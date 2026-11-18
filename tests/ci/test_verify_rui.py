@@ -1375,13 +1375,13 @@ while True:
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name, words in (("stopped", "■ Stopped"),
+        for name, words in (("stopped", "▪ Stopped"),
                             ("chat-failed", "× The model's reply didn't come through · ctrl+r retries")):
             with self.subTest(state=name):
                 self.assertEqual(states[name]["steps"], [{"wait": words}])
                 self.assertEqual(states[name]["expect"], [words])
         self.assertEqual(states["tools-running"]["expect"],
-                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+                         ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1533,12 +1533,12 @@ while True:
         self.assertEqual(state["sizes"], [(140, 40)])
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
-            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
-            {"wait": "■ Stopped", "timeout": 60},
+            {"wait": "◝ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"wait": "▪ Stopped", "timeout": 60},
         ])
-        self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        self.assertEqual(state["expect"], ["▪ Stopped", "   Stopped"])
         self.assertTrue(state["first_frame"])
-        self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
+        self.assertEqual(state["expect_next"], {"▪ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
         self.assertNotEqual(narrow["open"], state["open"])
@@ -1546,7 +1546,7 @@ while True:
         self.assertEqual(narrow["cast"][0]["messages"], ["Ready."])
         self.assertEqual(narrow["steps"][0], {"send": {"to": narrow["open"], "text": "long bash", "wait": False}})
         self.assertEqual(narrow["steps"][1:], state["steps"][1:])
-        self.assertEqual(narrow["expect"], ["■ Stopped"])
+        self.assertEqual(narrow["expect"], ["▪ Stopped"])
         self.assertIn("ctrl+x stop", narrow["absent"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
@@ -2308,10 +2308,10 @@ while True:
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
-            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped", "■ Stopped"], [None, None]),
-            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+            ("stop-clean", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped", "▪ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped  Stopping…", "▪ Stopped  Stopping…"],
              ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("raw-archive-id", {"steps": [], "absent": ["{session:Archive audit}"]},
              ["Archived tz05sr", "Archived Archive audit"],
@@ -2357,14 +2357,14 @@ while True:
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
-        stale = "■ Stopped\n   Stopped\n   Stopping…\n"
+        stale = "▪ Stopped\n   Stopped\n   Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         terminal = types.SimpleNamespace(frame=committed(stale))
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
-            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped\n   Stopped")))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="▪ Stopped\n   Stopped")))
         terminal.wait = wait
         ready(terminal, {**state, "first_frame": False, "expect_next": {}})
         with tempfile.TemporaryDirectory() as temp:
@@ -2383,7 +2383,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "▪ Stop the slow job  now\n   Old completed answer\n▪ Another Session\n   Stopped\n▪ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
@@ -2723,247 +2723,229 @@ class EvidencePublicationTest(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "invalid capture file"):
                     self.helper["publication_frames"](out)
 
-    def publish(self, out, pr="1549", ssh=False, **options):
-        """Exercise the real CLI boundary with a fake gh executable on PATH."""
-        fake = out.parent / "fake-gh"
-        fake.mkdir(exist_ok=True)
-        config = fake / "config.json"
-        log = fake / "commands.jsonl"
-        log.write_text("")
-        config.write_text(json.dumps({"body": "attribution\n\n## Summary\nsummary\n\n## Screens\npending\n\n## Evidence\nkeep evidence\n\n## Merge danger\nkeep danger\nfooter\n", **options}))
-        # Make origin deterministic on forks; reject any attempt to write through git.
-        git = fake / "git"
-        git.write_text("#!" + sys.executable + "\nimport sys\nassert sys.argv[-3:] == ['remote', 'get-url', 'origin']\nprint('https://github.com/DivyanshGolyan/rui.git')\n")
-        git.chmod(0o755)
-        executable = fake / "gh"
-        executable.write_text("#!" + sys.executable + "\n" + r'''import hashlib, json, os, re, sys
+    def publish_fixture(self, root, head=None, retry=False):
+        remote = root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        fake = root / "bin"
+        fake.mkdir()
+        log = root / "gh.log"
+        gh = fake / "gh"
+        gh.write_text("#!" + sys.executable + "\n" + """import json, os, sys
 from pathlib import Path
-from urllib.parse import quote
-config = Path(os.environ["FAKE_GH_CONFIG"])
-data = json.loads(config.read_text())
 args = sys.argv[1:]
-event = {"argv": args, "cwd": os.getcwd()}
-if args[:2] == ["pr", "edit"] and "--body-file" in args:
-    event["body"] = Path(args[args.index("--body-file") + 1]).read_text()
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(json.dumps(event) + "\n")
-if args == ["--version"]:
-    version = "2.89.0" if data.get("local_old") and not Path.cwd().name.startswith("verify-rui-attachments.") else data.get("version", "2.104.0")
-    print("gh version " + version)
-elif args == ["pr", "edit", "--help"]:
-    print("--attach file" if data.get("attach_help", True) else "--body-file file")
-elif args == ["auth", "token"]:
-    if data.get("no_token"):
-        sys.exit(1)
-    print(data.get("token", "ghp_fake_test_token"))
-elif args[0] == "api":
-    endpoint = args[1]
-    if "/pulls?" in endpoint:
-        print(json.dumps([{"number": 1549}] if not data.get("no_pr") else []))
-    elif "/pulls/" in endpoint:
-        print(json.dumps({"body": data["body"]}))
-    else:
-        print(json.dumps({"permissions": {"push": data.get("push", True)}}))
-elif args[:2] == ["pr", "edit"]:
-    body = event["body"]
-    files = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
-    if data.get("partial_failure"):
-        files = files[:1]
-    for attachment in files:
-        name, alt = attachment.rsplit("#", 1)
-        assert Path(name).is_file(), name
-        reference = "![" + alt + "](" + quote(name, safe="/@") + ")"
-        url = "https://github.com/user-attachments/assets/" + hashlib.sha256(name.encode()).hexdigest()
-        body = body.replace(reference, "![" + alt + "](" + url + ")")
-    if data.get("mangle"):
-        body = body.replace("![", "[")
-    if data.get("inline_code"):
-        body = re.sub(r"^(!\[[^\n]+)$", r"`\1`", body, flags=re.M)
-    data["body"] = body
-    config.write_text(json.dumps(data))
-    print("https://github.com/DivyanshGolyan/rui/pull/1549")
-    sys.exit(1 if data.get("partial_failure") else 0)
-else:
+with open(os.environ['PUBLISH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')
+if args[:1] == ['api'] and args[1] == 'repos/DivyanshGolyan/rui/pulls/1549':
+    print(json.dumps({'state': os.environ.get('PUBLISH_STATE', 'open'), 'head': {'sha': os.environ['PUBLISH_HEAD']}}))
+elif args[:4] != ['api', '--method', 'POST', 'repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches']:
     raise AssertionError(args)
-''')
-        executable.chmod(0o755)
-        if ssh:
-            transport = r'''import json, os, shlex, shutil, subprocess, sys, tempfile
+""")
+        gh.chmod(0o755)
+        env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
+               "PUBLISH_LOG": str(log), "PUBLISH_HEAD": head or self.head,
+               "RUI_SCREENS_REMOTE": str(remote), "GIT_ALLOW_PROTOCOL": "file",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_COUNT": "0"}
+        if retry:
+            # Advance the branch immediately before the first push, forcing a rejection.
+            real_git = shutil.which("git")
+            wrapper = fake / "git"
+            wrapper.write_text("#!" + sys.executable + "\n" + """import os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
-kind = Path(sys.argv[0]).name
-config = json.loads(Path(os.environ["FAKE_GH_CONFIG"]).read_text())
-event = {"transport": kind, "argv": args, "cwd": os.getcwd()}
-if kind == "scp":
-    source, target = args[-2:]
-    destination = target.split(":", 1)[1]
-    event["files"] = sorted(str(p.relative_to(Path(source))) for p in Path(source).rglob("*") if p.is_file())
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(json.dumps(event) + "\n")
-if kind == "scp":
-    if config.get("scp_failure"):
-        print("copy failed", file=sys.stderr)
-        sys.exit(1)
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-else:
-    command = shlex.split(args[-1])
-    if command[0] == "mktemp":
-        print(tempfile.mkdtemp(prefix="verify-rui-attachments."))
-    elif command[0] == "rm":
-        shutil.rmtree(command[-1])
-    elif command[0] == "python3":
-        sys.exit(subprocess.run([sys.executable, *command[1:]]).returncode)
-    else:
-        raise AssertionError(command)
-'''
-            for name in ("ssh", "scp"):
-                program = fake / name
-                program.write_text("#!" + sys.executable + "\n" + transport)
-                program.chmod(0o755)
-        command = [sys.executable, str(SCRIPT), "publish", str(out)]
-        if ssh:
-            command += ["--ssh", "test-box"]
-        if pr is not None:
-            command += ["--pr", pr]
-        result = subprocess.run(command, capture_output=True, text=True,
-            env={**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
-                 "FAKE_GH_CONFIG": str(config), "FAKE_GH_LOG": str(log)})
-        calls = [json.loads(line) for line in log.read_text().splitlines()]
-        for call in calls:
-            if call.get("transport") == "scp":
-                self.addCleanup(shutil.rmtree, call["argv"][-1].split(":", 1)[1], ignore_errors=True)
-        return result, calls, json.loads(config.read_text())["body"]
+marker = Path(os.environ['PUBLISH_MARKER'])
+if args and args[0] == 'push' and not marker.exists():
+    marker.touch()
+    subprocess.run([os.environ['REAL_GIT'], 'init', '-q', os.environ['RACE_REPO']], check=True)
+    def git(*args):
+        subprocess.run([os.environ['REAL_GIT'], '-C', os.environ['RACE_REPO'], *args], check=True, capture_output=True)
+    git('config', 'user.name', 'Race')
+    git('config', 'user.email', 'race@example.com')
+    Path(os.environ['RACE_REPO'], 'other').write_text('concurrent')
+    git('add', 'other')
+    git('commit', '-qm', 'concurrent')
+    git('push', os.environ['PUBLISH_REMOTE'], 'HEAD:refs/heads/pr-screens')
+os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
+""")
+            wrapper.chmod(0o755)
+            env.update(REAL_GIT=real_git, PUBLISH_MARKER=str(root / "raced"),
+                       RACE_REPO=str(root / "race"), PUBLISH_REMOTE=str(remote))
+        return remote, log, env
 
-    def test_native_publish_command_alt_text_placement_and_readback(self):
+    def publish_run(self, out, env, *args, script=SCRIPT):
+        return subprocess.run([sys.executable, str(script), "publish", str(out), "--pr", "1549", "--repo", "DivyanshGolyan/rui", *args],
+                              env=env, text=True, capture_output=True)
+
+    def _publish_refuses_closed_pr(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "captures with spaces"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            result, calls, body = self.publish(out)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            edits = [call for call in calls if "--body-file" in call["argv"]]
-            self.assertEqual(len(edits), 1)
-            args = edits[0]["argv"]
-            self.assertEqual(args[:5], ["pr", "edit", "1549", "-R", "DivyanshGolyan/rui"])
-            self.assertEqual(edits[0]["cwd"], str(out))
-            attachments = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
-            self.assertEqual(attachments, [f"{side}/changed@140x40.{ext}#changed 140x40 {side}" +
-                                          (" recording" if ext == "gif" else "")
-                                          for side in ("before", "after") for ext in ("png", "gif")])
-            self.assertIn("![changed 140x40 before](before/changed@140x40.png)", edits[0]["body"])
-            from pr_shape import screen_evidence
-            self.assertTrue(screen_evidence(body))
-            self.assertIn("#### 140x40\n\nBefore\n\n![", body)
-            self.assertIn("\n\nAfter\n\n![", body)
-            self.assertIn(self.head, body)
-            self.assertIn(self.base, body)
-            self.assertIn("Sizes: 140x40", body)
-            self.assertIn("Surface: plain PTY, L1 synthetic input", body)
-            self.assertNotIn("pending", body)
-            self.assertNotIn("same@", body)
-            self.assertTrue(body.startswith("attribution\n\n## Summary\nsummary"))
-            self.assertTrue(body.endswith("keep danger\nfooter\n"))
-            self.assertEqual(body.count("## Screens"), 1)
-            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
-            self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
-            self.assertIn("4 embedded Screens attachments verified by readback", result.stdout)
-
-    def test_native_publish_single_build_requires_explicit_pr(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            record = self.capture(out)
-            (out / "frames.json").write_text(json.dumps([record]))
-            result, calls, body = self.publish(out)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(any("/pulls?" in str(c["argv"]) for c in calls))
-            self.assertIn("Base: none (single build)", body)
-            self.assertIn("![overview 140x40 after](https://github.com/user-attachments/", body)
-            self.assertIn("2 embedded Screens attachments", result.stdout)
-            result, calls, _body = self.publish(out, pr=None)
+            remote, log, env = self.publish_fixture(root)
+            env["PUBLISH_STATE"] = "closed"
+            result = self.publish_run(out, env)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("required: --pr", result.stderr)
-            self.assertEqual(calls, [])
+            self.assertIn("PR that is not open", result.stderr)
+            self.assertEqual(subprocess.run(["git", "-C", str(remote), "show-ref"], capture_output=True, text=True).stdout, "")
 
-    def test_native_publish_refuses_missing_cli_capability_or_push_token(self):
-        cases = (({"version": "2.103.0"}, "gh 2.104.0+"),
-                 ({"attach_help": False}, "gh 2.104.0+"),
-                 ({"no_token": True}, "classic PAT or gh OAuth token"),
-                 ({"token": "github_pat_fine_grained"}, "classic PAT or gh OAuth token"),
-                 ({"push": False}, "push access"))
+    def _publish_selected_media_and_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            for options, reason in cases:
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(len(result.stderr.splitlines()), 1)
-                    self.assertIn(reason, result.stderr)
-                    self.assertFalse(any("--body-file" in c["argv"] for c in calls))
-                    self.assertEqual(result.stdout, "")
-                    self.assertNotIn("ghp_fake_test_token", result.stderr)
-
-    def test_native_publish_detects_filtered_readback_and_partial_upload(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            self.comparison(out)
-            for options, message in (({"mangle": True}, "missing embedded Screens attachments"),
-                                     ({"inline_code": True}, "missing embedded Screens attachments"),
-                                     ({"partial_failure": True}, "PR may be partially updated")):
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(message, result.stderr)
-                    self.assertEqual(result.stdout, "")
-                    self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
-                    self.assertIn("inspect", result.stderr)
-
-    def test_native_publish_batches_at_cli_limit_and_preserves_previous_uploads(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            records = [self.capture(out, name=f"state-{i}") for i in range(26)]
-            (out / "frames.json").write_text(json.dumps(records))
-            result, calls, body = self.publish(out, token="gho_fake_oauth_token")
+            pairs_file = out / "pairs.json"
+            pairs = json.loads(pairs_file.read_text())
+            pairs["pairs"][0]["after"]["files"]["html"] = "after/unpublished.html"
+            pairs_file.write_text(json.dumps(pairs))
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            edits = [c for c in calls if "--body-file" in c["argv"]]
-            self.assertEqual([c["argv"].count("--attach") for c in edits], [50, 2])
-            self.assertEqual(edits[1]["body"].count("https://github.com/user-attachments/"), 50)
-            self.assertEqual(body.count("https://github.com/user-attachments/"), 52)
-            self.assertIn("52 embedded Screens attachments", result.stdout)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            gen = calls[-1][-1].removeprefix("inputs[gen]=")
+            self.assertRegex(gen, r"^[0-9]{1,20}$")
+            prefix = f"pr-1549/{self.head}/{gen}"
+            def show(name):
+                return subprocess.check_output(["git", "--git-dir", str(remote), "show", f"pr-screens:{prefix}/{name}"], text=True)
+            files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+            self.assertIn(prefix + "/before/changed@140x40.png", files)
+            self.assertNotIn("same@", files)
+            shots = json.loads(show("shots.json"))
+            self.assertEqual([r["name"] for r in shots], ["changed"])
+            self.assertNotIn("html", shots[0]["files"])
+            self.assertNotIn("html", json.loads(show("diff.json"))["changed"][0]["after"]["files"])
+            self.assertEqual([r["name"] for r in json.loads(show("diff.json"))["changed"]], ["changed"])
+            self.assertEqual(json.loads(show("shots-meta.json")), {"head": self.head, "base": self.base})
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(calls[-1], ["api", "--method", "POST", "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches", "-f", "ref=main", "-f", "inputs[pr]=1549", "-f", f"inputs[head]={self.head}", "-f", f"inputs[gen]={gen}"])
+            self.assertIn("actions/workflows/screens-comment.yml", result.stdout)
 
-    def test_ssh_publisher_uses_same_worker_copies_only_selected_files_and_cleans(self):
+    def test_publish_immutable_generations_scr_2(self):
+        # SCR-2: each publication retains its own immutable generation.
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            (out / "secret.txt").write_text("must not copy")
-            result, calls, body = self.publish(out, ssh=True, local_old=True)
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            copies = [c for c in calls if c.get("transport") == "scp"]
-            self.assertEqual(len(copies), 1)
-            self.assertEqual(set(copies[0]["files"]), {"__verify_publish_helper__.py", "__publish_job__.json",
-                *(f"{side}/changed@140x40.{ext}" for side in ("before", "after") for ext in ("png", "gif"))})
-            edits = [c for c in calls if "--body-file" in c["argv"]]
-            self.assertEqual(len(edits), 1)
-            remote = Path(edits[0]["cwd"])
-            self.assertTrue(remote.name.startswith("verify-rui-attachments."))
-            self.assertFalse(remote.exists())
-            self.assertEqual(calls[-1]["transport"], "ssh")
-            self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", calls[-1]["argv"][-1])
-            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
-            self.assertTrue(body.startswith("attribution"))
-            self.assertTrue(body.endswith("keep danger\nfooter\n"))
+            first_gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            first_tree = subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"])
+            result = self.publish_run(out, env, "--all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(first_tree, subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"]))
+            dispatches = [json.loads(line) for line in log.read_text().splitlines() if "--method" in line]
+            gens = [call[-1].removeprefix("inputs[gen]=") for call in dispatches]
+            self.assertEqual(len(set(gens)), 2)
+            self.assertLess(int(gens[0]), int(gens[1]))
+            for gen, count in zip(gens, (0, 1)):
+                prefix = f"pr-screens:pr-1549/{self.head}/{gen}"
+                data = subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/diff.json"], text=True)
+                self.assertEqual(json.loads(data)["same_count"], count)
+                subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/after/changed@140x40.png"])
 
-    def test_ssh_publisher_cleans_after_copy_or_readback_failure(self):
+    def _publish_all_includes_unchanged_pairs(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            for options in ({"scp_failure": True}, {"mangle": True}, {"no_token": True}):
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, ssh=True, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    cleanup = calls[-1]
-                    self.assertEqual(cleanup.get("transport"), "ssh")
-                    self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", cleanup["argv"][-1])
-                    self.assertFalse(Path(cleanup["argv"][-1].split()[-1]).exists())
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env, "--all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            name = f"pr-screens:pr-1549/{self.head}/{gen}/diff.json"
+            diff = json.loads(subprocess.check_output(["git", "--git-dir", str(remote), "show", name], text=True))
+            self.assertEqual(diff["same_count"], 1)
+            self.assertEqual([row["name"] for row in diff["same"]], ["same"])
+            self.assertEqual(diff["same"][0]["before"]["files"]["png"], "before/same@140x40.png")
+            self.assertEqual(diff["same"][0]["after"]["files"]["png"], "after/same@140x40.png")
+
+    def _publish_refuses_combined_media_over_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root)
+            for side in ("before", "after"):
+                with (out / side / "changed@140x40.png").open("wb") as f:
+                    f.truncate(11 * 1024 * 1024)
+            result = self.publish_run(out, env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exceeds 20 MB in total", result.stderr)
+            self.assertFalse(log.exists())
+            self.assertEqual(subprocess.check_output(["git", "--git-dir", str(remote), "branch", "--list"], text=True), "")
+
+    def test_publish_preserves_concurrent_publication_scr_8(self):
+        # SCR-8: a rejected push is retried without discarding the concurrent branch.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root, retry=True)
+            result = self.publish_run(out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+            self.assertIn("other", files)
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            self.assertIn(f"pr-1549/{self.head}/{gen}/diff.json", files)
+            self.assertTrue((root / "raced").exists())
+
+    def _publish_refuses_mismatched_head_or_oversize(self, cases):
+        for mismatch in cases:
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "frames"
+                self.comparison(out)
+                remote, log, env = self.publish_fixture(root, head=self.base if mismatch else self.head)
+                if not mismatch:
+                    with (out / "after/changed@140x40.png").open("wb") as f:
+                        f.truncate(20 * 1024 * 1024 + 1)
+                result = self.publish_run(out, env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not match" if mismatch else "exceeds 20 MB", result.stderr)
+                refs = subprocess.check_output(["git", "--git-dir", str(remote), "branch", "--list"], text=True)
+                self.assertEqual(refs, "")
+                if log.exists():
+                    self.assertNotIn("dispatches", log.read_text())
+
+    def test_publish_refuses_closed_or_stale_pr_scr_6(self):
+        # SCR-6: reject closed PRs and stale capture heads.
+        self._publish_refuses_closed_pr()
+        self._publish_refuses_mismatched_head_or_oversize((True,))
+
+    def test_publish_refuses_oversized_media_scr_10(self):
+        # SCR-10: reject both single and combined media over the limit.
+        self._publish_refuses_mismatched_head_or_oversize((False,))
+        self._publish_refuses_combined_media_over_limit()
+
+    def test_publish_selected_media_scr_7(self):
+        # SCR-7: publication includes selected media and dispatches its generation.
+        self._publish_selected_media_and_dispatch()
+        self._publish_all_includes_unchanged_pairs()
+
+    def test_publish_uses_explicit_fixture_with_any_origin_scr_9(self):
+        # SCR-9: explicit targets isolate publication from checkout origin discovery.
+        for origin in (None, "git@github.com:someone/rui.git", "https://github.com/fork/rui.git"):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = root / "checkout"
+                script = checkout / ".claude/skills/verify-rui/scripts/verify-rui"
+                script.parent.mkdir(parents=True)
+                shutil.copyfile(SCRIPT, script)
+                subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+                if origin:
+                    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", origin], check=True)
+                out = root / "frames"
+                self.comparison(out)
+                remote, log, env = self.publish_fixture(root)
+                result = self.publish_run(out, env, script=script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+                self.assertIn("diff.json", files)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
+                self.assertEqual(calls[1][3], "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches")
 
     def test_screens_parts_preserves_fenced_example_and_other_sections(self):
         body = "## Summary\n```md\n## Screens\nfake\n```\n\n## Screens\nold\n\n## Evidence\nproof\n"

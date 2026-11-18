@@ -322,6 +322,7 @@ test "provider interpretation retries clean close but not incomplete framing or 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.OrderedInputLimit => @import("failure_class.zig").ordered_input_limit,
+        error.ModelImageUnsupported => "model_image_input_unsupported",
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
@@ -556,6 +557,7 @@ pub const Preparation = struct {
         emission: Emission = .none,
         history_position: u64 = 0,
         replayed_images: u16 = 0,
+        image_capability: model_catalog.ImageCapability = .unknown,
         input_prefix: enum { none, sender, action_final } = .none,
         input_kind: enum { message, tool_result } = .message,
         declaration: ?store.Declaration = null,
@@ -774,6 +776,7 @@ pub const Preparation = struct {
         switch (self.state.stage) {
             .settings => {
                 try self.page.settings(&self.settings);
+                self.state.image_capability = model_catalog.imageCapability(self.settings.model.slice());
                 if (self.page.compound_inputs) {
                     // Rebuild every compound input so all selected images are
                     // counted; planSpan still checks the durable prefix seal.
@@ -925,6 +928,10 @@ pub const Preparation = struct {
                 return switch (part.kind) {
                     .text => self.loadItemHeader(.input_text, 0b1),
                     .image => |image| image: {
+                        if (self.state.image_capability == .unsupported) return error.ModelImageUnsupported;
+                        if (model_catalog.imageCostRule(self.settings.provider, self.settings.model.slice()) == .astra_auto and
+                            @import("input_media.zig").astraAuto(image.media.width, image.media.height) == .impossible)
+                            return error.OrderedInputLimit;
                         if (self.state.replayed_images == max_replayed_images) return error.OrderedInputLimit;
                         self.state.replayed_images += 1;
                         break :image self.loadItemHeader(.{ .input_image = contractValue(codec_abi.ImageMime, image.media.format) }, 0b1);
@@ -6531,4 +6538,203 @@ test "canonical ordered Action Resolution background final prefixes the same par
         };
         try std.testing.expectEqual(@as(usize, 1), results);
     }
+}
+
+test "image model policy checks retained Message and Action inputs" {
+    const image = OrderedTestPart{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } };
+    const text = OrderedTestPart{ .bytes = "plain" };
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-4.1", "unlisted-image-policy-model" }) |model_name| {
+        for (0..3) |producer| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("image-policy-config");
+            var change: wire_request.ConfigureCommand = .{};
+            try change.key.set("image-policy-model");
+            change.session = session;
+            change.configuration.model.state = .value;
+            change.configuration.compaction_trigger.state = .value;
+            try change.configuration.compaction_trigger.value.set("10000");
+            try change.configuration.model.value.set(model_name);
+            try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+            try submitOrderedForTesting(&setup, session.slice(), "image-policy-message", if (producer == 1) &.{image} else &.{text}, null, null);
+            var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (producer == 2) {
+                try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "image-item", .call_id = "image-call" }});
+                const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                try settleOrderedForTesting(&setup, action, &.{image});
+                binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            // The same frozen recipe is checked on a fresh attempt and on retry.
+            for (0..2) |attempt| {
+                if (attempt != 0) {
+                    try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+                    try store.testing.exec(&setup.storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{binding.operation_id});
+                    var retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+                    binding = try retry.permit.consume();
+                }
+                if (std.mem.eql(u8, model_name, "gpt-3.5-turbo") and producer != 0) {
+                    try std.testing.expectError(error.ModelImageUnsupported, prepareMemoForTesting(&setup, binding, null, .{}));
+                    try std.testing.expectEqualStrings("model_image_input_unsupported", preparationFailureCode(error.ModelImageUnsupported));
+                } else {
+                    const result = try prepareMemoForTesting(&setup, binding, null, .{});
+                    defer std.testing.allocator.free(result.bytes);
+                    try std.testing.expectEqual(producer != 0, std.mem.indexOf(u8, result.bytes, "\"type\":\"input_image\"") != null);
+                }
+            }
+            try std.testing.expect(!setup.storage.isFenced());
+        }
+    }
+}
+
+test "image model policy rechecks retained inputs after model switch" {
+    const image = OrderedTestPart{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } };
+    const text = OrderedTestPart{ .bytes = "plain" };
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-4.1", "unlisted-image-policy-model" }) |model_name| {
+        for (0..3) |producer| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("image-switch-config");
+            try submitOrderedForTesting(&setup, session.slice(), "image-switch-first", if (producer == 1) &.{image} else &.{text}, null, null);
+            var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (producer == 2) {
+                try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "switch-item", .call_id = "switch-call" }});
+                const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                try settleOrderedForTesting(&setup, action, &.{image});
+                binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"switch-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+            var change: wire_request.ConfigureCommand = .{};
+            try change.key.set("image-switch-model");
+            change.session = session;
+            change.configuration.model.state = .value;
+            change.configuration.compaction_trigger.state = .value;
+            try change.configuration.compaction_trigger.value.set("10000");
+            try change.configuration.model.value.set(model_name);
+            try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+            try setup.submit("image-switch-next", "image-switch-next", session.slice(), "continue");
+            binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (std.mem.eql(u8, model_name, "gpt-3.5-turbo") and producer != 0) {
+                try std.testing.expectError(error.ModelImageUnsupported, prepareMemoForTesting(&setup, binding, null, .{}));
+            } else {
+                const result = try prepareMemoForTesting(&setup, binding, null, .{});
+                defer std.testing.allocator.free(result.bytes);
+                try std.testing.expectEqual(producer != 0, std.mem.indexOf(u8, result.bytes, "\"type\":\"input_image\"") != null);
+            }
+        }
+    }
+}
+
+test "old text request retries unchanged across later image message and final action on every codec" {
+    const saved_mcp_json = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}";
+    for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("replay-wire-config");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try setup.submit("replay-wire-seed", "replay-wire-seed", session.slice(), "old text input");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, first, &.{ .{ .item_id = "legacy-item", .call_id = "legacy-call" }, .{ .item_id = "background-item", .call_id = "background-call" } });
+        const legacy_action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+        try settleOrderedForTesting(&setup, legacy_action, &.{.{ .bytes = saved_mcp_json }});
+        const selected = (try setup.storage.nextAction(.bash, .fromFree(2, true))).?;
+        const background_binding = (try setup.storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        var promotion: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+        try promotion.key.set("replay-wire-promote");
+        try std.testing.expect(setup.storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+        const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const before = try prepareMemoForTesting(&setup, original, null, .{});
+        defer std.testing.allocator.free(before.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before.bytes, .{});
+        defer parsed.deinit();
+        var saved_found = false;
+        for (parsed.value.object.get("input").?.array.items) |item| {
+            const kind = item.object.get("type") orelse continue;
+            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+            if (!std.mem.eql(u8, item.object.get("call_id").?.string, "legacy-call")) continue;
+            try std.testing.expectEqualStrings(saved_mcp_json, item.object.get("output").?.string);
+            saved_found = true;
+        }
+        try std.testing.expect(saved_found);
+        try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+        try submitOrderedForTesting(&setup, session.slice(), "replay-wire-later", &.{.{ .bytes = image_test_png, .kind = .{ .image = .{} } }}, null, null);
+        try settleOrderedForTesting(&setup, background_binding, &.{ .{ .bytes = "late result" }, .{ .bytes = image_test_png, .kind = .{ .image = .{} } } });
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+        try setup.storage.close();
+        try setup.storage.open(std.testing.io, database, setup.root);
+        const retry = (try store.admitRetryForTesting(&setup.storage)).?.permit.binding;
+        try std.testing.expectEqual(original.operation_id, retry.operation_id);
+        const after = try prepareMemoForTesting(&setup, retry, null, .{});
+        defer std.testing.allocator.free(after.bytes);
+        try std.testing.expectEqualStrings(before.bytes, after.bytes);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "input_image") == null);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "late result") == null);
+    }
+}
+
+test "Astra image patch limit is enforced for Message and Action inputs on the OpenAI route" {
+    const fixtures = [_]struct { bytes: []const u8, impossible: bool }{
+        .{ .bytes = @embedFile("testing/fixtures/astra-4800x6400.png"), .impossible = false },
+        .{ .bytes = @embedFile("testing/fixtures/astra-4801x6400.png"), .impossible = true },
+    };
+    const routes = [_]struct { provider: []const u8, model: []const u8, guarded: bool }{
+        .{ .provider = "openai", .model = "gpt-6-astra", .guarded = true },
+        .{ .provider = "codex", .model = "gpt-6-astra", .guarded = false },
+        .{ .provider = "openai", .model = "gpt-4.1", .guarded = false },
+    };
+    for (routes) |route| for (fixtures) |fixture| for ([_]bool{ false, true }) |action_input| {
+        var stage: []const u8 = "setup";
+        errdefer std.debug.print("Astra guard fixture failed at {s}: provider={s}, model={s}, impossible={}, action={}\n", .{ stage, route.provider, route.model, fixture.impossible, action_input });
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        var create: wire_request.ConfigureCommand = .{};
+        try create.key.set("astra-boundary-config");
+        create.configuration.workspace.state = .value;
+        try create.configuration.workspace.value.set(setup.workspace);
+        create.configuration.provider.state = .value;
+        try create.configuration.provider.value.set(route.provider);
+        create.configuration.model.state = .value;
+        try create.configuration.model.value.set(route.model);
+        create.configuration.tools = try .of(&.{ "bash", "web_search" });
+        create.configuration.permission_mode.state = .value;
+        try create.configuration.permission_mode.value.set("bypass");
+        create.configuration.compaction_trigger.state = .value;
+        try create.configuration.compaction_trigger.value.set("115200");
+        if (std.mem.eql(u8, route.model, "gpt-6-astra")) {
+            create.configuration.reasoning_effort.state = .value;
+            try create.configuration.reasoning_effort.value.set("low");
+        } else create.configuration.reasoning_effort.state = .explicit_null;
+        stage = "configure";
+        const configured = try setup.storage.configure(&create, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        const image = OrderedTestPart{ .bytes = fixture.bytes, .kind = .{ .image = .{} } };
+        const text = OrderedTestPart{ .bytes = "inspect image" };
+        stage = "submit";
+        try submitOrderedForTesting(&setup, session.slice(), "astra-boundary-message", if (action_input) &.{text} else &.{image}, null, null);
+        stage = "initial admission";
+        var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (action_input) {
+            stage = "action setup";
+            try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "astra-item", .call_id = "astra-call" }});
+            const result_binding = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            try settleOrderedForTesting(&setup, result_binding, &.{image});
+            binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        }
+        stage = "prepare";
+        if (route.guarded and fixture.impossible) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+            try std.testing.expectEqualStrings("local_ordered_input_limit", preparationFailureCode(error.OrderedInputLimit));
+        } else {
+            const prepared = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(prepared.bytes);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prepared.bytes, "\"type\":\"input_image\""));
+            try std.testing.expect(std.mem.indexOf(u8, prepared.bytes, "data:image/png;base64,") != null);
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    };
 }

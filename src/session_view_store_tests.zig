@@ -84,8 +84,8 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
         }
     };
     var sink: Sink = .{};
-    try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
-    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
+    try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
+    try std.testing.expectEqualStrings("\n● fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
     try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
     try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).mcp);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };

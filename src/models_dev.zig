@@ -12,6 +12,7 @@ pub const Generated = struct {
     kind: ?[]const u8 = null,
     family: ?[]const u8 = null,
     input_text: bool = false,
+    input_image: ?bool = null,
     output_text: bool = false,
 
     pub fn canChat(self: Generated) bool {
@@ -186,8 +187,9 @@ const Parser = struct {
                     record.family = family;
                 } else if (std.mem.eql(u8, text(member), "modalities")) {
                     const modalities = try self.textModalities();
-                    record.input_text = modalities.input;
-                    record.output_text = modalities.output;
+                    record.input_text = modalities.input_text;
+                    record.input_image = modalities.input_image;
+                    record.output_text = modalities.output_text;
                 } else try self.skip();
             } else try self.skip();
         }
@@ -201,7 +203,7 @@ const Parser = struct {
         return self.scratch.dupe(u8, text(token));
     }
 
-    const TextModalities = struct { input: bool = false, output: bool = false };
+    const TextModalities = struct { input_text: bool = false, input_image: ?bool = null, output_text: bool = false };
 
     fn textModalities(self: *Parser) Error!TextModalities {
         try self.expect(.object_begin);
@@ -209,23 +211,29 @@ const Parser = struct {
         while (try self.key()) |member| {
             defer self.release(member);
             if (std.mem.eql(u8, text(member), "input")) {
-                modalities.input = try self.hasText();
+                const input = try self.inputModalities();
+                modalities.input_text = input.text;
+                modalities.input_image = input.image;
             } else if (std.mem.eql(u8, text(member), "output")) {
-                modalities.output = try self.hasText();
+                modalities.output_text = (try self.inputModalities()).text;
             } else try self.skip();
         }
         return modalities;
     }
 
-    fn hasText(self: *Parser) Error!bool {
+    fn inputModalities(self: *Parser) Error!struct { text: bool, image: bool } {
         try self.expect(.array_begin);
-        var found = false;
+        var found_text = false;
+        var found_image = false;
         while (true) {
             const token = try self.next();
             defer self.release(token);
             switch (token) {
-                .array_end => return found,
-                .string, .allocated_string => found = found or std.mem.eql(u8, text(token), "text"),
+                .array_end => return .{ .text = found_text, .image = found_image },
+                .string, .allocated_string => {
+                    found_text = found_text or std.mem.eql(u8, text(token), "text");
+                    found_image = found_image or std.mem.eql(u8, text(token), "image");
+                },
                 else => return error.InvalidCatalog,
             }
         }
