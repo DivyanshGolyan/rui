@@ -1692,6 +1692,19 @@ const PreparationTestSetup = struct {
         return configured.accepted.session;
     }
 
+    fn configureImagePolicy(self: *PreparationTestSetup, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+        // Start with a model that has no reasoning effort, so later model
+        // switches exercise image policy rather than retained-effort admission.
+        var command = try store.testing.completeConfiguration(key, "", self.workspace, "gpt-4.1");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.loaded_tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.reasoning_effort.state = .explicit_null;
+        try command.configuration.compaction_trigger.value.set("10000");
+        const configured = try self.storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        return configured.accepted.session;
+    }
+
     fn submit(self: *PreparationTestSetup, file_name: []const u8, key: []const u8, session: []const u8, text: []const u8) !void {
         return self.submitFrom(file_name, key, session, null, null, text);
     }
@@ -6551,7 +6564,7 @@ test "image model policy checks retained Message and Action inputs" {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
             defer setup.close();
-            const session = try setup.configure("image-policy-config");
+            const session = try setup.configureImagePolicy("image-policy-config");
             var change: wire_request.ConfigureCommand = .{};
             try change.key.set("image-policy-model");
             change.session = session;
@@ -6598,7 +6611,7 @@ test "image model policy rechecks retained inputs after model switch" {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
             defer setup.close();
-            const session = try setup.configure("image-switch-config");
+            const session = try setup.configureImagePolicy("image-switch-config");
             try submitOrderedForTesting(&setup, session.slice(), "image-switch-first", if (producer == 1) &.{image} else &.{text}, null, null);
             var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             if (producer == 2) {
