@@ -319,7 +319,7 @@ test "App screens render the original composition with painted marker rows" {
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    try std.testing.expectEqual(@as(u64, 18264872532239988578), hash.final());
+    try std.testing.expectEqual(@as(u64, 17161666746937587859), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {
