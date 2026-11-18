@@ -2263,7 +2263,7 @@ fn partsExhausted(view: *RequestPage) bool {
 
 pub fn messagePartFrom(a: *ReadAccess, view: *RequestPage) !RequestPage.MessageProgress {
     return switch (try view.message_cursor.?.value.step(a)) {
-        .raw => .pending,
+        .raw, .certified => .pending,
         .rows => rows: {
             try store_access.runAs(a, error.CorruptStore);
             break :rows .pending;

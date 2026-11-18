@@ -271,7 +271,9 @@ pub const Cursor = struct {
         self.trailer_length = 0;
     }
 
-    pub const Step = union(enum) { raw, rows, part: Part, done };
+    /// `certified` marks the pass boundary: the whole manifest and index are
+    /// certified and the next step starts yielding parts. It is emitted once.
+    pub const Step = union(enum) { raw, rows, certified, part: Part, done };
 
     pub const Weight = struct {
         bytes: u64 = 0,
@@ -346,7 +348,7 @@ pub const Cursor = struct {
                 if (self.identity == null and self.row_count == 0) {
                     self.pending = .none;
                     self.finished = true;
-                    return self.finishPass(a);
+                    return self.finishPass();
                 }
             },
         }
@@ -385,16 +387,16 @@ pub const Cursor = struct {
         }
     }
 
-    fn finishPass(self: *Cursor, a: anytype) anyerror!Cursor.Step {
+    fn finishPass(self: *Cursor) Cursor.Step {
         if (self.certified) return .done;
         self.reset();
         self.certified = true;
-        return self.step(a);
+        return .certified;
     }
 
     pub fn next(self: *Cursor, a: anytype) !?Part {
         while (true) switch (try self.step(a)) {
-            .raw => {}, // Access.readRaw already completed this effect.
+            .raw, .certified => {}, // Access.readRaw already completed this effect.
             .rows => try access.runAs(a, error.CorruptStore),
             .part => |part| return part,
             .done => return null,

@@ -1,5 +1,5 @@
 const std = @import("std");
-const os = @import("os.zig");
+const os = @import("os");
 
 pub const GroupSignal = enum { sent, absent, zombie_group_denied, failed };
 

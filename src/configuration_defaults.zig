@@ -328,7 +328,7 @@ fn selectedModelCases() !void {
     }
 }
 
-test "ADM-23 configuration field wire grammar" {
+test "ADM-29 configuration field wire grammar" {
     const protocol = @import("protocol.zig");
     const Custody = struct {
         pub const File = struct {};
@@ -533,7 +533,7 @@ fn toolProfileCases() !void {
     };
 }
 
-test "ADM-22 configuration default resolution" {
+test "ADM-28 configuration default resolution" {
     try creationFieldCases();
     try updateFieldCases();
     try selectedModelCases();

@@ -2,7 +2,6 @@ import base64
 from collections import Counter
 import json
 import os
-import pathlib
 import shlex
 import sqlite3
 import subprocess
@@ -11,6 +10,7 @@ import threading
 
 from host_process import dispose_all, HostDiagnostics, PauseGate
 import model_fixture as fixture
+import os_semantics
 
 
 def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
@@ -121,16 +121,11 @@ def rows(store, sql, parameters=()):
 
 
 def process_resources(process):
-    process_root = pathlib.Path(f"/proc/{process.pid}")
-    if not process_root.exists():
+    memory = os_semantics.process_memory(process.pid)
+    if memory is None:
         return {"process_resources": "unavailable"}
-    status = {}
-    for line in (process_root / "status").read_text().splitlines():
-        if line.startswith(("VmRSS:", "VmHWM:")):
-            name, value, unit = line.split()
-            assert unit == "kB", line
-            status[name[:-1]] = int(value) * 1024
-    status["descriptors"] = len(os.listdir(process_root / "fd"))
+    status = {{"rss_kib": "VmRSS", "peak_kib": "VmHWM"}[field]: kib * 1024 for field, kib in memory.items()}
+    status["descriptors"] = len(os_semantics.descriptor_links(process.pid))
     return status
 
 

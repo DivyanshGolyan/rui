@@ -464,6 +464,15 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
+        # CI-75: touched Message capture owners select their real provider witness.
+        for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
+                     "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("cli-image-integration", selected[family])
+
     def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
@@ -1232,9 +1241,9 @@ class SelectionTest(unittest.TestCase):
             self.assertIn("human-cli-integration", result[family])
         self.assertTrue(setup_requirements(result["targets"])["python"])
 
-    def test_public_parts_owner_selects_image_export_fixture(self):
-        for path in ("src/store/domain/public_parts.zig", "src/store/tests/action_parts.zig",
-                     "src/protocol.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+    def test_public_parts_owner_selects_part_cli_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/public_parts.zig",
+                     "src/protocol.zig", "src/protocol_reply.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
@@ -1682,7 +1691,7 @@ fi
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
                         '- uses: ./.github/actions/setup',
-                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' && inputs.compiler-installed != 'true' }}",
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
                         'with:',
                         "targets: '[]'",
                         "compiled: 'true'",
@@ -1806,9 +1815,10 @@ fi
         caches = Path(".github/actions/setup/caches/action.yml").read_text()
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
-        policy = Path(".github/actions/policy/action.yml").read_text()
+        policy = Path(".github/actions/policy/checks.sh").read_text()
         policy_step = "Reject undefined fixture names before native builds"
-        self.assertFalse(cache(".github/actions/policy/action.yml", policy, policy.replace(policy_step, policy_step + " here")))
+        self.assertIn(policy_step, policy)
+        self.assertFalse(cache(".github/actions/policy/checks.sh", policy, policy.replace(policy_step, policy_step + " here")))
         job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)

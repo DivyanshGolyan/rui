@@ -174,7 +174,7 @@ class BuildWiringTest(unittest.TestCase):
         self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
         self.assertIn('unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs)', gate)
         self.assertIn('if (unit_module.includes("check-full", check_part, .native_pair))', gate)
-        self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), ["&units.run_renderer_allocation.step"])
+        self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), ["&units.run_renderer_allocation.step", "&units.run_os_tests.step"])
         for row in build_files.unit_roots():
             if row["name"] in ("unit-native", "unit-store") or row["source"] in ("src/h2/h2.zig", "src/store/wire/pg.zig"):
                 self.assertIn(("check-full", "all"), row["owners"])

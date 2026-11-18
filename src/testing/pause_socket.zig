@@ -1,7 +1,7 @@
 //! Test-only control channel. The caller owns the controller and joins this
 //! adapter before deinitializing it. The adapter takes ownership of the fd.
 const std = @import("std");
-const socket = @import("../os/socket.zig");
+const socket = @import("os").socket;
 const pause = @import("pause.zig");
 
 const WireContext = struct {

@@ -361,7 +361,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/public-part": {
+    "/v1/public-parts": {
         parameters: {
             query?: never;
             header?: never;
@@ -370,15 +370,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Typed metadata for an ordered Message or Action Resolution part. */
-        post: operations["publicPart"];
+        /** The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session. */
+        post: operations["publicParts"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/public-part-bytes": {
+    "/v1/public-part-content": {
         parameters: {
             query?: never;
             header?: never;
@@ -387,8 +387,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exact bytes of one image part. */
-        post: operations["publicPartBytes"];
+        /** The exact bytes of one part of an owner's parts value, framed as conversation content. */
+        post: operations["publicPartContent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1083,6 +1083,18 @@ export interface components {
             require_model?: true;
             preset?: string;
         };
+        ContentValue: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            /** @constant */
+            type: "parts";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            owner: components["schemas"]["PartOwner"];
+        };
         ConversationContentRequest: {
             /** @constant */
             version: "21";
@@ -1279,7 +1291,7 @@ export interface components {
             /** @constant */
             version: "21";
             /** @enum {string} */
-            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable";
+            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
         };
         FirstMessage: {
@@ -1489,6 +1501,18 @@ export interface components {
             /** @constant */
             kind: "host_stop";
             store: string;
+        };
+        InputPartSchema: {
+            /** @constant */
+            type: "text";
+            /** @description Text of any length, saved as content. */
+            text: string;
+        } | {
+            /** @constant */
+            type: "image";
+            /** @enum {string} */
+            mime: "image/png" | "image/jpeg";
+            data: string;
         };
         InspectSessionReply: {
             /** @constant */
@@ -1760,6 +1784,75 @@ export interface components {
             type: "message_reply";
             answer: {
                 /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                admission: components["schemas"]["Decimal"];
+            };
+            input: {
+                /** @constant */
+                type: "parts";
+                bytes: components["schemas"]["Decimal"];
+                sha256: string;
+            };
+            queue: {
+                /** @constant */
+                status: "queued";
+                admission: components["schemas"]["Decimal"];
+            };
+            execution: {
+                /** @constant */
+                status: "queued";
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "message_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                admission: components["schemas"]["Decimal"];
+                configuration: {
+                    /** @enum {string} */
+                    provider: "codex" | "openai" | "chatgpt";
+                    model: string;
+                    /** @enum {unknown} */
+                    reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+                    workspace: string;
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    tools: string[];
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    loaded_tools: string[];
+                    /** @enum {string} */
+                    permission_mode: "ask" | "bypass";
+                    compaction_trigger: components["schemas"]["Decimal"] | null;
+                };
+            };
+            input: {
+                /** @constant */
+                type: "parts";
+                bytes: components["schemas"]["Decimal"];
+                sha256: string;
+            };
+            queue: {
+                /** @constant */
+                status: "queued";
+                admission: components["schemas"]["Decimal"];
+            };
+            execution: {
+                /** @constant */
+                status: "queued";
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "message_reply";
+            answer: {
+                /** @constant */
                 status: "rejected";
                 replayed: boolean;
                 session: string;
@@ -1770,6 +1863,30 @@ export interface components {
             input: {
                 /** @constant */
                 type: "text";
+                bytes: components["schemas"]["Decimal"];
+                sha256: string;
+            };
+            execution: {
+                /** @constant */
+                status: "queued";
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "message_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                /** @enum {string} */
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                message: string | null;
+            };
+            input: {
+                /** @constant */
+                type: "parts";
                 bytes: components["schemas"]["Decimal"];
                 sha256: string;
             };
@@ -1798,6 +1915,23 @@ export interface components {
                 /** @description Text of any length, saved as content. */
                 value: string;
             };
+            /** @constant */
+            require_model?: true;
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "message";
+            store: string;
+            key: string;
+            session: string;
+            sender: {
+                store: string;
+                session: string;
+            } | null;
+            sender_handle: string | null;
+            configuration?: components["schemas"]["Configuration"];
+            parts: components["schemas"]["InputPartSchema"][];
             /** @constant */
             require_model?: true;
         };
@@ -2009,6 +2143,35 @@ export interface components {
                 kind: "message";
                 target: string;
                 /** @constant */
+                state: "rejected";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "rejected";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
                 state: "queued";
                 input: {
                     /** @constant */
@@ -2785,6 +2948,807 @@ export interface components {
                 input: {
                     /** @constant */
                     type: "text";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "failed";
+                    code: string;
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "queued";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "queued";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "processing";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "processing";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "processing";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "processing";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: components["schemas"]["WorkStateJson"];
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "waiting_for_permission";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                work: {
+                    state: {
+                        /** @constant */
+                        kind: "approval";
+                        since: components["schemas"]["Decimal"];
+                    };
+                    first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "completed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "completed";
+                    text: {
+                        /** @constant */
+                        type: "text";
+                        bytes: components["schemas"]["Decimal"];
+                        sha256: string;
+                    };
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "completed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "completed";
+                    text: {
+                        /** @constant */
+                        type: "text";
+                        bytes: components["schemas"]["Decimal"];
+                        sha256: string;
+                    };
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "completed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "completed";
+                    text: {
+                        /** @constant */
+                        type: "text";
+                        bytes: components["schemas"]["Decimal"];
+                        sha256: string;
+                    };
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "completed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "completed";
+                    text: {
+                        /** @constant */
+                        type: "text";
+                        bytes: components["schemas"]["Decimal"];
+                        sha256: string;
+                    };
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "cancelled";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "cancelled";
+                    code: string;
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "failed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "failed";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "failed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "failed";
+                    code: string;
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                /** @constant */
+                state: "failed";
+                input: {
+                    /** @constant */
+                    type: "parts";
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                queue: {
+                    admission: components["schemas"]["Decimal"];
+                    admitted_at: components["schemas"]["Decimal"];
+                };
+                binding: {
+                    turn: components["schemas"]["Decimal"];
+                    operation: components["schemas"]["Decimal"];
+                    attempt: components["schemas"]["Decimal"];
+                };
+                result: {
+                    /** @constant */
+                    status: "failed";
+                    code: string;
+                };
+                recovery: components["schemas"]["MessageRecoveryJson"];
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "message";
+                target: string;
+                code: string;
+                /** @constant */
+                state: "failed";
+                input: {
+                    /** @constant */
+                    type: "parts";
                     bytes: components["schemas"]["Decimal"];
                     sha256: string;
                 };
@@ -3174,6 +4138,11 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };
+        PartOwner: {
+            message: components["schemas"]["Decimal"];
+        } | {
+            action: components["schemas"]["Decimal"];
+        };
         Peer: {
             session: string;
         };
@@ -3247,61 +4216,53 @@ export interface components {
             /** @enum {string} */
             permission_mode?: "ask" | "bypass";
         };
-        PublicPartBytesRequest: {
+        PublicPart: {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "image";
+            mime: string;
+            width: components["schemas"]["Decimal"];
+            height: components["schemas"]["Decimal"];
+            name: string | null;
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        };
+        PublicPartContentRequest: {
             /** @constant */
             version: "21";
             /** @constant */
-            kind: "public_part_bytes";
+            kind: "public_part_content";
             store: string;
             session: string;
-            id: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @enum {string} */
-            target: "message" | "action";
+            owner: components["schemas"]["PartOwner"];
+            part: components["schemas"]["Decimal"];
+            start: components["schemas"]["Decimal"];
+            /** @constant */
+            stream?: true;
         };
-        PublicPartReply: {
+        PublicPartsReply: {
             /** @constant */
             version: "21";
             /** @constant */
-            type: "public_part";
-            part: null;
-        } | {
-            /** @constant */
-            version: "21";
-            /** @constant */
-            type: "public_part";
-            part: {
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                type: "text";
-                bytes: components["schemas"]["Decimal"];
-                sha256: string;
-            };
-        } | {
-            /** @constant */
-            version: "21";
-            /** @constant */
-            type: "public_part";
-            part: {
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                type: "image";
-                mime: string;
-                bytes: components["schemas"]["Decimal"];
-                sha256: string;
-            };
+            type: "public_parts";
+            session: string;
+            value: components["schemas"]["ContentValue"];
+            parts: components["schemas"]["PublicPart"][];
         };
-        PublicPartRequest: {
+        PublicPartsRequest: {
             /** @constant */
             version: "21";
             /** @constant */
-            kind: "public_part";
+            kind: "public_parts";
             store: string;
             session: string;
-            id: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @enum {string} */
-            target: "message" | "action";
+            owner: components["schemas"]["PartOwner"];
         };
         Queued: {
             count: components["schemas"]["Decimal"];
@@ -4885,7 +5846,7 @@ export interface operations {
             };
         };
     };
-    publicPart: {
+    publicParts: {
         parameters: {
             query?: never;
             header: {
@@ -4899,7 +5860,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublicPartRequest"];
+                "application/json": components["schemas"]["PublicPartsRequest"];
             };
         };
         responses: {
@@ -4909,7 +5870,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PublicPartReply"];
+                    "application/json": components["schemas"]["PublicPartsReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -4923,7 +5884,7 @@ export interface operations {
             };
         };
     };
-    publicPartBytes: {
+    publicPartContent: {
         parameters: {
             query?: never;
             header: {
@@ -4937,7 +5898,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublicPartBytesRequest"];
+                "application/json": components["schemas"]["PublicPartContentRequest"];
             };
         };
         responses: {

@@ -34,10 +34,19 @@ pub const PermissionDecisionRejection = enum {
     action_not_pending,
 };
 pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
+pub const InputReference = struct {
+    form: InputForm,
+    content: ContentReference,
+
+    pub fn writeJson(self: InputReference, writer: *std.Io.Writer) !void {
+        try writer.print("{{\"type\":\"{s}\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ @tagName(self.form), self.content.bytes, std.fmt.bytesToHex(self.content.digest, .lower) });
+    }
+};
+pub const InputForm = enum { text, parts };
 
 pub const Target = union(CommandKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
+    message: struct { bytes: u64, digest: [32]u8, form: InputForm = .text, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
@@ -48,7 +57,7 @@ pub const Target = union(CommandKind) {
 };
 
 pub const Answer = struct {
-    input: ?ContentReference = null,
+    input: ?InputReference = null,
     result: union(enum) {
         accepted: union(enum) {
             configure: struct { revision: u64, created: bool, skills: ?SkillsReloadStatus = null, configuration: ?@import("creation_receipt.zig").Configuration = null },
@@ -94,7 +103,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
     switch (target) {
         inline else => |_, kind| {
             const Reply = command_spec.spec(kind).Reply(protocol);
-            inline for (.{ "accepted_create", "accepted", "accepted_skills", "rejected", "conflict" }) |name| {
+            inline for (.{ "accepted_parts_create", "accepted_create", "accepted_parts", "accepted", "accepted_skills", "rejected_parts", "rejected", "conflict" }) |name| {
                 if (comptime !@hasDecl(Reply, name)) continue;
                 const accepted = comptime std.mem.startsWith(u8, name, "accepted");
                 const conflict = comptime std.mem.eql(u8, name, "conflict");
@@ -255,15 +264,15 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
         try require(partial, ".completion");
         if (!accepted and !wire.completion.status.eql("unavailable")) return error.InvalidResponse;
     }
-    var confirmed_input: ?ContentReference = null;
+    var confirmed_input: ?InputReference = null;
     if (comptime kind == .message and !conflict) {
         try require(partial, ".input");
         const input = wire.input;
         var digest: [32]u8 = undefined;
-        if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
+        if (!input.type.eql(@tagName(target.message.form)) or input.sha256.slice().len != 64) return error.InvalidResponse;
         _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
         const bytes = try decimalId(input.bytes, true);
-        confirmed_input = .{ .bytes = bytes, .digest = digest };
+        confirmed_input = .{ .form = target.message.form, .content = .{ .bytes = bytes, .digest = digest } };
         if (bytes != target.message.bytes or !std.mem.eql(u8, &digest, &target.message.digest)) return error.RequestBindingMismatch;
     }
     const value: @FieldType(@FieldType(Answer, "result"), "accepted") = if (!accepted) undefined else switch (kind) {
@@ -621,7 +630,7 @@ test "mutation rejection preserves an empty original creation target" {
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
 }
 
-test "CLI-21 creation reply binding" {
+test "CLI-24 creation reply binding" {
     const protocol = @import("protocol.zig");
     const command_reply = @import("command_reply.zig");
     const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
@@ -632,6 +641,12 @@ test "CLI-21 creation reply binding" {
     const receipt = (try result.answer).result.accepted.message.configuration.?;
     try std.testing.expectEqualStrings("gpt-5.5", receipt.model.slice());
     try std.testing.expectEqualStrings("bash", receipt.tools.slice());
+    const parts_tail = "},\"input\":{\"type\":\"parts\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    const parts_target: Target = .{ .message = .{ .bytes = 3, .digest = @splat(0), .form = .parts, .creates_session = true } };
+    const parts = try decodeForTest(protocol, command_reply, 200, message_head ++ config ++ parts_tail, "", parts_target).answer;
+    try std.testing.expectEqual(InputForm.parts, parts.input.?.form);
+    try std.testing.expectEqualStrings("gpt-5.5", parts.result.accepted.message.configuration.?.model.slice());
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ parts_tail, "", parts_target).answer);
     try std.testing.expectEqual(@as(?u64, 100), receipt.compaction_trigger);
     try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ message_tail, "", target).answer);
     const malformed = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"bad model\",\"reasoning_effort\":null,\"workspace\":\"/workspace\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"compaction_trigger\":null}";
@@ -641,4 +656,34 @@ test "CLI-21 creation reply binding" {
     const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"1\",\"created\":true" ++ config ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     const configured = decodeForTest(protocol, command_reply, 200, configure, "", .configure);
     try std.testing.expectEqualStrings("/workspace", (try configured.answer).result.accepted.configure.configuration.?.workspace.slice());
+}
+
+test "ADM-23 multipart mutation reply binds form and manifest identity" {
+    const current = @import("protocol.zig").wire_version;
+    const digest: [32]u8 = @splat(7);
+    var body: [1024]u8 = undefined;
+    inline for (.{ .text, .parts }) |target_form| {
+        const target: Target = .{ .message = .{ .bytes = 108, .digest = digest, .form = target_form } };
+        inline for (.{ .text, .parts }) |wire_form| {
+            const wire = try std.fmt.bufPrint(&body, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"{s}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ current, @tagName(wire_form), std.fmt.bytesToHex(digest, .lower) });
+            const result = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", target).answer;
+            if (target_form == wire_form) {
+                const answer = try result;
+                try std.testing.expectEqual(@as(u64, 7), answer.result.accepted.message.admission);
+                try std.testing.expectEqual(target_form, answer.input.?.form);
+                var output: [256]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&output);
+                try answer.input.?.writeJson(&writer);
+                const expected = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"{s}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}}", .{ @tagName(target_form), std.fmt.bytesToHex(digest, .lower) });
+                defer std.testing.allocator.free(expected);
+                try std.testing.expectEqualStrings(expected, writer.buffered());
+                var changed = target;
+                changed.message.digest[0] ^= 1;
+                try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
+                changed = target;
+                changed.message.bytes += 1;
+                try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
+            } else try std.testing.expectError(error.InvalidResponse, result);
+        }
+    }
 }

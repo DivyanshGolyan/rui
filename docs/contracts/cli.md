@@ -22,9 +22,9 @@ The CLI uses shallow resource-first commands with one canonical spelling per ope
 
 | Resource | Operations |
 | --- | --- |
-| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, `inspect-part`, `read-image-part`, human `resume` |
+| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, `list-parts`, `read-part`, human `resume` |
 | `request` | `inspect`, `wait`, `recover`, `read-result`, `list` |
-| `action` | `inspect`, `allow`, `deny`, `background`, `stop`, `inspect-part`, `read-image-part`, explicit saved-content reads |
+| `action` | `inspect`, `allow`, `deny`, `background`, `stop`, `list-parts`, `read-part`, explicit saved-content reads |
 | `host` | `start`, `stop`, `status`, `serve` |
 | `defaults` | `inspect`, `configure` |
 | `auth` | explicit operator `login` |
@@ -73,13 +73,10 @@ Any canonical failure rolls back allocation, revision and Message together.
 This is not a configure/send wrapper.
 It uses the existing Message endpoint, captured request kind and observation/result contracts.
 
-CLI Message text comes only from stdin for `session start` and `session send`.
-Instructions come only from stdin through `session configure --instructions -`.
-File-valued text/instructions flags and inline or positional Message operands are unsupported, including after `--`.
+For `session start` and `session send`, repeated `--text TEXT`, `--text-file FILE`, and `--image FILE` operands compose the Message in the supplied order. Text files and literals retain exact UTF-8 bytes, NULs and trailing newlines; images must be local regular PNG or JPEG files. `--text-file -` selects stdin once at that position. Without an explicit text operand, nonterminal stdin precedes image operands when nonempty; with explicit text, nonempty stdin must be selected. With no operands, the legacy stdin-only capture remains byte-identical. Text-only compositions use the existing scalar text representation.
+Instructions come only from stdin through `session configure --instructions -`; positional Message operands remain unsupported, including after `--`.
 A start cannot also read separate instructions; it uses fresh defaults, and explicit instruction changes require a separate configure operation.
-Complete UTF-8 bytes, NULs and trailing newlines remain unchanged under existing content bounds.
-Empty Message stdin refuses before capture publication or admission.
-Empty instruction stdin is an explicit empty update.
+An empty Message composition refuses before capture publication or admission. Empty instruction stdin is an explicit empty update.
 Reject unknown options, duplicate singleton options even when equal, conflicting selectors and two consumers of stdin before capture or transmission.
 An option value spelling `--help` remains data.
 Domain validation and saved rejection stay with the existing owners.

@@ -1013,3 +1013,53 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
         }
     }.run);
 }
+
+test "SH-59 compound skills submission commits and rolls back with its callback" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Capture = @import("../../InputCapture.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var used: std.atomic.Value(u64) = .init(0);
+            var capture: Capture = undefined;
+            const spool = try tmp.dir.createFile(std.testing.io, "compound-skills-spool", .{ .read = true });
+            const index = try tmp.dir.createFile(std.testing.io, "compound-skills-index", .{ .read = true });
+            try tmp.dir.deleteFile(std.testing.io, "compound-skills-spool");
+            try tmp.dir.deleteFile(std.testing.io, "compound-skills-index");
+            capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 10000 });
+            defer capture.close();
+            for ([_][]const u8{ "first", "second" }) |bytes| {
+                try capture.begin(.text, bytes.len);
+                var available = bytes.len;
+                _ = try capture.append(bytes, &available, false);
+                try capture.end();
+            }
+            const loan = try capture.seal();
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const config = try completeConfiguration("compound-skills", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            var command: wire_request.MessageCommand = .{ .key = config.key, .configuration = config.configuration };
+            const captured: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "captured skill body" }} };
+            var commits: shared_fixtures.TestingCommits = .{};
+            const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            const failed = try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{ .before_commit = true });
+            try std.testing.expect(failed == .infrastructure_failure);
+            try std.testing.expectEqual(@as(usize, 0), commits.count);
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            const accepted = try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(@as(usize, 1), commits.count);
+            try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            try std.testing.expect((try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{})).accepted.replayed);
+            try std.testing.expectEqual(@as(usize, 1), commits.count);
+        }
+    }.run);
+}

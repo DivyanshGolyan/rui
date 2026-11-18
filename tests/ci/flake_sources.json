@@ -259,7 +259,7 @@
     "test_double": 1
   },
   "tests/integration/host_launch_exit_test.py": {
-    "test_double": 16
+    "test_double": 15
   },
   "tests/integration/host_process_test.py": {
     "test_double": 56

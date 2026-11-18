@@ -727,6 +727,15 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn publishRetryCrossings(self: *NativeTurn, from: u64, now_ms: u64) error{Fence}!execution_turn.DeadlineRead {
+        const read = self.host.store.publishRetryCrossings(from, now_ms) catch |err| {
+            fenceDispatch(self.host, "retry deadline read", err);
+            self.fenced = true;
+            return error.Fence;
+        };
+        return .{ .generation = read.generation, .next = read.next };
+    }
+
     pub fn controlGeneration(self: *const NativeTurn) u64 {
         return self.host.store.controlGeneration();
     }
@@ -909,7 +918,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -5022,9 +5031,8 @@ test "an encode failure settles unanswered and releases request scratch" {
             try std.testing.expectEqual(@as(usize, 2), counted.requests);
             try std.testing.expectEqual(@as(usize, 2), counted.peer.streams.items.len);
             try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-            // Public text observation still refuses compound input; inspect the
-            // committed Operation to pin its exact unanswered terminal failure.
-            try std.testing.expectError(error.InputPartsNotSupported, storage.observeCommand("encode-failure-key", null, &observed));
+            // The command observation preserves its compound input identity.
+            try storage.observeCommand("encode-failure-key", null, &observed);
             try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(
                 &storage,
                 "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal=?3 AND turn_id=?4 AND resolution_code=?5 AND resolved_at IS NOT NULL AND retry_due_at_ms IS NULL AND attempt_at IS NULL AND request_id IS NULL",

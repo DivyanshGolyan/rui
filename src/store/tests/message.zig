@@ -861,7 +861,8 @@ test "compound Message retains ordered input across replay and saved refusal" {
             const id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1", .{command.key.slice()});
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT form FROM content WHERE content_id=?1", .{id}));
             try std.testing.expectError(error.ContentIsParts, storage.openContent(accepted.accepted.content));
-            try std.testing.expectError(error.InputPartsNotSupported, store_testing.observeCommandForTesting(&storage, command.key.slice()));
+            const observed = try store_testing.observeCommandForTesting(&storage, command.key.slice());
+            try std.testing.expectEqual(@import("../../input_parts.zig").Form.parts, observed.kind.message.?.form);
             try std.testing.expect(!storage.isFenced());
             for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
                 try std.testing.expectError(error.InputPartsNotSupported, shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile));
@@ -905,7 +906,7 @@ test "compound Message retains ordered input across replay and saved refusal" {
             try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
             try std.testing.expectEqual(id, try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1", .{command.key.slice()}));
             try std.testing.expect((try storage.submitMessageParts(&command, loan, null, .{})).rejected.replayed);
-            try std.testing.expectError(error.InputPartsNotSupported, store_testing.observeCommandForTesting(&storage, "compound-refused"));
+            try std.testing.expectEqual(.rejected, (try store_testing.observeCommandForTesting(&storage, "compound-refused")).status);
             try std.testing.expect(!storage.isFenced());
 
             // Both admission and conversation retain the same compound value.

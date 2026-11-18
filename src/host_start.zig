@@ -950,7 +950,7 @@ test "Host start pipe file and assignment admissions retain source values" {
     }
 }
 
-test "CLI-17 Host refusal presentation" {
+test "CLI-25 Host refusal presentation" {
     const Probe = struct {
         var output: [2][4096]u8 = undefined;
         var used: [2]usize = .{ 0, 0 };

@@ -143,6 +143,7 @@ In-memory retention supports recovery only while the client survives.
 Recover an uncertain reply by identity, not by guessing from content.
 
 Direct caller capture enforces the decoded per-value content boundary while streaming, before publication or transmission.
+For an ordered Message, capture reads each local image from one acquired regular-file descriptor, validates it, and seals its bytes with the ordered text parts. The published record contains the exact serialized request, not mutable image paths; recovery reconstructs its identity from those saved bytes. A text-only Message retains the scalar text wire representation.
 A stable OS-held lock per record owns capture, recovery and no-overwrite publication.
 Revisiting that record removes its prior incomplete temporary under the lock; killing a writer releases the lock.
 The empty lock file remains to preserve one lock inode across openers.
@@ -161,7 +162,7 @@ This is one reader per active capture/recovery, fixed content windows and bounde
 Generated recovery decodes only configuration, Message and Permission Decision records; Session stop and Model Interruption keep their explicit record/retry routes.
 
 Client also owns typed decoding of these six mutation replies before callers interpret admission.
-One fixed-storage parse validates the complete bounded envelope, consumed-field duplicates, operation/status/replay semantics, echoed Session and control target, and Message decoded length/domain-separated digest and queue admission against the pinned capture.
+One fixed-storage parse validates the complete bounded envelope, consumed-field duplicates, operation/status/replay semantics, echoed Session and control target, and Message decoded length/domain-separated digest and queue admission against the pinned capture. For compound input the reply identifies the ordered canonical parts manifest by its encoded length and domain-separated digest, including validated image metadata; scalar text retains its existing identity.
 Invalid or mismatched replies are unconfirmed invocations, not durable rejection or proof of noncommit; retain the original recovery key.
 A canonical invocation failure retains its independent Host-fence authority.
 Typed facts, original request identity/target and bounded invocation status/type/code are owned values that survive capture closure and response-buffer reuse.

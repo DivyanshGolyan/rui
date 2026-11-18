@@ -1916,7 +1916,7 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     try std.testing.expectEqual(codec_abi.max_pieces, longest);
 }
 
-test "CM-40 provider effort encoding" {
+test "CM-43 provider effort encoding" {
     for (std.enums.values(Version)) |version| {
         for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
             var encoder: Encoder = .{ .carry = initial(version, effort) };

@@ -170,7 +170,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["src/cli.zig"], "review", AVAILABLE)["mac_required"])
         for path in ("src/HostLifecycle.zig", "src/host_coordinator.zig",
                      "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig", "src/upgrade.zig",
-                     "src/upgrade_process.zig", "tests/integration/upgrade_integration.py"):
+                     "src/upgrade_process.zig"):
             self.assertTrue(select([path], "review", AVAILABLE)["mac_required"], path)
 
     def test_python_scan_ignores_comments_strings_and_attributes(self):
@@ -268,11 +268,14 @@ class PlatformBoundaryTest(unittest.TestCase):
         for path in ("src/client.zig", "src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
                      ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig", "tests/ci/build_artifact.py",
-                     "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
-                     "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
+                     "src/os/process.zig", "src/os/descriptor_limit.zig", "src/os/Waker.zig",
+                     "tests/integration/terminal_process.py",
                      "tests/integration/terminal_leader.py", "tests/integration/terminal_restoration_cases.py"):
             self.assertTrue(mac_path(path), path)
-        for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
+        for path in ("src/session_view.zig", "src/server.zig", "src/h2/Connection.zig", "src/h2/testing/Peer.zig",
+                     "tests/integration/dispatch_integration.py",
+                     "tests/integration/upgrade_integration.py", "tests/integration/host_launch_integration.py",
+                     "tests/integration/terminal_process_test.py",
                      ".github/workflows/check.yml", "README.md",
                      "build.zig", "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
             self.assertFalse(mac_path(path), path)

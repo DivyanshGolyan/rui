@@ -39,10 +39,14 @@ pub const Spec = struct {
 
     pub fn replyShapes(comptime self: Spec, comptime Wire: type) type {
         const r = self.Reply(Wire);
-        return Shapes(if (@hasDecl(r, "accepted_create"))
+        return Shapes(if (@hasDecl(r, "accepted_parts_create"))
+            .{ r.accepted, r.accepted_create, r.accepted_parts, r.accepted_parts_create, r.rejected, r.rejected_parts }
+        else if (@hasDecl(r, "accepted_create"))
             (if (@hasDecl(r, "accepted_skills")) .{ r.accepted, r.accepted_create, r.accepted_skills, r.rejected } else .{ r.accepted, r.accepted_create, r.rejected })
         else if (@hasDecl(r, "accepted_skills"))
             .{ r.accepted, r.accepted_skills, r.rejected }
+        else if (@hasDecl(r, "accepted_parts"))
+            .{ r.accepted, r.accepted_parts, r.rejected, r.rejected_parts }
         else
             .{ r.accepted, r.rejected });
     }
@@ -110,12 +114,12 @@ const MessageObservation = struct {
     }
 
     pub fn accepted(comptime Wire: type) type {
-        return shapeSuffix(shapes(Wire).values, 2);
+        return shapeSuffix(shapes(Wire).values, 3);
     }
 
     pub fn rejected(comptime Wire: type) type {
         const values = shapes(Wire).values;
-        return Shapes(.{ values[0], values[1] });
+        return Shapes(.{ values[0], values[1], values[2] });
     }
 };
 
@@ -219,6 +223,14 @@ const MessageRequest = struct {
         return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.text ++ .{S.Content} ++ r.text_tail ++ .{
+            S.Optional(r.require_model),
+        } ++ r.tail);
+    }
+    pub fn partsSchema(comptime S: type) type {
+        const r = S.Wire.message_request;
+        return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
+            S.Optional(r.configuration ++ .{S.Configuration}),
+        } ++ r.parts ++ .{S.Parts} ++ .{
             S.Optional(r.require_model),
         } ++ r.tail);
     }
@@ -372,10 +384,14 @@ fn mutationDecoderKinds(comptime Wire: type, comptime index: usize) type {
     const kinds = std.meta.tags(CommandKind);
     if (index == kinds.len) return Shapes(.{});
     const r = spec(kinds[index]).Reply(Wire);
-    return Shapes((if (@hasDecl(r, "accepted_create"))
+    return Shapes((if (@hasDecl(r, "accepted_parts_create"))
+        .{ r.accepted, r.accepted_create, r.accepted_parts, r.accepted_parts_create, r.rejected, r.rejected_parts, r.conflict }
+    else if (@hasDecl(r, "accepted_create"))
         (if (@hasDecl(r, "accepted_skills")) .{ r.accepted, r.accepted_create, r.accepted_skills, r.rejected, r.conflict } else .{ r.accepted, r.accepted_create, r.rejected, r.conflict })
     else if (@hasDecl(r, "accepted_skills"))
         .{ r.accepted, r.accepted_skills, r.rejected, r.conflict }
+    else if (@hasDecl(r, "accepted_parts"))
+        .{ r.accepted, r.accepted_parts, r.rejected, r.rejected_parts, r.conflict }
     else
         .{ r.accepted, r.rejected, r.conflict }) ++ mutationDecoderKinds(Wire, index + 1).values);
 }

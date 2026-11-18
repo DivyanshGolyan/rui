@@ -42,6 +42,7 @@ pub const ConfigureReply = union(enum) {
 };
 
 pub const AcceptedMessage = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     admission_id: u64,
     /// Borrowed from caller-supplied receipt storage; valid for its lifetime.
@@ -51,6 +52,7 @@ pub const AcceptedMessage = struct {
 };
 
 pub const RejectedMessage = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     code: message_admission.Rejection,
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
@@ -179,6 +181,7 @@ pub const PublicConversationPage = struct {
 };
 
 pub const MessageObservation = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
     admitted_at: u64 = 0,

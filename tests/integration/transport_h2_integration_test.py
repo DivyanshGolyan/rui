@@ -168,7 +168,7 @@ class ShapedWorkTests(unittest.TestCase):
             stack.enter_context(patch.object(transport, "closed_host_request", side_effect=request))
             stack.enter_context(patch.object(transport.dispatch, "wait_for", side_effect=lambda predicate, *args, **kwargs: predicate()))
             stack.enter_context(patch.object(transport, "open_descriptors", side_effect=descriptors))
-            stack.enter_context(patch.object(transport, "host_physical_peak", return_value=123456))
+            stack.enter_context(patch.object(transport.os_semantics, "physical_footprint_peak", return_value=123456))
             with self.assertRaisesRegex(RuntimeError, "wave 2 failed"):
                 transport.round_trip(pathlib.Path("/fixture"), endpoint, 1, pathlib.Path("/fixture/ca"))
             stop.assert_called_once()
