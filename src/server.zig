@@ -318,7 +318,8 @@ const Intake = struct {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
                 error.ControlCapacity => "control_capacity_exhausted",
                 error.DiscoveryCapacity => "discovery_capacity_exhausted",
-                error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
+                error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else if (self.route == .action_publish) "too_large" else "control_request_too_large",
+                error.ContentTooLarge => if (self.route == .action_publish) "too_large" else @errorName(err),
                 error.RequestIdentityExhausted => "request_identity_exhausted",
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
                 error.EnvironmentRequired => "environment_required",
@@ -395,6 +396,7 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
+                        .action_publish => protocol.shapeBytes(protocol.action_publish_request),
                         inline else => |route| if (comptime route.commandKind()) |kind|
                             if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
                         else
@@ -1494,6 +1496,7 @@ const Route = enum {
     permission_decision,
     action_background,
     action_stop,
+    action_publish,
     observe,
     read_result,
     read_action,
@@ -1798,6 +1801,21 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
             const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
             try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
+        },
+        .action_publish => |*command| {
+            if (command.text.length > protocol.max_action_value_bytes) return respondStatic(fd, 409, .invocation_error, "too_large");
+            const bytes = try host.allocator.alloc(u8, @intCast(command.text.length));
+            defer host.allocator.free(bytes);
+            const count = try command.text.file.?.readPositionalAll(host.io, bytes, 0);
+            if (count != bytes.len) return error.UnexpectedEndOfFile;
+            const result = host.store.publishActionValue(command.handle.slice(), command.key.slice(), bytes) catch |err| {
+                fenceDispatch(host, "action value publication", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            };
+            switch (result) {
+                .accepted => |receipt| try fd.json(200, comptime protocol.shapeBytes(protocol.action_publish_reply), renderActionValueReceipt, .{receipt}),
+                .refused => |reason| return respondStatic(fd, 409, .invocation_error, @tagName(reason)),
+            }
         },
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
@@ -2148,6 +2166,8 @@ const HeaderReader = struct {
             .host_stop
         else if (std.mem.eql(u8, path, "/v1/control/host-pause"))
             .host_pause
+        else if (std.mem.eql(u8, path, "/v1/action-publish"))
+            .action_publish
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
@@ -2279,6 +2299,10 @@ test "initial Message reply binds its allocated Session and original input befor
         .session = allocated,
     } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
+}
+
+fn renderActionValueReceipt(out: protocol.JsonOut, receipt: anytype) !void {
+    try out.appendShape(protocol.action_publish_reply, .{ receipt.action_id, receipt.ordinal, receipt.admission_id, receipt.replayed });
 }
 
 /// The Store owns which read failures are fatal: it fences itself for those and returns the
