@@ -81,7 +81,31 @@ export interface SessionArchiveResult {
 
 export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
 
-export interface SessionSummary {
+export interface ServedWork {
+	attention: Schemas["SessionWork"]["attention"];
+	group: Schemas["SessionWork"]["group"];
+	canStop: boolean;
+	decide: string | null;
+	interruptTarget: InterruptTarget | null;
+}
+
+function servedWork(work: Schemas["SessionWork"]): ServedWork {
+	if (!work || !("attention" in work) || !("group" in work) || !work.actions ||
+		typeof work.actions.stop !== "boolean" || !("interrupt" in work.actions) || !("decide" in work.actions) ||
+		!["needs_you", "working", "queued", "done"].includes(work.group) ||
+		(work.attention !== null && (typeof work.attention !== "object" ||
+			!["approval", "failed", "finished"].includes(work.attention.kind) ||
+			typeof work.attention.turn !== "string" || typeof work.attention.step !== "string")) ||
+		(work.actions.decide !== null && typeof work.actions.decide !== "string") ||
+		(work.actions.interrupt !== null && (typeof work.actions.interrupt !== "object" ||
+			typeof work.actions.interrupt.turn !== "string" || typeof work.actions.interrupt.operation !== "string"))) {
+		throw new Error("Invalid work reply: missing served facts");
+	}
+	return { attention: work.attention, group: work.group, canStop: work.actions.stop,
+		decide: work.actions.decide, interruptTarget: work.actions.interrupt };
+}
+
+export interface SessionSummary extends ServedWork {
 	id: string;
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
@@ -98,15 +122,13 @@ type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current
 export interface InterruptTarget { turn: string; operation: string }
 
 /** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
-export interface SessionStatus {
+export interface SessionStatus extends ServedWork {
 	archiveState: SessionArchiveState;
 	/** `working` includes owed attached-tree work, including unpublished child endings. */
 	state: CurrentReport["work"]["state"]["kind"];
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];
 	operation: CurrentReport["work"]["operation"];
-	/** The Host-served target for interrupting the observed model call. */
-	interruptTarget: InterruptTarget | null;
 	pendingMessages: CurrentReport["pending_messages"];
 	parent: CurrentReport["session"]["parent"];
 	label: CurrentReport["session"]["label"];
@@ -221,14 +243,15 @@ export class Session {
 			} satisfies Schemas["InspectSessionRequest"])),
 		);
 		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
-		this.#interruptTarget = reply.work.actions.interrupt === null ? null : { ...reply.work.actions.interrupt };
+		const served = servedWork(reply.work);
+		this.#interruptTarget = served.interruptTarget === null ? null : { ...served.interruptTarget };
 		return {
 			archiveState: reply.archive_state,
 			state: reply.work.state.kind,
 			since: reply.work.state.since,
 			turn: reply.work.turn,
 			operation: reply.work.operation,
-			interruptTarget: reply.work.actions.interrupt,
+			...served,
 			pendingMessages: reply.pending_messages,
 			parent: reply.session.parent,
 			label: reply.session.label,
@@ -463,7 +486,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent, creator: row.creator });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, ...servedWork(row.work), archiveState: row.archive_state, parent: row.parent, creator: row.creator });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

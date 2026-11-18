@@ -71,12 +71,12 @@ test("session lists keep archive visibility across pages and expose independent 
 			assert.equal(path, "/v1/list-sessions");
 			requests.push(JSON.parse(build("/store")));
 			return Buffer.from(JSON.stringify({
-				sessions: [{ reference: requests.length === 1 ? "k7m2qx" : "09azvw", label: null, parent: null, creator: null, work: { state: { kind: "idle" } }, archive_state: "archived" }],
+				sessions: [{ reference: requests.length === 1 ? "k7m2qx" : "09azvw", label: null, parent: null, creator: null, work: { state: { kind: "idle" }, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, archive_state: "archived" }],
 				next: requests.length === 1 ? { after: "8", ceiling: "23" } : null,
 			}));
 		} });
 		const options: ListSessionsOptions | undefined = archive === undefined ? undefined : { archive };
-		assert.deepEqual(await sessions.list(options), ["09azvw", "k7m2qx"].map((id) => ({ id, label: null, parent: null, creator: null, state: "idle", archiveState: "archived" })));
+		assert.deepEqual(await sessions.list(options), ["09azvw", "k7m2qx"].map((id) => ({ id, label: null, parent: null, creator: null, state: "idle", attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, archiveState: "archived" })));
 		assert.deepEqual(requests.map(({ archive, workspace, after, ceiling }) => ({ archive, workspace, after, ceiling })), [
 			{ archive: archive ?? "active", workspace: null, after: "0", ceiling: "0" },
 			{ archive: archive ?? "active", workspace: null, after: "8", ceiling: "23" },

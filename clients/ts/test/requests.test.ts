@@ -76,9 +76,37 @@ test("status requests the Current profile and maps reported facts and parent los
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, interruptTarget: null, pendingMessages: "9007199254740993",
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
 			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
+	}
+});
+
+test("status and list expose exactly the Host served facts", async () => {
+	const facts = { attention: { kind: "approval", turn: "7", step: "9" }, group: "needs_you", actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
+	const link: Link = { async exchange(path) {
+		return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? report({ ...idleWork, ...facts })
+			: { sessions: [{ reference: "abc123", label: null, state: "idle", archive_state: "active", parent: null, creator: null, work: { ...idleWork, ...facts } }], next: null }));
+	} };
+	const expected = { attention: facts.attention, group: facts.group, canStop: true, decide: null, interruptTarget: facts.actions.interrupt };
+	const status = await new Session(link, "abc123").status();
+	const [row] = await new Sessions(link).list();
+	for (const result of [status, row]) {
+		assert.ok(result);
+		for (const [key, value] of Object.entries(expected)) assert.deepEqual(result[key as keyof typeof expected], value);
+	}
+});
+
+test("status and list reject missing served facts", async () => {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const link: Link = { async exchange(path) { return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? { ...report(idleWork), work }
+			: { sessions: [{ reference: "abc123", work }], next: null })); } };
+		await assert.rejects(new Session(link, "abc123").status(), /missing served facts/);
+		await assert.rejects(new Sessions(link).list(), /missing served facts/);
 	}
 });
 
