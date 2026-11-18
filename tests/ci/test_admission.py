@@ -23,6 +23,7 @@ RELEASE = ROOT / '.github/workflows/release.yml'
 RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
 QUALIFIER = ROOT / '.github/workflows/main-qualifier.yml'
+TIER = ROOT / '.github/workflows/qualification-tier.yml'
 
 
 def job(text, name):
@@ -30,6 +31,11 @@ def job(text, name):
     if not match:
         raise AssertionError(f'missing job {name}')
     return match[1]
+
+
+def permissions_of(body):
+    block = body.split('\n    permissions:\n', 1)[1]
+    return dict(re.findall(r'(?m)^      ([a-z-]+): (read|write)$', block.split('\n    uses:', 1)[0].split('\n    runs-on:', 1)[0]))
 
 
 def step_script(text, name):
@@ -387,7 +393,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_upgrade_runs_both_platforms_in_promotion_and_never_on_prs(self):
         self.assertNotIn('uses: ./.github/workflows/previous-release-upgrade.yml', CHECK.read_text())
-        promotion = job(PROMOTE.read_text(), 'upgrade')
+        promotion = job(TIER.read_text(), 'upgrade')
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', promotion)
         text = UPGRADE.read_text()
         self.assertNotIn('pull_request', text)
@@ -815,12 +821,16 @@ class ReleaseFlowTest(unittest.TestCase):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
     def test_only_a_manual_promotion_publishes_main(self):
-        # Qualify main builds the release archives too, but only Promote publishes them.
-        for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['main-qualifier.yml', 'promote.yml'])):
+        # One tier builds and judges the archives for Qualify main and Promote; only Promote publishes them.
+        for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['qualification-tier.yml']),
+                                   (UPGRADE, ['qualification-tier.yml']), (RENDERER, ['qualification-tier.yml']),
+                                   (TIER, ['main-qualifier.yml', 'promote.yml'])):
             release = workflow.read_text().split('\npermissions:', 1)[0]
             self.assertIn('  workflow_call:', release)
+            # The upgrade check and renderer contracts also run by hand for diagnosis.
             for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
-                self.assertNotIn(trigger, release)
+                if workflow not in (UPGRADE, RENDERER) or trigger != 'workflow_dispatch:':
+                    self.assertNotIn(trigger, release)
             callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
                        if f'uses: ./.github/workflows/{workflow.name}' in path.read_text()]
             self.assertCountEqual(callers, expected)
@@ -839,70 +849,101 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('  workflow_dispatch:', on)
         self.assertNotRegex(on, r'push:|pull_request')
         self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-qualifier\n  cancel-in-progress: false$')
-        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
-        # Only the release plan's draft lookup holds push access, as in Promote.
-        self.assertEqual(text.count('contents: write'), 1)
-        self.assertIn('contents: write', job(text, 'release_build'))
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write|secrets')
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify'])
         self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
         self.assertIn('main_qualified.py batch --head "$HEAD_SHA"', job(text, 'batch'))
-        selected = job(text, 'selected')
-        self.assertIn('uses: ./.github/workflows/check.yml', selected)
-        self.assertIn('promotion: true', selected)
-        self.assertIn('base: ${{ needs.batch.outputs.base }}', selected)
-        self.assertIn('uses: ./.github/workflows/release-build.yml', job(text, 'release_build'))
-        for name in ('release_build', 'selected', 'upgrade', 'renderer'):
-            self.assertIn("if: ${{ needs.batch.outputs.needed == 'true' }}", job(text, name))
-        for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
-            body = job(text, name)
-            self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
-            self.assertIn('needs: [batch, release_build]', body)
-            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
-            self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
-        qualified = job(text, 'qualified')
-        self.assertIn('if: ${{ always() && ', qualified)
-        self.assertIn('statuses: write', qualified)
-        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
-                      qualified)
-        report = job(text, 'report')
-        self.assertIn('--workflow "Qualify main"', report)
-        self.assertIn('--label main-red', report)
+        qualify = job(text, 'qualify')
+        for line in ('uses: ./.github/workflows/qualification-tier.yml', "if: ${{ needs.batch.outputs.needed == 'true' }}",
+                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
+                     'red-label: main-red'):
+            self.assertIn(line, qualify)
+        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
+                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
         # Promote and Qualify main on one SHA never cancel each other's tiers.
         self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
 
-    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
-        text = PROMOTE.read_text()
-        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+    def test_one_tier_owns_qualification_and_its_verdict(self):
+        text = TIER.read_text()
+        on = text.split('\npermissions:', 1)[0]
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_call'])
+        self.assertEqual(re.findall(r'(?m)^      ([a-z-]+):\n        description', on), ['base', 'head', 'red-label', 'version'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]),
+                         ['release_build', 'selected', 'upgrade', 'renderer', 'qualified', 'report'])
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
+        build = job(text, 'release_build')
+        self.assertIn('uses: ./.github/workflows/release-build.yml', build)
+        self.assertIn('sha: ${{ inputs.head }}', build)
         selected = job(text, 'selected')
         self.assertIn('uses: ./.github/workflows/check.yml', selected)
         self.assertIn('promotion: true', selected)
-        build = job(text, 'release_build')
-        self.assertIn('uses: ./.github/workflows/release-build.yml', build)
-        self.assertIn('sha: ${{ needs.batch.outputs.head }}', build)
+        self.assertIn('base: ${{ inputs.base }}', selected)
         for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
             body = job(text, name)
             self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
-            self.assertIn('${{ needs.batch.outputs.head }}', body)
-            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
+            self.assertIn('${{ inputs.head }}', body)
+            self.assertIn('batch-base: ${{ inputs.base }}', body)
             # The tiers test the bytes the release publishes.
-            self.assertIn('needs: [batch, release_build]', body)
+            self.assertIn('needs: release_build', body)
             self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
         qualified = job(text, 'qualified')
-        needs = re.search(r'(?m)^    needs: \[(.*?)\]$', qualified)[1].split(', ')
-        self.assertCountEqual(needs, ['batch', 'release_build', 'selected', 'upgrade', 'renderer'])
+        self.assertIn('needs: [release_build, selected, upgrade, renderer]', qualified)
+        self.assertIn('if: ${{ always() }}', qualified)
+        self.assertEqual(permissions_of(qualified), {'contents': 'read', 'statuses': 'write'})
+        script = step_script(qualified, 'Record the verdict on HEAD')
+        self.assertIn('main_qualified.py verdict $RESULTS', script)
+        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
+                      script)
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
+        # The requirement is report_issue.py's aggregate step: it files nothing of its own.
+        self.assertIn('      - name: Require every selected qualification tier\n', qualified)
+        self.assertIn('run: test "$STATE" = success', qualified.split('Require every selected qualification tier', 1)[1])
+        report = job(text, 'report')
+        self.assertIn('if: ${{ failure() }}', report)
+        self.assertIn('WORKFLOW: ${{ github.workflow }}', report)
+        self.assertIn('report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label "$RED_LABEL"',
+                      report)
+        # No caller enumerates the tiers, collects their results or records a verdict itself.
+        workflows = {path.name: path.read_text() for path in (ROOT / '.github/workflows').glob('*.yml')}
+        authorities = {
+            'calls the release build': r'uses: \./\.github/workflows/release-build\.yml',
+            'calls the upgrade check': r'uses: \./\.github/workflows/previous-release-upgrade\.yml',
+            'calls the renderer contracts': r'uses: \./\.github/workflows/renderer-contracts\.yml',
+            'runs Selected checks as a promotion': r'promotion: true',
+            'derives a verdict': r'main_qualified\.py verdict',
+            'records a final verdict': r'main_qualified\.py record [^\n]*--state "\$state"',
+        }
+        for what, pattern in authorities.items():
+            with self.subTest(authority=what):
+                self.assertEqual([name for name, body in sorted(workflows.items()) if re.search(pattern, body)],
+                                 ['qualification-tier.yml'])
+
+    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
+        text = PROMOTE.read_text()
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release'])
+        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
+        qualify = job(text, 'qualify')
+        for line in ('uses: ./.github/workflows/qualification-tier.yml',
+                     "if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}",
+                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
+                     'red-label: promotion-red'):
+            self.assertIn(line, qualify)
+        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
+                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
         release = job(text, 'release')
-        self.assertIn('needs: [batch, release_build, qualified]', release)
-        self.assertIn("if: ${{ !cancelled() && needs.qualified.result == 'success' }}", release)
+        self.assertIn('needs: [batch, qualify]', release)
+        self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
         self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
-                      " || needs.release_build.outputs.version }}", release)
+                      " || needs.qualify.outputs.version }}", release)
+        self.assertIn('value: ${{ jobs.release_build.outputs.version }}', TIER.read_text())
         # A green qualification publishes that run's archives without qualifying again.
         self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
-        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
-        for name in ('release_build', 'selected', 'upgrade', 'renderer'):
-            self.assertIn("needs.batch.outputs.reuse != 'true'", job(text, name).split('\n    if:', 1)[1].split('\n', 1)[0])
-        self.assertIn("if: ${{ always() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' }}", qualified)
         self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
         self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
         # Publication never rebuilds: it checks the archives against the digests recorded at build time.
@@ -911,14 +952,6 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('rui-digests/SHA256SUMS', publication)
         self.assertIn('sha256sum --check --strict SHA256SUMS', publication)
         self.assertIn('name: rui-digests', RELEASE_BUILD.read_text())
-        script = step_script(qualified, 'Record the verdict on HEAD')
-        self.assertIn('main_qualified.py verdict $RESULTS', script)
-        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state"', script)
-        # The requirement is report_issue.py's aggregate step: it files nothing of its own.
-        self.assertIn('      - name: Require every selected promotion tier\n', qualified)
-        self.assertIn('run: test "$STATE" = success', qualified.split('Require every selected promotion tier', 1)[1])
-        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
-            self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
 
     BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 

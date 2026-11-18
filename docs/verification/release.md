@@ -52,7 +52,7 @@ Correctness failures are fixed on the PR before it reaches `main`.
 ### Qualify main
 
 [Qualify main](../../.github/workflows/main-qualifier.yml) runs every three hours, and by `gh workflow run main-qualifier.yml --ref main`, when main HEAD has no `main-qualified` verdict yet.
-It runs Promote's qualification tier below on main HEAD, over the batch since the newest first-parent commit with a green `main-qualified` record, else since `stable`, so a failing step bisects only the commits since `main` was last known green.
+It calls the [qualification tier](../../.github/workflows/qualification-tier.yml) that Promote calls (described below) on main HEAD, over the batch since the newest first-parent commit with a green `main-qualified` record, else since `stable`, so a failing step bisects only the commits since `main` was last known green.
 A failing job files or updates one `main-red` issue per cause, with the bisect's verdict on it.
 Every run records its verdict as the `main-qualified` commit status of HEAD, whose target is the run: green only when every tier passed, red when one failed, and unfinished when a tier was cancelled, which the next tick qualifies again.
 [main_qualified.py](../../tests/ci/main_qualified.py) alone writes and reads that record and names the batch.
@@ -68,6 +68,7 @@ It publishes main HEAD by default; `-f sha=<commit>` names a first-parent `main`
 When that commit's `main-qualified` record is green, its run still holds the release archives, and the release plan still gives the version that run built, Promote publishes those archives at once and qualifies nothing.
 A red record refuses: fix forward and promote a later commit, or promote an earlier green one.
 Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so Qualify main skips it.
+Promote and Qualify main share one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues; its callers differ only in the batch, the issue label (`promotion-red` or `main-red`) and runner routing (only Promote passes the runner-status token), and only Promote publishes after it. Its jobs appear as `qualify / <job>`.
 Promote qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, Linux `mysql-wire-integration`, the upgrade check on both systems and the renderer contracts.
 A failing suite, upgrade or contract job bisects each step that failed, on the same runner, by replaying that step's recorded command: once at HEAD, then by binary search over the batch's first-parent commits.
 A step is one suite batch, one upgrade check or one contract; a suite job stops at its first failed batch, and [steps.py](../../tests/ci/steps.py) runs every upgrade check and contract even after one fails.

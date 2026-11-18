@@ -283,7 +283,7 @@ Free eligibility does not prove capacity; report the actual runner outcome and d
 Apart from the shard rerun above and a [listed flake](#listed-flakes)'s rerun, test execution has no automatic retry.
 Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's or a Promote run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the PR run still tests the PR's head, or no later Promote run was dispatched.
 A build or test step's failure, a later attempt, any check failure in the run or a failed job routed to `rui-mac` (whose hook rejects the bot that triggers the rerun) never reruns, and a rerun job's tests had not run.
-A promotion's rerun also reruns `qualified` and Release, so publication still requires every tier, and Release resumes an interrupted publication rather than publishing twice ([Release publication](release.md#release-publication)).
+A promotion's rerun also reruns the tier's `qualify / qualified` verdict and Release, so publication still requires every tier, and Release resumes an interrupted publication rather than publishing twice ([Release publication](release.md#release-publication)).
 
 ## Self-hosted Mac runner
 

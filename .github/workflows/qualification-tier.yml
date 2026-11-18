@@ -1,0 +1,140 @@
+name: Qualification tier
+# The one owner of main's full qualification tier and its verdict. Qualify main
+# (main-qualifier.yml) and Promote (promote.yml) both call it for the batch
+# BASE..HEAD of main: release archives built cold first, beside the Linux and
+# macOS suites; the upgrade check and renderer contracts test those archives.
+# It records the verdict as HEAD's main-qualified status with the caller's run,
+# whose archives Promote publishes, files one issue per failure cause under
+# the caller's label, and publishes nothing; publication stays with Promote.
+# Its jobs appear as "<caller job> / <job>", and github.workflow is the
+# caller's name, so concurrency groups and filed issues name the caller.
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: Commit the batch starts after; each failing step bisects BASE..HEAD
+        type: string
+        required: true
+      head:
+        description: Main commit under qualification
+        type: string
+        required: true
+      red-label:
+        description: Label for the issue each failure cause files
+        type: string
+        required: true
+    secrets:
+      # Runner routing: only a caller that passes it may route macOS to rui-mac.
+      MAC_RUNNER_STATUS_TOKEN:
+        required: false
+    outputs:
+      version:
+        description: Release version the archives were built for
+        value: ${{ jobs.release_build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  release_build:
+    # Version planning and cold release archives of HEAD. Publishes nothing.
+    permissions:
+      # The plan sees draft reservations only with push access; it never writes.
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      sha: ${{ inputs.head }}
+  selected:
+    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
+    # the targets the batch's paths select.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
+    uses: ./.github/workflows/check.yml
+    with:
+      base: ${{ inputs.base }}
+      promotion: true
+    # Only the runner-status token, so the caller's Mac routing can see rui-mac.
+    secrets:
+      MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
+  upgrade:
+    # Tests the release executables; without a planned release it compiles the candidate.
+    needs: release_build
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/previous-release-upgrade.yml
+    with:
+      candidate-ref: ${{ inputs.head }}
+      batch-base: ${{ inputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
+  renderer:
+    needs: release_build
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/renderer-contracts.yml
+    with:
+      ref: ${{ inputs.head }}
+      batch-base: ${{ inputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
+  qualified:
+    # The sole verdict, recorded on HEAD whatever it is; a cancelled tier
+    # records an unfinished verdict that the next run qualifies again.
+    needs: [release_build, selected, upgrade, renderer]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the verdict on HEAD
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head }}
+          VERSION: ${{ needs.release_build.outputs.version }}
+          RESULTS: >-
+            ${{ needs.release_build.result }} ${{ needs.selected.result }}
+            ${{ needs.upgrade.result }} ${{ needs.renderer.result }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # one word per tier result
+          state=$(python3 -B tests/ci/main_qualified.py verdict $RESULTS | sed -n 's/^state=//p')
+          python3 -B tests/ci/main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"
+          echo "$HEAD_SHA: main-qualified $state" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Require every selected qualification tier
+        env:
+          STATE: ${{ steps.verdict.outputs.state }}
+        run: test "$STATE" = success
+  report:
+    # One issue per failure signature, with the bisect's verdict on it.
+    needs: [selected, upgrade, renderer]
+    if: ${{ failure() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head }}
+          WORKFLOW: ${{ github.workflow }}
+          RED_LABEL: ${{ inputs.red-label }}
+        run: python3 -B tests/ci/report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label "$RED_LABEL"

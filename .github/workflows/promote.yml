@@ -4,11 +4,11 @@ name: Promote
 # commit after stable, or `qualified` the newest one with a green
 # main-qualified record. A commit Qualify main (main-qualifier.yml) or an
 # earlier promotion qualified green publishes that run's archives at once.
-# Otherwise, only for main HEAD, Promote qualifies it here with the expensive
-# tier over the batch since stable, the last promoted release: release
-# archives built cold first, beside the suites; the upgrade check and renderer
-# contracts test them, and Release publishes those bytes. A failing job bisects
-# the batch with its own command; the run never merges. A red record refuses.
+# Otherwise, only for main HEAD, Promote runs the same qualification tier
+# (qualification-tier.yml) over the batch since stable, the last promoted
+# release, and Release publishes the archives it built and tested. A failing
+# job bisects the batch with its own command; the run never merges. A red
+# record refuses.
 on:
   workflow_dispatch:
     inputs:
@@ -60,100 +60,34 @@ jobs:
           outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN")
           echo "$outputs" >> "$GITHUB_OUTPUT"
           echo "$outputs"
-  release_build:
-    # Version planning and cold release archives of the batch head. Publishes nothing.
+  qualify:
+    # The shared tier and its verdict (qualification-tier.yml), only when the
+    # chosen commit is main HEAD without a green record to reuse.
     needs: batch
     if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}
     permissions:
-      # The plan sees draft reservations only with push access; it never writes.
+      # Only the release plan's draft lookup holds push access; it never writes.
       contents: write
       actions: read
-    uses: ./.github/workflows/release-build.yml
-    with:
-      sha: ${{ needs.batch.outputs.head }}
-  selected:
-    # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
-    # the targets the batch's paths select.
-    needs: batch
-    if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}
-    permissions:
-      contents: read
       pull-requests: read
-      actions: read
       checks: read
-    uses: ./.github/workflows/check.yml
+      statuses: write
+      issues: write
+    uses: ./.github/workflows/qualification-tier.yml
     with:
       base: ${{ needs.batch.outputs.base }}
-      promotion: true
+      head: ${{ needs.batch.outputs.head }}
+      red-label: promotion-red
     # Only the runner-status token, so promotion's Mac routing can see rui-mac.
     secrets:
       MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
-  upgrade:
-    # Tests the release executables; without a planned release it compiles the candidate.
-    needs: [batch, release_build]
-    if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/previous-release-upgrade.yml
-    with:
-      candidate-ref: ${{ needs.batch.outputs.head }}
-      batch-base: ${{ needs.batch.outputs.base }}
-      release-version: ${{ needs.release_build.outputs.version }}
-  renderer:
-    needs: [batch, release_build]
-    if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/renderer-contracts.yml
-    with:
-      ref: ${{ needs.batch.outputs.head }}
-      batch-base: ${{ needs.batch.outputs.base }}
-      release-version: ${{ needs.release_build.outputs.version }}
-  qualified:
-    # The sole promotion verdict: the chosen commit's green record, or success
-    # of every tier here, which this job then records on main HEAD.
-    needs: [batch, release_build, selected, upgrade, renderer]
-    if: ${{ always() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      statuses: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ needs.batch.outputs.reuse != 'true' }}
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Record the verdict on HEAD
-        id: verdict
-        if: ${{ needs.batch.outputs.reuse != 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.batch.outputs.head }}
-          VERSION: ${{ needs.release_build.outputs.version }}
-          RESULTS: >-
-            ${{ needs.release_build.result }} ${{ needs.selected.result }}
-            ${{ needs.upgrade.result }} ${{ needs.renderer.result }}
-        run: |
-          set -euo pipefail
-          # shellcheck disable=SC2086 # one word per tier result
-          state=$(python3 -B tests/ci/main_qualified.py verdict $RESULTS | sed -n 's/^state=//p')
-          python3 -B tests/ci/main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-      - name: Require every selected promotion tier
-        if: ${{ needs.batch.outputs.reuse != 'true' }}
-        env:
-          STATE: ${{ steps.verdict.outputs.state }}
-        run: test "$STATE" = success
   release:
-    # Publication of the archives Release build made and the tiers tested, here
-    # or in the run that qualified the commit, and the stable fast-forward of
-    # the qualified SHA. It rebuilds nothing.
-    needs: [batch, release_build, qualified]
-    if: ${{ !cancelled() && needs.qualified.result == 'success' }}
+    # Publication of the archives the qualifying run built and tested, here or
+    # in the run that qualified the commit, and the stable fast-forward of the
+    # qualified SHA. It rebuilds nothing. The commit is qualified when the
+    # batch reused a green record or this run's tier recorded success.
+    needs: [batch, qualify]
+    if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && (needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}
     permissions:
       contents: write
       actions: write
@@ -162,25 +96,5 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       sha: ${{ needs.batch.outputs.head }}
-      version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version || needs.release_build.outputs.version }}
+      version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version || needs.qualify.outputs.version }}
       artifact-run: ${{ needs.batch.outputs.run }}
-  report:
-    # One issue per failure signature, with the bisect's verdict on it.
-    needs: [batch, selected, upgrade, renderer]
-    if: ${{ failure() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: read
-      issues: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: File each failure under its cause
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.batch.outputs.head }}
-        run: python3 -B tests/ci/report_issue.py --workflow Promote --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label promotion-red
