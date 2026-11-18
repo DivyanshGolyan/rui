@@ -139,6 +139,21 @@ def process_executable(pid):
     return pathlib.Path(os.fsdecode(buffer.value))
 
 
+def process_state(pid, *, env=None):
+    """pid's process-table state letters ("S", "Z+", ...), or None once the table has no entry for it."""
+    observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], env=env, capture_output=True, text=True, timeout=5)
+    if observed.returncode == 1 and not observed.stdout and not observed.stderr:
+        return None
+    assert observed.returncode == 0 and observed.stdout.strip(), observed
+    return observed.stdout.strip()
+
+
+def describe_processes(pids):
+    """A process-table listing of pids (group, terminal group, state, command) for a failure message."""
+    return subprocess.run(["ps", "-o", "pid,pgid,tpgid,stat,command", "-p", ",".join(map(str, pids))],
+                          capture_output=True, text=True).stdout
+
+
 def process_environment(pid, *, env):
     if _module.PROC_FS:
         return pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode()

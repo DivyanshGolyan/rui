@@ -35,7 +35,7 @@ MAC_PATHS = (
     "tests/integration/live_engines.py", "tests/integration/proc_sample.py",
     "tests/integration/server_delivery_integration.py", "tests/integration/session_list_fixture.py",
     "tests/integration/settings_integration.py", "tests/integration/settings_mysql_integration.py",
-    "tests/integration/terminal_process_test.py", "tests/integration/transport_h2_cases.py",
+    "tests/integration/transport_h2_cases.py",
     "tests/integration/os_semantics.py",
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",

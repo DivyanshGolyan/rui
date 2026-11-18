@@ -425,6 +425,19 @@ class ProcessCensusTest(unittest.TestCase):
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
 
+    def test_process_state_tells_running_from_zombie_from_reaped(self):
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        try:
+            self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
+            child.stdin.close()
+            HOST.wait_for(lambda: self.semantics.process_state(child.pid).startswith("Z"), "the exited child's zombie entry")
+        finally:
+            child.kill()
+            child.wait(timeout=5)
+        self.assertIsNone(self.semantics.process_state(child.pid))
+        listing = self.semantics.describe_processes((os.getpid(),))
+        self.assertIn(str(os.getpid()), listing)
+
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):
             return patch.object(self.semantics.subprocess, "run",
