@@ -1711,7 +1711,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1735,7 +1735,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1782,7 +1782,7 @@ export interface components {
             require_model?: true;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "message";
             store: string;
