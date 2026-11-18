@@ -1445,12 +1445,19 @@ def typed_child_refusal(root, env):
     result = run_start(directory, selected_env)
     assert result.returncode == 1 and result.stdout == child.stdout, result
     assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    credential = root / "typed-child-codex.json"
+    codex_fixture.credentials(credential)
+    selected_env["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
     master, slave = open_pty()
+    bare = None
     try:
-        bare = spawn([RUI], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        bare = spawn([RUI, "--store", directory, "--provider", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
         assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
     finally:
+        if bare is not None and bare.poll() is None:
+            bare.kill()
+            bare.wait(timeout=5)
         close_pty(master, slave)
     managed_descriptor_rejection(root / "unexpected-parent", selected_env, 64)
 
