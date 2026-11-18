@@ -227,8 +227,8 @@ test "a Session's program status follows its work, and a record begins only with
     const seen_finish: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), opened_on);
     try std.testing.expectEqual(Status.idle, Status.next(.working, working, seen_finish, false).?);
     try std.testing.expectEqual(Status.idle, Status.next(.idle, seen_finish, seen_finish, false).?);
-    try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, opened_on), false).?);
-    try std.testing.expectEqual(Status.failed, Status.next(.idle, seen_finish, .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }, opened_on), false).?);
+    try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }), opened_on), false).?);
+    try std.testing.expectEqual(Status.failed, Status.next(.idle, seen_finish, .of(fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }), opened_on), false).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.done).?);
     try std.testing.expectEqual(Status.idle, Status.opened(.failed).?);
     try std.testing.expectEqual(Status.blocked, Status.opened(.blocked).?);
