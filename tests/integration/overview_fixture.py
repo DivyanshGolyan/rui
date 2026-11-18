@@ -10,7 +10,7 @@ import threading
 
 import model_fixture as fixture
 import codex_fixture
-from human_cli_fixture import split_pane_row
+from terminal_screen import split_pane_row
 from host_process import dispose_all, screen_fixture_root, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, close_pty, open_pty, spawn
 from terminal_screen import ScreenCapture

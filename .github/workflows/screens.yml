@@ -20,13 +20,17 @@ cache-mode: read
 
 jobs:
   select:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Automatic runs are off unless repository variable RUI_SCREENS is 'on': each run holds
+    # up to ten runners for half an hour and starved Selected checks (17 Nov). Dispatch always runs.
+    if: ${{ (github.event_name == 'workflow_dispatch' || vars.RUI_SCREENS == 'on') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.select.outputs.run }}
+      tooling: ${{ steps.select.outputs.tooling }}
       pr: ${{ steps.select.outputs.pr }}
       head: ${{ steps.select.outputs.head }}
       base: ${{ steps.select.outputs.base }}
+      base_tip: ${{ steps.select.outputs.base_tip }}
       close: ${{ steps.select.outputs.close }}
       started: ${{ steps.select.outputs.started }}
     steps:
@@ -45,6 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "tooling=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" = push ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
             echo "head=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
@@ -63,6 +68,7 @@ jobs:
           base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
           git fetch --no-tags origin "$head" "$base"
           git worktree add --detach "$RUNNER_TEMP/selector-head" "$head"
+          echo "base_tip=$base" >> "$GITHUB_OUTPUT"
           base=$(git merge-base "$base" "$head")
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
@@ -89,6 +95,13 @@ jobs:
           ref: ${{ needs.select.outputs.head }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: ./.github/actions/setup
         with:
           targets: '["terminal-restoration-integration"]'
@@ -97,7 +110,7 @@ jobs:
       - name: Build candidate
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/screens-build"
           bash src/fetch_screen_dependencies.sh
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
@@ -116,6 +129,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       missing: ${{ steps.probe.outputs.missing }}
+      cacheable: ${{ steps.probe.outputs.cacheable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -126,10 +140,22 @@ jobs:
         id: probe
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor "$BASE" "origin/$DEFAULT_BRANCH"
+          git fetch --no-tags origin "$BASE_TIP"
+          git merge-base --is-ancestor "$BASE" "$BASE_TIP"
+          if git merge-base --is-ancestor "$BASE" "origin/$DEFAULT_BRANCH"; then
+            echo 'cacheable=true' >> "$GITHUB_OUTPUT"
+          else
+            result=$?
+            if [ "$result" -ne 1 ]; then exit "$result"; fi
+            echo 'cacheable=false' >> "$GITHUB_OUTPUT"
+            echo 'missing=true' >> "$GITHUB_OUTPUT"
+            echo 'Stacked baseline is outside main; building without retaining it.'
+            exit 0
+          fi
           remote=$(git ls-remote --refs origin refs/heads/pr-screens)
           if [ -n "$remote" ]; then
             git fetch --no-tags origin refs/heads/pr-screens:refs/remotes/origin/pr-screens
@@ -161,6 +187,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: ./.github/actions/setup
         with:
           targets: '["terminal-restoration-integration"]'
@@ -169,10 +202,19 @@ jobs:
       - name: Build the exact base with trusted tooling
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
+          git fetch --no-tags origin "$BASE_TIP"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
+          # Setup restored these package graphs; retain local paths for Zig's relative dependencies.
+          for package_dir in zig-pkg screen-emulator/zig-pkg; do
+            if [ -d "$GITHUB_WORKSPACE/$package_dir" ]; then
+              mkdir -p "$RUNNER_TEMP/base-source/$package_dir"
+              cp -a "$GITHUB_WORKSPACE/$package_dir/." "$RUNNER_TEMP/base-source/$package_dir/"
+            fi
+          done
           mkdir -p "$RUNNER_TEMP/screens-baseline-build"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here > "$RUNNER_TEMP/screens-baseline-build/build.json")
@@ -199,6 +241,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: screens-baseline-build-${{ github.run_id }}
@@ -206,8 +255,10 @@ jobs:
       - name: Restore base build and source
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
         run: |
           set -euo pipefail
+          git fetch --no-tags origin "$BASE_TIP"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
           tar -xf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP"
           python3 - "$RUNNER_TEMP/screens-baseline-build" "$RUNNER_TEMP/base-source" <<'PY_MANIFEST'
@@ -241,21 +292,23 @@ jobs:
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
           # verify-rui shots starts the fixture Host, whose helpers import h2.
-          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
+          python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/screens-tooling/tests/integration/requirements.txt"
       - name: Capture baseline shard with trusted tooling
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-baseline-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard"; then
+          mkdir -p "$RUNNER_TEMP/baseline-shard"
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/baseline-shard" 2>&1 | tee "$RUNNER_TEMP/baseline-capture.log"; then
             echo success > "$RUNNER_TEMP/baseline-shard/verdict"
           else
-            test -f "$RUNNER_TEMP/baseline-shard/shots.json"
             echo failure > "$RUNNER_TEMP/baseline-shard/verdict"
+            if [ -d "$VERIFY_RUI_CACHE/runs" ]; then cp -a "$VERIFY_RUI_CACHE/runs" "$RUNNER_TEMP/baseline-shard/evidence"; fi
           fi
+          mv "$RUNNER_TEMP/baseline-capture.log" "$RUNNER_TEMP/baseline-shard/capture.log"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -279,6 +332,13 @@ jobs:
           ref: ${{ needs.select.outputs.head }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: screens-build-${{ github.run_id }}
@@ -315,21 +375,21 @@ jobs:
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
           # verify-rui shots starts the fixture Host, whose helpers import h2.
-          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
+          python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/screens-tooling/tests/integration/requirements.txt"
       - name: Capture candidate shard
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/results"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head"; then
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/results/head" 2>&1 | tee "$RUNNER_TEMP/results/capture.log"; then
             echo success > "$RUNNER_TEMP/results/verdict"
           else
-            test -f "$RUNNER_TEMP/results/head/shots.json"
             echo failure > "$RUNNER_TEMP/results/verdict"
+            if [ -d "$VERIFY_RUI_CACHE/runs" ]; then cp -a "$VERIFY_RUI_CACHE/runs" "$RUNNER_TEMP/results/evidence"; fi
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
@@ -357,6 +417,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: screens-[1-4]-${{ github.run_id }}
@@ -378,20 +445,26 @@ jobs:
           BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           candidate_ok=true
           baseline_ok=true
           shards=()
           for number in 1 2 3 4; do
             shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID"
-            test -f "$shard/head/shots.json"
             case "$(cat "$shard/verdict")" in
-              success) ;;
+              success) test -f "$shard/head/shots.json" && test -f "$shard/head/shots-meta.json" ;;
               failure) candidate_ok=false ;;
               *) exit 1 ;;
             esac
-            shards+=("$shard/head")
+            if [ -f "$shard/head/shots.json" ] && [ -f "$shard/head/shots-meta.json" ]; then
+              shards+=("$shard/head")
+            fi
           done
+          if [ "${#shards[@]}" -eq 0 ]; then
+            mkdir -p "$RUNNER_TEMP/empty-candidate"
+            echo '[]' > "$RUNNER_TEMP/empty-candidate/shots.json"
+            shards+=("$RUNNER_TEMP/empty-candidate")
+          fi
           if [ -n "$BASE" ]; then
             base_shards=()
             if [ "$BASELINE_MISSING" = false ]; then
@@ -402,14 +475,20 @@ jobs:
             else
               for number in 1 2 3 4; do
                 shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID"
-                test -f "$shard/shots.json"
                 case "$(cat "$shard/verdict")" in
-                  success) ;;
+                  success) test -f "$shard/shots.json" && test -f "$shard/shots-meta.json" ;;
                   failure) baseline_ok=false ;;
                   *) exit 1 ;;
                 esac
-                base_shards+=("$shard")
+                if [ -f "$shard/shots.json" ] && [ -f "$shard/shots-meta.json" ]; then
+                  base_shards+=("$shard")
+                fi
               done
+            fi
+            if [ "${#base_shards[@]}" -eq 0 ]; then
+              mkdir -p "$RUNNER_TEMP/empty-baseline"
+              echo '[]' > "$RUNNER_TEMP/empty-baseline/shots.json"
+              base_shards+=("$RUNNER_TEMP/empty-baseline")
             fi
             if ! "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline"; then
               baseline_ok=false
@@ -425,6 +504,25 @@ jobs:
               test -f "$RUNNER_TEMP/merged/shots.json"
             fi
           fi
+          python3 - "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$BASELINE_MISSING" "$BASE" <<'PY_FAILURES'
+          import json, pathlib, sys
+          root, run, baseline_missing, base = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+          failures = []
+          for label, pattern in [('candidate', 'shards/screens-{}-' + run) ,
+                                 ('baseline', 'baseline-shards/screens-baseline-{}-' + run)]:
+              if label == 'baseline' and (not base or baseline_missing != 'true'):
+                  continue
+              for number in range(1, 5):
+                  shard = root / pattern.format(number)
+                  if (shard / 'verdict').read_text().strip() != 'failure':
+                      continue
+                  log = shard / 'capture.log'
+                  lines = log.read_text(errors='replace').splitlines() if log.exists() else []
+                  reason = next((line for line in lines if line.startswith('verify-rui:')), None)
+                  reason = reason or next((line for line in lines if line.strip()), 'unknown capture error')
+                  failures.append({'side': label, 'shard': number, 'reason': reason})
+          (root / 'capture-failures.json').write_text(json.dumps(failures))
+          PY_FAILURES
           echo "candidate_ok=$candidate_ok" >> "$GITHUB_OUTPUT"
           echo "baseline_ok=$baseline_ok" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -445,6 +543,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           STARTED: ${{ needs.select.outputs.started }}
           BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
+          BASELINE_CACHEABLE: ${{ needs.baseline_probe.outputs.cacheable }}
           CANDIDATE_OK: ${{ steps.merge.outputs.candidate_ok }}
           BASELINE_OK: ${{ steps.merge.outputs.baseline_ok }}
         run: |
@@ -496,10 +595,10 @@ jobs:
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(src, target)
           PY_MEDIA
-            if [ "$BASELINE_OK" = true ]; then
+            if [ "$BASELINE_CACHEABLE" = true ] && [ "$BASELINE_OK" = true ]; then
               mkdir -p "$RUNNER_TEMP/published/main/$BASE"
               cp -a "$RUNNER_TEMP/baseline/." "$RUNNER_TEMP/published/main/$BASE/"
-            else
+            elif [ "$BASELINE_CACHEABLE" = true ]; then
               rm -rf "$RUNNER_TEMP/published/main/$BASE"
             fi
           else
@@ -513,7 +612,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/published/main"
           git rev-list "origin/$DEFAULT_BRANCH" > "$RUNNER_TEMP/main-history"
           pin=""
-          if [ "$BASELINE_MISSING" = true ]; then pin="$BASE"; fi
+          if [ "$BASELINE_MISSING" = true ] && [ "$BASELINE_CACHEABLE" = true ]; then pin="$BASE"; fi
           python3 - "$RUNNER_TEMP/published/main" "$RUNNER_TEMP/main-history" "$pin" <<'PY'
           import pathlib, shutil, sys
           root = pathlib.Path(sys.argv[1])
@@ -537,7 +636,7 @@ jobs:
           echo "Screen preview wall time: $(( $(date +%s) - STARTED )) seconds" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$PR" ]; then
             cd "$GITHUB_WORKSPACE"
-            python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json"
+            python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json" --capture-failures "$RUNNER_TEMP/capture-failures.json" --run-id "$GITHUB_RUN_ID"
           fi
           test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true
   cleanup:

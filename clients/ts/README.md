@@ -203,7 +203,14 @@ await session.update({ model: "gpt-5.5" });
 `await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.
 Counts, times and Turn/Operation IDs stay decimal strings; absent targets, parents and outcomes are `null`.
 A separate ending is not in the report, so status does not invent one.
-`interrupt()` uses this status snapshot to select its exact model target.
+`interruptTarget` is the Host-served target from that snapshot. Pass it explicitly with a key to interrupt that observed call in one request, and reuse the same key to recover its answer:
+
+```ts
+const { interruptTarget } = await session.status();
+if (interruptTarget) await session.interrupt(interruptTarget, { key: "interrupt:1" });
+```
+
+`key` is also accepted by other writes using `WriteOptions`; it takes precedence if `idempotencyKey` is also supplied. `operation_resolved` and `target_mismatch` resolve without effect; other rejections throw. The convenience `interrupt({ key: "interrupt:1" })` uses the last target observed by this handle through `status()` or a feed page. It sends nothing if the handle has observed no target, or its last observation had a null target. Neither form reads first.
 
 Presets are complete agent specs passed at connect and kept only in Host memory.
 Creation copies the preset, with every supplied field (including `null`) overriding it.

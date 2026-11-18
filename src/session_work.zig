@@ -82,9 +82,11 @@ pub const Inputs = struct {
         operation_id: u64,
         input_cutoff: u64,
         stopped_at: ?u64 = null,
+        interruptible: bool = false,
+        stop_remaining: bool = false,
         terminal: ?Terminal = null,
         op: Op,
-        actions: Actions = .{},
+        actions: Inputs.Actions = .{},
     };
 
     pub const Terminal = struct {
@@ -120,13 +122,59 @@ pub const Work = struct {
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
+    actions: Actions = .{},
+    served_attention: ?Attention = null,
+    served_group: ?Group = null,
 };
+
+pub const Actions = struct {
+    stop: bool = false,
+    interrupt: ?struct { turn: u64, operation: u64 } = null,
+    decide: ?u64 = null,
+};
+
+pub const Attention = struct {
+    kind: enum { approval, failed, finished },
+    turn: u64,
+    step: u64,
+};
+
+/// Matches the client classification at base 3e389620a3a6b83e314e02657c9e6a95e67488e8.
+pub fn attention(work: Work) ?Attention {
+    const turn = work.turn orelse 0;
+    return switch (work.state) {
+        .approval => .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 },
+        .bash => |bash| if (bash.approvals != 0) .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 } else null,
+        .failed => .{ .kind = .failed, .turn = turn, .step = std.math.maxInt(u64) },
+        .finished => .{ .kind = .finished, .turn = turn, .step = std.math.maxInt(u64) },
+        else => null,
+    };
+}
+
+pub const Group = enum { needs_you, working, queued, done };
+
+/// Classifies the state as derived at the Host's observation time.
+pub fn group(work: Work) Group {
+    return switch (work.state) {
+        .approval => .needs_you,
+        .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
+        .working, .retrying, .stopping => .working,
+        .pending => .queued,
+        .idle, .finished, .failed, .stopped => .done,
+    };
+}
 
 pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     var work = try deriveOwn(inputs);
     if (work.state.progress() == null) {
         if (inputs.owed_since) |at| work.state = .{ .working = .{ .since = @max(work.state.since(), at) } };
     }
+    const current = if (inputs.latest) |turn| turn.terminal == null and turn.stopped_at == null else false;
+    work.actions.stop = current or inputs.oldest_pending != null or inputs.owed_since != null or if (inputs.latest) |turn| turn.stop_remaining else false;
+    if (inputs.latest) |turn| {
+        if (current and turn.interruptible and turn.op == .in_flight) work.actions.interrupt = .{ .turn = turn.turn_id, .operation = turn.operation_id };
+    }
+    work.actions.decide = inputs.first_action;
     return work;
 }
 
@@ -212,7 +260,7 @@ fn bounded(comptime capacity: usize, text: []const u8) error{CorruptStore}!Bound
 }
 
 fn activeTurn(op: Inputs.Op, actions: Inputs.Actions) Inputs.Turn {
-    return .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .op = op, .actions = actions };
+    return .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .op = op, .actions = actions, .interruptible = op == .in_flight };
 }
 
 fn proposals(at: u64) Inputs.Op {
@@ -417,12 +465,12 @@ test "a quota failure carries its saved reset time and nothing else does" {
 
 test "inputs no writer produces are corrupt" {
     const unresolved: Inputs.Op = .{ .in_flight = .{ .attempt_at = 300 } };
-    const group: Inputs.Actions = .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 };
+    const action_group: Inputs.Actions = .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 };
     var ended_with_group = endedTurn(.cancelled, "cancelled");
     ended_with_group.actions = .{ .total = 1, .latest_resolution_at = 1 };
     for ([_]Inputs.Turn{
-        activeTurn(unresolved, group),
-        activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 330 } }, group),
+        activeTurn(unresolved, action_group),
+        activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 330 } }, action_group),
         ended_with_group,
         activeTurn(.{ .resolved = .{ .resolution = null, .at = 330 } }, .{}),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 2 }),
@@ -531,4 +579,104 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectEqual(@as(?u64, null), selected_stop.first_action);
     try std.testing.expect(selected_stop.state == .stopping);
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
+}
+
+test "attention and group match base client classification across work states" {
+    // Expectations transcribed from attention.Attention.of and overview_view.orderClass
+    // at 3e389620a3a6b83e314e02657c9e6a95e67488e8, with no viewer open stop.
+    const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), group: Group };
+    const cases = [_]Case{
+        .{ .state = .{ .idle = .{ .since = 1 } }, .attention_kind = null, .group = .done },
+        .{ .state = .{ .pending = .{ .since = 1 } }, .attention_kind = null, .group = .queued },
+        .{ .state = .{ .working = .{ .since = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .retrying = .{ .since = 1, .due_at_ms = 9999, .cause = try bounded(max_code_bytes, "retry"), .attempt = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 1 } }, .attention_kind = .approval, .group = .needs_you },
+        .{ .state = .{ .approval = .{ .since = 1 } }, .attention_kind = .approval, .group = .needs_you },
+        .{ .state = .{ .stopping = .{ .since = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .finished = .{ .since = 1 } }, .attention_kind = .finished, .group = .done },
+        .{ .state = .{ .failed = .{ .since = 1, .code = try bounded(max_code_bytes, "failed"), .resets_at = null } }, .attention_kind = .failed, .group = .done },
+        .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .attention_kind = null, .group = .done },
+    };
+    for (cases) |case| for (0..8) |mask| {
+        const work: Work = .{ .state = case.state, .turn = if (mask & 1 != 0) 7 else null, .operation = if (mask & 2 != 0) 19 else null, .first_action = if (mask & 4 != 0) 41 else null };
+        try std.testing.expectEqual(case.group, group(work));
+        const got = attention(work);
+        if (case.attention_kind) |kind| {
+            try std.testing.expect(got != null);
+            try std.testing.expectEqual(kind, got.?.kind);
+            try std.testing.expectEqual(work.turn orelse 0, got.?.turn);
+            try std.testing.expectEqual(if (kind == .approval) work.first_action orelse 0 else std.math.maxInt(u64), got.?.step);
+        } else try std.testing.expect(got == null);
+    };
+}
+
+test "work loses whether a model operation is current" {
+    const in_flight = try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 500 } }, .{}) });
+    const owed = try derive(.{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .owed_since = 500 });
+    try std.testing.expectEqualDeep(in_flight.state, owed.state);
+    try std.testing.expectEqual(in_flight.turn, owed.turn);
+    try std.testing.expectEqual(in_flight.operation, owed.operation);
+    try std.testing.expect(in_flight.actions.interrupt != null);
+    try std.testing.expect(owed.actions.interrupt == null);
+    try std.testing.expect(in_flight.actions.stop and owed.actions.stop);
+}
+
+test "actions derive from work inputs" {
+    const pending = Inputs.Pending{ .at = 600, .position = 60 };
+    for (0..64) |mask| {
+        const queued: ?Inputs.Pending = if (mask & 1 != 0) pending else null;
+        const owed: ?u64 = if (mask & 2 != 0) 600 else null;
+        const decision: ?u64 = if (mask & 4 != 0) 41 else null;
+        const turns = [_]?Inputs.Turn{
+            null,
+            activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{}),
+            activeTurn(.{ .waiting = .{ .scheduled_at = 300, .due_at_ms = 5000, .cause = "retry", .attempt = 1 } }, .{}),
+            activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 300 } }, .{}),
+            endedTurn(.completed, "completed"),
+            endedTurn(.failed, "failed"),
+            endedTurn(.cancelled, "cancelled"),
+        };
+        for (turns, 0..) |initial, index| {
+            var turn = initial;
+            if (turn) |*t| {
+                if (mask & 8 != 0) t.stopped_at = 450;
+                if (mask & 16 != 0) t.interruptible = false;
+                t.stop_remaining = mask & 32 != 0;
+            }
+            // first_action requires a latest Turn, even when it refers to an older Action.
+            if (turn == null and decision != null) continue;
+            const work = try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
+            try std.testing.expectEqual((index >= 1 and index <= 3 and mask & 8 == 0) or queued != null or owed != null or (turn != null and mask & 32 != 0), work.actions.stop);
+            try std.testing.expectEqual(index == 1 and mask & 8 == 0 and mask & 16 == 0, work.actions.interrupt != null);
+            if (work.actions.interrupt) |target| {
+                try std.testing.expectEqual(@as(u64, 7), target.turn);
+                try std.testing.expectEqual(@as(u64, 19), target.operation);
+            }
+            try std.testing.expectEqual(decision, work.actions.decide);
+        }
+    }
+}
+
+test "actions cover proposal and stopping combinations" {
+    for (0..16) |mask| {
+        const queued: ?Inputs.Pending = if (mask & 1 != 0) .{ .at = 600, .position = 60 } else null;
+        const decision: ?u64 = if (mask & 2 != 0) 41 else null;
+        const stopped = mask & 4 != 0;
+        const owed: ?u64 = if (mask & 8 != 0) 600 else null;
+        const action_sets = [_]Inputs.Actions{
+            .{},
+            .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 },
+            .{ .total = 1, .unresolved = 1, .running = 1, .oldest_running = .{ .at = 400, .call = 1, .description = null } },
+            .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 400, .call = 1, .description = null } },
+        };
+        for (action_sets) |set| {
+            var turn = activeTurn(proposals(340), set);
+            if (stopped) turn.stopped_at = 500;
+            const work = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
+            try std.testing.expectEqual(!stopped or queued != null or owed != null, work.actions.stop);
+            try std.testing.expect(work.actions.interrupt == null);
+            try std.testing.expectEqual(decision, work.actions.decide);
+        }
+    }
 }

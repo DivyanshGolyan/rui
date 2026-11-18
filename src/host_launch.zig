@@ -4,10 +4,9 @@ const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
-pub const invalid_base_url = "rui: " ++ @import("providers.zig").openai_base_url_variable ++ " must be an https:// URL with a host and no credentials, query or fragment";
 
 pub const Summary = union(enum) {
-    ready: ?Warning,
+    ready: void,
     failed: Failure,
 
     pub const Next = enum {
@@ -52,17 +51,9 @@ pub const Summary = union(enum) {
             };
         }
     };
-    pub const Warning = enum {
-        invalid_openai_base_url,
-
-        pub fn words(_: Warning) []const u8 {
-            return "OpenAI URL invalid";
-        }
-    };
-
     pub fn words(self: Summary) []const u8 {
         return switch (self) {
-            .ready => |warning| if (warning) |value| value.words() else "",
+            .ready => "",
             .failed => |failure| failure.words(),
         };
     }
@@ -70,7 +61,6 @@ pub const Summary = union(enum) {
 
 pub const Result = struct {
     outcome: union(enum) { ready: Ready, failed: Failure },
-    warning: ?Summary.Warning = null,
     startup_bytes: [max_startup_bytes]u8 = undefined,
     startup_len: usize = 0,
     wait: ?HostStartupWait = null,
@@ -98,7 +88,7 @@ pub const Result = struct {
 
     pub fn summary(self: *const Result) Summary {
         return switch (self.outcome) {
-            .ready => .{ .ready = self.warning },
+            .ready => .{ .ready = {} },
             .failed => |failure| .{ .failed = failure.cause },
         };
     }
@@ -111,7 +101,6 @@ pub const Result = struct {
 pub const max_report_bytes = 4 * protocol.max_store_bytes + Result.max_startup_bytes + 2048;
 
 pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: usize) !void {
-    if (result.warning != null and std.mem.indexOf(u8, result.startup(), invalid_base_url) == null) try writer.writeAll(invalid_base_url ++ "; this Host starts without OpenAI.\n");
     switch (result.outcome) {
         .ready => {
             if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);
@@ -148,7 +137,7 @@ pub fn writeSignIn(writer: *std.Io.Writer, summary: Summary, default_failed: boo
     try writer.writeAll("Sign-in saved");
     if (default_failed) try writer.writeAll("; default not saved");
     switch (summary) {
-        .ready => |warning| if (warning) |value| try writer.print("; {s}", .{value.words()}),
+        .ready => {},
         .failed => |failure| {
             try writer.print("; Host {s}", .{failure.words()});
             if (retry_hint and failure.next() != null) try writer.writeAll(" · enter tries again");

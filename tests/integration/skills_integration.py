@@ -147,8 +147,7 @@ def main():
         skill(project / "container", "nested", "Not advertised")
         initial_catalog = catalog(demo, shared, removed, home_only, switching)
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "OPENAI_API_KEY": "sk-fixture-only",
-                       "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "OPENAI_API_KEY": "sk-fixture-only"}
         endpoint = SkillsEndpoint()
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"

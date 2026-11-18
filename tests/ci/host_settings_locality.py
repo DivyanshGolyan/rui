@@ -402,11 +402,46 @@ def host_child_violations(root=ROOT):
     return found
 
 
+# Process environment is not a second Host configuration surface.  Dynamic
+# settings-selected secret resolution and retired-name refusal are intake, not
+# post-intake reads. The launch gates are test synchronization, not settings.
+HOST_ENV_ALLOW = frozenset("HOME TMPDIR PATH HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE RUI_OPENAI_KEY_FILE RUI_CODEX_CREDENTIAL_FILE RUI_CHATGPT_CREDENTIAL_FILE".split())
+HOST_LAUNCH_TEST_GATES = frozenset(("RUI_TEST_HOST_AFTER_FREEZE_GATE", "RUI_TEST_HOST_STORE_LOCKED_GATE"))
+
+
+def host_environment_violations(root=ROOT):
+    src = root / "src"
+    paths = set(src.glob("server*.zig")) | set(src.glob("provider*.zig")) | {src / "host_start.zig"}
+    # provider_login is the client-side interactive login owner, not a Host adapter.
+    paths.discard(src / "provider_login.zig")
+    found = []
+    for path in sorted(paths):
+        if not path.exists():
+            continue
+        tokens = production(lex(path.read_text()))
+        names = [t.text for t in tokens]
+        for i, token in enumerate(tokens):
+            if token.text not in ("get", "getenv") or names[i + 1:i + 2] != ["("]:
+                continue
+            receiver = names[max(0, i - 5):i]
+            if token.text != "getenv" and not any(re.search(r"(?:^env$|environ)", x, re.I) for x in receiver):
+                continue
+            owner = next((names[j + 1] for j in range(i - 1, -1, -1) if names[j] == "fn" and names[j + 2:j + 3] == ["("]), None)
+            if path.name == "host_start.zig" and owner in ("resolve", "refuseRetiredEnvironment"):
+                continue
+            value = unquote(names[i + 2]) if i + 2 < len(names) else None
+            if value in HOST_ENV_ALLOW or (path.name == "host_start.zig" and owner == "spawn" and value in HOST_LAUNCH_TEST_GATES):
+                continue
+            relative = path.relative_to(root).as_posix()
+            found.append(f"{relative}:{token.line}: Host environment read not allowed: {value or '<dynamic>'}")
+    return found
+
+
 def violations(root=ROOT):
     derived = facts(root)
     return ([hit for path in surfaces(root)
              for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
-            + running_source_violations(root) + host_child_violations(root))
+            + running_source_violations(root) + host_child_violations(root) + host_environment_violations(root))
 
 
 if __name__ == "__main__":

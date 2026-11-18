@@ -15,6 +15,7 @@ Load guidance for the task at hand, combining applicable routes:
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
 - **Documentation, terminology or decisions:** read [Contract maintenance](CODING_STANDARDS.md#contract-maintenance) and the documentation checks in [Evidence](CODING_STANDARDS.md#evidence).
 - **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and use the [Verification index](VERIFICATION.md#contract-index) to load the affected subsystem's required evidence.
+- **Writing or changing tests, or any change to production logic:** read [Test requirements](docs/verification/testing.md); a production change moves its owners' tests onto them ([Migration](docs/verification/testing.md#migration)).
 - **Test selection or CI changes:** read [Canonical gates](docs/verification/gates.md#canonical-gates).
 - **Red CI:** use [rui-ci-triage](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md).

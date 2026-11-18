@@ -1,7 +1,7 @@
 const std = @import("std");
-const utf8_validation = @import("../utf8_validation.zig");
 const reply = @import("reply.zig");
 const document = @import("document.zig");
+const result_parts = @import("result_parts.zig");
 
 pub const excerpt_bytes = 10_000;
 pub const max_answer_bytes = 4 * 1024 * 1024;
@@ -36,70 +36,19 @@ fn answerCode(code: reply.Code) Code {
 
 pub const Ended = struct { server_name: []const u8, ended: Ending };
 
-pub fn write(out: *std.Io.Writer, ended: Ended) !Code {
-    return (try writeExcerpt(out, ended)).code;
+/// Immediately after an image, only one empty text item can emit nothing.
+/// Any second item emits either a separator or content of its own.
+fn hasFollowingOutput(remaining: document.Items) bool {
+    var rest = remaining;
+    const next = rest.next() orelse return false;
+    return switch (result_parts.classify(next)) {
+        .text => |text| document.decodedLength(text) != 0 or rest.next() != null,
+        .image, .bad_image, .other => true,
+    };
 }
 
-pub const Excerpt = struct { code: Code, total: usize, omitted: bool };
-
-pub fn writeExcerpt(out: *std.Io.Writer, ended: Ended) !Excerpt {
-    var bounded: Prefix = .{ .out = out };
-    const code = try render(&bounded.writer, ended);
-    try bounded.writer.flush();
-    try bounded.finish();
-    if (bounded.total > bounded.shown) {
-        try out.print("\n[{d} more bytes not shown]", .{bounded.total - bounded.shown});
-    }
-    return .{ .code = code, .total = bounded.total, .omitted = bounded.total > bounded.shown };
-}
-
-pub fn writeFull(out: *std.Io.Writer, ended: Ended) !void {
-    _ = try render(out, ended);
-}
-
-const Prefix = struct {
-    writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-    out: *std.Io.Writer,
-    total: usize = 0,
-    shown: usize = 0,
-    tail: [5]u8 = undefined,
-    tail_len: usize = 0,
-
-    fn append(self: *Prefix, bytes: []const u8) std.Io.Writer.Error!void {
-        self.total += bytes.len;
-        const direct = @min(bytes.len, excerpt_bytes - 4 - self.shown);
-        try self.out.writeAll(bytes[0..direct]);
-        self.shown += direct;
-        const saved = @min(bytes.len - direct, self.tail.len - self.tail_len);
-        @memcpy(self.tail[self.tail_len..][0..saved], bytes[direct..][0..saved]);
-        self.tail_len += saved;
-    }
-
-    fn finish(self: *Prefix) std.Io.Writer.Error!void {
-        var take = self.tail_len;
-        if (self.total > excerpt_bytes) {
-            take = utf8_validation.scalarStart(&self.tail, 4);
-        }
-        try self.out.writeAll(self.tail[0..take]);
-        self.shown += take;
-    }
-
-    fn drain(writer: *std.Io.Writer, parts: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *Prefix = @fieldParentPtr("writer", writer);
-        var count: usize = 0;
-        for (parts[0 .. parts.len - 1]) |part| {
-            try self.append(part);
-            count += part.len;
-        }
-        for (0..splat) |_| {
-            try self.append(parts[parts.len - 1]);
-            count += parts[parts.len - 1].len;
-        }
-        return count;
-    }
-};
-
-fn render(out: *std.Io.Writer, ended: Ended) !Code {
+pub fn render(sink: anytype, ended: Ended) !Code {
+    const out = sink.out;
     const name = ended.server_name;
     const code = classify(ended.ended);
     switch (ended.ended) {
@@ -109,10 +58,25 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
                 if (result.is_error) try out.writeAll("The tool reported an error:\n");
                 var items = document.Items.init(result.content);
                 var any = false;
+                var previous_image = false;
                 while (items.next()) |block| {
-                    if (any) try out.writeByte('\n');
+                    const part = result_parts.classify(block);
+                    const is_image = part == .image;
+                    if (any and !previous_image and !is_image) try out.writeByte('\n');
                     any = true;
-                    try writeBlock(out, block);
+                    previous_image = is_image;
+                    switch (part) {
+                        .text => |text| try document.writeDecoded(out, text),
+                        .other => |raw| try out.writeAll(raw),
+                        .image => |image| {
+                            try out.flush();
+                            try sink.image(image, block, !hasFollowingOutput(items));
+                        },
+                        .bad_image => |reason| {
+                            try out.flush();
+                            try sink.badImage(reason, block);
+                        },
+                    }
                 }
                 if (!any) try out.writeAll(result.structured orelse "(no output)");
                 return code;
@@ -164,20 +128,18 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
     }
 }
 
-fn writeBlock(out: *std.Io.Writer, block: []const u8) !void {
-    if (document.kind(block) == .object) {
-        if (document.member(block, "type")) |kind| {
-            if (document.kind(kind) == .string and document.keyIs(document.contents(kind), "text")) {
-                if (document.member(block, "text")) |text| {
-                    if (document.kind(text) == .string) {
-                        try document.writeDecoded(out, document.contents(text));
-                        return;
-                    }
-                }
-            }
-        }
-    }
-    try out.writeAll(block);
+// Historical excerpt behavior remains an independent oracle for these cases.
+fn legacyWrite(out: *std.Io.Writer, ended: Ended) !Code {
+    const legacy = @import("result_text_legacy_test.zig");
+    const ending: legacy.Ending = switch (ended.ended) {
+        .outcome => |value| .{ .outcome = value },
+        .not_sent => |value| .{ .not_sent = value },
+        .lost => |value| .{ .lost = value },
+        .timed_out => |value| .{ .timed_out = .{ .after_ms = value.after_ms, .sent = value.sent } },
+        .stopped => |value| .{ .stopped = value },
+        .oversized => |value| .{ .oversized = value },
+    };
+    return @fromBackingInt(@intCast(@backingInt(try legacy.write(out, .{ .server_name = ended.server_name, .ended = ending }))));
 }
 
 test "result_text renders blocks and structured content with resolution codes" {
@@ -185,13 +147,13 @@ test "result_text renders blocks and structured content with resolution codes" {
     var out: std.Io.Writer = .fixed(&buffer);
     const result = @import("reply.zig");
     const mixed: result.CallResult = .{ .content = "[{\"type\":\"text\",\"text\":\"a\\nb\"},{\"type\":\"text\",\"text\":\"c\"},{\"type\":\"image\",\"data\":\"x\"}]", .is_error = false, .structured = null };
-    try std.testing.expectEqual(Code.succeeded, try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = mixed } } }));
+    try std.testing.expectEqual(Code.succeeded, try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = mixed } } }));
     try std.testing.expectEqualStrings("a\nb\nc\n{\"type\":\"image\",\"data\":\"x\"}", out.buffered());
     out = .fixed(&buffer);
-    try std.testing.expectEqual(Code.failed, try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = "{\"x\":1}", .is_error = true } } } }));
+    try std.testing.expectEqual(Code.failed, try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = "{\"x\":1}", .is_error = true } } } }));
     try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "{\"x\":1}"));
     out = .fixed(&buffer);
-    _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[{\"type\":\"text\",\"text\":7}]", .structured = null, .is_error = false } } } });
+    _ = try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[{\"type\":\"text\",\"text\":7}]", .structured = null, .is_error = false } } } });
     try std.testing.expectEqualStrings("{\"type\":\"text\",\"text\":7}", out.buffered());
 }
 
@@ -206,7 +168,7 @@ test "result_text keeps a UTF-8 prefix and counts omitted bytes" {
     const buffer = try gpa.alloc(u8, excerpt_bytes + 100);
     defer gpa.free(buffer);
     var out: std.Io.Writer = .fixed(buffer);
-    _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
+    _ = try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.buffered()));
     try std.testing.expectEqualStrings("\n[101 more bytes not shown]", out.buffered()[excerpt_bytes - 1 ..]);
 }
@@ -236,7 +198,7 @@ test "result_text classification covers every ending and certainty boundary" {
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         try std.testing.expectEqual(case.code, classify(case.ending));
-        try std.testing.expectEqual(case.code, try write(&out, .{ .server_name = "test", .ended = case.ending }));
+        try std.testing.expectEqual(case.code, try legacyWrite(&out, .{ .server_name = "test", .ended = case.ending }));
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), case.contains) != null);
     }
     const PrefixCase = struct { prefix: []const u8, code: Code };
@@ -280,7 +242,7 @@ test "result_text classification covers every ending and certainty boundary" {
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         try std.testing.expectEqual(case.code, classify(ending));
-        try std.testing.expectEqual(case.code, try write(&out, .{ .server_name = "test", .ended = ending }));
+        try std.testing.expectEqual(case.code, try legacyWrite(&out, .{ .server_name = "test", .ended = ending }));
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "larger than") != null);
         try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case.prefix));
         if (case.code == .indeterminate) try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "not retried") != null);
@@ -353,7 +315,7 @@ test "result_text truncates at every UTF-8 offset and preserves exact-fit output
             content[content.len - 1] = '"';
             @memcpy(content[at..][0..character.len], character);
             var out: std.Io.Writer = .fixed(buffer);
-            _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
+            _ = try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = content, .is_error = false } } } });
             const kept = if (at < excerpt_bytes and at + character.len > excerpt_bytes) at else excerpt_bytes;
             try std.testing.expect(std.unicode.utf8ValidateSlice(out.buffered()));
             try std.testing.expectEqualSlices(u8, content[0..kept], out.buffered()[0..kept]);
@@ -365,7 +327,66 @@ test "result_text truncates at every UTF-8 offset and preserves exact-fit output
     for ([_]usize{ excerpt_bytes - 4, excerpt_bytes - 1, excerpt_bytes }) |length| {
         @memset(content, 'x');
         var out: std.Io.Writer = .fixed(buffer);
-        _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .refused = .{ .status = 403, .body = content[0 .. length - "The MCP server answered HTTP 403: ".len] } } } });
+        _ = try legacyWrite(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .refused = .{ .status = 403, .body = content[0 .. length - "The MCP server answered HTTP 403: ".len] } } } });
         try std.testing.expectEqual(length, out.buffered().len);
     }
+}
+
+test "result_text sink preserves block order and routes malformed images" {
+    const TestSink = struct {
+        out: *std.Io.Writer,
+        pub fn image(self: *@This(), value: result_parts.Image, _: []const u8, _: bool) !void {
+            try self.out.print("<image:{s}:{s}>", .{ value.mime, value.data });
+        }
+        pub fn badImage(self: *@This(), reason: []const u8, _: []const u8) !void {
+            try self.out.print("<bad:{s}>", .{reason});
+        }
+    };
+    const ended: Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{
+        .content = "[{\"type\":\"text\",\"text\":\"a\\nb\"},{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"},{\"type\":\"image\",\"data\":\"Yg==\",\"mimeType\":\"image/jpeg\"},{\"type\":\"image\",\"data\":\"secret\"},{\"type\":\"text\",\"text\":\"end\"},{\"type\":\"audio\"}]",
+        .is_error = true,
+        .structured = null,
+    } } } };
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var sink: TestSink = .{ .out = &out };
+    try std.testing.expectEqual(Code.failed, try render(&sink, ended));
+    try std.testing.expectEqualStrings("The tool reported an error:\na\nb<image:image/png:YQ==><image:image/jpeg:Yg==><bad:missing image MIME type>\nend\n{\"type\":\"audio\"}", out.buffered());
+    out = .fixed(&buffer);
+    try std.testing.expectEqual(Code.failed, try legacyWrite(&out, ended));
+    try std.testing.expectEqualStrings("The tool reported an error:\na\nb\n{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"}\n{\"type\":\"image\",\"data\":\"Yg==\",\"mimeType\":\"image/jpeg\"}\n{\"type\":\"image\",\"data\":\"secret\"}\nend\n{\"type\":\"audio\"}", out.buffered());
+}
+
+test "result_text sink propagates image callback errors" {
+    const TestSink = struct {
+        out: *std.Io.Writer,
+        pub fn image(_: *@This(), _: result_parts.Image, _: []const u8, _: bool) !void {
+            return error.ImageRejected;
+        }
+        pub fn badImage(_: *@This(), _: []const u8, _: []const u8) !void {
+            return error.BadImageRejected;
+        }
+    };
+    var buffer: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var sink: TestSink = .{ .out = &out };
+    for ([_]struct { content: []const u8, err: anyerror }{
+        .{ .content = "[{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"}]", .err = error.ImageRejected },
+        .{ .content = "[{\"type\":\"image\"}]", .err = error.BadImageRejected },
+    }) |case| {
+        try std.testing.expectError(case.err, render(&sink, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = case.content, .is_error = false, .structured = null } } } }));
+    }
+}
+
+test "MCP image lookahead counts only emitted trailing content" {
+    const cases = [_]struct { content: []const u8, following: bool }{
+        .{ .content = "[]", .following = false },
+        .{ .content = "[{\"type\":\"text\",\"text\":\"\"}]", .following = false },
+        .{ .content = "[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"text\",\"text\":\"\"}]", .following = true },
+        .{ .content = "[{\"type\":\"text\",\"text\":\"x\"}]", .following = true },
+        .{ .content = "[{\"type\":\"image\"}]", .following = true },
+        .{ .content = "[{\"type\":\"audio\"}]", .following = true },
+        .{ .content = "[{\"type\":\"image\",\"data\":\"\",\"mimeType\":\"image/png\"}]", .following = true },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.following, hasFollowingOutput(document.Items.init(case.content)));
 }

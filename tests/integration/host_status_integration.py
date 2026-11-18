@@ -87,7 +87,7 @@ def prove_fragmented_request():
 
 def start(store, capacity, *options):
     return start_ready_process(
-        [RUI, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(capacity), *options],
+        [RUI, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(capacity), "--set", "models.catalogUrl=http://127.0.0.1:1/api.json", *options],
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
