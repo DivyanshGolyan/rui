@@ -2267,7 +2267,7 @@ test "App overview paints its ground and plain footer" {
     }
 }
 
-test "pin separator is ground and inert beside selected controls or Sessions at both widths" {
+fn sui4PinSeparators() !void {
     const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
@@ -2287,18 +2287,22 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New chat"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
-        for (0..30) |col| {
-            const cell = shown.screen.readCell(@intCast(col), 3).?;
-            try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
-            try std.testing.expectEqual(ground, cell.style.bg);
+        try std.testing.expectEqualStrings("", try shown.line(2));
+        try std.testing.expect((try shown.line(3)).len != 0);
+        try std.testing.expect((try shown.line(5)).len != 0);
+        for ([_]u16{ 2, 4 }) |row| {
+            for (0..width) |col| {
+                const cell = shown.screen.readCell(@intCast(col), row).?;
+                try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
+                try std.testing.expectEqual(ground, cell.style.bg);
+            }
+            const opens = Seen.now.conversations;
+            const pins = Seen.now.pins;
+            try std.testing.expect(try rig.click(4, row, width, 30) == null);
+            try std.testing.expectEqual(selection, overview.state.selected);
+            try std.testing.expectEqual(opens, Seen.now.conversations);
+            try std.testing.expectEqual(pins, Seen.now.pins);
         }
-        try std.testing.expect((try shown.line(2)).len != 0);
-        const opens = Seen.now.conversations;
-        const pins = Seen.now.pins;
-        try std.testing.expect(try rig.click(4, 3, width, 30) == null);
-        try std.testing.expectEqual(selection, overview.state.selected);
-        try std.testing.expectEqual(opens, Seen.now.conversations);
-        try std.testing.expectEqual(pins, Seen.now.pins);
     };
 }
 
@@ -4850,7 +4854,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 5 }, .cell_size = .{} };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 6 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
     const selected = overview.app_sessions.selected.?;
     const target = (try view.Lines.at(arena.allocator(), &overview.state, selected, 40, overview.caps, 0)).?.target.?;
@@ -4858,11 +4862,11 @@ test "App overview list stays live beside a focused child and wheels stay in the
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 0), peer.wheels);
     try std.testing.expect(!std.meta.eql(before, overview.app_sessions.list.scroll));
     const scrolled = overview.app_sessions.list.scroll;
-    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
     Seen.now.listed = 2;
@@ -5528,22 +5532,22 @@ test "pinned New Session remains above the end marker and responds to clicks and
         _ = try rig.press("\x1b[F\x1b[A");
         const selected = rig.overview.state.selected.session;
         for (0..2) |_| {
-            var shown = try rig.shown(width, 7);
+            var shown = try rig.shown(width, 8);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New chat"));
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "↑") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
             } else return error.SelectedSessionMissing;
             try std.testing.expectEqual(@as(u16, 1), span.height);
         }
-        try std.testing.expect(try rig.click(3, 0, width, 7) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 8) == null);
         try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expect(try rig.click(3, 0, width, 7) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 8) == null);
         try std.testing.expect(rig.overview.state.creating());
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
@@ -5636,7 +5640,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
-                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
                     for (overview.app_sessions.shown_at, 0..) |span, index| {
                         try std.testing.expectEqual(@as(i17, @intCast(index)), span.row);
                         try std.testing.expectEqual(@as(u16, 1), span.height);
@@ -5721,7 +5725,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New chat"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(29), "     Settings"));
         try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, 28).?.char.grapheme);
     }
@@ -8597,7 +8601,7 @@ test "narrow empty chat exit retains every list row through spinner repaints and
             try std.testing.expect(ctx.redraw);
             stage = "spinner paint";
             try Frames.paint(rig, &vx, &output.writer, size);
-            const glyph = vx.screen_last.readCell(3, 3).?.char.grapheme;
+            const glyph = vx.screen_last.readCell(3, 4).?.char.grapheme;
             if (previous.len != 0 and !std.mem.eql(u8, previous.slice(), glyph)) changed = true;
             try previous.set(glyph);
         }
@@ -8614,6 +8618,7 @@ test "SUI-4 Settings focus navigation and retained draft" {
         sui4Hover,
         sui4CapturedPaste,
         sui4Pointer,
+        sui4PinSeparators,
         sui4Tab,
         OverviewLines.sui4WordBounds,
         OverviewLines.sui4BottomControls,
