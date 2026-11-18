@@ -40,3 +40,108 @@ class PolicySuiteTest(unittest.TestCase):
         names = [name for name, _ in checks if name.startswith("tests/ci")]
         self.assertIn("tests/ci: test_client_locality.py", names)
         self.assertNotIn("tests/ci (CI policy suite)", names)
+
+    def test_parallel_results_and_fixture_lifetimes(self):
+        # CI-83: each table case must have the same outcome and test IDs at every worker count.
+        cases = {
+            "pass": ("def test_one(self): pass\n", 0, ["test_one"]),
+            "failure": ("def test_one(self): self.fail('failure marker')\n", 1, ["test_one"]),
+            "error": ("def test_one(self): raise ValueError('error marker')\n", 1, ["test_one"]),
+            "unexpected": ("@unittest.expectedFailure\ndef test_one(self): pass\n", 1, ["test_one"]),
+            "class_setup": ("@classmethod\ndef setUpClass(cls): raise ValueError('setup marker')\ndef test_one(self): pass\n", 1, []),
+            "skip_class": ("@unittest.skip('class skipped')\ndef test_one(self): pass\n", 0, ["test_one"]),
+        }
+        import os
+        import re
+        import subprocess
+        import textwrap
+        runner = Path(policy_suite.__file__).resolve()
+        for label, (body, status, expected) in cases.items():
+            for jobs in (1, 2, 4):
+                with self.subTest(case=label, jobs=jobs), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    decorator = "@unittest.skip('class skipped')\n" if label == 'skip_class' else ''
+                    if decorator:
+                        body = "def test_one(self): pass\n"
+                    (root / 'test_sample.py').write_text('import unittest\n' + decorator + 'class Sample(unittest.TestCase):\n' + textwrap.indent(body, '    '))
+                    result = subprocess.run([sys.executable, '-B', '-c',
+                        'import policy_suite,sys; sys.exit(not policy_suite.run_parallel(policy_suite.suite([], sys.argv[1]), int(sys.argv[2]), sys.argv[1]))',
+                        str(root), str(jobs)], capture_output=True, text=True,
+                        env=dict(os.environ, PYTHONPATH=str(runner.parent)))
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    markers = {'pass': 'OK', 'failure': 'failure marker', 'error': 'error marker',
+                               'unexpected': 'unexpected success', 'class_setup': 'setup marker',
+                               'skip_class': 'class skipped'}
+                    self.assertIn(markers[label], result.stderr)
+                    self.assertEqual(sorted(re.findall(r'^(test_\w+) \(', result.stderr, re.M)), expected)
+
+        for jobs in (1, 2, 4):
+            with self.subTest(case='fixtures and skips', jobs=jobs), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'test_shared.py').write_text(textwrap.dedent('''\
+                    import os, unittest
+                    def record(value):
+                        with open(os.environ['EVENTS'], 'a') as output: output.write(value + '\\n')
+                    def setUpModule():
+                        record('module setup')
+                        unittest.addModuleCleanup(record, 'module cleanup')
+                    def tearDownModule(): record('module teardown')
+                    class Shared(unittest.TestCase):
+                        @classmethod
+                        def setUpClass(cls):
+                            record('class setup')
+                            cls.addClassCleanup(record, 'class cleanup')
+                        @classmethod
+                        def tearDownClass(cls): record('class teardown')
+                        def test_a(self): record('a')
+                        def test_b(self): record('b')
+                    class Other(unittest.TestCase):
+                        def test_c(self): record('c')
+                '''))
+                (root / 'test_class_cleanup.py').write_text(textwrap.dedent('''\
+                    import os, unittest
+                    def record(value):
+                        with open(os.environ['EVENTS'], 'a') as output: output.write(value + '\\n')
+                    class Cleanup(unittest.TestCase):
+                        def test_a(self): self.addClassCleanup(record, 'cleanup a'); record('class a')
+                        def test_b(self): self.addClassCleanup(record, 'cleanup b'); record('class b')
+                '''))
+                (root / 'test_import_cleanup.py').write_text(textwrap.dedent('''\
+                    import os, unittest
+                    def cleanup():
+                        with open(os.environ['EVENTS'], 'a') as output: output.write('import cleanup\\n')
+                    unittest.addModuleCleanup(cleanup)
+                    class ImportCleanup(unittest.TestCase):
+                        def test_a(self): pass
+                        def test_b(self): pass
+                '''))
+                (root / 'test_skipped.py').write_text("raise __import__('unittest').SkipTest('module skipped')\n")
+                events = root / 'events'
+                result = subprocess.run([sys.executable, '-B', '-c',
+                    'import policy_suite,sys; sys.exit(not policy_suite.run_parallel(policy_suite.suite([], sys.argv[1]), int(sys.argv[2]), sys.argv[1]))',
+                    str(root), str(jobs)], capture_output=True, text=True,
+                    env=dict(os.environ, PYTHONPATH=str(runner.parent), EVENTS=str(events)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertCountEqual(events.read_text().splitlines(), ['module setup', 'module teardown', 'module cleanup',
+                    'class setup', 'class teardown', 'class cleanup', 'a', 'b', 'c', 'class a', 'class b', 'cleanup a', 'cleanup b', 'import cleanup'])
+                lines = events.read_text().splitlines()
+                self.assertLess(lines.index('module setup'), lines.index('a'))
+                self.assertLess(lines.index('c'), lines.index('module teardown'))
+                self.assertLess(lines.index('module teardown'), lines.index('module cleanup'))
+                self.assertLess(lines.index('class b'), lines.index('cleanup a'))
+                self.assertIn('module skipped', result.stderr)
+
+        for label, body, marker in [('unimportable', 'raise ImportError("missing marker")\n', 'missing marker'),
+                                    ('worker death', 'import os, unittest\nclass D(unittest.TestCase):\n    def test_die(self): os._exit(7)\n', 'test_die')]:
+            for jobs in (1, 2, 4):
+                with self.subTest(case=label, jobs=jobs), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / 'test_bad.py').write_text(body)
+                    result = subprocess.run([sys.executable, '-B', '-c',
+                        'import policy_suite,sys; sys.exit(not policy_suite.run_parallel(policy_suite.suite([], sys.argv[1]), int(sys.argv[2]), sys.argv[1]))',
+                        str(root), str(jobs)], capture_output=True, text=True,
+                        env=dict(os.environ, PYTHONPATH=str(runner.parent)))
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(marker, result.stderr)
+                    if label == 'worker death':
+                        self.assertIn('Worker process died', result.stderr)
