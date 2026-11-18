@@ -55,6 +55,7 @@ test "CLI-2 invalid invocation is refused before effects" {
         .{ .args = &.{ "rui", "request", "inspect", "HANDLE", "--store", "P" }, .code = .handle_names_store_and_key, .line = "rui request inspect: --store with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n" },
         .{ .args = &.{ "rui", "session", "interrupt-model", "--session", "k7m2qx", "--turn", "12x", "--operation", "3" }, .code = .id_malformed, .line = "rui session interrupt-model: --turn 12x: That is not an ID. Accepted: a decimal from 1 to 9223372036854775807. Next: Copy the ID from rui session inspect. Nothing was captured or sent. [id_malformed]\n" },
         .{ .args = &.{ "rui", "session", "configure", "--instructions", "file" }, .code = .instructions_source, .line = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
+        .{ .args = &.{ "rui", "session", "configure", "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .line = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
         .{ .args = &.{ "rui", "session", "send", "k7m2qx" }, .code = .session_id_needs_to, .line = "rui session send: k7m2qx: A positional Session ID is not a destination selector. Accepted: --to ID, with Message text on stdin. Next: Move the Session ID to --to ID and pipe or redirect the Message into stdin. Nothing was captured or sent. [session_id_needs_to]\n" },
         .{ .args = &.{ "rui", "session", "configure", "k7m2qx" }, .code = .session_id_needs_session, .line = "rui session configure: k7m2qx: A positional Session ID is not a Session selector for this command. Accepted: --session ID. Next: Move the Session ID to --session ID. Nothing was captured or sent. [session_id_needs_session]\n" },
         .{ .args = &.{ "rui", "session", "send", "--to", "k7m2qx", "literal" }, .code = .message_not_stdin, .line = "rui session send: literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]\n" },
@@ -138,13 +139,23 @@ test "CLI-2 invalid invocation is refused before effects" {
         try std.testing.expectEqual(case.code, refusal.code);
         var buffer: [4096]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buffer);
-        try caller_error.writeLine(&writer, refusal.code, refusal.held(null, null));
+        try writeParseProblem(&writer, refusal, null, null, null);
         try std.testing.expectEqualStrings(case.line, writer.buffered());
     }
     const args = &[_][]const u8{ "rui", "session", "configure", "--record", "record", "--key", "k", "--permission-mode", "historical-mode" };
-    try std.testing.expectEqual(.stat_record, std.meta.activeTag(next(.{ .args = args }, std.testing.allocator)));
-    try std.testing.expectEqual(.refused, std.meta.activeTag(next(.{ .args = args, .record_exists = false }, std.testing.allocator)));
-    try std.testing.expectEqual(.dispatch, std.meta.activeTag(next(.{ .args = args, .record_exists = true }, std.testing.allocator)));
+    const stat = next(.{ .args = args }, std.testing.allocator);
+    try std.testing.expectEqual(.stat_record, std.meta.activeTag(stat));
+    try std.testing.expectEqualStrings("record", stat.stat_record.path);
+    const fresh = next(.{ .args = args, .record_exists = false }, std.testing.allocator);
+    try std.testing.expectEqual(.refused, std.meta.activeTag(fresh));
+    try std.testing.expectEqual(.choice_unsupported, fresh.refused.syntax.problem.code);
+    const saved = next(.{ .args = args, .record_exists = true }, std.testing.allocator);
+    try std.testing.expectEqual(.dispatch, std.meta.activeTag(saved));
+    try std.testing.expectEqualStrings("historical-mode", saved.dispatch.parsed.get("permission-mode").?);
+    var context_buffer: [1024]u8 = undefined;
+    var context_writer: std.Io.Writer = .fixed(&context_buffer);
+    try writeParseProblem(&context_writer, .{ .code = .instructions_source, .token = "instructions", .value = "file" }, null, "/setup", "; active Session unchanged");
+    try std.testing.expectEqualStrings("rui /setup: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent.; active Session unchanged [instructions_source]\n", context_writer.buffered());
 }
 
 const caller_error = @import("caller_error.zig");
@@ -219,6 +230,12 @@ pub fn next(facts: Facts, allocator: std.mem.Allocator) Route {
     return .{ .dispatch = .{ .command = command, .parsed = parsed } };
 }
 
+pub fn writeParseProblem(writer: *std.Io.Writer, problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) !void {
+    var held = problem.held(resource, operation);
+    held.unchanged = unchanged;
+    try caller_error.writeLine(writer, problem.code, held);
+}
+
 pub fn writeRefusal(writer: *std.Io.Writer, refused: Refused) !void {
     switch (refused) {
         .retired => |r| {
@@ -230,13 +247,13 @@ pub fn writeRefusal(writer: *std.Io.Writer, refused: Refused) !void {
             }
         },
         .unknown_operation => |resource| try writer.print("\nrui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) }),
-        .syntax => |s| try caller_error.writeLine(writer, s.problem.code, s.problem.held(@tagName(s.resource), s.operation)),
+        .syntax => |s| try writeParseProblem(writer, s.problem, @tagName(s.resource), s.operation, null),
         .missing => |m| {
             var buffer: [1024]u8 = undefined;
             var group: std.Io.Writer = .fixed(&buffer);
             try m.definition.writeGroup(&group, m.group);
             const problem: cli_args.Refusal = .{ .code = .option_required, .token = group.buffered(), .option = false, .accepted = .{ .grammar = group.buffered() } };
-            try caller_error.writeLine(writer, problem.code, problem.held(@tagName(m.resource), m.definition.name));
+            try writeParseProblem(writer, problem, @tagName(m.resource), m.definition.name, null);
         },
     }
 }

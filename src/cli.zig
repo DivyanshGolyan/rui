@@ -227,32 +227,8 @@ fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
 noinline fn reportParseProblem(problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    var held = problem.held(resource, operation);
-    held.unchanged = unchanged;
-    caller_error.writeLine(&writer, problem.code, held) catch unreachable;
+    cli_invocation.writeParseProblem(&writer, problem, resource, operation, unchanged) catch unreachable;
     stderr.diagnosticBytes(writer.buffered());
-}
-
-noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
-    var buffer: [1024]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-    try definition.writeGroup(&writer, group);
-    reportParseProblem(.{ .code = .option_required, .token = writer.buffered(), .option = false, .accepted = .{ .grammar = writer.buffered() } }, @tagName(resource), definition.name, null);
-    return error.InvalidArguments;
-}
-
-fn validateFreshInvocation(io: std.Io, parsed: *const cli_args.Parsed, refusal: *cli_args.Refusal) !void {
-    if (!try existingCapture(io, parsed)) try parsed.validateValues(refusal);
-}
-
-fn existingCapture(io: std.Io, parsed: *const cli_args.Parsed) !bool {
-    if (!parsed.definition.mutation or std.mem.eql(u8, parsed.definition.name, "recover")) return false;
-    const record = parsed.get("record") orelse return false;
-    _ = std.Io.Dir.cwd().statFile(io, record, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
@@ -4530,43 +4506,6 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
-}
-
-test "existing explicit captures bypass fresh option choices while new captures refuse" {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const record = try std.fmt.bufPrint(&record_buffer, "{s}/saved.json", .{directory});
-    var refusal: cli_args.Refusal = undefined;
-    const parsed = try cli_args.Command.session_configure.definition().parseSyntax(&.{ "--record", record, "--key", "k", "--permission-mode", "historical-mode" }, std.testing.allocator, &refusal);
-    try std.testing.expectError(error.InvalidOptionValue, validateFreshInvocation(io, &parsed, &refusal));
-    try std.testing.expectEqual(.choice_unsupported, refusal.code);
-    const file = try tmp.dir.createFile(io, "saved.json", .{});
-    defer file.close(io);
-    try file.writeStreamingAll(io, "capture-owner-validates-this");
-    try validateFreshInvocation(io, &parsed, &refusal);
-    try std.testing.expectEqualStrings("historical-mode", parsed.get("permission-mode").?);
-}
-
-test "fresh instruction validation renders both source and stdin conflict refusals" {
-    const Case = struct { args: []const []const u8, code: caller_error.Code, expected: []const u8 };
-    const cases = [_]Case{
-        .{ .args = &.{ "--instructions", "file" }, .code = .instructions_source, .expected = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
-        .{ .args = &.{ "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .expected = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
-    };
-    for (cases) |case| {
-        var refusal: cli_args.Refusal = undefined;
-        const parsed = try cli_args.Command.session_configure.definition().parseSyntax(case.args, std.testing.allocator, &refusal);
-        if (validateFreshInvocation(std.Io.Threaded.global_single_threaded.io(), &parsed, &refusal)) |_| return error.ExpectedRefusal else |_| {}
-        try std.testing.expectEqual(case.code, refusal.code);
-        var storage: [1024]u8 = undefined;
-        var out = std.Io.Writer.fixed(&storage);
-        try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
-        try std.testing.expectEqualStrings(case.expected, out.buffered());
-    }
 }
 
 const LaunchFixture = struct {
