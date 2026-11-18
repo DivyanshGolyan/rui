@@ -165,103 +165,6 @@ class SnapshotTest(unittest.TestCase):
             shutil.copy2(directory / name, prefix / name)
         return prefix
 
-    def test_linked_output_class_is_executables_libraries_and_their_unit_objects(self):
-        test = self.executable("c" * 32, "test")
-        self.assertTrue(snapshot.linked_output(test))
-        library = self.executable("d" * 32, "libghostty-vt.so.1.0.0", companion=False)
-        (library / "ghostty-vt_zcu.o").write_bytes(b"object")
-        (library / "libghostty-vt.so.1").symlink_to("libghostty-vt.so.1.0.0")
-        (library / "libghostty-vt.so").symlink_to("libghostty-vt.so.1")
-        self.assertTrue(snapshot.linked_output(library), "in-directory aliases of a library")
-        for name, content in (("sqlite3.o", b"\x7fELF relocatable"), ("libcrypto.a", b"!<arch>\n"),
-                              ("tables.zig", b"pub const x = 1;")):
-            with self.subTest(name=name):
-                directory = self.root / "local" / "o" / f"{len(name):032x}"
-                directory.mkdir()
-                (directory / name).write_bytes(content)
-                self.assertFalse(snapshot.linked_output(directory))
-        only_object = self.root / "local" / "o" / ("e" * 32)
-        only_object.mkdir()
-        (only_object / "test_zcu.o").write_bytes(b"object")
-        self.assertFalse(snapshot.linked_output(only_object), "a unit object alone links nothing")
-        (test / "escape").symlink_to("../" + "d" * 32 + "/libghostty-vt.so")
-        self.assertFalse(snapshot.linked_output(test), "aliases stay inside the directory")
-        (test / "escape").unlink()
-        (test / "nested").mkdir()
-        self.assertFalse(snapshot.linked_output(test))
-
-    def test_read_liveness_removes_every_unread_linked_output_and_keeps_the_rest(self):
-        prefix = self.current_prefix()
-        old_test = self.executable(f"{1:032x}", "test")
-        self.add_manifest(self.roots[0], f"{2:032x}", old_test.name)
-        old_cli = self.executable(f"{3:032x}", "rui-debug-check")
-        with (old_cli / "rui-debug-check").open("ab") as out:
-            out.write(b"old revision")
-        self.add_manifest(self.roots[0], f"{4:032x}", old_cli.name)
-        read_tool = self.executable(f"{5:032x}", "translate-c")
-        self.add_manifest(self.roots[0], f"{6:032x}", read_tool.name)
-        shared = self.executable(f"{7:032x}", "configurer")
-        self.add_manifest(self.roots[0], f"{8:032x}", shared.name)
-        self.add_manifest(self.roots[0], f"{9:032x}", shared.name)
-        global_owned = self.executable(f"{10:032x}", "generate-def")
-        self.add_manifest(self.roots[0], f"{11:032x}", global_owned.name)
-        self.add_manifest(self.roots[1], f"{12:032x}", global_owned.name)
-        referenced = self.executable(f"{13:032x}", "parser-fuzz")
-        self.add_manifest(self.roots[0], f"{14:032x}", referenced.name)
-        self.add_manifest(self.roots[0], f"{15:032x}", "f" * 32, [str(referenced / "parser-fuzz")])
-        c_object = self.root / "local" / "o" / f"{16:032x}"
-        c_object.mkdir()
-        (c_object / "sqlite3.o").write_bytes(b"\x7fELF relocatable")
-        self.add_manifest(self.roots[0], f"{17:032x}", c_object.name)
-        orphan = self.executable(f"{18:032x}", "uucode_generate")
-        unread = {f"{value:032x}" for value in (2, 4, 8, 11, 14, 15, 17)}
-        report = snapshot.audit(*self.roots, prefixes=[prefix], unread=unread)
-        self.assertEqual([item["path"] for item in report["removable"]], [str(old_test), str(old_cli)])
-        self.assertEqual([[Path(owner["path"]).name for owner in item["manifests"]]
-                          for item in report["removable"]], [[f"{2:032x}"], [f"{4:032x}"]])
-        self.assertEqual(report["retained_read"], [str(read_tool), str(shared), str(global_owned)])
-        self.assertIn(str(c_object), report["unknown"])
-        self.assertIn(str(orphan), report["unknown"])
-        self.assertEqual(report["unread_manifests"], len(unread))
-        self.assertEqual(len(report["protected_hashes"]), 4)
-        self.assertNotIn(str(referenced), [item["path"] for item in report["removable"]])
-        report = snapshot.compact(*self.roots, prefixes=[prefix], unread=unread)
-        self.assertEqual(report["invalidated_manifests"], 2)
-        for directory in (old_test, old_cli):
-            self.assertFalse(directory.exists())
-        for name in (2, 4):
-            self.assertFalse((self.roots[0] / "h" / f"{name:032x}").exists())
-        for directory in (read_tool, shared, global_owned, referenced, c_object, orphan, *(
-                self.roots[0] / "o" / f"{index:032x}" for index in range(80, 84))):
-            self.assertTrue(directory.exists(), directory)
-
-    def test_read_liveness_needs_current_outputs_and_a_mark_that_saw_them(self):
-        with self.assertRaises(snapshot.SnapshotError):
-            snapshot.audit(*self.roots, unread=set())
-        prefix = self.current_prefix()
-        with self.assertRaisesRegex(snapshot.SnapshotError, "mark missed"):
-            snapshot.audit(*self.roots, prefixes=[prefix], unread={f"{180:032x}"})
-
-    def test_mark_makes_restored_manifests_unread_until_a_step_reads_them(self):
-        record = self.root / "mark.json"
-        self.assertIsNone(snapshot.unread_manifests(self.roots[0], record), "no mark, no read liveness")
-        self.add_manifest(self.roots[0], "c" * 32, "d" * 32)
-        (self.roots[0] / "h" / "timestamp").write_bytes(b"")
-        report = snapshot.mark(self.roots[0], record)
-        if not report["atime"]:
-            self.assertFalse(record.exists(), "noatime keeps the CLI-only rule")
-            self.skipTest("this filesystem does not move access times on read")
-        self.assertEqual(report, dict(atime=True, marked=2))
-        self.assertFalse((self.roots[0] / "rui-atime-probe").exists())
-        self.assertEqual(snapshot.unread_manifests(self.roots[0], record), {"a" * 32, "c" * 32})
-        (self.roots[0] / "h" / ("c" * 32)).read_bytes()
-        self.add_manifest(self.roots[0], "e" * 32, "f" * 32)
-        self.assertEqual(snapshot.unread_manifests(self.roots[0], record), {"a" * 32})
-        record.write_text(json.dumps(dict(atime=False)))
-        self.assertIsNone(snapshot.unread_manifests(self.roots[0], record))
-        record.write_text("[]")
-        self.assertIsNone(snapshot.unread_manifests(self.roots[0], record))
-
     def test_historical_cli_own_manifest_is_not_a_current_graph_root(self):
         prefix = self.current_prefix()
         obsolete = self.executable("c" * 32)
@@ -633,7 +536,55 @@ class PublicationTest(unittest.TestCase):
     def write(self):
         self.path.write_text(json.dumps(self.receipt))
 
+    def manifest(self, root, seed, output, atime, paths=()):
+        path = root / "h" / seed
+        path.write_bytes(b"".join(ManifestTest().record(value) for value in paths) + b"\0")
+        os.utime(path, ns=(atime, 0))
+        self.outputs[str(path)] = output
+        return path
+
+    def publisher_cache(self, name, read):
+        """One restored-and-compiled cache: (local, global, expected removals by rule)."""
+        unread = snapshot.UNREAD_NS
+        local, global_cache = self.root / name / "local", self.root / name / "global"
+        for root in (local, global_cache):
+            (root / "h").mkdir(parents=True)
+            (root / "o").mkdir()
+        def output(index, executable, **kwargs):
+            return write_executable(local / "o" / f"{index:032x}", executable, **kwargs)
+        old_test = output(1, "test")
+        old_cli = output(2, "rui-debug-check")
+        with (old_cli / "rui-debug-check").open("ab") as out:
+            out.write(b"old revision")
+        library = output(3, "libghostty-vt.so.1.0.0", companion=False)
+        (library / "ghostty-vt_zcu.o").write_bytes(b"object")
+        (library / "libghostty-vt.so.1").symlink_to("libghostty-vt.so.1.0.0")
+        (library / "libghostty-vt.so").symlink_to("libghostty-vt.so.1")
+        read_tool, shared, global_owned = output(4, "translate-c"), output(5, "configurer"), output(6, "generate-def")
+        referenced, orphan = output(7, "parser-fuzz"), output(8, "uucode_generate")
+        c_object = local / "o" / f"{9:032x}"
+        c_object.mkdir()
+        (c_object / "sqlite3.o").write_bytes(b"\x7fELF relocatable")
+        owners = {}
+        for seed, directory, atime in ((21, old_test, unread), (22, old_cli, unread), (23, library, unread),
+                                       (24, read_tool, read), (25, shared, unread), (26, shared, read),
+                                       (27, global_owned, unread), (28, referenced, unread), (29, c_object, unread)):
+            owners[directory] = self.manifest(local, f"{seed:032x}", directory.name, atime)
+        self.manifest(global_cache, f"{30:032x}", global_owned.name, read)
+        self.manifest(local, f"{31:032x}", "f" * 32, read, [str(referenced / "parser-fuzz")])
+        prefix = self.root / "rui-compiled-build/bin"
+        prefix.mkdir(parents=True, exist_ok=True)
+        current = []
+        for index, product in enumerate(("rui-debug-check", "rui-release-safe-check", "rui-release-small-check"), 10):
+            directory = output(index, product)
+            owners[directory] = self.manifest(local, f"{index + 30:032x}", directory.name, read)
+            shutil.copy2(directory / product, prefix / product)
+            current.append(directory)
+        kept = [read_tool, shared, global_owned, referenced, orphan, c_object, *current]
+        return local, global_cache, owners, dict(read=[old_test, old_cli, library], cli=[old_cli]), kept
+
     def test_current_full_llvm_producer_can_prepare_a_save(self):
+        """CI-30: a qualified main producer publishes only the linked outputs its build read, failing closed."""
         for event in ("push", "workflow_dispatch", "workflow_call", "schedule"):
             for part in ("all", "rest"):
                 for gate in ("check", "check-full"):
@@ -642,6 +593,81 @@ class PublicationTest(unittest.TestCase):
                         self.inputs.update(part=part, targets=[gate])
                         self.write()
                         self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
+        unread = snapshot.UNREAD_NS
+        # The probe writes a mark only when a read moved the access time forward.
+        for after, expected in ((unread + 1, True), (unread + 10**18, True), (unread, False),
+                                (unread - 1, False), (0, False)):
+            with self.subTest(probe_after=after):
+                self.assertIs(snapshot.reads_move_atime(unread, after), expected)
+        # Liveness is only the manifests still at the mark, and only with a usable mark.
+        atimes = {"a" * 32: unread, "b" * 32: unread + 1, "c" * 32: unread - 1, "d" * 32: 0}
+        for record in (None, {}, {"atime": False}, {"atime": None}, {"atime": 1}, {"atime": "true"},
+                       [], "scalar", 42):
+            with self.subTest(mark_record=record):
+                self.assertIsNone(snapshot.unread_names(record, atimes))
+        usable = {"atime": True, "marked": 4}
+        self.assertEqual(snapshot.unread_names(usable, atimes), {"a" * 32},
+                         "advanced, backwards and zeroed access times all count as read")
+        self.assertEqual(snapshot.unread_names(usable, {}), set())
+        # The real mark on this filesystem follows the probe's decision.
+        probe = self.root / "probe"
+        (probe / "h").mkdir(parents=True)
+        self.manifest(probe, "a" * 32, "b" * 32, unread + 1)
+        record = self.root / "probe-mark.json"
+        marked = snapshot.mark(probe, record)
+        self.assertFalse((probe / "rui-atime-probe").exists())
+        self.assertEqual(record.exists(), marked["atime"])
+        self.assertEqual(marked["marked"], 1 if marked["atime"] else 0)
+        if marked["atime"]:
+            self.assertEqual(snapshot.unread_manifests(probe, record), {"a" * 32})
+            (probe / "h" / ("a" * 32)).read_bytes()
+            self.assertEqual(snapshot.unread_manifests(probe, record), set())
+        else:
+            self.assertIsNone(snapshot.unread_manifests(probe, record))
+        # Only linked outputs are eligible: executables or libraries, unit objects, in-directory aliases.
+        classes = self.root / "classes"
+        for index, (names, expected) in enumerate(((("test", "test_zcu.o"), True),
+                                                   (("sqlite3.o",), False), (("libcrypto.a",), False),
+                                                   (("tables.zig",), False), (("test_zcu.o",), False))):
+            with self.subTest(linked=names):
+                directory = classes / f"{index:032x}"
+                if names[0] == "test":
+                    write_executable(directory, "test")
+                else:
+                    directory.mkdir(parents=True)
+                    (directory / names[0]).write_bytes(b"data")
+                self.assertIs(snapshot.linked_output(directory), expected)
+        escaping = write_executable(classes / ("e" * 32), "test")
+        (escaping / "alias").symlink_to("../" + "0" * 32 + "/test")
+        self.assertFalse(snapshot.linked_output(escaping), "aliases stay inside the directory")
+        # Publication: a usable mark removes every unread linked output; without one, only old CLIs.
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for state in ("usable", "missing", "false"):
+            with self.subTest(mark=state):
+                local, global_cache, owners, removed, kept = self.publisher_cache(state, unread + 1)
+                mark = self.root / snapshot.MARK
+                mark.unlink(missing_ok=True)
+                if state != "missing":
+                    mark.write_text(json.dumps(dict(atime=state == "usable", marked=13)))
+                report = snapshot.publication_report(self.env, key, local, global_cache)
+                expected = removed["read" if state == "usable" else "cli"]
+                self.assertEqual(report["key"], key)
+                self.assertEqual([item["path"] for item in report["removable"]], [str(path) for path in expected])
+                self.assertEqual(report["unread_manifests"], 7 if state == "usable" else None)
+                for directory in expected:
+                    self.assertFalse(directory.exists())
+                    self.assertFalse(owners[directory].exists(), "owners go with their outputs")
+                for directory in kept:
+                    self.assertTrue(directory.exists(), directory)
+        # A mark that missed the producer's current output declines publication and removes nothing.
+        local, global_cache, owners, removed, kept = self.publisher_cache("missed", unread + 1)
+        mark.write_text(json.dumps(dict(atime=True, marked=13)))
+        os.utime(owners[kept[-3]], ns=(unread, 0))
+        with self.assertRaisesRegex(snapshot.SnapshotError, "mark missed"):
+            snapshot.publication_report(self.env, key, local, global_cache)
+        self.assertTrue(all(directory.exists() for directory in removed["read"]))
+        with self.assertRaisesRegex(snapshot.SnapshotError, "current producer outputs"):
+            snapshot.audit(local, global_cache, unread=set())
 
     def test_complete_partial_by_work_outcome_uses_one_compaction_policy(self):
         original = self.env["RUI_CACHE_BUILD_KEY"]
@@ -663,37 +689,6 @@ class PublicationTest(unittest.TestCase):
                                 with self.assertRaises(snapshot.SnapshotError):
                                     snapshot.publication_report(env, key, "local", "global")
                                 compact.assert_not_called()
-
-    def test_setup_mark_reaches_compaction_as_read_liveness(self):
-        local, global_cache = self.root / "local", self.root / "global"
-        for root in (local, global_cache):
-            (root / "h").mkdir(parents=True)
-            (root / "o").mkdir()
-        old = write_executable(local / "o" / ("1" * 32), "test")
-        old_owner = local / "h" / ("2" * 32)
-        old_owner.write_bytes(b"\0")
-        self.outputs[str(old_owner)] = old.name
-        if not snapshot.mark(local, self.root / snapshot.MARK)["atime"]:
-            self.skipTest("this filesystem does not move access times on read")
-        # The producer writes its current outputs after the mark.
-        prefix = self.root / "rui-compiled-build/bin"
-        prefix.mkdir(parents=True)
-        current = []
-        for index, name in enumerate(("rui-debug-check", "rui-release-safe-check", "rui-release-small-check"), 3):
-            directory = write_executable(local / "o" / (str(index) * 32), name)
-            owner = local / "h" / (str(index + 3) * 32)
-            owner.write_bytes(b"\0")
-            self.outputs[str(owner)] = directory.name
-            shutil.copy2(directory / name, prefix / name)
-            current.append(directory)
-        key = self.env["RUI_CACHE_BUILD_KEY"]
-        report = snapshot.publication_report(self.env, key, local, global_cache)
-        self.assertEqual(report["key"], key)
-        self.assertEqual(report["unread_manifests"], 1)
-        self.assertEqual([item["path"] for item in report["removable"]], [str(old)])
-        self.assertFalse(old.exists())
-        self.assertFalse(old_owner.exists())
-        self.assertTrue(all(directory.exists() for directory in current))
 
     def test_target_key_cannot_bypass_compaction_with_missing_or_mismatched_environment(self):
         key = self.env["RUI_CACHE_BUILD_KEY"]

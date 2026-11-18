@@ -189,6 +189,26 @@ def linked_output(directory):
     return linked
 
 
+def reads_move_atime(before_ns, after_ns):
+    """Whether one read moved the probe's access time forward from the mark.
+
+    Unchanged means noatime; backwards means the clock or filesystem cannot be
+    trusted to order reads after the mark. Either keeps the CLI-only rule.
+    """
+    return after_ns > before_ns
+
+
+def unread_names(record, atimes):
+    """Manifests still at the mark's access time, or None without a usable mark.
+
+    record is the decoded mark (None when absent or unreadable); atimes maps
+    each local manifest name to its access time in nanoseconds.
+    """
+    if not isinstance(record, dict) or record.get("atime") is not True:
+        return None
+    return {name for name, atime in atimes.items() if atime == UNREAD_NS}
+
+
 def mark(local, record):
     """After restat and before compilation, make every local manifest unread.
 
@@ -202,18 +222,18 @@ def mark(local, record):
     try:
         os.utime(probe, ns=(UNREAD_NS, probe.stat().st_mtime_ns))
         probe.read_bytes()
-        reads_move_atime = probe.stat().st_atime_ns != UNREAD_NS
+        moved = reads_move_atime(UNREAD_NS, probe.stat().st_atime_ns)
     finally:
         probe.unlink()
     marked = 0
-    if reads_move_atime and (local / "h").exists():
+    if moved and (local / "h").exists():
         real_namespace(local / "h")
         for path in (local / "h").iterdir():
             if HEX.fullmatch(path.name) and not path.is_symlink() and path.is_file():
                 os.utime(path, ns=(UNREAD_NS, path.stat().st_mtime_ns), follow_symlinks=False)
                 marked += 1
-    report = dict(atime=reads_move_atime, marked=marked)
-    if reads_move_atime:
+    report = dict(atime=moved, marked=marked)
+    if moved:
         Path(record).write_text(json.dumps(report))
     return report
 
@@ -224,15 +244,15 @@ def unread_manifests(local, record):
     Call before anything else reads manifests, including zig cache-cat.
     """
     try:
-        if not json.loads(Path(record).read_text()).get("atime"):
-            return None
-    except (OSError, ValueError, AttributeError):
+        decoded = json.loads(Path(record).read_text())
+    except (OSError, ValueError):
+        decoded = None
+    if unread_names(decoded, {}) is None:
         return None
     directory = Path(local) / "h"
     real_namespace(directory)
-    return {path.name for path in directory.iterdir()
-            if HEX.fullmatch(path.name) and not path.is_symlink()
-            and path.stat().st_atime_ns == UNREAD_NS}
+    return unread_names(decoded, {path.name: path.stat().st_atime_ns for path in directory.iterdir()
+                                  if HEX.fullmatch(path.name) and not path.is_symlink()})
 
 
 def native_cli(executable):
