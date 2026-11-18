@@ -268,7 +268,7 @@ for (const kind of ["send", "update", "decide", "interrupt", "stop", "archive", 
 				case "send": await writer.send("hello", { idempotencyKey: "k" }); break;
 				case "update": await writer.update({ label: "x" }); break;
 				case "decide": await writer.decide("1", "allow"); break;
-				case "interrupt": await writer.interrupt(); break;
+				case "interrupt": await writer.interrupt({ turn: "1", operation: "1" }); break;
 				case "stop": await writer.stop(); break;
 				case "archive": await writer.archive(); break;
 				case "unarchive": await writer.unarchive(); break;
@@ -534,4 +534,40 @@ test("call and approval mapping preserves saved facts and readContent opens orig
     assert.equal(entries[1]?.kind, "call");
     if (entries[1]?.kind === "call") assert.equal(entries[1].server, null);
     assert.deepEqual(reads.map((read) => (read as { ordinal: string }).ordinal), ["0", "1"]);
+});
+
+
+test("interrupt remembers the last feed page target on its own handle", async () => {
+	let target: { turn: string; operation: string } | null = { turn: "8", operation: "21" };
+	const requests: string[] = [];
+	const session = new Session({ async exchange(path, build) {
+		requests.push(path);
+		if (path === "/v1/activity-page") return Buffer.from(JSON.stringify({
+			delta: "full", items: [], more: false, end: "0", since: null,
+			work: { actions: { interrupt: target } },
+		}));
+		assert.deepEqual(JSON.parse(build("store")).target, { session: "s", turn: "8", operation: "21" });
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "s");
+	for await (const _entry of session.listActivity()) { /* drain */ }
+	await session.interrupt({ key: "feed-key" });
+	target = null;
+	for await (const _entry of session.listActivity()) { /* drain */ }
+	await session.interrupt();
+	assert.deepEqual(requests, ["/v1/activity-page", "/v1/control/model-interruption", "/v1/activity-page"]);
+});
+
+
+test("feed observations belong to the handle that read them", async () => {
+	const paths: string[] = [];
+	const link: Link = { async exchange(path) {
+		paths.push(path);
+		return Buffer.from(JSON.stringify({ delta: "full", items: [], more: false, end: "0", since: null,
+			work: { actions: { interrupt: { turn: "2", operation: "3" } } } }));
+	} };
+	const reader = new Session(link, "s");
+	const other = new Session(link, "s");
+	for await (const _entry of reader.listActivity()) { /* drain */ }
+	await other.interrupt();
+	assert.deepEqual(paths, ["/v1/activity-page"]);
 });

@@ -88,7 +88,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:status" });
 		const idle = await session.status();
 		assert.deepEqual(idle, {
-			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
+			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, interruptTarget: null, pendingMessages: "0",
 			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
