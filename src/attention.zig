@@ -134,7 +134,7 @@ fn news(before: ?Work, next: Work) ?Kind {
     return observe(&seen, fixture(next));
 }
 
-test "each finish, failure and approval is news once, and stopping or working is none" {
+fn statusCase0() !void {
     const finished: Work = .{ .state = .{ .finished = .{ .since = 10 } }, .turn = 1 };
     try std.testing.expectEqual(Kind.finished, news(.{ .state = .{ .working = .{ .since = 5 } } }, finished).?);
     try std.testing.expectEqual(Kind.finished, news(null, finished).?);
@@ -158,7 +158,7 @@ test "each finish, failure and approval is news once, and stopping or working is
     try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(finished)));
 }
 
-test "a delayed read of an earlier wait neither notifies nor makes the finish after it news again" {
+fn statusCase1() !void {
     const waiting: Work = .{ .state = .{ .approval = .{ .since = 4 } }, .turn = 3, .first_action = 7 };
     const finished: Work = .{ .state = .{ .finished = .{ .since = 9 } }, .turn = 3 };
     var seen: ?Attention = null;
@@ -170,7 +170,7 @@ test "a delayed read of an earlier wait neither notifies nor makes the finish af
     try std.testing.expectEqual(Kind.approval, observe(&seen, fixture(.{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 })).?);
 }
 
-test "of every work state, only a finish, a failure and an Action awaiting approval want the person" {
+fn statusCase2() !void {
     for (std.enums.values(session_work.Kind)) |tag| {
         const state: session_work.WorkState = switch (tag) {
             .idle => .{ .idle = .{ .since = 1 } },
@@ -197,7 +197,7 @@ test "of every work state, only a finish, a failure and an Action awaiting appro
     try std.testing.expectEqual(@as(?Kind, null), news(null, .{ .state = .{ .bash = .{ .since = 1, .call = 0, .description = null, .running = 1, .approvals = 0 } } }));
 }
 
-test "a Session's program status follows its work, and a record begins only with news" {
+fn statusCase3() !void {
     const working: Reading = .of(fixture(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }), null);
     const finished: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), null);
     const failed: Reading = .of(fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }), null);
@@ -235,7 +235,7 @@ test "a Session's program status follows its work, and a record begins only with
     try std.testing.expectEqual(@as(?Status, null), Status.opened(null));
 }
 
-test "a program status report is one sequence the terminal accepts, whatever the name" {
+fn statusCase4() !void {
     var buffer: [max_status_bytes]u8 = undefined;
     const cases = .{
         .{ "k7m2qx", "Fix the build", Status.done, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBidWlsZA==\x1b\\" },
@@ -258,4 +258,16 @@ test "a program status report is one sequence the terminal accepts, whatever the
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=blocked:id=rui/" ++ session[0..32] ++ ":"));
     try std.testing.expect(std.mem.endsWith(u8, written, "\x1b\\"));
     for (written[1 .. written.len - 2]) |byte| try std.testing.expect(byte >= 0x20 and byte < 0x7f);
+}
+
+test "SUI-21 status_delivery" {
+    try statusCase0();
+    try statusCase1();
+    try statusCase2();
+    try statusCase3();
+    try statusCase4();
+    var seen: ?Attention = null;
+    const served: Work = .{ .state = .{ .approval = .{ .since = 1 } }, .served_attention = null, .served_group = .working };
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, served));
+    try std.testing.expectEqual(Status.working, Status.next(null, null, .of(served, null), true).?);
 }

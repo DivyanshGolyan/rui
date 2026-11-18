@@ -2157,7 +2157,7 @@ test "activity page preserves the canonical row preview with its work" {
     }
 }
 
-test "activity page retains served work actions for identical bindings" {
+test "CLI-17 activity_served_work" {
     var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{
         .revision = 1,
         .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 2, .served_attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .served_group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 } } },
@@ -2773,7 +2773,7 @@ const testing_started_row_facts = ",\"read_version\":\"0000000000000000000000000
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
-test "Session list facts own complete rows and render semantic output after scratch reuse" {
+fn listValidationCase0() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2928,7 +2928,7 @@ test "Session list byte range validates junk inside and ignores junk outside the
     try std.testing.expectEqual(@as(usize, 0), spaced.page.count);
 }
 
-test "Session list facts reject malformed metadata and consequential ambiguity" {
+fn listValidationCase1() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3166,7 +3166,7 @@ test "Session list rows retain host tool names" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"tools\":[\"bash\",\"fetch_page\"]") != null);
 }
 
-test "Session list facts attain eight maximum escaped rows and bind the continuation cohort" {
+fn listValidationCase2() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4096,4 +4096,10 @@ test "derived observation payloads cover caller fields" {
             try std.testing.expect(owned);
         }
     }
+}
+
+test "CLI-12 list_page_validation" {
+    try listValidationCase0();
+    try listValidationCase1();
+    try listValidationCase2();
 }

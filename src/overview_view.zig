@@ -3241,7 +3241,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
     }
 }
 
-test "a retry that has fallen due reads as queued in its group, mark and colour" {
+fn projectionCase4() !void {
     const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     var state = try opened(&.{session("k7m2qx", due, .{ .label = "Write the notes" })});
     defer state.deinit();
@@ -3258,7 +3258,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
 }
 
-test "overview rows draw a flat order without headings" {
+fn projectionCase5() !void {
     var state = try opened(&mixed);
     defer state.deinit();
     const text = try screenText(&state, 80, 40, .{});
@@ -3549,7 +3549,7 @@ test "the screen asks for frames only while a spinner shows" {
     try std.testing.expect(!anySpins(&state, .{}));
 }
 
-test "ctrl-x stops at once a row its rule lets it stop, and asks nothing" {
+fn stopCase0() !void {
     for (kind_cases) |case| {
         var state = try opened(&.{session("k7m2qx", case.state, .{ .label = "Write the notes" })});
         defer state.deinit();
@@ -3612,7 +3612,7 @@ test "conversation footer domain carries chat notices but never upgrade status" 
     };
 }
 
-test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
+fn stopCase1() !void {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
@@ -3710,7 +3710,7 @@ test "older and newer activity reads settle by revision in either order before d
     };
 }
 
-test "leaving before a stale full or changed listing never undoes a settled stop" {
+fn stopCase3() !void {
     const ref = "k7m2qx".*;
     for ([_]Delta{ .full, .changed }) |delta| {
         const old = session(&ref, .{ .stopping = ago(10) }, .{ .label = "Same Session", .turn = 7 });
@@ -3766,7 +3766,7 @@ test "snapshot and listing rows render identical stopped failed and done endings
     }
 }
 
-test "same revision retry reads cannot regress elapsed work or age" {
+fn projectionCase6() !void {
     const ref = "aaaaaa".*;
     for ([_]Delta{ .full, .changed }) |delta| {
         const retry = retryRow(&ref, "provider_temporary_http_429", 5);
@@ -3906,7 +3906,7 @@ test "an original Esc left unconfirmed is named at once and recovered on departu
     try std.testing.expectEqual(@as(usize, max_requests - 2), std.mem.count(u8, lines, "rui: Message not confirmed. Use rui request recover " ++ saved_key));
 }
 
-test "unconfirmed stops keep their handles until departure; a full ledger refuses another" {
+fn stopCase2() !void {
     const refs = [_]Reference{ "k7m2qx".*, "r4t9vw".*, "a1b2c3".*, "b2c3d4".*, "c3d4e5".*, "d4e5f6".*, "f6g7h8".*, "g7h8j9".*, "m1n2p3".* };
     comptime std.debug.assert(refs.len == max_requests + 1);
     var rows: [refs.len]Listed = undefined;
@@ -4341,7 +4341,7 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 0, " + New Session");
 }
 
-test "a tick moves a retry that fell due to pending" {
+fn projectionCase7() !void {
     var state = try opened(&mixed);
     defer state.deinit();
     try std.testing.expect(state.find("c3d4e5".*).?.state == .retrying);
@@ -4398,7 +4398,7 @@ test "provider bands derive from the same conversation work as rows" {
     }
 }
 
-test "an observed retry's own deadline updates row order counts and wake through departure" {
+fn projectionCase3() !void {
     const ref = "aaaaaa".*;
     for ([_]u64{ 5, 20 }) |delay| {
         var state = try opened(&.{ retryRow(&ref, "provider_temporary_http_429", 10), session("bbbbbb", .{ .finished = ago(10) }, .{}) });
@@ -4937,7 +4937,7 @@ test "a saved MCP running line fits overview rows without narrowing its saved bo
     try std.testing.expectEqualStrings(description, state.rows.items[0].state.bash.description.?.slice());
 }
 
-test "overview order covers every Kind sender age queue and reference tie" {
+fn projectionCase0() !void {
     var rows: [kind_cases.len * 2 + 4]Listed = undefined;
     for (kind_cases, 0..) |case, at| {
         for (0..2) |owner| {
@@ -5012,21 +5012,25 @@ test "overview refresh removes selection to next row else New Session and preser
     try std.testing.expectEqual(Selection.new_session, empty.selected);
 }
 
-test "overview ordering and stop use served facts for superseded approvals" {
-    var listed = session("asking", .{ .approval = ago(1) }, .{ .first_action = 7 });
+fn projectionCase1() !void {
+    var listed = session("asking", .{ .approval = ago(1) }, .{ .first_action = 7, .label = "Superseded" });
     listed.group = .working;
     listed.attention = null;
     listed.actions = .{ .stop = false, .decide = null };
-    var state = try opened(&.{listed});
+    const genuine = session("real00", .{ .approval = ago(100) }, .{ .first_action = 8, .label = "Genuine" });
+    var state = try opened(&.{ listed, genuine });
     defer state.deinit();
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Genuine").? < std.mem.indexOf(u8, text, "Superseded").?);
     const row = state.find("asking".*).?;
-    try std.testing.expectEqual(OrderClass.working, ordering(&state, row));
+    try std.testing.expectEqual(session_work.Group.working, state.workOf(row).served_group.?);
     state.selected = .{ .session = row.reference };
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .{ .action = .stop } } }));
     try std.testing.expect(!conversation(&state, row.reference, row.actions.stop).stoppable);
 }
 
-test "overview retains served work facts from list and session observation" {
+fn projectionCase2() !void {
     const protocol = @import("protocol.zig");
     var source: protocol.SessionRow = .{};
     try source.reference.set("k7m2qx");
@@ -5435,7 +5439,7 @@ test "Alt-A archives the selected row at once, busy or not, without a composer" 
     }
 }
 
-test "upgrade holds share stop admission for both screens, and the stop goes once they clear" {
+fn stopCase4() !void {
     const ref = "aaaaaa".*;
     const events = [_]Event{
         .{ .input = .{ .key = .{ .action = .stop } } },
@@ -6267,7 +6271,7 @@ test "Option session navigation skips paired New Session Archived and Settings c
     };
 }
 
-test "Session pins precede exactly the existing unpinned order across work changes" {
+fn projectionCase8() !void {
     var baseline = try opened(&mixed);
     defer baseline.deinit();
     var rows = mixed;
@@ -7126,4 +7130,24 @@ test "overview lines fixture domain preserves base targets focus bold archive an
     try D.checkBoundaries();
     // Recorded by running this same fixture domain against base 03aa26d0.
     try std.testing.expectEqual(@as(u64, 0x50a2b94318a8b3e8), bytes_and_styles);
+}
+
+test "SUI-3 overview_projection" {
+    try projectionCase4();
+    try projectionCase5();
+    try projectionCase6();
+    try projectionCase7();
+    try projectionCase8();
+    try projectionCase0();
+    try projectionCase1();
+    try projectionCase2();
+    try projectionCase3();
+}
+
+test "SUI-5 stop_intent" {
+    try stopCase2();
+    try stopCase3();
+    try stopCase4();
+    try stopCase0();
+    try stopCase1();
 }
