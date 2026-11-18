@@ -234,6 +234,36 @@ def activity_case():
     print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; waiting Messages appear only in the queue until applied, then once as bands", flush=True)
 
 
+
+def thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        first = fixture.sse_answer("thinking-first", "r1", "m1", "FIRST-DONE")[0]
+        second = fixture.sse_answer("thinking-second", "r2", "m2", "SECOND-DONE")[0]
+        with Chrome("rui-thinking-queue.", [(first, first_release), (second, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                working = chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Thinking" in screen and "FIRST-QUESTION" in screen)
+                assert "MIDTURN-HI" not in working, working
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert "Thinking" in queued, queued
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "FIRST-DONE" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                next_release.set()
+                done = chrome.frame(master, b"", lambda screen: "SECOND-DONE" in screen, timeout=30)
+                assert done.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in done, done
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
+
 def send_state_case():
     with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
         session = chrome.session()
@@ -762,6 +792,7 @@ def main():
     send_state_case()
     send_recovery_case()
     activity_case()
+    thinking_queue_case()
     scroll_marker_case()
     pages_case()
     info_natural_height_case()

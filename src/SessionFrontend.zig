@@ -6792,16 +6792,21 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     return text[0..end];
 }
 
-test "SessionFrontend draws queued input once through admission and turn handoff" {
+test "SessionFrontend draws a mid-Turn submission once before and after it is taken" {
     for ([_]u16{ 46, 140 }) |width| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
         const self = &fixture.held.self;
         fixture.held.size.width = width;
+        try fixture.page(.opening, &.{.{ .key = 9, .text = "› first request\n" }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        const working = try fixture.held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, working, "› first request") != null);
+        try std.testing.expect(std.mem.indexOf(u8, working, "Thinking") != null);
         const ticket = self.input.submitText("waiting one");
         self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
         defer self.submission.disposeMessage();
-        try fixture.page(.opening, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+        try fixture.page(.scan, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
         try std.testing.expect(!self.submission.messageHeld());
         self.live.work.state = .{ .working = .{ .since = 1 } };
         self.live.queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 };
