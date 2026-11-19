@@ -11,7 +11,7 @@ First drafts, written from the README and the contracts and checked against fixe
 | [Conversation, settings and model requests](conversation-model.md) | 38 |
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 50 |
 | [Session list facts and read work](session-list.md) | 4 |
-| [Session UI and diagnostics](session-ui.md) | 72 |
+| [Session UI and diagnostics](session-ui.md) | 73 |
 | [CI tooling and policy checks](ci-tooling.md) | 85 |
 | [Test pause point owner](pause.md) | 17 |
 | [Theme palette](theme.md) | 5 |
