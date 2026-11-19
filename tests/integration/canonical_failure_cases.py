@@ -137,68 +137,55 @@ def wrong_target(response, null_code=False):
         + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
 
 
-def binding_cases(state, null_code=False):
-    home = state / ("nulls" if null_code else "binding")
-    reason = "InvalidResponse" if null_code else "RequestBindingMismatch"
-    rewrite = lambda response: wrong_target(response, null_code=null_code)
+def binding_cases(state):
+    home = state / "binding"
+    reason = "RequestBindingMismatch"
+    rewrite = wrong_target
     home.mkdir(mode=0o700)
     store = home / "store"
     host = fixture.start_host(store, None)
-    commands = (
-        ("configure", "/v1/configure", ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"]),
-        ("message", "/v1/message", ["session", "send"]),
-        ("session-stop", "/v1/control/session-stop", ["session", "stop"]),
-        ("model-interruption", "/v1/control/model-interruption", ["session", "interrupt-model", "--turn", "3", "--operation", "11"]),
-        ("permission-decision", "/v1/control/permission-decision", ["action", "deny", "--action", "7"]),
-        ("permission-allow", "/v1/control/permission-decision", ["action", "allow", "--action", "7"]),
-    )
+    # ADM-19 owns the mutation and corruption matrix. This witness checks
+    # that the real client binds the reply to its generated capture.
+    route = "/v1/message"
     try:
         session = fixture.configure(home, store, "binding-session", None, "gpt-6-sol")
-        for name, route, command in commands:
-            kind = "permission-decision" if name == "permission-allow" else name
-            for mode in ("raw", "generated"):
-                record = home / f"{name}-{mode}.json"
-                address = ["--store", store, "--to", session] if name == "message" else ["--store", store, "--session", session]
-                args = [*command, *address]
-                args += ["--record", record, "--key", f"{name}-{mode}"] if mode == "raw" else []
-                proxy = ReplyProxy(host, route, rewrite)
-                try:
-                    result = invoke(home, *args, input="a\nµ" if kind == "message" else None)
-                    assert result.returncode == 4 and "[reply_unconfirmed]" in result.stderr, result
-                    assert "(internal_unexpected)" in result.stderr, result
-                    assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
-                finally:
-                    proxy.close()
-                request, original_reply = proxy.exchanges[0]
-                saved = json.loads(request)
-                key = saved["key"]
-                if mode != "raw":
-                    assert announced(result) == key, result
-                    record = home / ".config/rui/requests" / f"{key}.json"
-                assert record.read_bytes() == request
-                expect_mutation_error(result, saved, status=200, reason=reason, diagnostic=None)
-                for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", kind],
-                        *([["request", "recover", key]] if mode != "raw" else [])):
-                    proxy = ReplyProxy(host, route, rewrite)
-                    try:
-                        failed = invoke(home, *recovery)
-                        assert failed.returncode == 4 and "[reply_unconfirmed]" in failed.stderr, failed
-                        assert "(internal_unexpected)" in failed.stderr, failed
-                    finally:
-                        proxy.close()
-                    expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
-                    assert record.read_bytes() == request
-                original_answer = json.loads(original_reply.split(b"\r\n\r\n", 1)[1])["answer"]
-                for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", kind],
-                        *([["request", "recover", key]] if mode != "raw" else [])):
-                    recovered = invoke(home, *recovery)
-                    replayed = json.loads(recovered.stdout)["answer"]
-                    assert recovered.returncode == (0 if original_answer["status"] == "accepted" else 3), recovered
-                    assert replayed["replayed"] is True and replayed["status"] == original_answer["status"], recovered
-                assert record.read_bytes() == request
+        proxy = ReplyProxy(host, route, rewrite)
+        try:
+            result = invoke(home, "session", "send", "--store", store, "--to", session, input="a\nµ")
+            assert result.returncode == 4 and "[reply_unconfirmed]" in result.stderr, result
+            assert "(internal_unexpected)" in result.stderr, result
+            assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
+        finally:
+            proxy.close()
+        request, original_reply = proxy.exchanges[0]
+        saved = json.loads(request)
+        key = saved["key"]
+        assert announced(result) == key, result
+        record = home / ".config/rui/requests" / f"{key}.json"
+        assert record.read_bytes() == request
+        expect_mutation_error(result, saved, status=200, reason=reason, diagnostic=None)
+        for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", "message"],
+                         ["request", "recover", key]):
+            proxy = ReplyProxy(host, route, rewrite)
+            try:
+                failed = invoke(home, *recovery)
+                assert failed.returncode == 4 and "[reply_unconfirmed]" in failed.stderr, failed
+                assert "(internal_unexpected)" in failed.stderr, failed
+            finally:
+                proxy.close()
+            expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
+            assert record.read_bytes() == request
+        original_answer = json.loads(original_reply.split(b"\r\n\r\n", 1)[1])["answer"]
+        for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", "message"],
+                         ["request", "recover", key]):
+            recovered = invoke(home, *recovery)
+            replayed = json.loads(recovered.stdout)["answer"]
+            assert recovered.returncode == (0 if original_answer["status"] == "accepted" else 3), recovered
+            assert replayed["replayed"] is True and replayed["status"] == original_answer["status"], recovered
+        assert record.read_bytes() == request
     finally:
         fixture.stop_host(host)
-    print(f"mutation {'nulls' if null_code else 'bindings'}: five typed explicit/generated/retry/recover callers reject {'present null code' if null_code else 'wrong Session, digest, target or decision'}; original-key replay preserved", flush=True)
+    print("mutation binding: generated Message rejects wrong digest; original-key replay preserved", flush=True)
 
 
 def committed_cases(state):
@@ -461,7 +448,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 assert "admitted:" not in output and "Configured." not in output, output
                 assert "You: " not in output, output
                 if not binding:
-                    assert "Detached." not in output, output
+                    assert "Detached." not in output and "Your chats keep working while you are away." not in output, output
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal), "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]
@@ -844,10 +831,10 @@ def main(selected="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "proxy-swap", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output", "store-read"), selected
+        assert selected in ("all", "proxy-swap", "producers", "committed", "interactive", "permission-read", "bindings", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output", "store-read"), selected
         if selected in ("keyed-bindings", "keyed-output"):
             keyed_observation_cases(state, selected)
-        for name, case in (("proxy-swap", proxy_swap_cases), ("producers", producer_cases), ("committed", committed_cases), ("store-read", store_read_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
+        for name, case in (("proxy-swap", proxy_swap_cases), ("producers", producer_cases), ("committed", committed_cases), ("store-read", store_read_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True

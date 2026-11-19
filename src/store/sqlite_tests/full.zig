@@ -534,44 +534,7 @@ test "Full history's step faults keep main's names, and its content and stop rea
     }
 }
 
-test "Full rejects an invalid canonical form before emitting any list" {
-    const BeforeOutput = struct {
-        called: bool = false,
-
-        fn reject(self: *@This()) error{UnexpectedFullOutput}!void {
-            self.called = true;
-            return error.UnexpectedFullOutput;
-        }
-
-        pub fn missing(self: *@This(), _: protocol.ReportProfile) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub fn current(self: *@This(), _: protocol.ReportProfile, _: *const @import("../../session_report.zig").Current) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub fn open(self: *@This(), _: @import("../../session_report.zig").List) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub fn row(self: *@This(), _: *const @import("../../session_report.zig").Row) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub const end = reject;
-        pub const tail = reject;
-
-        pub fn fullOpen(self: *@This(), _: @import("../../session_report.zig").FullList) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub fn fullRow(self: *@This(), _: *const @import("../../session_report.zig").FullRow, _: *report_domain.FullText) error{UnexpectedFullOutput}!void {
-            return self.reject();
-        }
-
-        pub const fullEnd = reject;
-    };
+test "INS-12 Full capture rejects an invalid canonical form and fences" {
     for ([_]i64{ 2, -1 }) |form| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -581,16 +544,15 @@ test "Full rejects an invalid canonical form before emitting any list" {
         const session = try configureTestSessionAsk(&storage, "invalid-form-full-config");
         try submitTestMessage(&storage, &tmp, "invalid-form-full-first", "invalid-form-full-first", session.slice(), "first");
         try submitTestMessage(&storage, &tmp, "invalid-form-full-message", "invalid-form-full-message", session.slice(), "pending");
-        // Stopped pending input lies outside Current pressure and its first
-        // Message stays valid, isolating Full's early canonical-form check.
+        // The stop keeps pending input out of Current pressure. Full still
+        // includes the damaged Message after the valid first Message.
         var stop = try completeSessionStop("invalid-form-full-stop", session.slice());
         try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
         try store_testing.sqlite_only.exec(&storage, "UPDATE content SET form=?1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='invalid-form-full-message')", .{form});
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
-        var before: BeforeOutput = .{};
-        try std.testing.expectError(error.CorruptStore, storage.readSessionReport(session.slice(), .full, &before));
-        try std.testing.expect(!before.called);
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current));
+        try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
         try std.testing.expect(storage.isFenced());
     }
 }

@@ -36,7 +36,14 @@ pub const Ingress = struct {
     metadata: std.ArrayList(u8) = .empty,
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
-    content_state: enum { metadata, awaiting_quote, awaiting_schema, capturing, capturing_schema } = .metadata,
+    content_state: enum { metadata, awaiting_quote, awaiting_schema, awaiting_part, capturing, capturing_schema, capturing_part } = .metadata,
+    parts_capture: ?@import("InputCapture.zig") = null,
+    parts_loan: ?@import("InputCapture.zig").Loan = null,
+    part_sink: PartSink = undefined,
+    part_started: u32 = 0,
+    part_finished: u32 = 0,
+    part_image: bool = false,
+    part_format: ?@import("input_media.zig").Format = null,
     capture: ContentCapture = undefined,
     decoder: protocol.StringDecoder = .{},
     schema_encoder: SchemaEncoder = undefined,
@@ -55,6 +62,7 @@ pub const Ingress = struct {
     pub fn deinit(self: *Ingress) void {
         if (self.content_state == .capturing_schema) self.schema_encoder.deinit();
         if (self.content_state == .capturing or self.content_state == .capturing_schema) self.capture.deinit();
+        if (self.parts_capture) |*capture| capture.close();
         self.content_state = .metadata;
         for (&self.contents) |*field| field.removeTemporaryContent(self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
@@ -88,6 +96,27 @@ pub const Ingress = struct {
                         'n' => self.content_state = .metadata,
                         else => return error.InvalidJsonShape,
                     }
+                },
+                .awaiting_part => switch (byte) {
+                    ' ', '\t', '\r', '\n' => continue,
+                    '"' => {
+                        try self.startPart();
+                        self.decoder = .{};
+                        self.content_state = .capturing_part;
+                        continue;
+                    },
+                    else => return error.InvalidJsonShape,
+                },
+                .capturing_part => {
+                    if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
+                    if (try self.decoder.feed(byte, &self.part_sink)) {
+                        self.part_started += 1;
+                        self.content_state = .metadata;
+                        try self.append('"');
+                        try self.append('"');
+                        try self.preview();
+                    }
+                    continue;
                 },
                 .capturing, .capturing_schema => {
                     const schema = self.content_state == .capturing_schema;
@@ -143,31 +172,76 @@ pub const Ingress = struct {
             .source = &source,
             .expected_kind = self.options.expected_kind,
             .captured = self.contents[0..self.content_count],
+            .part_started = self.part_started,
+            .part_finished = self.part_finished,
         };
-        try parser.parse(&self.request);
+        parser.parse(&self.request) catch |err| {
+            self.part_image = parser.part_image;
+            self.part_format = parser.part_format;
+            return err;
+        };
         std.debug.assert(parser.content_ordinal == self.content_count);
     }
 
+    fn startPart(self: *Ingress) !void {
+        if (self.parts_capture == null) {
+            const budget = self.options.scratch_budget orelse return error.ScratchCapacityExhausted;
+            const spool = try anonymousPartFile(self.options, 250);
+            errdefer spool.close(self.options.io);
+            const index = try anonymousPartFile(self.options, 251);
+            self.parts_capture = @as(@import("InputCapture.zig"), undefined);
+            self.parts_capture.?.init(self.options.io, spool, index, budget);
+        }
+        const capture = &self.parts_capture.?;
+        if (self.part_image) try capture.beginUnknownImage() else try capture.beginUnknownText();
+        self.part_sink = .{ .capture = capture, .image = self.part_image };
+    }
+
     fn preview(self: *Ingress) !void {
-        self.parse() catch |err| switch (err) {
-            error.NeedInput => return,
-            error.NeedContent, error.NeedSchema => {
-                std.debug.assert(self.content_count < self.contents.len);
-                self.content_state = if (err == error.NeedSchema) .awaiting_schema else .awaiting_quote;
-                return;
-            },
-            else => return err,
-        };
-        self.complete = true;
-        if (self.received != self.options.content_length) return error.TrailingInput;
+        while (true) {
+            self.parse() catch |err| switch (err) {
+                error.NeedInput => return,
+                error.NeedContent, error.NeedSchema => {
+                    std.debug.assert(self.content_count < self.contents.len);
+                    self.content_state = if (err == error.NeedSchema) .awaiting_schema else .awaiting_quote;
+                    return;
+                },
+                error.NeedPartStart => {
+                    self.content_state = .awaiting_part;
+                    return;
+                },
+                error.NeedPartEnd => {
+                    const capture = if (self.parts_capture) |*value| value else return error.InvalidMessage;
+                    if (self.part_image) {
+                        capture.endImage(self.part_format orelse return error.InvalidMessage) catch |failure| switch (failure) {
+                            error.ScratchCapacityExceeded => return error.ScratchCapacityExhausted,
+                            else => return failure,
+                        };
+                    } else capture.end() catch |failure| switch (failure) {
+                        error.ScratchCapacityExceeded => return error.ScratchCapacityExhausted,
+                        else => return failure,
+                    };
+                    self.part_finished += 1;
+                    continue;
+                },
+                else => return err,
+            };
+            self.complete = true;
+            if (self.received != self.options.content_length) return error.TrailingInput;
+            return;
+        }
     }
 
     pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
         self.parse() catch |err| switch (err) {
-            error.NeedInput, error.NeedContent, error.NeedSchema => return error.UnexpectedEndOfBody,
+            error.NeedInput, error.NeedContent, error.NeedSchema, error.NeedPartStart, error.NeedPartEnd => return error.UnexpectedEndOfBody,
             else => return err,
         };
+        if (self.parts_capture) |*capture| {
+            if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
+            self.parts_loan = try capture.seal();
+        }
         const request = &self.request;
         var moved: usize = 0;
         switch (request.*) {
@@ -177,6 +251,10 @@ pub const Ingress = struct {
                     self.take(field);
                     moved += 1;
                 }
+            },
+            .action_publish => |*command| {
+                self.take(&command.text);
+                moved += 1;
             },
             .message => |*command| {
                 if (command.configuration) |*configuration| {
@@ -230,6 +308,70 @@ pub fn pollExchange(io: std.Io, fd: std.posix.fd_t, events: i16, deadline: ?i128
     }
 }
 
+/// Decodes a JSON part string directly into the ordered capture. Image data
+/// is standard padded base64; text is validated by InputCapture as UTF-8.
+const PartSink = struct {
+    capture: *@import("InputCapture.zig"),
+    image: bool,
+    group: [4]u8 = undefined,
+    group_len: u3 = 0,
+    padded: bool = false,
+    buffer: [@import("InputCapture.zig").window_bytes]u8 = undefined,
+    used: usize = 0,
+
+    pub fn write(self: *PartSink, bytes: []const u8) !void {
+        if (!self.image) return self.writeDecoded(bytes);
+        for (bytes) |byte| {
+            if (self.padded) return error.InvalidBase64;
+            self.group[self.group_len] = byte;
+            self.group_len += 1;
+            if (self.group_len != 4) continue;
+            var decoded: [3]u8 = undefined;
+            const count = std.base64.standard.Decoder.calcSizeForSlice(&self.group) catch return error.InvalidBase64;
+            std.base64.standard.Decoder.decode(decoded[0..count], &self.group) catch return error.InvalidBase64;
+            try self.writeDecoded(decoded[0..count]);
+            self.group_len = 0;
+            self.padded = count < 3;
+        }
+    }
+
+    fn writeDecoded(self: *PartSink, bytes: []const u8) !void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const count = @min(bytes.len - offset, self.buffer.len - self.used);
+            @memcpy(self.buffer[self.used..][0..count], bytes[offset..][0..count]);
+            self.used += count;
+            offset += count;
+            if (self.used == self.buffer.len) try self.flush();
+        }
+    }
+
+    pub fn endString(self: *PartSink) !void {
+        if (self.image and self.group_len != 0) return error.InvalidBase64;
+        try self.flush();
+    }
+
+    fn flush(self: *PartSink) !void {
+        if (self.used == 0) return;
+        var allowance = self.used;
+        const count = self.capture.append(self.buffer[0..self.used], &allowance, false) catch |err| switch (err) {
+            error.ScratchCapacityExceeded => return error.ScratchCapacityExhausted,
+            else => return err,
+        };
+        std.debug.assert(count == self.used);
+        self.used = 0;
+    }
+};
+
+fn anonymousPartFile(options: ParseOptions, ordinal: u8) !std.Io.File {
+    var file: ContentCapture = undefined;
+    try file.init(options, ordinal);
+    errdefer file.deinit();
+    try std.Io.Dir.deleteFileAbsolute(options.io, file.path[0..file.path_len]);
+    file.transferred = true;
+    return file.sink.file;
+}
+
 const ContentCapture = struct {
     options: ParseOptions,
     path: [protocol.max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
@@ -250,7 +392,7 @@ const ContentCapture = struct {
         });
         self.options = options;
         self.path_len = path.len;
-        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
+        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget, .limit = if (options.expected_kind == .action_publish) protocol.max_action_value_bytes else protocol.max_sqlite_content_bytes };
         self.sealed = null;
         self.transferred = false;
     }
@@ -307,12 +449,13 @@ const ContentSink = struct {
     buffer: [protocol.content_window_bytes]u8 = undefined,
     used: usize = 0,
     length: u64 = 0,
+    limit: u64 = protocol.max_sqlite_content_bytes,
     hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
     utf8: protocol.Utf8State = .{},
 
     pub fn write(self: *ContentSink, bytes: []const u8) !void {
         const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
-        if (next_length > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
+        if (next_length > self.limit) return error.ContentTooLarge;
         try self.utf8.feed(bytes);
         self.hash.update(bytes);
         self.length = next_length;
@@ -971,5 +1114,281 @@ test "schema object custody is canonical and cannot collide with reference-shape
         ingress.deinit();
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
+    }
+}
+
+test "APV-1 action publication captures exact decoded content" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const cases = [_]struct { body: []const u8, expected: ?[]const u8 = null, failure: ?anyerror = null, kind: protocol.Kind = .action_publish }{
+        .{ .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"action_publish\",\"store\":\"s\",\"handle\":\"abc\",\"key\":\"k\",\"value\":\"line\\n\\u00e9\"}", .expected = "line\né" },
+        .{ .body = "{\"value\":\"\",\"key\":\"k\",\"handle\":\"abc\",\"store\":\"s\",\"kind\":\"action_publish\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .expected = "" },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = case.body.len, .scratch_path = root[0..root_len], .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = protocol.max_action_value_bytes }, .expected_kind = case.kind });
+        const result: anyerror!*Request = blk: {
+            for (case.body) |byte| ingress.feed(&.{byte}) catch |err| break :blk err;
+            break :blk ingress.finish();
+        };
+        const request = try result;
+        var bytes: [16]u8 = undefined;
+        const n = try request.action_publish.text.file.?.readPositionalAll(io, &bytes, 0);
+        try std.testing.expectEqualStrings(case.expected.?, bytes[0..n]);
+        try request.removeTemporaryContent(io);
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "APV-11 invalid publication requests release scratch" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const cases = [_]struct { body: []const u8, expected: ?[]const u8 = null, failure: ?anyerror = null, kind: protocol.Kind = .action_publish }{
+        .{ .body = "{\"value\":\"abc\",\"kind\":\"host_info\",\"store\":\"s\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .kind = .host_info, .failure = error.UnexpectedField },
+        .{ .body = "{\"value\":\"abc\",\"key\":\"\",\"handle\":\"abc\",\"store\":\"s\",\"kind\":\"action_publish\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .failure = error.InvalidKey },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = case.body.len, .scratch_path = root[0..root_len], .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = protocol.max_action_value_bytes }, .expected_kind = case.kind });
+        const result: anyerror!*Request = blk: {
+            for (case.body) |byte| ingress.feed(&.{byte}) catch |err| break :blk err;
+            break :blk ingress.finish();
+        };
+        try std.testing.expectError(case.failure.?, result);
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "APV-2 action publication enforces the decoded byte limit" {
+    {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(io, &root);
+        const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"action_publish\",\"store\":\"s\",\"handle\":\"h\",\"key\":\"k\",\"value\":\"";
+        const suffix = "\"}";
+        const payload = try std.testing.allocator.alloc(u8, 16 * 1024);
+        defer std.testing.allocator.free(payload);
+        @memset(payload, 'a');
+        var used = std.atomic.Value(u64).init(0);
+        var retained: ?named_scratch.Owner = null;
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = prefix.len + payload.len + suffix.len, .scratch_path = root[0..root_len], .request_number = 41, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 32 * 1024 }, .expected_kind = .action_publish });
+        try ingress.feed(prefix);
+        try ingress.feed(payload);
+        try ingress.feed(suffix);
+        const request = try ingress.finish();
+        const actual = try std.testing.allocator.alloc(u8, payload.len);
+        defer std.testing.allocator.free(actual);
+        const n = try request.action_publish.text.file.?.readPositionalAll(io, actual, 0);
+        try std.testing.expectEqualSlices(u8, payload, actual[0..n]);
+        try request.removeTemporaryContent(io);
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+    {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(io, &root);
+        const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"action_publish\",\"store\":\"s\",\"handle\":\"h\",\"key\":\"k\",\"value\":\"";
+        const suffix = "\"}";
+        const payload = try std.testing.allocator.alloc(u8, 16 * 1024 + 1);
+        defer std.testing.allocator.free(payload);
+        @memset(payload, 'x');
+        var used = std.atomic.Value(u64).init(0);
+        var retained: ?named_scratch.Owner = null;
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = prefix.len + payload.len + suffix.len, .scratch_path = root[0..root_len], .request_number = 42, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 32 * 1024 }, .expected_kind = .action_publish });
+        try ingress.feed(prefix);
+        try std.testing.expectError(error.ContentTooLarge, ingress.feed(payload));
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "SH-63 wire image decoding streams standard base64 into capture" {
+    const Capture = @import("InputCapture.zig");
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
+    for ([_]enum { valid, incomplete, invalid, trailing }{ .valid, .incomplete, .invalid, .trailing }) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const spool = try tmp.dir.createFile(std.testing.io, "spool", .{ .read = true });
+        const index = try tmp.dir.createFile(std.testing.io, "index", .{ .read = true });
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: Capture = undefined;
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+        defer capture.close();
+        try capture.beginUnknownImage();
+        var sink: PartSink = .{ .capture = &capture, .image = true };
+        var decoder: protocol.StringDecoder = .{};
+        switch (scenario) {
+            .valid => {
+                for (encoded) |byte| try std.testing.expect(!try decoder.feed(byte, &sink));
+                try std.testing.expect(try decoder.feed('"', &sink));
+                try capture.endImage(.jpeg);
+                const loan = try capture.seal();
+                var cursor = loan.cursor();
+                const part = (try cursor.next()).?;
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(jpeg), &part.range.digest);
+                try std.testing.expectEqual(@as(u64, jpeg.len), part.range.length);
+            },
+            .incomplete => {
+                _ = try decoder.feed('A', &sink);
+                try std.testing.expectError(error.InvalidBase64, decoder.feed('"', &sink));
+            },
+            .invalid => {
+                for ("AAA") |byte| _ = try decoder.feed(byte, &sink);
+                try std.testing.expectError(error.InvalidBase64, decoder.feed('!', &sink));
+            },
+            .trailing => {
+                for ("YQ==") |byte| _ = try decoder.feed(byte, &sink);
+                try std.testing.expectError(error.InvalidBase64, decoder.feed('A', &sink));
+            },
+        }
+    }
+}
+
+test "SH-64 ordered Message parts stream and reject invalid media" {
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    var encoded_png: [std.base64.standard.Encoder.calcSize(png.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded_png, png);
+    for ([_]enum { valid, valid_png, wrong_mime, unsupported_mime, malformed_base64 }{ .valid, .valid_png, .wrong_mime, .unsupported_mime, .malformed_base64 }) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        const mime = switch (scenario) {
+            .valid_png, .wrong_mime => "image/png",
+            .unsupported_mime => "image/gif",
+            else => "image/jpeg",
+        };
+        const payload: []const u8 = if (scenario == .malformed_base64) "!!!!" else if (scenario == .valid_png) &encoded_png else &encoded;
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[{{\"text\":\"before\",\"type\":\"text\"}},{{\"data\":\"{s}\",\"mime\":\"{s}\",\"type\":\"image\"}},{{\"type\":\"text\",\"text\":\"after\"}}]}}", .{ payload, mime });
+        defer std.testing.allocator.free(body);
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = root[0..root_len], .request_number = 12, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 100000 } });
+        defer ingress.deinit();
+        if (scenario != .valid and scenario != .valid_png) {
+            const expected: anyerror = switch (scenario) {
+                .wrong_mime => error.ImageMimeMismatch,
+                .unsupported_mime => error.UnsupportedImage,
+                .malformed_base64 => error.InvalidBase64,
+                .valid, .valid_png => unreachable,
+            };
+            try std.testing.expectError(expected, ingress.feed(body));
+            try std.testing.expect(ingress.parts_loan == null);
+            continue;
+        }
+        for (body) |byte| try ingress.feed(&.{byte});
+        const request = try ingress.finish();
+        try std.testing.expectEqual(protocol.FieldState.omitted, request.message.text.state);
+        var cursor = ingress.parts_loan.?.cursor();
+        const image: []const u8 = if (scenario == .valid_png) png else jpeg;
+        for ([_][]const u8{ "before", image, "after" }, 0..) |expected, ordinal| {
+            const part = (try cursor.next()).?;
+            try std.testing.expect((part.kind == .image) == (ordinal == 1));
+            try std.testing.expectEqual(@as(u64, expected.len), part.range.length);
+            const actual = try std.testing.allocator.alloc(u8, expected.len);
+            defer std.testing.allocator.free(actual);
+            try std.testing.expectEqual(expected.len, try part.range.file.readPositionalAll(std.testing.io, actual, part.range.offset));
+            try std.testing.expectEqualSlices(u8, expected, actual);
+        }
+        try std.testing.expect((try cursor.next()) == null);
+    }
+}
+
+test "SH-66 part ingress failures release scratch without publishing a loan" {
+    for ([_]enum { acquire, write, seal, budget }{ .acquire, .write, .seal, .budget }) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[{\"type\":\"text\",\"text\":\"hello\"}]}";
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{
+            .io = std.testing.io,
+            .content_length = body.len,
+            .scratch_path = root[0..root_len],
+            .request_number = 13,
+            .retained_scratch = &retained,
+            .scratch_budget = .{ .used = &used, .limit = if (scenario == .budget) 4 else 10000 },
+            .content_faults = .{ .acquire = scenario == .acquire, .write = scenario == .write, .seal = scenario == .seal },
+        });
+        switch (scenario) {
+            .acquire => try std.testing.expectError(error.InjectedContentAcquireFailure, ingress.feed(body)),
+            .write => try std.testing.expectError(error.InjectedContentWriteFailure, ingress.feed(body)),
+            .budget => try std.testing.expectError(error.ScratchCapacityExhausted, ingress.feed(body)),
+            .seal => {
+                try ingress.feed(body);
+                try std.testing.expectError(error.InjectedContentSealFailure, ingress.finish());
+            },
+        }
+        try std.testing.expect(ingress.parts_loan == null);
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "SH-67 ordered wire input accepts the part limit and refuses the next part" {
+    const maximum = @import("input_parts.zig").max_parts;
+    for ([_]usize{ maximum, maximum + 1 }) |count| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(std.testing.io, &root);
+        var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer body.deinit();
+        try body.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"parts\":[");
+        for (0..count) |index| {
+            if (index != 0) try body.writer.writeByte(',');
+            try body.writer.writeAll("{\"type\":\"text\",\"text\":\"\"}");
+        }
+        try body.writer.writeAll("]}");
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var ingress: Ingress = undefined;
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.written().len, .scratch_path = root[0..root_len], .request_number = 14, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 2 * 1024 * 1024 } });
+        defer ingress.deinit();
+        if (count > maximum) {
+            try std.testing.expectError(error.TooManyInputParts, ingress.feed(body.written()));
+            try std.testing.expect(ingress.parts_loan == null);
+        } else {
+            try ingress.feed(body.written());
+            _ = try ingress.finish();
+            try std.testing.expectEqual(@as(u32, maximum), ingress.parts_loan.?.count);
+        }
     }
 }

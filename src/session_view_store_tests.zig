@@ -109,7 +109,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
@@ -159,8 +159,8 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
                     try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
-                    try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
-                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), row.call_id.sha256.slice());
+                    try std.testing.expectEqual(@as(u64, 13), row.arguments.value.text.length);
+                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), &std.fmt.bytesToHex(row.call_id.value.text.digest, .lower));
                     try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.description.?.slice());
                     try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
@@ -174,7 +174,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 1000 + i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
                     try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
-                    try std.testing.expectEqual(@as(u64, 13), row.name.bytes.value);
+                    try std.testing.expectEqual(@as(u64, 13), row.name.value.text.length);
                     try std.testing.expect(row.presentation.value.description == null);
                 },
                 .actionable => |row| {
@@ -230,4 +230,31 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     }
     try std.testing.expectEqual(bytes, try file.length(io));
     std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(protocol_reply.Current), bytes });
+}
+
+test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
+    const View = @import("session_view.zig");
+    const Sink = struct {
+        pub fn feed(_: *@This(), _: []const u8) !void {
+            return error.UnexpectedOutput;
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+    };
+    var sink: Sink = .{};
+    const content_ref: @FieldType(protocol.ActivityItem.Message, "content") = .{ .text = .{ .length = 5, .digest = @splat(0) } };
+    for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
+        const value: protocol.ActivityItem.Message = .{
+            .admission = 1,
+            .key = .{},
+            .turn = null,
+            .state = state,
+            .content = content_ref,
+            .admitted_at = 1,
+            .source_action = 42,
+        };
+        for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
+            const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };
+            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        }
+    }
 }

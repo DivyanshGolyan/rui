@@ -17,9 +17,10 @@ const OverviewLines = @import("OverviewLines.zig");
 const client = @import("client.zig");
 const configure_input = @import("configure_input.zig");
 const process_memory = @import("process_memory.zig");
-const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const content_value = @import("content_value.zig");
+const value_reads = @import("value_reads.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
@@ -127,7 +128,7 @@ pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
-    first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
+    first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
@@ -269,10 +270,10 @@ const CreationSnapshot = struct {
     binding: ?view.Default,
     settings: anyerror!CreationSettings,
 
-    fn read(binding: ?view.Default, home: []const u8, inherit_effort: bool, load: *const fn ([]const u8) anyerror!preferences.Values) CreationSnapshot {
+    fn read(binding: ?view.Default, home: []const u8, load: *const fn ([]const u8) anyerror!preferences.Values) CreationSnapshot {
         const saved: preferences.Values = if (home.len == 0) .{} else load(home) catch |err| return .{ .binding = binding, .settings = err };
         return .{ .binding = binding, .settings = .{
-            .effort = if (inherit_effort and binding != null) saved.reasoning_effort else null,
+            .effort = saved.reasoning_effort,
             .permission = saved.permission_mode,
         } };
     }
@@ -627,14 +628,14 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
         try self.initScreen(screen);
     }
     self.screen_fresh = false;
-    var opened: [6]std.Io.File = undefined;
+    var opened: [7]std.Io.File = undefined;
     var count: usize = 0;
     errdefer for (opened[0..count]) |file| file.close(self.init.io);
     for (&opened) |*file| {
         file.* = try self.hooks.scratch(self.init);
         count += 1;
     }
-    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].* };
+    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].*, .parts = opened[6] };
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
@@ -773,7 +774,7 @@ fn keepUpgrade(self: *Self) !void {
 
 fn disposeSession(self: *Self, left: Left) void {
     if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "details" }) |name| @field(files, name).close(self.init.io);
+        inline for (.{ "scratch", "action", "inspection", "details", "parts" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
     if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
@@ -1332,7 +1333,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
-            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
+            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, read.content, &line.bytes)) {
                 .line => |text| {
                     line.result = .line;
                     line.len = text.len;
@@ -1344,8 +1345,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             };
         },
         .create => |*snapshot| {
-            var compaction_buffer: [20]u8 = undefined;
-            const input = self.creationInput(snapshot, &compaction_buffer) catch |err| {
+            const input = self.creationInput(snapshot) catch |err| {
                 self.answer = .{ .reply = .refused(@errorName(err)) };
                 return;
             };
@@ -1486,10 +1486,10 @@ fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapsho
 }
 
 fn creationSnapshot(self: *const Self, binding: ?view.Default) CreationSnapshot {
-    return .read(binding, self.options.home, self.options.selectors.needsPreferences(), preferences.load);
+    return .read(binding, self.options.home, preferences.load);
 }
 
-fn creationInput(self: *const Self, snapshot: *const CreationSnapshot, compaction_buffer: *[20]u8) !configure_input.ConfigureInput {
+fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configure_input.ConfigureInput {
     const saved = try snapshot.settings;
     const binding = &snapshot.binding;
     var configuration: configure_input.ConfigureInput = .{
@@ -1500,7 +1500,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot, compactio
         .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
-    configuration.completeCreation(if (binding.*) |value| value.provider else .codex, if (binding.*) |*value| value.model.slice() else product_defaults.recommended_model, @import("os/read_image_file.zig").available, saved.effort, saved.permission, compaction_buffer);
+    configuration.applySavedCreation(saved.effort, saved.permission);
     return configuration;
 }
 
@@ -1596,9 +1596,9 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     return self.state.upgrade;
 }
 
-fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
+fn conversationLine(raw: *anyopaque, can_stop: bool) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind);
+    const said = view.conversation(&self.state, self.opened, can_stop);
     return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
@@ -1852,8 +1852,9 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     return null;
 }
 
-fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
-    return requests.readActivityPrefix(self.options.store, session, position, buffer);
+/// A parts value reads its part list into the scratch, which no other job holds while this one runs.
+fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, value: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    return value_reads.firstLine(requests, self.options.store, session, position, value, self.scratch.?, buffer);
 }
 
 fn createSession(self: *Self, requests: client.Requests, input: configure_input.ConfigureInput, reply: *Reply) !void {
@@ -1917,11 +1918,13 @@ const Seen = struct {
         workspace: protocol.Bounded(64) = .{},
         provider: ?protocol.Bounded(64) = null,
         model: ?protocol.Bounded(64) = null,
-        permission_mode: protocol.Bounded(64) = .{},
+        permission_mode: ?protocol.Bounded(64) = null,
         tools: ?protocol.Bounded(protocol.max_tool_names_bytes) = null,
         loaded_tools: ?protocol.Bounded(protocol.max_tool_names_bytes) = null,
         label: ?protocol.Bounded(64) = null,
         reasoning_effort: ?protocol.Bounded(64) = null,
+        saved_effort: ?model_capability.ReasoningEffort = null,
+        saved_permission: ?protocol.PermissionMode = null,
     } = .{},
     stops: usize = 0,
     archives: usize = 0,
@@ -1945,6 +1948,22 @@ const Seen = struct {
     }
 };
 
+fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
+    var served = value;
+    served.served_attention = protocol.session_work.attention(served);
+    served.served_group = protocol.session_work.group(served);
+    served.actions.stop = switch (served.served_group.?) {
+        .needs_you, .working, .queued => true,
+        .done => false,
+    };
+    served.actions.decide = if (served.served_group.? == .needs_you) served.first_action else null;
+    return served;
+}
+
+fn fixtureSessionWork(value: protocol.session_work.Work) protocol.SessionWork {
+    return .fromCore(fixtureWork(value));
+}
+
 const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
 const fake_operations: Operations = .{
@@ -1967,18 +1986,18 @@ const fake_operations: Operations = .{
             page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
                 const since = test_now_s - 10 - at;
-                row.* = .{ .read_version = page.since, .work = .{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 } };
+                row.* = .{ .read_version = page.since, .work = fixtureSessionWork(.{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 }) };
                 row.reference.set(reference) catch unreachable;
                 row.workspace.set("/work") catch unreachable;
                 row.model.set("gpt-5.5") catch unreachable;
-                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
+                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .text = .{ .length = 27, .digest = @splat(0) } } };
                 row.peers.from_person_at = since;
             }
             return null;
         }
     }.list,
     .first_line = struct {
-        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, _: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
             Seen.now.line = .{ .session = session[0..6].*, .position = position };
             const text = "Fix the flaky test\nand more";
             @memcpy(buffer[0..text.len], text);
@@ -1993,11 +2012,13 @@ const fake_operations: Operations = .{
                 .workspace = Seen.bounded(settings.workspace.value),
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
-                .permission_mode = Seen.bounded(settings.permission_mode.value),
+                .permission_mode = if (settings.permission_mode.present) Seen.bounded(settings.permission_mode.value) else null,
                 .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools.cli) catch unreachable else null,
                 .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded.cli) catch unreachable else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
+                .saved_effort = settings.preferences.reasoning_effort,
+                .saved_permission = settings.preferences.permission_mode,
             };
             reply.* = .{ .outcome = .accepted, .session = "n3w5es".* };
             reply.handle.set("create-handle") catch unreachable;
@@ -2150,7 +2171,7 @@ const Rig = struct {
         var frame = try rig.shown(width, height);
         defer frame.deinit();
         for (0..height) |row| {
-            if (std.mem.indexOf(u8, try frame.line(@intCast(row)), "New Session")) |column| {
+            if (std.mem.indexOf(u8, try frame.line(@intCast(row)), "New chat")) |column| {
                 return rig.click(@intCast(column), @intCast(row), width, height);
             }
         }
@@ -2265,7 +2286,7 @@ test "initial presentation release restores focus only to the active Session" {
 
 fn overviewGround() !void {
     var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5", .selectors = .{ .provider = "codex", .model = "gpt-5.5" } }, fake_operations, &cancellation);
     defer rig.close();
     for ([_]struct { caps: view.Caps, ground: vaxis.Color }{
         .{ .caps = .{}, .ground = .{ .rgb = .{ 0x1b, 0x21, 0x36 } } },
@@ -2305,21 +2326,23 @@ test "SUI-40 pinned Session separator is ground and inert" {
             if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Pinned test Session") != null) break @intCast(row);
         } else return error.PinnedSessionNotDrawn;
         const new_row: u16 = for (0..30) |row| {
-            if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "New Session") != null) break @intCast(row);
+            if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "New chat") != null) break @intCast(row);
         } else return error.NewSessionNotDrawn;
-        const separator = pinned_row + 1;
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, new_row).?.style.bg));
-        for (0..30) |col| {
-            const cell = shown.screen.readCell(@intCast(col), separator).?;
-            try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
-            try std.testing.expectEqual(ground, cell.style.bg);
+        try std.testing.expect((try shown.line(pinned_row + 2)).len != 0);
+        for ([_]u16{ new_row + 2, pinned_row + 1 }) |row| {
+            for (0..width) |col| {
+                const cell = shown.screen.readCell(@intCast(col), row).?;
+                try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
+                try std.testing.expectEqual(ground, cell.style.bg);
+            }
+            const opens = Seen.now.conversations;
+            const pins = Seen.now.pins;
+            try std.testing.expect(try rig.click(4, row, width, 30) == null);
+            try std.testing.expectEqual(selection, overview.state.selected);
+            try std.testing.expectEqual(opens, Seen.now.conversations);
+            try std.testing.expectEqual(pins, Seen.now.pins);
         }
-        const opens = Seen.now.conversations;
-        const pins = Seen.now.pins;
-        try std.testing.expect(try rig.click(4, separator, width, 30) == null);
-        try std.testing.expectEqual(selection, overview.state.selected);
-        try std.testing.expectEqual(opens, Seen.now.conversations);
-        try std.testing.expectEqual(pins, Seen.now.pins);
     };
 }
 
@@ -2416,7 +2439,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("/work", start.workspace.slice());
     try std.testing.expectEqualStrings("codex", start.provider.?.slice());
     try std.testing.expectEqualStrings("gpt-5.5", start.model.?.slice());
-    try std.testing.expectEqualStrings(product_defaults.permission_mode, start.permission_mode.slice());
+    try std.testing.expect(start.permission_mode == null);
     try std.testing.expect(start.label == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
@@ -2487,7 +2510,7 @@ test "facts omit an unsupported saved effort that the next start will not use" {
     }
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.creation.reasoning_effort.?.slice());
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .max), Seen.now.creation.saved_effort);
 }
 
 fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
@@ -2534,7 +2557,7 @@ test "a default saved elsewhere while the overview is open outlasts its exit wit
     try std.testing.expectEqualStrings("gpt-6-luna", values.model.slice());
 }
 
-test "empty creation with no saved binding requires a model without inventing one" {
+fn checkEmptyCreationBinding() !void {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
@@ -2542,11 +2565,11 @@ test "empty creation with no saved binding requires a model without inventing on
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(Seen.now.creation.require_model);
     try std.testing.expect(Seen.now.creation.provider == null and Seen.now.creation.model == null);
-    try std.testing.expectEqualStrings(product_defaults.permission_mode, Seen.now.creation.permission_mode.slice());
+    try std.testing.expect(Seen.now.creation.permission_mode == null);
     try std.testing.expect(Seen.now.creation.label == null);
 }
 
-test "empty Session creation reads saved permissions even with explicit selectors" {
+fn checkCreationPermissionPreferences() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2560,21 +2583,22 @@ test "empty Session creation reads saved permissions even with explicit selector
             try std.testing.expect(try rig.press("\r") == null);
             try std.testing.expect(try rig.settle() == null);
             try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
-            try std.testing.expectEqualStrings(if (saved) |mode| @tagName(mode) else product_defaults.permission_mode, Seen.now.creation.permission_mode.slice());
+            try std.testing.expectEqual(saved, Seen.now.creation.saved_permission);
+            try std.testing.expect(Seen.now.creation.permission_mode == null);
         }
     }
 }
 
-test "empty creation sends the fresh tool profile" {
+fn checkCreationToolOmission() !void {
     const rig = try openOverview();
     defer rig.close();
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).allowed, Seen.now.creation.tools.?.slice());
-    try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).loaded, Seen.now.creation.loaded_tools.?.slice());
+    try std.testing.expect(Seen.now.creation.tools == null);
+    try std.testing.expect(Seen.now.creation.loaded_tools == null);
 }
 
-test "empty creation takes saved effort only when the launch reads defaults" {
+fn checkCreationEffortPreferences() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2586,7 +2610,8 @@ test "empty creation takes saved effort only when the launch reads defaults" {
         defer rig.close();
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (explicit) try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.creation.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), Seen.now.creation.saved_effort);
+        try std.testing.expect(Seen.now.creation.reasoning_effort == null);
     }
 }
 
@@ -2791,7 +2816,7 @@ test "a canonical Store failure in a listing ends the overview" {
 test "a refused first line answers its row, and a canonical Store failure ends the overview" {
     const Refuse = struct {
         var code: []const u8 = "";
-        fn firstLine(_: *Self, _: client.Requests, _: []const u8, _: u64, _: []u8) !protocol_reply.ActivityPrefixReply {
+        fn firstLine(_: *Self, _: client.Requests, _: []const u8, _: u64, _: content_value.Value, _: []u8) !protocol_reply.ActivityPrefixReply {
             return .{ .failure = readFailure(code) };
         }
     };
@@ -2861,7 +2886,7 @@ test "a stop whose reply was lost names its request on departure" {
 
 fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
     const written = try finishedWith(rig, {}, null, buffer);
-    const at = std.mem.indexOf(u8, written, "\nDetached. Host work continues.\nOverview: rui --store ") orelse return error.TestExpectedDetached;
+    const at = std.mem.indexOf(u8, written, "\nYour chats keep working while you are away.\nCome back with: rui\nOverview: rui --store ") orelse return error.TestExpectedDetached;
     return written[0..at];
 }
 
@@ -2897,7 +2922,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     overview.opened = "k7m2qx".*;
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    _ = try conversed(overview, .working, .stop);
+    _ = try conversed(overview, .working, .{ .stop = true });
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
@@ -2934,7 +2959,7 @@ test "a terminal that answers the program status probe gets each Session's recor
         var finished = false;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            if (finished) page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
+            if (finished) page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 });
             return null;
         }
     };
@@ -2959,7 +2984,7 @@ test "a terminal that answers the program status probe gets each Session's recor
     written = rig.signalled();
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     written = rig.signalled();
@@ -3068,12 +3093,12 @@ test "each later finish, and each later wait, is a record again though no listin
     const blocked = "\x1b]7501;state=blocked:id=rui/k7m2qx:kind=permission:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     const finished = struct {
         fn of(id: u64) protocol.SessionWork {
-            return .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = id, .operation = id };
+            return fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = id, .operation = id });
         }
     }.of;
     const waiting = struct {
         fn of(id: u64, action: u64) protocol.SessionWork {
-            return .{ .state = .{ .approval = .{ .since = test_now_s } }, .turn = id, .operation = id, .first_action = action };
+            return fixtureSessionWork(.{ .state = .{ .approval = .{ .since = test_now_s } }, .turn = id, .operation = id, .first_action = action });
         }
     }.of;
     for ([_]struct { work: ?protocol.SessionWork, record: ?[]const u8 }{
@@ -3106,7 +3131,7 @@ test "a later Turn's finish the conversation read first is still a record when t
         var finished_turn: u64 = 1;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn };
+            page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn });
             return null;
         }
     };
@@ -3125,7 +3150,7 @@ test "a later Turn's finish the conversation read first is still a record when t
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -3142,7 +3167,7 @@ test "a finish the conversation opened on is no done record when a listing reads
         var finished_turn: ?u64 = null;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            if (finished_turn) |finished| page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished };
+            if (finished_turn) |finished| page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished });
             return null;
         }
     };
@@ -3161,7 +3186,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, true);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }) }, true);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
@@ -3193,7 +3218,7 @@ test "records go out though the terminal never answered the probe, and nothing e
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, 0x07) == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
 }
 
@@ -3218,7 +3243,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, true).notice.?);
 
     const queued = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer queued.close();
@@ -3232,7 +3257,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try queued.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, true).notice.?);
 }
 
 test "a failed terminal restore still prints the departure guidance" {
@@ -3248,7 +3273,7 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Not sure the new Session was created. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure the new chat was created. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 const HostRecovery = struct {
@@ -3487,7 +3512,7 @@ test "Settings composes the Overview list at most once with and without a retain
             if (!retained) try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.inputHostWidget()));
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
-            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New Session"));
+            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New chat"));
         }
     }
 }
@@ -4037,7 +4062,7 @@ test "a conversation that fails to open still names unconfirmed creation on depa
     rig.overview.stopApp();
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, {}, error.AccessDenied, &buffer);
-    try std.testing.expectEqualStrings("rui: Not sure the new Session was created. Check with: rui request recover lost-handle\n" ++
+    try std.testing.expectEqualStrings("rui: Not sure the new chat was created. Check with: rui request recover lost-handle\n" ++
         "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
 }
 
@@ -4109,7 +4134,7 @@ test "leaving while creation is queued or running says what became of it" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect((try rig.press("\r\x03")).? == .overview);
-        try std.testing.expectEqualStrings("rui: The new Session was not created.\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: The new chat was not created.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     }
     {
@@ -4284,7 +4309,7 @@ test "Footer notices fit or truncate on the right without adding rows; persisten
     }
 }
 
-test "Settings Keys opens from the overview and Esc returns to settings" {
+fn sui4NestedKeys() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -4325,6 +4350,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
                     .archiving => .{ .stopping = .{ .since = test_now_s } },
                     .archived => .{ .stopped = .{ .since = test_now_s, .cause = .stop } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return null;
         }
@@ -4678,7 +4704,7 @@ test "SUI-29 overview top space and drawn controls accept clicks" {
             try std.testing.expect(!rig.overview.state.creating());
             try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
 
-            const label = if (control == .new_session) "New Session" else "Settings";
+            const label = if (control == .new_session) "New chat" else "Settings";
             var column: u16 = undefined;
             const row: u16 = for (0..30) |at| {
                 if (std.mem.indexOf(u8, try shown.line(@intCast(at)), label)) |col| {
@@ -4898,11 +4924,11 @@ test "SUI-41 sidebar stays live and wheels route to their pane" {
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 0), peer.wheels);
     try std.testing.expect(!std.meta.eql(before, overview.app_sessions.list.scroll));
     const scrolled = overview.app_sessions.list.scroll;
-    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
     Seen.now.listed = 2;
@@ -5302,7 +5328,7 @@ test "App root navigation shows and focuses the main pane before every Session s
     }
 }
 
-test "App settings Enter reaches Root at both widths with and without a retained Session" {
+fn sui4SettingsEntry() !void {
     const Settings = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -5347,6 +5373,7 @@ test "App settings Enter reaches Root at both widths with and without a retained
                 _ = overview.app_session.?.frontend.?.input.append("retained draft");
             }
             const previous = overview.root.session;
+            const previous_selection = overview.state.selected;
             const frontend = if (overview.app_session) |left| left.frontend else null;
             var ctx = rig.context();
             defer ctx.cmds.deinit(std.testing.allocator);
@@ -5363,7 +5390,11 @@ test "App settings Enter reaches Root at both widths with and without a retained
                 try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
             }
             try std.testing.expect(overview.root.input.layer.settingsOpen());
-            try std.testing.expect(overview.state.selected == .settings);
+            if (retained) {
+                try std.testing.expectEqual(previous_selection, overview.state.selected);
+            } else {
+                try std.testing.expect(overview.state.selected == .settings);
+            }
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
             const focus = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
@@ -5569,7 +5600,7 @@ fn controlsAboveScroll() !void {
             var marker: ?usize = null;
             for (0..9) |row| {
                 const line = try shown.line(@intCast(row));
-                if (std.mem.indexOf(u8, line, "New Session") != null) control = row;
+                if (std.mem.indexOf(u8, line, "New chat") != null) control = row;
                 if (std.mem.indexOf(u8, line, "↑") != null) marker = row;
             }
             try std.testing.expect(control != null and marker != null and control.? < marker.?);
@@ -5605,7 +5636,7 @@ fn sidebarControls() !void {
     _ = try rig.press("\x1b[F\x1b[A");
     var before = try rig.shown(140, 11);
     defer before.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New chat") != null);
     const selected = rig.overview.state.selected.session;
     _ = try rig.press("\r");
     for ([_]u16{ 140, 46, 140, 46 }) |width| {
@@ -5613,7 +5644,7 @@ fn sidebarControls() !void {
         defer shown.deinit();
         const text = try shown.text();
         try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
-        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
@@ -5628,7 +5659,8 @@ fn sidebarControls() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
     }
 }
@@ -5670,7 +5702,7 @@ fn sidebarLateListing() !void {
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
-            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") == null);
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
@@ -5758,7 +5790,8 @@ fn sidebarLateListing() !void {
     for ([_]u16{ 140, 46 }) |width| {
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Fix the flaky test") != null);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(29), "     Settings"));
@@ -5779,7 +5812,7 @@ fn controlsAboveProvider() !void {
         var shown = try rig.shown(width, 4);
         defer shown.deinit();
         try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(0), " "));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "New chat") != null);
     }
 }
 test "relaunch departure matrix preserves every screen and all unsent drafts" {
@@ -5982,7 +6015,7 @@ test "bare CSI and SS3 arrows move between view tabs through the existing key ta
     };
 }
 
-test "App settings Model keeps every named app binding live while filter text stays local" {
+fn sui4ModelKeys() !void {
     for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
         if (std.mem.eql(u8, bytes, "\x1b")) continue;
         errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
@@ -6005,7 +6038,7 @@ test "App settings Model keeps every named app binding live while filter text st
     };
 }
 
-test "App settings Model filters live choices and saves the next Session at both widths" {
+fn sui4ModelFilter() !void {
     for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "codex", "openai" }) |provider| for ([_][]const u8{ "gpt-6-luna", "future-chat" }) |id| {
         errdefer std.debug.print("Model width={d} provider={s} id={s}\n", .{ width, provider, id });
         var tmp = std.testing.tmpDir(.{});
@@ -6207,7 +6240,7 @@ test "chat info Archive backend forwards exact core ledger admission through the
     };
 }
 
-test "Overview mouse Settings hover persists across frames and never changes selection or focus" {
+fn sui4Hover() !void {
     const rig = try openListed();
     defer rig.close();
     var plain = try rig.shown(80, 24);
@@ -6351,6 +6384,9 @@ test "Overview pinned New Session hover survives unchanged frames without select
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         const pinned = rig.overview.app_new_session.widget();
+        const new_row: u16 = for (0..30) |row| {
+            if (std.mem.indexOf(u8, try plain.line(@intCast(row)), "New chat") != null) break @intCast(row);
+        } else return error.NewSessionNotDrawn;
         const motion: vxfw.Event = .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } };
         try pinned.handleEvent(&ctx, .mouse_enter);
         try pinned.handleEvent(&ctx, motion);
@@ -6358,8 +6394,8 @@ test "Overview pinned New Session hover survives unchanged frames without select
             var hovered = try rig.shown(width, 30);
             defer hovered.deinit();
             const style = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
-            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, 0).?.style.bg);
-            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, 0).?.style.reverse);
+            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, new_row).?.style.bg);
+            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, new_row).?.style.reverse);
             try std.testing.expect(rig.overview.app_new_session.row.inner.hover.pointing);
             try std.testing.expectEqual(selected, rig.overview.state.selected);
             for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
@@ -6372,7 +6408,7 @@ test "Overview pinned New Session hover survives unchanged frames without select
         try pinned.handleEvent(&ctx, .mouse_leave);
         var left = try rig.shown(width, 30);
         defer left.deinit();
-        try std.testing.expectEqual(plain.screen.readCell(4, 0).?.style, left.screen.readCell(4, 0).?.style);
+        try std.testing.expectEqual(plain.screen.readCell(4, new_row).?.style, left.screen.readCell(4, new_row).?.style);
         try std.testing.expect(!rig.overview.app_new_session.row.inner.hover.pointing);
     }
 }
@@ -6450,6 +6486,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         const next_creation = overview.creationSnapshot(overview.state.default);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
+        try std.testing.expect((try overview.creationInput(&next_creation)).model.present);
         try std.testing.expect(overview.state.login_at != null);
         try std.testing.expect(!overview.root.input.layer.signInOpen() and !overview.root.input.layer.settingsOpen());
         const expected = if (session_open) session.widget() else (overview.root.session orelse overview.widget());
@@ -6630,18 +6667,11 @@ test "overview ignores printable ASCII Unicode unknown keys x r and bracketed pa
         defer after.deinit();
         try std.testing.expectEqualStrings(try before.text(), try after.text());
         try std.testing.expect(after.cursor() == null);
-        try std.testing.expect(std.mem.indexOf(u8, try after.text(), "Type a task") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try after.text(), "What shall we work on?") == null);
     }
 }
 
-test "SUI-2 new Session captures configuration and settles once" {
-    try creationDeduplicates();
-    try creationRecovery();
-    try creationOpensBlank();
-    try creationCapturesPreferences();
-}
-
-fn creationDeduplicates() !void {
+fn checkCreationDeduplication() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click_first| {
         const rig = try openListed();
         defer rig.close();
@@ -6668,7 +6698,7 @@ fn creationDeduplicates() !void {
     };
 }
 
-fn creationRecovery() !void {
+fn checkCreationRecovery() !void {
     const CreationAnswer = struct {
         var uncertain: bool = false;
         fn create(_: *Self, _: client.Requests, _: configure_input.ConfigureInput, reply: *Reply) !void {
@@ -6700,7 +6730,7 @@ fn creationRecovery() !void {
     }
 }
 
-fn creationOpensBlank() !void {
+fn checkAcceptedEmptyCreation() !void {
     const Scratch = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -6750,10 +6780,10 @@ fn creationOpensBlank() !void {
         try std.testing.expectEqualStrings("/work", Seen.now.creation.workspace.slice());
         try std.testing.expectEqualStrings("codex", Seen.now.creation.provider.?.slice());
         try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.creation.model.?.slice());
-        try std.testing.expectEqualStrings("ask", Seen.now.creation.permission_mode.slice());
-        try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
-        try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).allowed, Seen.now.creation.tools.?.slice());
-        try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).loaded, Seen.now.creation.loaded_tools.?.slice());
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), Seen.now.creation.saved_permission);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), Seen.now.creation.saved_effort);
+        try std.testing.expect(Seen.now.creation.tools == null);
+        try std.testing.expect(Seen.now.creation.loaded_tools == null);
         try std.testing.expect(Seen.now.creation.label == null);
         try std.testing.expect(frontend.reader.thread == null);
         const focused = rig.last_focus orelse return error.ExpectedChatFocus;
@@ -6794,7 +6824,7 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .end = &.{ "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~", "\x1b[1;1F" },
     .ctrl_end = &.{ "\x1b[1;5F", "\x1b[4;5~" },
 });
-fn creationCapturesPreferences() !void {
+fn checkCreationSnapshotAtActivation() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -6815,8 +6845,8 @@ fn creationCapturesPreferences() !void {
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
         try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.creation.model.?.slice());
-        try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
-        try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), Seen.now.creation.saved_effort);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), Seen.now.creation.saved_permission);
         try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
         const after = try preferences.load(home);
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .xhigh), after.reasoning_effort);
@@ -6976,9 +7006,10 @@ const EmptySessionOwner = struct {
         return null;
     }
 
-    fn firstMessageLine(_: *Self, _: client.Requests, reference: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    fn firstMessageLine(_: *Self, _: client.Requests, reference: []const u8, position: u64, value: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
         const row = canonical(reference);
         try std.testing.expectEqual(row.first_message.?.position, position);
+        try std.testing.expectEqualDeep(row.first_message.?.content, value);
         @memcpy(buffer[0..message.len], message);
         return .{ .line = buffer[0..message.len] };
     }
@@ -7097,7 +7128,7 @@ const EmptySessionOwner = struct {
         try std.testing.expect(self.rig.overview.root.session.?.eql(self.frontend().widget()));
         try std.testing.expectEqualStrings("", self.frontend().input.composition().bytes);
         try std.testing.expect(self.frontend().submission.intent == null);
-        try self.expectSelectedName(reference, "New Session");
+        try self.expectSelectedName(reference, "New chat");
         return reference;
     }
 
@@ -7123,7 +7154,7 @@ const EmptySessionOwner = struct {
         try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
-        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New chat");
     }
 
     fn chooseEffort(self: *EmptySessionOwner) !void {
@@ -7137,7 +7168,7 @@ const EmptySessionOwner = struct {
         try self.joinRead();
         try self.readCurrent();
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .medium), self.frontend().line.effort);
-        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New chat");
     }
 
     fn expectSelectedName(self: *EmptySessionOwner, reference: view.Reference, name: []const u8) !void {
@@ -7159,7 +7190,7 @@ const EmptySessionOwner = struct {
                 for (0..columns) |col| try text.writer.writeAll(shown.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
                 try text.writer.writeByte('\n');
             }
-            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
+            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New chat")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
             try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
             var bold_name = false;
@@ -7258,7 +7289,7 @@ test "empty New Session owner opens blank then hides on leave without deleting i
     empty.label = .{};
     try empty.label.?.set("Renamed but still empty");
     try fixture.refresh();
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     try fixture.leave();
     try fixture.expectVisible(&.{});
     try fixture.refresh();
@@ -7309,7 +7340,7 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(chat.submission.intent != null);
     try std.testing.expectEqualStrings(EmptySessionOwner.message, try chat.input.message(chat.submission.intent.?.message));
     try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     try EmptySessionOwner.wait(&chat.submission.task);
     try std.testing.expect(chat.submission.join() == .failed);
     try std.testing.expect(chat.submission.captured != null);
@@ -7329,9 +7360,9 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(chat.submission.intent == null);
     try fixture.refresh();
     try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     const row = EmptySessionOwner.canonical(&reference);
-    row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+    row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } } };
     row.end = 2;
     row.revision += 1;
     row.peers.from_person_at = test_now_s;
@@ -7402,7 +7433,7 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
 }
 
-test "Overview forwards captured covered pane and paste without rereading newer Root state" {
+fn sui4CapturedPaste() !void {
     const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
@@ -7525,7 +7556,7 @@ test "App list selection consumes the core projection through arrivals covered S
 
     const second = try fixture.openNew();
     for (EmptySessionOwner.rows[0..EmptySessionOwner.count]) |*row| {
-        row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+        row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } } };
         row.end = 1;
         row.revision += 1;
         row.peers.from_person_at = test_now_s;
@@ -7560,7 +7591,7 @@ test "App list selection consumes the core projection through arrivals covered S
     try Check.draw(rig);
 }
 
-test "creation snapshot reads one owned preference pair with explicit null binding absent home and errors" {
+fn checkCreationSnapshot() !void {
     const Load = struct {
         var calls: usize = 0;
         var fail: bool = false;
@@ -7576,47 +7607,46 @@ test "creation snapshot reads one owned preference pair with explicit null bindi
     Load.fail = false;
     Load.values = .{ .reasoning_effort = .high, .permission_mode = .bypass };
     const binding = view.Default.of("codex", "gpt-6-luna").?;
-    const captured = CreationSnapshot.read(binding, "/snapshot-home", true, Load.read);
+    const captured = CreationSnapshot.read(binding, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 1), Load.calls);
     Load.values = .{ .reasoning_effort = .low, .permission_mode = .ask };
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try captured.settings).effort);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try captured.settings).permission);
 
-    const explicit = CreationSnapshot.read(binding, "/snapshot-home", false, Load.read);
+    const explicit = CreationSnapshot.read(binding, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 2), Load.calls);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (try explicit.settings).effort);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try explicit.settings).effort);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), (try explicit.settings).permission);
-    const unbound = CreationSnapshot.read(null, "/snapshot-home", true, Load.read);
+    const unbound = CreationSnapshot.read(null, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 3), Load.calls);
     try std.testing.expect(unbound.binding == null);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (try unbound.settings).effort);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try unbound.settings).effort);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), (try unbound.settings).permission);
 
-    const absent = CreationSnapshot.read(binding, "", true, Load.read);
+    const absent = CreationSnapshot.read(binding, "", Load.read);
     try std.testing.expectEqual(@as(usize, 3), Load.calls);
     try std.testing.expectEqual(CreationSettings{}, try absent.settings);
     Load.fail = true;
-    const failed_snapshot = CreationSnapshot.read(binding, "/snapshot-home", true, Load.read);
+    const failed_snapshot = CreationSnapshot.read(binding, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 4), Load.calls);
     try std.testing.expectError(error.CreationPreferencesUnavailable, failed_snapshot.settings);
-    const explicit_failed = CreationSnapshot.read(binding, "/snapshot-home", false, Load.read);
+    const explicit_failed = CreationSnapshot.read(binding, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 5), Load.calls);
     try std.testing.expectError(error.CreationPreferencesUnavailable, explicit_failed.settings);
 
     const rig = try openOverview();
     defer rig.close();
-    var buffer: [20]u8 = undefined;
-    const input = try rig.overview.creationInput(&unbound, &buffer);
+    const input = try rig.overview.creationInput(&unbound);
     try std.testing.expect(input.require_model);
     try std.testing.expect(!input.provider.present and !input.model.present);
-    try std.testing.expectEqualStrings("ask", input.permission_mode.value);
-    const defaults = try rig.overview.creationInput(&absent, &buffer);
-    try std.testing.expectEqualStrings(product_defaults.permission_mode, defaults.permission_mode.value);
-    try std.testing.expectError(error.CreationPreferencesUnavailable, rig.overview.creationInput(&failed_snapshot, &buffer));
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), input.preferences.permission_mode);
+    const defaults = try rig.overview.creationInput(&absent);
+    try std.testing.expect(!defaults.permission_mode.present);
+    try std.testing.expectError(error.CreationPreferencesUnavailable, rig.overview.creationInput(&failed_snapshot));
     try std.testing.expectEqual(@as(usize, 5), Load.calls);
 }
 
-test "creation preference read failure is retained through repair and ordinary refusal then retry" {
+fn checkCreationPreferenceFailure() !void {
     const File = struct {
         fn write(dir: std.Io.Dir, bytes: []const u8) !void {
             const file = try dir.createFile(std.testing.io, ".config/rui/preferences", .{ .permissions = .fromMode(0o600) });
@@ -7652,7 +7682,7 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
     try File.write(tmp.dir, File.valid);
     try std.testing.expect(try rig.press("\r") == null);
-    try std.testing.expect(try rig.click(3, 0, 140, 24) == null);
+    try std.testing.expect(try rig.clickNewSession(140, 24) == null);
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
     try std.testing.expect(try rig.settle() == null);
@@ -7668,11 +7698,32 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try overview.jobs[0].create.settings).permission);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
-    try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
-    try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), Seen.now.creation.saved_effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), Seen.now.creation.saved_permission);
 }
 
-test "App overview Tab projection is list then Settings and Settings Enter uses the drawn identity" {
+fn sui4Pointer() !void {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        rig.overview.state.launch = .done;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const row = view.layout(&rig.overview.state).settings.start + 1;
+        const selection = rig.overview.state.selected;
+        for ([_]u16{ 0, 4, 13, 20, width - 1 }) |col| {
+            try std.testing.expect(try rig.click(col, row, width, 30) == null);
+            try std.testing.expect(rig.overview.root.input.listFocused());
+            try std.testing.expectEqual(selection, rig.overview.state.selected);
+            try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
+        }
+        try std.testing.expect(try rig.click(5, row, width, 30) == null);
+        try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(selection, rig.overview.state.selected);
+    }
+}
+
+fn sui4Tab() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -8048,6 +8099,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             const row = &page.rows[page.count - 1];
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
+            row.work = fixtureSessionWork(row.work.core());
             row.provider = .codex;
             return failure;
         }
@@ -8234,7 +8286,7 @@ test "wide launch draws late listing after presentation deadline without flashin
         {
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
         }
         if (fast) {
             Seen.now.listed = 1;
@@ -8242,19 +8294,19 @@ test "wide launch draws late listing after presentation deadline without flashin
             try std.testing.expect(try rig.settle() == null);
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
         } else {
             _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1149, .list_visible = true, .host_unavailable = false } });
             {
                 var frame = try rig.shown(140, 40);
                 defer frame.deinit();
-                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
             }
             _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
             {
                 var frame = try rig.shown(140, 40);
                 defer frame.deinit();
-                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") != null);
             }
             _ = try overview.event(.presentation_presented);
             Seen.now.listed = 1;
@@ -8262,14 +8314,14 @@ test "wide launch draws late listing after presentation deadline without flashin
             try std.testing.expect(try rig.settle() == null);
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") != null);
         }
         try std.testing.expect(try rig.next(try overview.event(.launch_poll)) == null);
         try std.testing.expect(overview.state.launch == .creating);
         {
             var pending = try rig.shown(140, 40);
             defer pending.deinit();
-            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New Session") != null);
+            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New chat") != null);
         }
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
@@ -8280,7 +8332,7 @@ test "wide launch draws late listing after presentation deadline without flashin
         defer split.deinit();
         const divider = split.screen.readCell(Root.list_width, 0).?.char.grapheme;
         try std.testing.expect(std.mem.eql(u8, divider, "┆") or std.mem.eql(u8, divider, "|"));
-        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, try split.text(), "enter open") == null);
     }
 }
@@ -8296,7 +8348,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
                 row.model.set("gpt-5.5") catch unreachable;
             }
             page.rows[2].archive_state = .archived;
-            for (page.rows[3..5]) |*row| row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s, .sender = null, .content = .{ .length = 1, .digest = @splat(0) } };
+            for (page.rows[3..5]) |*row| row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 1, .digest = @splat(0) } } };
             return null;
         }
     };
@@ -8308,7 +8360,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
     _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     var shown = try rig.shown(140, 40);
     defer shown.deinit();
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New Session"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New chat"));
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "enter open"));
     var ctx = rig.context();
     defer {
@@ -8395,7 +8447,7 @@ test "wide launch creates a focused empty chat and Escape returns to overview" {
     try std.testing.expect(overview.state.launch == .creating);
     var pending = try rig.shown(140, 40);
     defer pending.deinit();
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try pending.text(), "+ New Session"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try pending.text(), "+ New chat"));
     _ = try rig.settle();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     const frontend = overview.app_session.?.frontend.?;
@@ -8458,7 +8510,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
         var refused = try rig.shown(140, 40);
         defer refused.deinit();
         const text = try refused.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (uncertain) "Creation unsure; details on exit" else "Not created") != null);
         try std.testing.expectEqual(uncertain, rig.overview.state.creating());
     }
@@ -8486,7 +8538,7 @@ test "wide launch shows stopped Host recovery and failed listing" {
         var recovered = try rig.shown(140, 40);
         defer recovered.deinit();
         const text = try recovered.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (availability == .stopped) "Host stopped" else "Host unreachable") != null);
         if (availability == .stopped) try std.testing.expect(std.mem.indexOf(u8, text, "start") != null);
         try std.testing.expectEqual(.done, rig.overview.state.launch);
@@ -8515,6 +8567,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
                     2 => .{ .approval = .{ .since = since } },
                     else => .{ .failed = .{ .since = since, .code = .{}, .resets_at = null } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return failure;
         }
@@ -8539,7 +8592,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
             }
             errdefer std.debug.print("paint cells: {s}\n", .{text.written()});
             for (labels) |label| try std.testing.expect(std.mem.indexOf(u8, text.written(), label) != null);
-            try std.testing.expect(std.mem.indexOf(u8, text.written(), "+ New Session") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "+ New chat") != null);
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "Settings") != null);
         }
     };
@@ -8584,7 +8637,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
     stage = "chat";
     var chat = try rig.shown(46, 30);
     defer chat.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try chat.text(), "Type a task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try chat.text(), "What shall we work on?") != null);
     stage = "escape";
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(overview.root.session == null);
@@ -8623,4 +8676,57 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
         }
         try std.testing.expect(changed);
     }
+}
+
+fn checkCreationDisplayedBinding() !void {
+    const Load = struct {
+        fn read(_: []const u8) !preferences.Values {
+            return .{ .reasoning_effort = .max, .permission_mode = .ask };
+        }
+    };
+    const rig = try openOverview();
+    defer rig.close();
+    const binding = view.Default.of("codex", "gpt-5.5").?;
+    const snapshot = CreationSnapshot.read(binding, "/home", Load.read);
+    const input = try rig.overview.creationInput(&snapshot);
+    try std.testing.expectEqualStrings("codex", input.provider.value);
+    try std.testing.expectEqualStrings("gpt-5.5", input.model.value);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .max), input.preferences.reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), input.preferences.permission_mode);
+    try std.testing.expect(!input.reasoning_effort.present and !input.permission_mode.present);
+}
+
+test "SUI-2 new_session_capture" {
+    try checkEmptyCreationBinding();
+    try checkCreationPermissionPreferences();
+    try checkCreationToolOmission();
+    try checkCreationEffortPreferences();
+    try checkCreationDeduplication();
+    try checkCreationRecovery();
+    try checkAcceptedEmptyCreation();
+    try checkCreationSnapshotAtActivation();
+    try checkCreationSnapshot();
+    try checkCreationPreferenceFailure();
+    try checkCreationDisplayedBinding();
+}
+
+test "SUI-4 Settings focus navigation and retained draft" {
+    const cases = [_]*const fn () anyerror!void{
+        sui4SettingsEntry,
+        sui4NestedKeys,
+        sui4ModelKeys,
+        sui4ModelFilter,
+        sui4Hover,
+        sui4CapturedPaste,
+        sui4Pointer,
+        sui4Tab,
+        OverviewLines.sui4WordBounds,
+        OverviewLines.sui4BottomControls,
+        SessionFrontend.sui4DraftHandoff,
+        @import("Composer.zig").sui4InactivePrompt,
+        @import("app_input.zig").sui4ChoiceFocus,
+        @import("app_input.zig").sui4PasteOwnership,
+        @import("app_input.zig").sui4RootRouting,
+    };
+    for (cases) |case| try case();
 }

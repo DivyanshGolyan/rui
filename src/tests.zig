@@ -75,10 +75,8 @@ test {
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
-    _ = @import("os/os.zig");
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
-    _ = @import("os/socket.zig");
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("preset_settings_test.zig");
@@ -100,6 +98,7 @@ test {
     _ = @import("protocol.zig");
     _ = @import("wire_request.zig");
     _ = @import("session_skills.zig");
+    _ = @import("creation_receipt_wire.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
@@ -118,7 +117,6 @@ test {
     _ = @import("server_host.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
-    _ = @import("client_defaults.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
     _ = @import("bash.zig");
@@ -158,6 +156,7 @@ test {
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
+    _ = @import("value_reads.zig");
     _ = @import("session_view_store_tests.zig");
     _ = @import("ClientTask.zig");
 }

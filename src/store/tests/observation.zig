@@ -21,7 +21,7 @@ test "Message request state has one Host precedence rule" {
     try std.testing.expectEqual(protocol.MessageRequestState.rejected, observed.requestState().?);
     observed.status = .accepted;
     observed.kind.message = .{
-        .content = .{ .length = 0, .digest = @splat(0) },
+        .content = .{ .text = .{ .length = 0, .digest = @splat(0) } },
         .queue = .{ .admission_id = 1, .state = .queued },
         .work = .{ .state = .{ .idle = .{ .since = 1 } } },
     };

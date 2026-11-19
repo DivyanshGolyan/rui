@@ -39,8 +39,12 @@ pub const Spec = struct {
 
     pub fn replyShapes(comptime self: Spec, comptime Wire: type) type {
         const r = self.Reply(Wire);
-        return Shapes(if (@hasDecl(r, "accepted_skills"))
+        return Shapes(if (@hasDecl(r, "accepted_create"))
+            (if (@hasDecl(r, "accepted_skills")) .{ r.accepted, r.accepted_create, r.accepted_skills, r.rejected } else if (@hasDecl(r, "rejected_parts")) .{ r.accepted, r.accepted_create, r.rejected, r.rejected_parts } else .{ r.accepted, r.accepted_create, r.rejected })
+        else if (@hasDecl(r, "accepted_skills"))
             .{ r.accepted, r.accepted_skills, r.rejected }
+        else if (@hasDecl(r, "rejected_parts"))
+            .{ r.accepted, r.rejected, r.rejected_parts }
         else
             .{ r.accepted, r.rejected });
     }
@@ -104,16 +108,15 @@ fn Observation(comptime name: []const u8, comptime retained_on_rejection: bool) 
 
 const MessageObservation = struct {
     pub fn shapes(comptime Wire: type) type {
-        return Shapes(Wire.command_observation_reply.message_variants);
+        return Shapes(accepted(Wire).values ++ rejected(Wire).values);
     }
 
     pub fn accepted(comptime Wire: type) type {
-        return shapeSuffix(shapes(Wire).values, 2);
+        return Shapes(Wire.command_observation_reply.message_accepted);
     }
 
     pub fn rejected(comptime Wire: type) type {
-        const values = shapes(Wire).values;
-        return Shapes(.{ values[0], values[1] });
+        return Shapes(.{Wire.command_observation_reply.message_rejected});
     }
 };
 
@@ -164,11 +167,6 @@ fn decoderObservationPayload(comptime payload: anytype, comptime index: usize, c
     return Shape(.{payload[index]} ++ decoderObservationPayload(payload, index + 1, Wire).shape);
 }
 
-fn shapeSuffix(comptime values: anytype, comptime index: usize) type {
-    if (index == values.len) return Shapes(.{});
-    return Shapes(.{values[index]} ++ shapeSuffix(values, index + 1).values);
-}
-
 fn observationPayloadShapes(comptime payloads: anytype, comptime index: usize, comptime prefix: anytype, comptime suffix: anytype, comptime Wire: type) type {
     if (index == payloads.len) return Shapes(.{});
     return Shapes(.{prefix ++ decoderObservationPayload(payloads[index], 0, Wire).shape ++ suffix} ++
@@ -217,6 +215,14 @@ const MessageRequest = struct {
         return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.text ++ .{S.Content} ++ r.text_tail ++ .{
+            S.Optional(r.require_model),
+        } ++ r.tail);
+    }
+    pub fn partsSchema(comptime S: type) type {
+        const r = S.Wire.message_request;
+        return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
+            S.Optional(r.configuration ++ .{S.Configuration}),
+        } ++ r.parts ++ .{S.Parts} ++ .{
             S.Optional(r.require_model),
         } ++ r.tail);
     }
@@ -369,11 +375,8 @@ test "command_spec resolves every subject from injected types" {
 fn mutationDecoderKinds(comptime Wire: type, comptime index: usize) type {
     const kinds = std.meta.tags(CommandKind);
     if (index == kinds.len) return Shapes(.{});
-    const r = spec(kinds[index]).Reply(Wire);
-    return Shapes((if (@hasDecl(r, "accepted_skills"))
-        .{ r.accepted, r.accepted_skills, r.rejected, r.conflict }
-    else
-        .{ r.accepted, r.rejected, r.conflict }) ++ mutationDecoderKinds(Wire, index + 1).values);
+    const facts = spec(kinds[index]);
+    return Shapes(facts.replyShapes(Wire).values ++ .{facts.Reply(Wire).conflict} ++ mutationDecoderKinds(Wire, index + 1).values);
 }
 
 pub fn mutationDecoderShapes(comptime Wire: type) type {

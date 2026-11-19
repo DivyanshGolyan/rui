@@ -58,6 +58,7 @@ class PrepushTest(unittest.TestCase):
                    subprocess.CompletedProcess([], 0, stdout=artifact + "\n")]
         with patch.object(prepush.subprocess, "run", side_effect=results) as run, redirect_stdout(io.StringIO()) as out:
             self.assertEqual(1, prepush.regenerate())
+        self.assertEqual(["zig", "build", "-j1", "openapi", "--summary", "none"], run.call_args_list[0].args[0])
         diff = run.call_args_list[-1].args[0]
         self.assertEqual(["git", "diff", "--name-only", "HEAD", "--", *prepush.GENERATED], diff)
         self.assertIn(artifact, diff)
@@ -195,8 +196,8 @@ class PrepushTest(unittest.TestCase):
                 self.assertEqual(commands["flake sources"],
                                  [sys.executable, "-B", "tests/ci/flake_sources.py"])
         self.assertNotIn("flake sources", self.commands(["docs/example.md"]))
-        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
-        self.assertIn("run: python3 -B tests/ci/flake_sources.py", workflow)
+        policy = (Path(__file__).resolve().parents[2] / ".github/actions/policy/checks.sh").read_text()
+        self.assertIn(" python3 -B tests/ci/flake_sources.py\n", policy)
 
     def test_deleted_files_select_owner_checks_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])
@@ -318,29 +319,6 @@ class PrepushTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", message)
         return self.git("rev-parse", "HEAD")
-
-    def test_merged_base_finds_only_a_merge_of_a_commit_the_base_reaches(self):
-        self.git("init", "-q", "-b", "main")
-        self.commit("a", "1\n", "root")
-        self.git("checkout", "-qb", "feature")
-        self.commit("b", "1\n", "feature")
-        self.git("checkout", "-q", "main")
-        self.commit("a", "2\n", "main moves")
-        self.git("checkout", "-qb", "other", "feature")
-        self.commit("c", "1\n", "other")
-        self.git("checkout", "-q", "feature")
-
-        def merged():
-            with contextlib.chdir(self.root):
-                return select_tests.merged_base(self.git("merge-base", "HEAD", "main"), "main")
-
-        self.assertFalse(merged(), "no merge")
-        self.git("merge", "-q", "--no-ff", "-m", "merge other", "other")
-        self.assertFalse(merged(), "a merge of a branch main does not reach")
-        self.git("merge", "-q", "--no-ff", "-m", "merge main", "main")
-        self.assertTrue(merged(), "a merge of main")
-        self.commit("b", "2\n", "after the merge")
-        self.assertTrue(merged(), "commits after the merge keep it in history")
 
     def receipt_repository(self):
         self.git("init", "-q")

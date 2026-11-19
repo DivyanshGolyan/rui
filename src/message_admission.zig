@@ -32,6 +32,7 @@ pub const Rejection = enum {
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
+    preferences_on_update,
     skill_file_unavailable,
     skill_file_too_large,
     skill_text_invalid,

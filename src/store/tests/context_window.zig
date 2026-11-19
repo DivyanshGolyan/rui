@@ -24,7 +24,7 @@ const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const settleMessagesForTesting = shared_fixtures.settleMessagesForTesting;
 
 fn saveFrozenContextWindow(storage: *Store, model: []const u8, window: ?u32) !void {
-    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .{}, .openai_listed = true }}, null);
+    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .initOne(.low), .openai_listed = true }}, null);
 }
 
 fn expectFrozenContextWindow(storage: *Store, binding: AttemptBinding, expected: u64) !void {

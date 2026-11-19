@@ -200,3 +200,89 @@ test "searchActivity fences missing assistant entries only in its scanned range"
     try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
     try std.testing.expect(storage.isFenced());
 }
+
+test "INS-8 searchActivity matches Text parts, names each part and skips Image bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-parts-config");
+    const png = @embedFile("../../codecs/fixtures/image-input/pixel.png");
+    const first_text = "a nee";
+    const second_text = "dle é needle";
+    const image_marker = "IHDR";
+    try std.testing.expect(std.mem.indexOf(u8, png, image_marker) != null);
+    // NEEDLE would also match across the first two Text parts if they were joined.
+    try store_testing.submitTestMessageParts(&storage, &tmp, "search-parts", session.slice(), &.{
+        .{ .bytes = first_text },
+        .{ .bytes = second_text },
+        .{ .bytes = png, .kind = .{ .image = .{} } },
+        .{ .bytes = image_marker ++ " needle" },
+    });
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission) };
+    try request.query.set("NEEDLE");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    const item = &result.items[0];
+    try std.testing.expectEqual(@as(usize, 2), item.count);
+    for (item.hits[0..item.count], [_]u32{ 1, 3 }, [_][]const u8{ second_text, image_marker ++ " needle" }) |*hit, part, snippet| {
+        try std.testing.expectEqual(@as(?u32, part), hit.part);
+        try std.testing.expectEqualStrings(snippet, hit.snippet.slice());
+        try std.testing.expectEqualStrings("needle", hit.snippet.slice()[hit.offset..][0..hit.length]);
+    }
+    try request.query.set(image_marker);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(@as(?u32, 3), result.items[0].hits[0].part);
+    try std.testing.expectEqual(@as(usize, 1), result.items[0].count);
+
+    const page = try arena.create(protocol.ActivityFacts);
+    const page_request: protocol.ActivityPage = .{ .session = session, .kinds = request.kinds };
+    try storage.activityPage(&page_request, page);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    const parts_position = page.items[0].position;
+    const value = page.items[0].value.admission.content;
+    try std.testing.expect(value == .parts);
+    const manifest_bytes: usize = @intCast(value.parts.identity.length);
+
+    // Leave just enough budget to cover the manifest and scan through IHDR.
+    const through_match = first_text.len + second_text.len + image_marker.len;
+    const filler = try arena.alloc(u8, reads_domain.activity_search_budget - manifest_bytes - through_match);
+    @memset(filler, 'x');
+    try submitTestMessage(&storage, &tmp, "parts-budget-filler", "parts-budget-filler", session.slice(), filler);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(parts_position, result.items[0].position);
+    try std.testing.expectEqual(@as(usize, 1), result.items[0].count);
+    try std.testing.expectEqual(@as(?u32, 3), result.items[0].hits[0].part);
+    try std.testing.expectEqualStrings(image_marker, result.items[0].hits[0].snippet.slice());
+    try std.testing.expect(result.next == null);
+
+    // One more admission leaves the budget one byte short of the manifest.
+    try submitTestMessage(&storage, &tmp, "parts-budget-boundary", "parts-budget-boundary", session.slice(), filler[0 .. through_match + 1]);
+    try storage.activityPage(&page_request, page);
+    try std.testing.expectEqual(@as(usize, 3), page.count);
+    const last_scanned = &page.items[1];
+    try std.testing.expectEqualStrings("parts-budget-filler", last_scanned.value.admission.key.slice());
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    const cursor = result.next orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(last_scanned.position, cursor.position);
+    try std.testing.expectEqual(last_scanned.ordinal, cursor.ordinal);
+
+    request.before_position = cursor.position;
+    request.before_ordinal = cursor.ordinal;
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(parts_position, result.items[0].position);
+    try std.testing.expectEqual(@as(usize, 1), result.items[0].count);
+    try std.testing.expectEqual(@as(?u32, 3), result.items[0].hits[0].part);
+    try std.testing.expectEqualStrings(image_marker ++ " needle", result.items[0].hits[0].snippet.slice());
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}

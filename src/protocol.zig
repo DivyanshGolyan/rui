@@ -132,6 +132,7 @@ pub const Kind = enum {
     permission_decision,
     action_background,
     action_stop,
+    action_publish,
     observe_command,
     read_result,
     read_action,
@@ -144,6 +145,8 @@ pub const Kind = enum {
     activity_page,
     activity_search,
     activity_content,
+    public_parts,
+    public_part_content,
     skill_suggestions,
     model_list,
 };
@@ -181,6 +184,27 @@ pub const MessageProgressStatus = WorkState.Progress;
 pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
+
+pub const content_value = @import("content_value.zig");
+
+/// The certified part list of a Session-scoped Message or Action owner.
+pub const PublicParts = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    owner: content_value.Owner = .{ .message = 0 },
+};
+
+/// One part's exact bytes, framed as conversation content.
+pub const PublicPartContent = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    owner: content_value.Owner = .{ .message = 0 },
+    /// At most `input_parts.max_parts - 1`.
+    part: u32 = 0,
+    start: u64 = 0,
+    /// Requires `start` 0, exactly as conversation content.
+    stream: bool = false,
+};
 
 pub const ReadActionArguments = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -316,21 +340,6 @@ pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;
 
-pub const ContentJson = struct {
-    value: ActivityItem.Content,
-
-    pub const openapi_name = "ActivityItemContent";
-    pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn optional(value: ?ActivityItem.Content) ?ContentJson {
-        return if (value) |content| .{ .value = content } else null;
-    }
-
-    pub fn writeJson(self: *const ContentJson, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.value.length, self.value.digest });
-    }
-};
 pub const ReadActivityContent = activity_read.ReadActivityContent;
 pub const ReadSkillSuggestions = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -356,15 +365,17 @@ pub const WorkStateJson = struct {
     state: WorkState,
 
     pub const plain_shape = .{ "{\"kind\":\"", Hole{ .tag = session_work.Kind }, "\",\"since\":\"", Hole.decimal, "\"}" };
+    pub const compacting_shape = .{ "{\"kind\":\"working\",\"since\":\"", Hole.decimal, "\",\"compaction\":true}" };
     pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
     pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
     pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
-    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });
+    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, compacting_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });
 
     pub fn writeJson(self: *const WorkStateJson, out: *std.Io.Writer) !void {
         switch (self.state) {
+            .working => |value| if (value.compaction) try writeShape(out, compacting_shape, .{value.since}) else try writeShape(out, plain_shape, .{ session_work.Kind.working, value.since }),
             .retrying => |value| try writeShape(out, retrying_shape, .{ value.since, value.due_at_ms, value.cause.slice(), value.attempt }),
             .bash => |value| {
                 const description = if (value.description) |text| text.slice() else null;
@@ -372,7 +383,7 @@ pub const WorkStateJson = struct {
             },
             .failed => |value| try writeShape(out, failed_shape, .{ value.since, value.code.slice(), value.resets_at }),
             .stopped => |value| try writeShape(out, stopped_shape, .{ value.since, value.cause }),
-            inline .idle, .pending, .working, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
+            inline .idle, .pending, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
         }
     }
 };
@@ -460,9 +471,9 @@ pub const FirstMessage = struct {
     admission: u64,
     admitted_at: u64,
     sender: ?Peer,
-    content: ActivityItem.Content,
+    content: content_value.Value,
 
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentJson }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentValueJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
@@ -471,12 +482,12 @@ pub const FirstMessage = struct {
             .admission = first.admission,
             .admitted_at = first.admitted_at,
             .sender = if (first.sender) |sender| .{ .session = sender } else null,
-            .content = .{ .length = first.length, .digest = first.digest },
+            .content = first.content,
         };
     }
 
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentJson{ .value = self.content } });
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentValueJson{ .value = self.content } });
     }
 };
 
@@ -624,6 +635,7 @@ pub const session_list_reply = struct {
 pub const ActivityFacts = activity_facts.Page;
 
 fn RequestOf(comptime Custody: type) type {
+    const ContentField = Requests(Custody).ContentField;
     const ConfigureCommand = Requests(Custody).ConfigureCommand;
     const MessageCommand = Requests(Custody).MessageCommand;
     return union(Kind) {
@@ -641,6 +653,7 @@ fn RequestOf(comptime Custody: type) type {
         permission_decision: PermissionDecisionCommand,
         action_background: command_input.ActionBackgroundCommand,
         action_stop: command_input.ActionStopCommand,
+        action_publish: struct { store: Bounded(max_store_bytes) = .{}, handle: Bounded(32) = .{}, key: Bounded(max_key_bytes) = .{}, text: ContentField = .{} },
         observe_command: ObserveCommand,
         read_result: ReadResult,
         read_action: @import("action_read.zig").Request,
@@ -653,6 +666,8 @@ fn RequestOf(comptime Custody: type) type {
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
         activity_content: ReadActivityContent,
+        public_parts: PublicParts,
+        public_part_content: PublicPartContent,
         skill_suggestions: ReadSkillSuggestions,
         model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
@@ -660,7 +675,8 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .action_publish => |*command| try command.text.removeTemporaryContent(io),
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -703,6 +719,11 @@ fn ParserOf(comptime Custody: type) type {
         source: *MetadataSource,
         expected_kind: ?Kind = null,
         content_ordinal: u8 = 0,
+        part_ordinal: u32 = 0,
+        part_started: u32 = 0,
+        part_finished: u32 = 0,
+        part_image: bool = false,
+        part_format: ?@import("input_media.zig").Format = null,
         captured: []const ContentField = &.{},
         spec_field: Bounded(32) = .{},
 
@@ -717,6 +738,7 @@ fn ParserOf(comptime Custody: type) type {
             const header = try self.scanHeader();
             self.source.start = start;
             self.content_ordinal = 0;
+            self.part_ordinal = 0;
             try self.expectByte('{');
             var members: Members = .{};
             const store = header.store;
@@ -775,6 +797,10 @@ fn ParserOf(comptime Custody: type) type {
                     out.* = .{ .action_stop = .{ .store = store } };
                     try self.parseActionStop(&out.action_stop, &members);
                 },
+                .action_publish => {
+                    out.* = .{ .action_publish = .{ .store = store } };
+                    try self.parseActionPublish(&out.action_publish, &members);
+                },
                 .read_action => {
                     out.* = .{ .read_action = .{ .store = store } };
                     try self.parseReadAction(&out.read_action, &members);
@@ -823,6 +849,14 @@ fn ParserOf(comptime Custody: type) type {
                     out.* = .{ .activity_content = .{ .store = store } };
                     try self.parseActivityContent(&out.activity_content, &members);
                 },
+                .public_parts => {
+                    out.* = .{ .public_parts = .{ .store = store } };
+                    try self.parsePublicParts(&out.public_parts, &members);
+                },
+                .public_part_content => {
+                    out.* = .{ .public_part_content = .{ .store = store } };
+                    try self.parsePublicPartContent(&out.public_part_content, &members);
+                },
                 .skill_suggestions => {
                     out.* = .{ .skill_suggestions = .{ .store = store } };
                     const Field = enum { session, workspace, prefix };
@@ -851,7 +885,7 @@ fn ParserOf(comptime Custody: type) type {
         const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
         fn scanHeader(self: *Parser) !Header {
-            const Field = enum { version, kind, store, text, configuration };
+            const Field = enum { version, kind, store, text, value, parts, configuration };
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -885,6 +919,16 @@ fn ParserOf(comptime Custody: type) type {
                         if (kind) |named| if (named != .message) return error.UnexpectedField;
                         try self.scanContentEnvelope(true);
                     },
+                    .value => {
+                        if (self.expected_kind) |expected| if (expected != .action_publish) return error.UnexpectedField;
+                        if (kind) |named| if (named != .action_publish) return error.UnexpectedField;
+                        var counted: ContentField = .{};
+                        try self.readContentString(&counted);
+                    },
+                    .parts => {
+                        if (kind) |named| if (named != .message) return error.UnexpectedField;
+                        try self.scanParts();
+                    },
                     .configuration => {
                         if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
                         try self.scanConfiguration();
@@ -892,7 +936,49 @@ fn ParserOf(comptime Custody: type) type {
                 }
             }
             if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
-            return .{ .kind = kind orelse return error.MissingField, .store = store };
+            const selected = kind orelse return error.MissingField;
+            if (seen.contains(.value) and selected != .action_publish) return error.UnexpectedField;
+            return .{ .kind = selected, .store = store };
+        }
+
+        fn scanParts(self: *Parser) !void {
+            const Field = enum { type, mime, text, data };
+            try self.expectByte('[');
+            var count: u32 = 0;
+            if (!try self.consumeIf(']')) while (true) {
+                if (self.part_ordinal >= @import("input_parts.zig").max_parts) return error.TooManyInputParts;
+                const ordinal = self.part_ordinal;
+                self.part_ordinal += 1;
+                count += 1;
+                try self.expectByte('{');
+                var members: Members = .{};
+                var seen: std.enums.EnumSet(Field) = .empty;
+                var kind: Bounded(8) = .{};
+                var mime: Bounded(16) = .{};
+                while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+                    .type => try self.readSmallString(&kind),
+                    .mime => try self.readSmallString(&mime),
+                    .text, .data => {
+                        self.part_image = field == .data;
+                        if (ordinal >= self.part_started) return error.NeedPartStart;
+                        try self.expectByte('"');
+                        if (try self.source.readByte() != '"') return error.InvalidJsonShape;
+                    },
+                };
+                if (!seen.contains(.type)) return error.MissingField;
+                self.part_image = kind.eql("image");
+                if (kind.eql("text")) {
+                    if (!seen.contains(.text) or seen.contains(.data) or seen.contains(.mime)) return error.InvalidMessage;
+                    self.part_format = null;
+                } else if (self.part_image) {
+                    if (!seen.contains(.data) or seen.contains(.text) or !seen.contains(.mime)) return error.InvalidMessage;
+                    self.part_format = if (mime.eql("image/png")) .png else if (mime.eql("image/jpeg")) .jpeg else return error.UnsupportedImage;
+                } else return error.InvalidMessage;
+                if (ordinal >= self.part_finished) return error.NeedPartEnd;
+                if (try self.consumeIf(']')) break;
+                try self.expectByte(',');
+            };
+            if (count == 0) return error.InvalidMessage;
         }
 
         fn scanConfiguration(self: *Parser) !void {
@@ -903,6 +989,7 @@ fn ParserOf(comptime Custody: type) type {
             while (try members.next(self, &key)) {
                 const field = try specField(&key, &seen);
                 switch (field) {
+                    .preferences => try self.skipValue(),
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
                         if (entry.kind == .content) {
@@ -1048,6 +1135,10 @@ fn ParserOf(comptime Custody: type) type {
             if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
         }
 
+        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+            if (missingCreatingSetting(configuration) != null) return error.MissingField;
+        }
+
         fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
             inline for (session_settings.spec_entries, 0..) |entry, index| {
                 if (key.eql(entry.spec)) {
@@ -1056,6 +1147,11 @@ fn ParserOf(comptime Custody: type) type {
                     seen.insert(field);
                     return field;
                 }
+            }
+            if (key.eql("preferences")) {
+                if (seen.contains(.preferences)) return error.UnexpectedField;
+                seen.insert(.preferences);
+                return .preferences;
             }
             return error.UnexpectedField;
         }
@@ -1067,6 +1163,10 @@ fn ParserOf(comptime Custody: type) type {
             while (try members.next(self, &self.spec_field)) {
                 const field = try specField(&self.spec_field, &seen);
                 switch (field) {
+                    .preferences => {
+                        out.preferences = .{};
+                        try self.parsePreferences(&out.preferences.?);
+                    },
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
                         const name = entry.field;
@@ -1085,6 +1185,21 @@ fn ParserOf(comptime Custody: type) type {
                         }
                     },
                 }
+            }
+        }
+
+        fn parsePreferences(self: *Parser, out: *@import("command_input.zig").Preferences) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            const Field = enum { reasoning_effort, permission_mode };
+            var seen = std.enums.EnumSet(Field).empty;
+            while (try self.nextField(Field, &members, &seen)) |field| {
+                const value = switch (field) {
+                    .reasoning_effort => &out.reasoning_effort,
+                    .permission_mode => &out.permission_mode,
+                };
+                value.state = .value;
+                try self.readSmallString(&value.value);
             }
         }
 
@@ -1117,12 +1232,8 @@ fn ParserOf(comptime Custody: type) type {
             };
         }
 
-        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            if (missingCreatingSetting(configuration, configuration.parent.state == .value) != null) return error.MissingField;
-        }
-
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-            const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
+            const Field = enum { key, session, sender, sender_handle, configuration, text, parts, require_model };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
@@ -1141,14 +1252,16 @@ fn ParserOf(comptime Custody: type) type {
                     try self.parseConfiguration(&out.configuration.?);
                 },
                 .text => try self.readContent(&out.text, false, true),
+                .parts => try self.scanParts(),
                 .require_model => out.require_model = try self.readBoolean(),
             };
-            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
+            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+            if (seen.contains(.text) == seen.contains(.parts)) return error.InvalidMessage;
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
-            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-            if (out.text.state != .value) return error.InvalidMessage;
+            if (seen.contains(.text) and out.text.state != .value) return error.InvalidMessage;
             if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
+            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         }
 
         fn parseAddress(self: *Parser, out: *Address) !void {
@@ -1259,13 +1372,71 @@ fn ParserOf(comptime Custody: type) type {
             try require(Field, seen, &.{ .key, .session, .action });
         }
 
+        fn parseActionPublish(self: *Parser, out: anytype, members: *Members) !void {
+            const Field = enum { handle, key, value };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .handle => try self.readSmallString(&out.handle),
+                .key => try self.readSmallString(&out.key),
+                .value => {
+                    try self.readContentString(&out.text);
+                    out.text.state = .value;
+                },
+            };
+            try require(Field, seen, &.{ .handle, .key, .value });
+            if (out.key.len == 0) return error.InvalidKey;
+        }
+
+        fn parsePublicParts(self: *Parser, out: *PublicParts, members: *Members) !void {
+            const Field = enum { session, owner };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .owner => out.owner = try self.readOwner(),
+            };
+            try require(Field, seen, &.{ .session, .owner });
+        }
+
+        fn parsePublicPartContent(self: *Parser, out: *PublicPartContent, members: *Members) !void {
+            const Field = enum { session, owner, part, start, stream };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var part: u64 = 0;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .owner => out.owner = try self.readOwner(),
+                .part => part = try self.readCanonicalU64(),
+                .start => out.start = try self.readCanonicalU64(),
+                .stream => {
+                    for ("true") |byte| try self.expectByte(byte);
+                    out.stream = true;
+                },
+            };
+            try require(Field, seen, &.{ .session, .owner, .part, .start });
+            if (part >= @import("input_parts.zig").max_parts or (out.stream and out.start != 0)) return error.InvalidCursor;
+            out.part = @intCast(part);
+        }
+
+        /// `{"message":"ID"}` or `{"action":"ID"}`: exactly one known owner kind and a positive id.
+        fn readOwner(self: *Parser) !content_value.Owner {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var key: Bounded(32) = .{};
+            if (!try members.next(self, &key)) return error.MissingField;
+            const kind = std.meta.stringToEnum(content_value.Owner.Kind, key.slice()) orelse return error.InvalidTarget;
+            const id = try self.readCanonicalU64();
+            if (try members.next(self, &key)) return error.UnexpectedField;
+            if (id == 0 or id > std.math.maxInt(i64)) return error.InvalidTarget;
+            return .of(kind, id);
+        }
+
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
-            const Field = enum { session, action, offset };
+            const Field = enum { session, action, offset, after };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .action => out.action_id = try self.readCanonicalU64(),
                 .offset => out.offset = try self.readCanonicalU64(),
+                .after => out.after = try self.readCanonicalU64(),
             };
             try require(Field, seen, &.{ .session, .action });
         }
@@ -1666,20 +1837,12 @@ fn ParserOf(comptime Custody: type) type {
     };
 }
 
-pub fn missingCreatingSetting(configuration: anytype, inherits_parent: bool) ?[]const u8 {
+pub fn missingCreatingSetting(configuration: anytype) ?[]const u8 {
     inline for (session_settings.entries) |entry| {
         const name = entry.field;
-        const state = @field(configuration, name).state;
         switch (entry.create) {
             .optional => {},
-            .must_value => if (state != .value) return entry.spec,
-            .must_state => if (state == .omitted) return entry.spec,
-        }
-    }
-    if (!inherits_parent) {
-        var tools = configuration.tools.iterator();
-        while (tools.next()) |tool| {
-            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value) return "workspace";
+            .must_value => if (@field(configuration, name).state != .value) return entry.spec,
         }
     }
     return null;
@@ -1952,6 +2115,9 @@ pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 pub const action_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const max_action_value_bytes = @import("action_value_limits.zig").max_value_bytes;
+pub const action_publish_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_publish\",\"store\":", store_hole, ",\"handle\":", Hole{ .string = 32 }, ",\"key\":", key_hole, ",\"value\":", Hole{ .string = max_action_value_bytes }, "}" };
+pub const action_publish_reply = .{ "{\"action_id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"admission_id\":", Hole.optional_id, ",\"replayed\":", Hole.boolean, "}" };
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
@@ -1993,7 +2159,8 @@ pub const read_action_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
     pub const offset = .{ ",\"offset\":\"", Hole.decimal, "\"" };
     pub const tail = .{"}"};
-    pub const all = head ++ offset ++ tail;
+    pub const after = .{ ",\"after\":\"", Hole.decimal, "\"" };
+    pub const all = head ++ offset ++ after ++ tail;
 };
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
@@ -2021,6 +2188,120 @@ pub const activity_page_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
 };
+/// The Message admission or Action that holds a parts value: `{"message":"ID"}` or `{"action":"ID"}`.
+pub const OwnerJson = struct {
+    owner: content_value.Owner,
+
+    pub const openapi_name = "PartOwner";
+    pub const message_shape = .{ "{\"message\":\"", Hole.decimal, "\"}" };
+    pub const action_shape = .{ "{\"action\":\"", Hole.decimal, "\"}" };
+    pub const openapi_shapes = .{ message_shape, action_shape };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const OwnerJson, out: *std.Io.Writer) !void {
+        switch (self.owner) {
+            .message => |id| try writeShape(out, message_shape, .{id}),
+            .action => |id| try writeShape(out, action_shape, .{id}),
+        }
+    }
+};
+
+/// One stored Content value: exact text bytes, or a parts manifest with the owner that addresses its parts.
+pub const ContentValueJson = struct {
+    value: content_value.Value,
+
+    pub const openapi_name = "ContentValue";
+    pub const text_shape = content_reference_shape;
+    const parts_head = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":" };
+    pub const parts_shape = parts_head ++ .{ Hole{ .json = OwnerJson }, "}" };
+    pub const openapi_shapes = .{ text_shape, parts_shape };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    /// Model text, which is never parts: an answer, an outcome, a call field.
+    pub fn text(reference: content_value.Reference) ContentValueJson {
+        return .{ .value = .{ .text = reference } };
+    }
+
+    pub fn optionalText(reference: ?content_value.Reference) ?ContentValueJson {
+        return if (reference) |value| text(value) else null;
+    }
+
+    pub fn writeJson(self: *const ContentValueJson, out: *std.Io.Writer) !void {
+        switch (self.value) {
+            .text => |reference| try writeShape(out, text_shape, .{ reference.length, reference.digest }),
+            .parts => |parts| try writeShape(out, parts_shape, .{ parts.identity.length, parts.identity.digest, OwnerJson{ .owner = parts.owner } }),
+        }
+    }
+};
+
+/// The stored input of an accepted Message, whose parts are owned by its admission.
+pub const MessageInputJson = struct {
+    value: content_value.Value,
+
+    pub const openapi_name = "MessageInput";
+    pub const openapi_shapes = .{
+        ContentValueJson.text_shape,
+        ContentValueJson.parts_head ++ OwnerJson.message_shape ++ .{"}"},
+    };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const MessageInputJson, out: *std.Io.Writer) !void {
+        try (ContentValueJson{ .value = self.value }).writeJson(out);
+    }
+};
+
+pub const public_parts_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_parts\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"owner\":", Hole{ .json = OwnerJson }, "}" };
+pub const public_part_content_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"owner\":", Hole{ .json = OwnerJson }, ",\"part\":\"", Hole.decimal, "\",\"start\":\"", Hole.decimal, "\"" };
+    pub const stream = .{",\"stream\":true"};
+    pub const tail = .{"}"};
+    pub const all = head ++ stream ++ tail;
+};
+
+/// The whole certified part list of one parts value, written into a report capture.
+pub const public_parts_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"public_parts\",\"session\":", session_hole, ",\"value\":", Hole{ .json = ContentValueJson }, ",\"parts\":[" };
+    pub const text = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const image = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"image\",\"mime\":", Hole{ .string = 10 }, ",\"width\":\"", Hole.decimal, "\",\"height\":\"", Hole.decimal, "\",\"name\":", Hole{ .optional_string = @import("input_parts.zig").max_name_bytes }, ",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const tail = .{"]}"};
+    pub const max_part_bytes = maxShapeBytes(.{ text, image });
+    /// The whole reply at its largest: every part an image with the longest name.
+    pub const max_bytes = shapeBytes(head) + @import("input_parts.zig").max_parts * (max_part_bytes + 1) + shapeBytes(tail);
+
+    /// The server's only writer of this reply: `head` once, then each `part`, then `finish`.
+    pub fn Writer(comptime Capture: type) type {
+        return struct {
+            capture: *Capture,
+            session: []const u8,
+            parts: u32 = 0,
+
+            pub fn head(self: *@This(), value: content_value.Value.Parts) !void {
+                try appendCapture(self.capture, public_parts_reply.head, .{ self.session, ContentValueJson{ .value = .{ .parts = value } } });
+            }
+
+            pub fn part(self: *@This(), value: content_value.Part) !void {
+                if (self.parts != 0) try self.capture.append(",");
+                self.parts += 1;
+                switch (value.kind) {
+                    .text => try appendCapture(self.capture, text, .{ value.ordinal, value.reference.length, value.reference.digest }),
+                    .image => |media| try appendCapture(self.capture, image, .{ value.ordinal, media.media.format.mime(), media.media.width, media.media.height, if (media.name) |*name| name.slice() else null, value.reference.length, value.reference.digest }),
+                }
+            }
+
+            pub fn finish(self: *@This()) !void {
+                try appendCapture(self.capture, tail, .{});
+            }
+        };
+    }
+
+    /// Renders one bounded shape on the stack, then hands the bytes to the capture.
+    fn appendCapture(capture: anytype, comptime shape: anytype, args: anytype) !void {
+        var buffer: [@max(shapeBytes(head), max_part_bytes, shapeBytes(tail))]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        writeShape(&out, shape, args) catch return error.ReplyShapeOverflow;
+        try capture.append(out.buffered());
+    }
+};
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
@@ -2037,6 +2318,7 @@ pub const message_request = struct {
     pub const sender_handle = .{ ",\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     pub const configuration = .{",\"configuration\":"};
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
+    pub const parts = .{",\"parts\":"};
     pub const text_tail = .{"}"};
     pub const require_model = .{",\"require_model\":true"};
     pub const tail = .{"}"};
@@ -2078,7 +2360,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_action_request.all,             read_action_arguments_request, read_action_call_id_request,
     conversation_content_request.all,    conversation_page_request,     activity_search_request.all,
     activity_page_request.all,           activity_content_request,      skill_suggestions_session_request,
-    skill_suggestions_workspace_request, model_list_request,
+    skill_suggestions_workspace_request, model_list_request,            public_parts_request,
+    public_part_content_request.all,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2086,26 +2369,32 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 }
 
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+pub const parts_reference_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+
+pub const creation_configuration_shape = .{ ",\"configuration\":{\"provider\":\"", Hole{ .tag = Provider }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
+    pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean } ++ creation_configuration_shape ++ .{execution};
     pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, execution };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_skills, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, accepted_skills, rejected, conflict });
 };
 
 pub const message_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.message).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
-    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
-        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
-        content_reference_shape ++ .{execution};
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":", Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"" } ++ creation_configuration_shape ++ .{"},\"input\":"} ++
+        .{ Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    const rejection = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" };
+    pub const rejected = rejection ++ content_reference_shape ++ .{execution};
+    pub const rejected_parts = rejection ++ parts_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, rejected, rejected_parts, conflict });
 };
 
 pub const session_stop_reply = struct {
@@ -2173,10 +2462,14 @@ pub const action_stop_reply = struct {
 
 pub const action_read_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
-    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
-    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
-    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":null}}" };
-    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts });
+    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null" };
+    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}" };
+    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":null}" };
+    pub const item = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = 128 }, ",\"text\":", Hole{ .string = @import("action_read.zig").page_bytes }, "}" };
+    pub const values_head = ",\"values\":{\"items\":";
+    pub const values_tail = .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
+    // The total text budget is shared by all items, rather than repeated per item.
+    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts }) + values_head.len + 2 + jsonListBytes(@import("action_read.zig").page_items, shapeBytes(item) - 6 * @import("action_read.zig").page_bytes) + 6 * @import("action_read.zig").page_bytes + shapeBytes(values_tail);
 };
 
 pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
@@ -2208,9 +2501,13 @@ pub const command_observation_reply = struct {
     pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         return .{ prefix, .{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":", .{ .optional_string = change_ring.SessionToken.max_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
     }
+    pub fn statusHead(comptime kind: CommandKind, comptime status: CommandObservationStatus) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
+        const shape = head(kind);
+        return .{ shape[0], shape[1], shape[2], shape[3], shape[4] ++ @tagName(status) ++ shape[6], shape[7] };
+    }
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
-    pub const input = .{",\"input\":"} ++ content_reference_shape;
+    pub const input = .{ ",\"input\":", Hole{ .json = MessageInputJson } };
     pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
     pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
     pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
@@ -2225,14 +2522,12 @@ pub const command_observation_reply = struct {
     const queued_state = .{",\"state\":\"queued\""};
     const processing_state = .{",\"state\":\"processing\""};
     const permission_state = .{",\"state\":\"waiting_for_permission\""};
-    const rejected_state = .{",\"state\":\"rejected\""};
+    pub const message_rejected = .{",\"state\":\"rejected\""};
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
     pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id } ++ SessionWork.extra_fields ++ .{"}"};
-    pub const message_variants = .{
-        rejected_state,
-        rejected_state ++ input,
+    pub const message_accepted = .{
         queued_state ++ input ++ queue ++ work,
         processing_state ++ input ++ queue ++ binding ++ work,
         processing_state ++ input ++ queue ++ binding ++ work ++ recovery,
@@ -2270,7 +2565,7 @@ pub const command_observation_reply = struct {
     };
 };
 
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable, parts_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
@@ -2306,11 +2601,23 @@ pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"ho
 pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
 pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
+// Trace and readiness paths used the pre-creation-receipt response bound.
+// Keep that independent of the larger, caller-owned mutation reply buffer.
+pub const max_diagnostic_buffer_bytes = blk: {
+    var bytes: usize = max_control_error_response_bytes;
+    for (std.meta.tags(CommandKind)) |kind| {
+        const reply = command_spec.spec(kind).Reply(Protocol);
+        bytes = @max(bytes, maxShapeBytes(.{ reply.accepted, reply.rejected, reply.conflict }));
+        if (@hasDecl(reply, "accepted_skills")) bytes = @max(bytes, shapeBytes(reply.accepted_skills));
+    }
+    break :blk @max(@max(bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
+};
+
 pub const conversation_page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         comptime std.debug.assert(kind != .hosted_call);
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":", .{ .json = ContentValueJson } };
     }
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };
@@ -2392,6 +2699,7 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
 
 pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
+pub const DiagnosticBuffer = FixedJsonBuffer(max_diagnostic_buffer_bytes);
 pub const CommandObservationBuffer = FixedJsonBuffer(command_observation_reply.max_bytes);
 
 const TestCustody = struct {
@@ -2881,39 +3189,48 @@ test "SessionRow borrowed fields preserve offered tool names" {
     try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
 }
 
-test "protocol creation requires five explicit settings independent of field order" {
-    const fields = [_][]const u8{
-        "\"model\":\"model\"",
-        "\"compactAt\":1000",
-        "\"tools\":[]",
-        "\"permissionMode\":\"default\"",
-        "\"effort\":null",
+test "protocol sparse creation preserves all omitted settings independent of field order" {
+    const fields = .{
+        .{ "\"model\":\"model\"", "model" },
+        .{ "\"compactAt\":null", "compaction_trigger" },
+        .{ "\"tools\":[]", "tools" },
+        .{ "\"loadedTools\":[]", "loaded_tools" },
+        .{ "\"permissionMode\":\"ask\"", "permission_mode" },
+        .{ "\"effort\":null", "reasoning_effort" },
     };
+    const members = [_][]const u8{ fields[0][0], fields[1][0], fields[2][0], fields[3][0], fields[4][0], fields[5][0] };
     inline for (.{ "configure", "message" }) |kind| {
-        for (0..fields.len + 1) |skip| {
-            var buffer: [2048]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
-            var comma = false;
-            for (fields, 0..) |field, index| {
-                if (index == skip) continue;
-                if (comma) try writer.writeByte(',');
-                try writer.writeAll(field);
-                comma = true;
-            }
-            try writer.writeAll("},\"session\":\"\"");
-            if (comptime std.mem.eql(u8, kind, "message"))
-                try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"omitted\"}");
-            try writer.writeByte('}');
-            const json = writer.buffered();
-            var source: MetadataSource = .{ .input = json };
-            var parser = Tested.Parser{ .source = &source };
-            if (skip < fields.len) {
-                try std.testing.expectError(error.MissingField, parseForTest(&parser));
-            } else if (comptime std.mem.eql(u8, kind, "message")) {
-                try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
-            } else {
-                _ = try parseForTest(&parser);
+        for (0..64) |present| {
+            for ([_]bool{ false, true }) |reverse| {
+                var buffer: [2048]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&buffer);
+                try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
+                var comma = false;
+                for (0..members.len) |index| {
+                    const field = if (reverse) members.len - index - 1 else index;
+                    if (present & (@as(usize, 1) << @intCast(field)) == 0) continue;
+                    if (comma) try writer.writeByte(',');
+                    try writer.writeAll(members[field]);
+                    comma = true;
+                }
+                try writer.writeAll("},\"session\":\"\"");
+                if (comptime std.mem.eql(u8, kind, "message"))
+                    try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}");
+                try writer.writeByte('}');
+                var source: MetadataSource = .{ .input = writer.buffered() };
+                const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+                var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+                if (present & 1 == 0) {
+                    try std.testing.expectError(error.MissingField, parseForTest(&parser));
+                    continue;
+                }
+                const request = try parseForTest(&parser);
+                const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
+                inline for (fields, 0..) |field, index| {
+                    const expected: FieldState = if (present & (@as(usize, 1) << index) == 0) .omitted else if (index == 1 or index == 5) .explicit_null else .value;
+                    const name = field[1];
+                    try std.testing.expectEqual(expected, @field(configuration, name).state);
+                }
             }
         }
     }
@@ -2944,7 +3261,7 @@ test "activity search wire validates query and paired backward cursor" {
     }
 }
 
-test "the request parser refuses what each command's grammar forbids" {
+test "WIR-1 wire_object_grammar" {
     const v = "{\"version\":\"" ++ wire_version ++ "\",";
     const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
     const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
@@ -2995,6 +3312,35 @@ test "the request parser refuses what each command's grammar forbids" {
         var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{}, .{} } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
+    try publicPartSelectorGrammar();
+}
+
+test "creation requires an explicit model while require_model and sparse updates retain their rules" {
+    inline for (.{ "configure", "message" }) |kind| {
+        inline for (.{ false, true }) |require_model| {
+            inline for (.{ "", "\"model\":null", "\"model\":\"\"", "\"model\":\"custom\"" }, 0..) |member, model| {
+                const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":" ++
+                    (if (require_model) "true" else "false") ++ ",\"configuration\":{" ++ member ++ "}" ++
+                    (if (comptime std.mem.eql(u8, kind, "message")) ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" else "") ++ "}";
+                var source: MetadataSource = .{ .input = json };
+                const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+                var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+                if (model < 2) {
+                    try std.testing.expectError(if (model == 0) error.MissingField else error.InvalidFieldState, parseForTest(&parser));
+                } else {
+                    const request = try parseForTest(&parser);
+                    const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
+                    try std.testing.expectEqual(FieldState.value, configuration.model.state);
+                    try std.testing.expectEqualStrings(if (model == 2) "" else "custom", configuration.model.value.slice());
+                    try std.testing.expectEqual(require_model, if (comptime std.mem.eql(u8, kind, "message")) request.message.require_model else request.configure.require_model);
+                }
+            }
+        }
+    }
+    var source: MetadataSource = .{ .input = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{}}" };
+    var parser: Tested.Parser = .{ .source = &source };
+    const update = try parseForTest(&parser);
+    try std.testing.expectEqual(FieldState.omitted, update.configure.configuration.model.state);
 }
 
 test "presets allow partial creating configure in either field order" {
@@ -3211,6 +3557,29 @@ test "Session settings preserve omitted and nullable wire states for every field
     }
 }
 
+test "creation parsers leave Workspace completeness to Host admission" {
+    inline for (.{
+        .{ "configure", "" },
+        .{ "configure", ",\"preset\":\"review\"" },
+        .{ "message", ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" },
+    }) |surface| {
+        inline for (.{ "", "\"tools\":[]", "\"tools\":[\"bash\"]" }) |members| {
+            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ surface[0] ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":true,\"configuration\":{\"model\":\"model\"" ++ (if (members.len == 0) "" else ",") ++ members ++ "}" ++ surface[1] ++ "}";
+            var source: MetadataSource = .{ .input = json };
+            const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+            var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+            const request = try parseForTest(&parser);
+            const configuration = if (comptime std.mem.eql(u8, surface[0], "message")) &request.message.configuration.? else &request.configure.configuration;
+            try std.testing.expectEqual(FieldState.omitted, configuration.workspace.state);
+            try std.testing.expectEqual(FieldState.value, configuration.model.state);
+            if (comptime std.mem.eql(u8, surface[0], "message")) {
+                try std.testing.expect(request.message.require_model);
+            } else try std.testing.expect(request.configure.require_model);
+            try std.testing.expectEqual(if (members.len == 0) FieldState.omitted else FieldState.value, configuration.tools.state);
+        }
+    }
+}
+
 test "parent spec relation parses creation without a workspace and rejects null or duplicate fields" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"configuration\":{";
     const required = "\"model\":\"model-a\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"";
@@ -3223,7 +3592,6 @@ test "parent spec relation parses creation without a workspace and rejects null 
         try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.provider.state);
     }
     inline for (.{
-        .{ required, error.MissingField },
         .{ required ++ ",\"parent\":null", error.InvalidFieldState },
         .{ required ++ ",\"parent\":\"k7m2qx\",\"parent\":\"k7m2qx\"", error.UnexpectedField },
     }) |case| {
@@ -3263,6 +3631,7 @@ test "session pin parser requires an explicit desired value and binds semantic r
 }
 
 test "Action read request preserves canonical identity and optional cursor" {
+    // ARD-2
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
     inline for (.{ "}", ",\"offset\":\"0\"}", ",\"offset\":\"16383\"}" }, .{ 0, 0, 16383 }) |tail, offset| {
         var source: MetadataSource = .{ .input = head ++ tail };
@@ -3270,7 +3639,27 @@ test "Action read request preserves canonical identity and optional cursor" {
         const request = (try parseForTest(&parser)).read_action;
         try std.testing.expectEqual(@as(u64, 42), request.action_id);
         try std.testing.expectEqual(@as(u64, offset), request.offset);
+        try std.testing.expectEqual(@as(u64, 0), request.after);
         try std.testing.expectEqualStrings("k7m2qx", request.session.slice());
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"offset\":\"9\",\"after\":\"16\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(@as(u64, 9), request.offset);
+        try std.testing.expectEqual(@as(u64, 16), request.after);
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"after\":\"18446744073709551615\",\"offset\":\"0\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(std.math.maxInt(u64), request.after);
+        try std.testing.expectEqual(@as(u64, 0), request.offset);
+    }
+    inline for (.{ ",\"after\":\"01\"}", ",\"after\":\"-1\"}", ",\"after\":\"18446744073709551616\"}" }) |tail| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
     }
     inline for (.{ ",\"offset\":\"01\"}", ",\"offset\":\"-1\"}", ",\"offset\":\"18446744073709551616\"}" }) |tail| {
         var source: MetadataSource = .{ .input = head ++ tail };
@@ -3300,4 +3689,130 @@ test "Action promotion parses one owned target and binds semantic replay" {
         var invalid_parser = Tested.Parser{ .source = &invalid };
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
     }
+}
+
+test "configuration preferences parse sparsely and bind idempotency" {
+    const cases = [_]struct { fields: []const u8, failure: ?anyerror = null }{
+        .{ .fields = "" },
+        .{ .fields = "\"preferences\":{}" },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":\"high\"}" },
+        .{ .fields = "\"preferences\":{\"permission_mode\":\"ask\",\"reasoning_effort\":\"low\"}" },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":\"12345678901234567\"}", .failure = error.ValueTooLong },
+        .{ .fields = "\"preferences\":null", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":null}", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"preferences\":{\"other\":\"x\"}", .failure = error.UnexpectedField },
+        .{ .fields = "\"preferences\":{\"permission_mode\":\"ask\",\"permission_mode\":\"ask\"}", .failure = error.UnexpectedField },
+        .{ .fields = "\"preferences\":{},\"preferences\":{}", .failure = error.UnexpectedField },
+    };
+    var digests: [4][32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{{s}}}}}", .{case.fields});
+        var source: MetadataSource = .{ .input = json };
+        var parser = Tested.Parser{ .source = &source };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+            continue;
+        }
+        const command = (try parseForTest(&parser)).configure;
+        digests[index] = command.semanticDigest();
+        for (digests[0..index]) |prior| try std.testing.expect(!std.mem.eql(u8, &prior, &digests[index]));
+        if (index == 0) try std.testing.expect(command.configuration.preferences == null) else {
+            const preferences = command.configuration.preferences.?;
+            try std.testing.expectEqual(if (index >= 2) FieldState.value else FieldState.omitted, preferences.reasoning_effort.state);
+            try std.testing.expectEqual(if (index == 3) FieldState.value else FieldState.omitted, preferences.permission_mode.state);
+        }
+    }
+}
+
+test "diagnostic buffer retains the noncreation response bound" {
+    try std.testing.expect(max_diagnostic_buffer_bytes < max_response_bytes);
+    try std.testing.expect(max_diagnostic_buffer_bytes >= max_host_info_response_bytes);
+    try std.testing.expect(max_diagnostic_buffer_bytes >= max_control_error_response_bytes);
+    inline for (comptime std.meta.tags(CommandKind)) |kind| {
+        const reply = comptime command_spec.spec(kind).Reply(Protocol);
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.accepted));
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.rejected));
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.conflict));
+        if (@hasDecl(reply, "accepted_skills")) try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.accepted_skills));
+    }
+}
+
+/// Owner, part, start and stream grammar of `public_parts` and `public_part_content`.
+fn publicPartSelectorGrammar() !void {
+    const Owner = content_value.Owner;
+    const owners = [_]struct { json: []const u8, failure: ?anyerror = null, owner: Owner = .{ .message = 1 } }{
+        .{ .json = "{\"message\":\"1\"}" },
+        .{ .json = " { \"action\" : \"9223372036854775807\" } ", .owner = .{ .action = std.math.maxInt(i64) } },
+        .{ .json = "{\"message\":\"0\"}", .failure = error.InvalidTarget },
+        .{ .json = "{\"action\":\"9223372036854775808\"}", .failure = error.InvalidTarget },
+        .{ .json = "{\"message\":\"01\"}", .failure = error.InvalidIdentity },
+        .{ .json = "{\"message\":1}", .failure = error.InvalidJsonShape },
+        .{ .json = "{\"turn\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = "{}", .failure = error.MissingField },
+        .{ .json = "{\"message\":\"1\",\"action\":\"2\"}", .failure = error.UnexpectedField },
+        .{ .json = "{\"message\":\"1\",\"message\":\"2\"}", .failure = error.UnexpectedField },
+        .{ .json = "\"message\"", .failure = error.InvalidJsonShape },
+        .{ .json = "null", .failure = error.InvalidJsonShape },
+    };
+    const Tail = struct { fields: []const u8, failure: ?anyerror = null, part: u32 = 0, start: u64 = 0, stream: bool = false };
+    const tails = [_]Tail{
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\"" },
+        .{ .fields = ",\"start\":\"4096\",\"part\":\"1499\"", .part = 1499, .start = 4096 },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"0\",\"stream\":true", .part = 2, .stream = true },
+        .{ .fields = ",\"part\":\"1500\",\"start\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"1\",\"stream\":true", .failure = error.InvalidCursor },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"0\",\"stream\":false", .failure = error.InvalidJsonShape },
+        .{ .fields = ",\"part\":\"00\",\"start\":\"0\"", .failure = error.InvalidIdentity },
+        .{ .fields = ",\"part\":\"0\"", .failure = error.MissingField },
+        .{ .fields = ",\"start\":\"0\"", .failure = error.MissingField },
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\",\"part\":\"1\"", .failure = error.UnexpectedField },
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\",\"ordinal\":\"0\"", .failure = error.UnexpectedField },
+    };
+    for (owners) |owner| {
+        var buffer: [512]u8 = undefined;
+        // The list takes exactly a session and an owner.
+        for ([_][]const u8{ "", ",\"part\":\"0\"" }, 0..) |extra, index| {
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_parts\",\"store\":\"s\",\"owner\":{s},\"session\":\"k7m2qx\"{s}}}", .{ owner.json, extra });
+            var source: MetadataSource = .{ .input = json };
+            var parser = Tested.Parser{ .source = &source };
+            var failure_expected: ?anyerror = owner.failure;
+            if (failure_expected == null and index == 1) failure_expected = error.UnexpectedField;
+            if (failure_expected) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+                continue;
+            }
+            const parsed = (try parseForTest(&parser)).public_parts;
+            try std.testing.expect(std.meta.eql(owner.owner, parsed.owner));
+            try std.testing.expectEqualStrings("k7m2qx", parsed.session.slice());
+            var wrong_source: MetadataSource = .{ .input = json };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = .public_part_content };
+            try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
+        }
+        for (tails) |tail| {
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_content\",\"store\":\"s\",\"session\":\"k7m2qx\",\"owner\":{s}{s}}}", .{ owner.json, tail.fields });
+            var source: MetadataSource = .{ .input = json };
+            var parser = Tested.Parser{ .source = &source };
+            const failure_expected: ?anyerror = if (owner.failure != null) owner.failure else tail.failure;
+            if (failure_expected) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+                continue;
+            }
+            const parsed = (try parseForTest(&parser)).public_part_content;
+            try std.testing.expect(std.meta.eql(owner.owner, parsed.owner));
+            try std.testing.expectEqual(tail.part, parsed.part);
+            try std.testing.expectEqual(tail.start, parsed.start);
+            try std.testing.expectEqual(tail.stream, parsed.stream);
+            var wrong_source: MetadataSource = .{ .input = json };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = .public_parts };
+            try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
+        }
+    }
+    // The request writers emit what the parser accepts.
+    var body: RequestBuffer = .{};
+    try body.appendShape(public_part_content_request.all, .{ "s", "k7m2qx", OwnerJson{ .owner = .{ .action = 42 } }, @as(u64, 7), @as(u64, 0) });
+    var source: MetadataSource = .{ .input = body.slice() };
+    var parser = Tested.Parser{ .source = &source };
+    const written = (try parseForTest(&parser)).public_part_content;
+    try std.testing.expect(std.meta.eql(Owner{ .action = 42 }, written.owner) and written.part == 7 and written.stream);
 }

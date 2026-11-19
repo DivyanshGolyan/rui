@@ -28,7 +28,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-const WireVersion = "20"
+const WireVersion = "22"
 
 const (
 	GoVersion         = "go1.27.1"

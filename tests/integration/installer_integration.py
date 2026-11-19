@@ -566,7 +566,7 @@ shutil.copyfile(source, args[args.index("-o") + 1])
                 self.assertFalse(restart.exists())
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
 
-    def test_SH_51_documented_recovery_bootstraps_verified_installer(self):
+    def test_SH_100_documented_recovery_bootstraps_verified_installer(self):
         readme = (ROOT / "README.md").read_text()
         recovery = readme.split("If an older Rui cannot download its update", 1)[1].split("```sh\n", 1)[1].split("\n```", 1)[0]
         log = self.root / "curl.log"

@@ -74,7 +74,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
     try std.testing.expectEqual(first_reply.accepted.admission_id, replay.accepted.admission_id);
-    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(first_text), &replay.accepted.content.digest);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(first_text), &replay.accepted.content.text.digest);
 
     const session = try storage.inspectSessionForTesting(created_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), session.pending_messages);
@@ -87,7 +87,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expect(accepted_observation.state == .queued);
 
     var reader: ContentReader = undefined;
-    reader.open(try storage.openContent(observed.kind.message.?.content));
+    reader.open(try storage.openContent(observed.kind.message.?.content.text));
     var actual: [first_text.len]u8 = undefined;
     var offset: usize = 0;
     while (offset < actual.len) {

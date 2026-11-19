@@ -8,11 +8,14 @@ const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
+const content_value = @import("../../content_value.zig");
+const input_parts = @import("../../input_parts.zig");
 const tool_defs = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
+const command_replay = @import("../command_replay.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -99,22 +102,193 @@ const MessageProjection = struct {
     },
 };
 
-const message_sender = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-        "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
-        "AND NOT " ++ action_domain.actionStoppedSql("action", "operation") ++ " LIMIT 1",
-    .Args = struct { handle: []const u8 },
-    .Row = struct { session: rsql.SessionHead },
+const message_replay = rsql.Read(.{
+    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length,content.digest,content.private,content.form FROM message_admission m " ++
+        "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct {
+        admission_id: rsql.Positive,
+        session_ref: Bounded(session_id.max_reference_bytes),
+        content_id: rsql.Positive,
+        byte_length: u64,
+        digest: [32]u8,
+        private: bool,
+        form: u8,
+    },
+    .cardinality = .one,
+});
+
+// Bound both enumeration and corrupt-state checks by the member primary key.
+const receipt_max_members = std.fmt.comptimePrint("{d}", .{@import("../../tool_name.zig").max_tools});
+fn receiptNamesSql(comptime set: []const u8) []const u8 {
+    return "(SELECT @list(tool.name) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set ++ " AND member.ordinal>=0 AND member.ordinal<" ++ receipt_max_members ++ ")";
+}
+fn receiptRowsSql(comptime set: []const u8) []const u8 {
+    return "(SELECT count(*) FROM tool_set_member member WHERE member.tool_set_id=" ++ set ++ " AND member.ordinal>=0 AND member.ordinal<" ++ receipt_max_members ++ ")";
+}
+fn receiptInvalidOrdinalSql(comptime set: []const u8) []const u8 {
+    return "(EXISTS(SELECT 1 FROM tool_set_member member WHERE member.tool_set_id=" ++ set ++ " AND member.ordinal<0) OR EXISTS(SELECT 1 FROM tool_set_member member WHERE member.tool_set_id=" ++ set ++ " AND member.ordinal>=" ++ receipt_max_members ++ "))";
+}
+
+const creation_receipt_read = rsql.Read(.{
+    .sql = "SELECT r.provider,r.model,r.reasoning_effort,r.workspace," ++
+        "coalesce(" ++ receiptNamesSql("r.tool_set_id") ++ ",'') AS tools," ++
+        "coalesce(" ++ receiptNamesSql(tool_set.offeredSetSql("r")) ++ ",'') AS loaded_tools," ++
+        "r.permission_mode,r.compaction_trigger,configured.member_count AS tools_count,loaded.member_count AS loaded_count," ++
+        receiptRowsSql("r.tool_set_id") ++ " AS tools_rows," ++ receiptRowsSql(tool_set.offeredSetSql("r")) ++ " AS loaded_rows," ++
+        receiptInvalidOrdinalSql("r.tool_set_id") ++ " AS tools_invalid," ++ receiptInvalidOrdinalSql(tool_set.offeredSetSql("r")) ++ " AS loaded_invalid " ++
+        "FROM session_revision r JOIN tool_set configured ON configured.tool_set_id=r.tool_set_id " ++
+        "JOIN tool_set loaded ON loaded.tool_set_id=" ++ tool_set.offeredSetSql("r") ++
+        " WHERE r.session_ref=?1 AND r.revision=1 AND r.command_key=?2",
+    .Args = struct { session: []const u8, key: []const u8 },
+    .Row = struct {
+        provider: provider_name.Provider,
+        model: *Bounded(@import("../../model_capability.zig").max_model_bytes),
+        reasoning_effort: ?@import("../../model_capability.zig").ReasoningEffort,
+        workspace: *Bounded(workspace_path.max_bytes),
+        tools: *Bounded(tool_set.max_names_bytes),
+        loaded_tools: *Bounded(tool_set.max_names_bytes),
+        permission_mode: u8,
+        compaction_trigger: ?u64,
+        tools_count: u64,
+        loaded_count: u64,
+        tools_rows: u64,
+        loaded_rows: u64,
+        tools_invalid: bool,
+        loaded_invalid: bool,
+    },
     .cardinality = .optional,
 });
 
-const message_replay = rsql.Read(.{
-    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
-        "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
-    .Args = struct { key: []const u8 },
-    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
-    .cardinality = .one,
+const fresh_selection_read = rsql.Read(.{
+    .sql = "SELECT coalesce(" ++ receiptNamesSql("configured.tool_set_id") ++ ",'') AS tools," ++
+        "coalesce(" ++ receiptNamesSql("loaded.tool_set_id") ++ ",'') AS loaded_tools," ++
+        "configured.member_count AS tools_count,loaded.member_count AS loaded_count," ++
+        receiptRowsSql("configured.tool_set_id") ++ " AS tools_rows," ++ receiptRowsSql("loaded.tool_set_id") ++ " AS loaded_rows," ++
+        receiptInvalidOrdinalSql("configured.tool_set_id") ++ " AS tools_invalid," ++ receiptInvalidOrdinalSql("loaded.tool_set_id") ++ " AS loaded_invalid " ++
+        "FROM tool_set configured JOIN tool_set loaded ON loaded.tool_set_id=?2 WHERE configured.tool_set_id=?1",
+    .Args = struct { tools: u64, loaded: u64 },
+    .Row = struct {
+        tools: *Bounded(tool_set.max_names_bytes),
+        loaded_tools: *Bounded(tool_set.max_names_bytes),
+        tools_count: u64,
+        loaded_count: u64,
+        tools_rows: u64,
+        loaded_rows: u64,
+        tools_invalid: bool,
+        loaded_invalid: bool,
+    },
+    .cardinality = .optional,
 });
+
+fn prepareFreshSelection(row: *fresh_selection_read.Row, out: *command_reply.CreationConfiguration) void {
+    row.* = .{ .tools = &out.tools, .loaded_tools = &out.loaded_tools, .tools_count = undefined, .loaded_count = undefined, .tools_rows = undefined, .loaded_rows = undefined, .tools_invalid = undefined, .loaded_invalid = undefined };
+}
+
+fn checkSelectedNames(actual: *const Bounded(tool_set.max_names_bytes), expected: *const command_input.ToolsField) !void {
+    var wanted = expected.iterator();
+    if (actual.len != 0) {
+        var each = std.mem.splitScalar(u8, actual.slice(), ',');
+        while (each.next()) |name| {
+            const value = wanted.next() orelse return error.CorruptStore;
+            if (!std.mem.eql(u8, name, value)) return error.CorruptStore;
+        }
+    }
+    if (wanted.next() != null) return error.CorruptStore;
+}
+
+fn checkFreshSelection(row: *const fresh_selection_read.Row, reads: *const configuration_domain.ConfigurationReads) !void {
+    if (row.tools_invalid or row.loaded_invalid or row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
+    try receiptNames(row.tools, row.tools_count, row.tools);
+    try receiptNames(row.loaded_tools, row.loaded_count, row.loaded_tools);
+    const tools = if (reads.tools) |*selection| selection.names else return error.CorruptStore;
+    const loaded = if (reads.loaded_tools) |*selection| selection.names else tools;
+    try checkSelectedNames(row.tools, tools);
+    try checkSelectedNames(row.loaded_tools, loaded);
+}
+
+fn prepareReceipt(row: *creation_receipt_read.Row, reads: *configuration_domain.ConfigurationReads) void {
+    row.* = .{
+        .provider = undefined,
+        .model = &reads.next.model,
+        .reasoning_effort = undefined,
+        .workspace = &reads.next.workspace,
+        .tools = &reads.saved_tools.names,
+        .loaded_tools = &reads.saved_loaded.names,
+        .permission_mode = undefined,
+        .compaction_trigger = undefined,
+        .tools_count = undefined,
+        .loaded_count = undefined,
+        .tools_rows = undefined,
+        .loaded_rows = undefined,
+        .tools_invalid = undefined,
+        .loaded_invalid = undefined,
+    };
+}
+
+noinline fn receiptNames(names: *const Bounded(tool_set.max_names_bytes), count: u64, out: *Bounded(tool_set.max_names_bytes)) !void {
+    var sorted: command_input.ToolsField = .{ .state = .value };
+    if (names.len != 0) {
+        var each = std.mem.splitScalar(u8, names.slice(), ',');
+        while (each.next()) |name| sorted.insert(name) catch return error.CorruptStore;
+    }
+    if (sorted.count != count) return error.CorruptStore;
+    // Receipt lists use commas; the admission representation uses spaces.
+    for (sorted.names.bytes[0..sorted.names.len]) |*byte| if (byte.* == ' ') {
+        byte.* = ',';
+    };
+    out.* = sorted.names;
+}
+
+test "creation receipt names reject empty segments and sort valid names" {
+    var input: Bounded(tool_set.max_names_bytes) = .{};
+    var output: Bounded(tool_set.max_names_bytes) = .{};
+    try input.set("z,a");
+    try receiptNames(&input, 2, &output);
+    try std.testing.expectEqualStrings("a,z", output.slice());
+    for ([_][]const u8{ ",foo", "foo,", "foo,,bar", "foo,foo" }) |invalid| {
+        try input.set(invalid);
+        try std.testing.expectError(error.CorruptStore, receiptNames(&input, 2, &output));
+    }
+    input.len = 0;
+    try receiptNames(&input, 0, &output);
+    try std.testing.expectEqual(@as(usize, 0), output.len);
+    try std.testing.expectError(error.CorruptStore, receiptNames(&input, 1, &output));
+}
+
+fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
+    if (row.tools_invalid or row.loaded_invalid or row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
+    out.provider = row.provider;
+    out.model = row.model.*;
+    out.reasoning_effort = row.reasoning_effort;
+    out.workspace = row.workspace.*;
+    try receiptNames(row.tools, row.tools_count, &out.tools);
+    try receiptNames(row.loaded_tools, row.loaded_count, &out.loaded_tools);
+    out.permission_mode = try configuration_domain.permissionMode(row.permission_mode);
+    // Before creation defaults were frozen in revision 1, a NULL trigger used
+    // the historical 128000-token window at 90 percent.
+    out.compaction_trigger = row.compaction_trigger orelse 115200;
+}
+
+fn freshReceipt(reads: *const configuration_domain.ConfigurationReads, out: *command_reply.CreationConfiguration) !void {
+    const next = &reads.next;
+    const tools = if (reads.tools) |*selection| selection.names else return error.CorruptStore;
+    const loaded = if (reads.loaded_tools) |*selection| selection.names else tools;
+    out.provider = next.provider;
+    out.model = next.model;
+    out.reasoning_effort = next.reasoning_effort;
+    out.workspace = next.workspace;
+    out.tools = tools.names;
+    out.loaded_tools = loaded.names;
+    for (out.tools.bytes[0..out.tools.len]) |*byte| if (byte.* == ' ') {
+        byte.* = ',';
+    };
+    for (out.loaded_tools.bytes[0..out.loaded_tools.len]) |*byte| if (byte.* == ' ') {
+        byte.* = ',';
+    };
+    out.permission_mode = try configuration_domain.permissionMode(next.permission_mode);
+    out.compaction_trigger = next.compaction_trigger orelse 115200;
+}
 
 fn admitFromSession(
     a: anytype,
@@ -154,7 +328,7 @@ const reject_sent = rsql.Write(.{
 pub const MessageReads = struct {
     digest: [32]u8,
     saved: saved_command.Result = undefined,
-    sender: message_sender.Result = null,
+    sender: action_domain.peer_by_handle.Result = null,
     text: content_domain.Import,
     bound: []const skills_domain.BoundSkill = &.{},
 };
@@ -166,7 +340,7 @@ fn claimedHandle(command: *const content_custody.MessageCommand, selector: []con
     return handle.slice();
 }
 
-fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
+fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: action_domain.peer_by_handle.Result) bool {
     if (command.sender_handle == null) return command.sender == null;
     if (claimedHandle(command, selector) == null) return false;
     const row = found orelse return false;
@@ -175,7 +349,7 @@ fn senderValid(command: *const content_custody.MessageCommand, selector: []const
 
 fn readMessage(a: anytype, selector: []const u8, command: *const content_custody.MessageCommand, reads: *MessageReads) void {
     lookupCommand(a, command.key.slice(), &reads.saved);
-    if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
+    if (claimedHandle(command, selector)) |handle| action_domain.liveByHandle(a, handle, &reads.sender);
 }
 
 pub const SubmitMessage = struct {
@@ -208,6 +382,7 @@ pub const SubmitMessage = struct {
         captured: ?*const skills_domain.MessageCapture,
         parts_saving: ?*content_parts.Saving = null,
         reply: *MessageReply,
+        receipt: ?*command_reply.CreationConfiguration,
     };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.none;
@@ -215,7 +390,7 @@ pub const SubmitMessage = struct {
     pub const Declined = error{};
 
     input: Input,
-    plain: MessageReads = undefined,
+    scratch: union { plain: MessageReads, receipt: creation_receipt_read.Row, fresh: fresh_selection_read.Row } = undefined,
     target: target_session.Result = null,
     creation: *configuration_domain.ConfigurationReads = undefined,
     sender_valid: bool = false,
@@ -229,6 +404,8 @@ pub const SubmitMessage = struct {
         skills: skills_domain.SavingBound,
     } = undefined,
     admission_id: u64 = 0,
+    receipt_found: store_access.Found = .missing,
+    fresh_checked: bool = false,
     pending: enum { accepted, rejected } = .accepted,
     refusal_diagnostic: ?u64 = null,
 
@@ -267,7 +444,7 @@ pub const SubmitMessage = struct {
     }
 
     fn reads(t: *SubmitMessage) *MessageReads {
-        return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
+        return if (t.input.command.configuration != null) &t.creation.message else &t.scratch.plain;
     }
 
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
@@ -276,6 +453,7 @@ pub const SubmitMessage = struct {
             t.creation = r.configurationReads();
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
+        if (command.configuration == null) t.scratch = .{ .plain = undefined };
         const message = t.reads();
         if (t.input.parts_saving) |saving| saving.restart();
         const identity = if (t.input.parts_saving) |saving| saving.reference.identity() else null;
@@ -299,11 +477,16 @@ pub const SubmitMessage = struct {
         switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } }),
+            .rejected => |code| return t.done(t.rejectedReply(code, true)),
             .accepted => |existing| {
                 _ = existing.primary_content_id orelse return error.CorruptStore;
                 t.later = .{ .replay = undefined };
                 r.read(message_replay, .{ .key = command.key.slice() }, &t.later.replay);
+                if (command.configuration != null and t.input.receipt != null) {
+                    t.scratch = .{ .receipt = undefined };
+                    prepareReceipt(&t.scratch.receipt, t.creation);
+                    r.readInto(creation_receipt_read, .{ .session = message.saved.?.target.slice(), .key = command.key.slice() }, &t.scratch.receipt, &t.receipt_found);
+                }
                 return .{ .round = .replay };
             },
         }
@@ -340,14 +523,42 @@ pub const SubmitMessage = struct {
             .accepted => |existing| existing,
             else => unreachable,
         };
+        if (command.configuration != null and t.input.receipt != null and !t.receipt_found.get()) return error.CorruptStore;
+        if (command.configuration != null and t.input.receipt != null) try creationReceipt(&t.scratch.receipt, t.input.receipt orelse return error.CorruptStore);
         const row = &t.later.replay;
         if (row.content_id.get() != existing.primary_content_id.? or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
+        const admission_id = row.admission_id.get();
+        const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
+        const content = try content_parts.publicValue(&metadata, .{ .message = admission_id });
+        const submitted = t.submittedInput();
+        const identity = submitted.identity();
+        if (row.form != @backingInt(std.meta.activeTag(submitted)) or row.byte_length != identity.length or
+            !std.mem.eql(u8, &row.digest, &identity.digest)) return error.CorruptStore;
         return t.done(.{ .accepted = .{
             .replayed = true,
-            .admission_id = row.admission_id.get(),
-            .content = .{ .length = row.length, .digest = row.digest },
+            .admission_id = admission_id,
+            .configuration = if (command.configuration != null) t.input.receipt else null,
+            .content = content,
             .session = existing.target,
         } });
+    }
+
+    fn submittedInput(t: *const SubmitMessage) input_parts.Reference {
+        if (t.input.parts_saving) |saving| return saving.reference;
+        const text = &t.input.command.text;
+        return .{ .bytes = .{ .length = text.length, .digest = text.digest } };
+    }
+
+    fn acceptedInput(t: *const SubmitMessage) content_value.Value {
+        return switch (t.submittedInput()) {
+            .bytes => |identity| .{ .text = identity },
+            .parts => |identity| .{ .parts = .{ .identity = identity, .owner = .{ .message = t.admission_id } } },
+        };
+    }
+
+    fn rejectedReply(t: *const SubmitMessage, code: message_admission.Rejection, is_replay: bool) MessageReply {
+        const input = t.submittedInput();
+        return .{ .rejected = .{ .form = std.meta.activeTag(input), .replayed = is_replay, .code = code, .content = input.identity() } };
     }
 
     fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
@@ -402,12 +613,26 @@ pub const SubmitMessage = struct {
     }
 
     noinline fn apply(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ApplyRound) !transition.Next(SubmitMessage) {
+        if (ran == .creation and t.input.receipt != null and !t.fresh_checked) {
+            if (!t.receipt_found.get()) return error.CorruptStore;
+            try checkFreshSelection(&t.scratch.fresh, t.creation);
+            t.fresh_checked = true;
+        }
         switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
-            .round => |round| return .{ .round = switch (round) {
-                inline else => |tag| @field(rounds.At, @tagName(tag)),
-            } },
+            .round => |round| {
+                if (round == .creation and !t.fresh_checked) if (t.input.receipt) |receipt| {
+                    t.scratch = .{ .fresh = undefined };
+                    prepareFreshSelection(&t.scratch.fresh, receipt);
+                    const next = &t.creation.next;
+                    r.readInto(fresh_selection_read, .{ .tools = next.tool_set_id, .loaded = next.loaded_tool_set_id orelse next.tool_set_id }, &t.scratch.fresh, &t.receipt_found);
+                };
+                return .{ .round = switch (round) {
+                    inline else => |tag| @field(rounds.At, @tagName(tag)),
+                } };
+            },
             .accepted => {},
         }
+        if (t.input.receipt) |receipt| try freshReceipt(t.creation, receipt);
         if (t.input.parts_saving != null) {
             t.head = t.creation.applied.head;
             return t.admit(r, &t.creation.applied);
@@ -504,15 +729,15 @@ pub const SubmitMessage = struct {
     pub fn committed(t: *SubmitMessage) Result {
         const command = t.input.command;
         if (t.admission_id == 0) {
-            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } };
+            t.input.reply.* = t.rejectedReply(t.rejection, false);
             return;
         }
-        const message = t.reads();
         t.input.reply.* = .{
             .accepted = .{
                 .replayed = false,
                 .admission_id = t.admission_id,
-                .content = .{ .length = message.text.length, .digest = message.text.digest },
+                .configuration = if (command.configuration != null) t.input.receipt else null,
+                .content = t.acceptedInput(),
                 .session = if (command.configuration != null) t.creation.applied.session else command.session,
             },
         };
@@ -973,6 +1198,7 @@ pub const Configure = struct {
         .skills_append = .{.branch},
         .outcome = .{.branch},
         .failure = .{.branch},
+        .receipt = .{.branch},
     });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
@@ -988,6 +1214,7 @@ pub const Configure = struct {
         allocator: std.mem.Allocator,
         committed: ?Store.CreationCommitted,
         reply: *configuration_domain.ConfigureReply,
+        receipt: ?*command_reply.CreationConfiguration,
     };
     pub const Result = void;
     pub const Ordinary = error{OutOfMemory};
@@ -996,6 +1223,9 @@ pub const Configure = struct {
 
     input: Input,
     reads: *configuration_domain.ConfigurationReads = undefined,
+    projection: union { replay: creation_receipt_read.Row, fresh: fresh_selection_read.Row } = undefined,
+    receipt_found: store_access.Found = .missing,
+    fresh_checked: bool = false,
     rejection: ?configuration_admission.Rejection = null,
     reloaded: ?skills_domain.Result = null,
     outcome: content_domain.Import = undefined,
@@ -1011,6 +1241,10 @@ pub const Configure = struct {
         const at = ran orelse return t.start(r);
         switch (at) {
             .facts => return t.decide(r),
+            .receipt => {
+                if (!t.receipt_found.get()) return error.CorruptStore;
+                return t.finishReplay();
+            },
             .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
                 inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
@@ -1042,13 +1276,15 @@ pub const Configure = struct {
         switch (try classify(configuration_admission.Rejection, saved, .configure, command.session.slice(), &reads.command_digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .accepted => |existing| return t.done(.{ .accepted = .{
-                .replayed = true,
-                .revision = existing.revision,
-                .created = existing.created,
-                .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
-                .session = existing.target,
-            } }),
+            .accepted => |existing| {
+                if (existing.created and t.input.receipt != null) {
+                    t.projection = .{ .replay = undefined };
+                    prepareReceipt(&t.projection.replay, t.reads);
+                    r.readInto(creation_receipt_read, .{ .session = reads.saved_command.?.target.slice(), .key = command.key.slice() }, &t.projection.replay, &t.receipt_found);
+                    return .{ .round = .receipt };
+                }
+                return t.finishReplay();
+            },
             .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code } }),
         }
         if (t.input.preset) |decision| if (decision.rejection) |code| switch (code) {
@@ -1059,6 +1295,23 @@ pub const Configure = struct {
         if (command.reload_skills) return t.startReload(r);
         t.later = .{ .saved = undefined };
         return t.validate(r, null);
+    }
+
+    fn finishReplay(t: *Configure) !transition.Next(Configure) {
+        const command = t.input.command;
+        const existing = switch (try classify(configuration_admission.Rejection, &t.reads.saved_command, .configure, command.session.slice(), &t.reads.command_digest)) {
+            .accepted => |value| value,
+            else => unreachable,
+        };
+        if (existing.created and t.input.receipt != null) try creationReceipt(&t.projection.replay, t.input.receipt orelse return error.CorruptStore);
+        return t.done(.{ .accepted = .{
+            .replayed = true,
+            .revision = existing.revision,
+            .created = existing.created,
+            .configuration = if (existing.created) t.input.receipt else null,
+            .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
+            .session = existing.target,
+        } });
     }
 
     fn done(t: *Configure, reply: configuration_domain.ConfigureReply) transition.Next(Configure) {
@@ -1089,10 +1342,24 @@ pub const Configure = struct {
     }
 
     noinline fn apply(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ApplyRound) !transition.Next(Configure) {
+        const creating = t.input.command.session.len == 0;
+        if (ran == .creation and creating and t.input.receipt != null and !t.fresh_checked) {
+            if (!t.receipt_found.get()) return error.CorruptStore;
+            try checkFreshSelection(&t.projection.fresh, t.reads);
+            t.fresh_checked = true;
+        }
         const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.reads, ran)) {
-            .round => |round| return .{ .round = switch (round) {
-                inline else => |tag| @field(rounds.At, @tagName(tag)),
-            } },
+            .round => |round| {
+                if (round == .creation and creating and !t.fresh_checked) if (t.input.receipt) |receipt| {
+                    t.projection = .{ .fresh = undefined };
+                    prepareFreshSelection(&t.projection.fresh, receipt);
+                    const next = &t.reads.next;
+                    r.readInto(fresh_selection_read, .{ .tools = next.tool_set_id, .loaded = next.loaded_tool_set_id orelse next.tool_set_id }, &t.projection.fresh, &t.receipt_found);
+                };
+                return .{ .round = switch (round) {
+                    inline else => |tag| @field(rounds.At, @tagName(tag)),
+                } };
+            },
             .accepted => |value| value,
         };
         const command = t.input.command;
@@ -1100,6 +1367,7 @@ pub const Configure = struct {
         reads.command_answer = .{ .accepted = true, .revision = applied.revision, .created = command.session.len == 0 };
         try configuration_domain.queueConfiguredCommand(r, applied, command.key.slice(), .configure, &reads.command_digest, applied.instructions_id, applied.output_schema_id, &reads.command_answer);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
+        if (command.session.len == 0) if (t.input.receipt) |receipt| try freshReceipt(reads, receipt);
         return .commit;
     }
 
@@ -1108,9 +1376,9 @@ pub const Configure = struct {
         const reads = t.reads;
         if (configuration_domain.targetRejection(command.session.slice())) |code| return t.refuse(r, code, null);
         if (command.session.len == 0 or !reads.found.get()) return t.refuse(r, .unknown_session, null);
-        var invalid = command.preset != null or command.require_model;
-        inline for (@typeInfo(content_custody.Configuration).@"struct".field_names) |field| {
-            if (@field(command.configuration, field).state != .omitted) invalid = true;
+        var invalid = command.preset != null or command.require_model or command.configuration.preferences != null;
+        inline for (@import("../../session_settings.zig").spec_entries) |entry| {
+            if (@field(command.configuration, entry.field).state != .omitted) invalid = true;
         }
         if (invalid) return t.refuse(r, .incomplete_initial_configuration, null);
         const captured = t.input.reload_capture orelse return t.refuse(r, .skills_unavailable, null);
@@ -1189,7 +1457,7 @@ pub const Configure = struct {
         else if (t.reloaded) |result|
             .{ .accepted = .{ .replayed = false, .revision = t.reads.next.revision, .created = false, .session = command.session, .skills = result.reload_status } }
         else
-            .{ .accepted = .{ .replayed = false, .revision = t.reads.applied.revision, .created = command.session.len == 0, .session = t.reads.applied.session } };
+            .{ .accepted = .{ .replayed = false, .revision = t.reads.applied.revision, .created = command.session.len == 0, .configuration = if (command.session.len == 0) t.input.receipt else null, .session = t.reads.applied.session } };
     }
 
     pub fn deinit(t: *Configure) void {
@@ -2005,12 +2273,11 @@ pub const InterruptModel = struct {
 
 const decision_action = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
-        action_domain.messageDeclinesApprovalSql("a") ++ " AS message_decline " ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool, message_decline: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
     .cardinality = .optional,
 });
 
@@ -2189,26 +2456,10 @@ pub noinline fn lookupCommand(a: anytype, key: []const u8, destination: *saved_c
     a.read(saved_command, .{ .key = key }, destination);
 }
 
-fn kindCode(kind: cli_value.CommandKind) u8 {
-    return switch (kind) {
-        .configure => 1,
-        .message => 2,
-        .session_stop => 3,
-        .model_interruption => 4,
-        .permission_decision => 5,
-        .session_archive => 6,
-        .session_pin => 7,
-        .action_background => 8,
-        .action_stop => 9,
-    };
-}
-
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
     return .{
-        .kind = for (std.enums.values(cli_value.CommandKind)) |candidate| {
-            if (kindCode(candidate) == row.kind) break candidate;
-        } else return error.CorruptStore,
+        .kind = command_replay.kindOf(row.kind) orelse return error.CorruptStore,
         .target = row.target,
         .digest = row.input_digest,
         .accepted = row.accepted,
@@ -2226,11 +2477,20 @@ pub fn classify(
     target: []const u8,
     digest: *const [32]u8,
 ) error{CorruptStore}!Replay(Rejection) {
-    const existing = try savedAnswer(saved) orelse return .fresh;
-    if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
-        !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
-    if (existing.accepted) return .{ .accepted = existing };
-    return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
+    const existing = try savedAnswer(saved);
+    const facts: ?command_replay.Saved = if (existing) |*row| .{
+        .kind = row.kind,
+        .target = row.target.slice(),
+        .digest = row.digest,
+        .accepted = row.accepted,
+        .code = row.code.slice(),
+    } else null;
+    return switch (try command_replay.classify(Rejection, facts, kind, target, digest)) {
+        .fresh => .fresh,
+        .conflict => .conflict,
+        .accepted => .{ .accepted = existing orelse unreachable },
+        .rejected => |code| .{ .rejected = code },
+    };
 }
 
 pub const pending_messages = rsql.Read(.{
@@ -2278,7 +2538,7 @@ pub noinline fn queueCommand(
 ) !void {
     a.write(insert_command, .{
         .key = key,
-        .kind = kindCode(kind),
+        .kind = command_replay.codeOf(kind),
         .target = target,
         .digest = digest.*,
         .primary_content_id = primary_content_id,
@@ -2363,22 +2623,17 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
         .configure => observation.kind = .{ .configure = .{ .revision = command.revision, .created = command.created } },
         .message => {
             observation.kind = .{ .message = null };
-            if (!command.accepted) {
-                if (command.primary_content_id) |id| {
-                    var metadata: content_domain.content_metadata.Row = undefined;
-                    a.read(content_domain.content_metadata, .{ .content_id = @intCast(id) }, &metadata);
-                    try store_access.runAs(a, error.CorruptStore);
-                    _ = try content_parts.publicMetadata(a, @intCast(id), &metadata);
-                }
-                return;
-            }
+            if (!command.accepted) return;
             const row = message orelse return error.CorruptStore;
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.input_length, .digest = row.input_digest, .private = row.input_private, .form = row.input_form };
-            _ = try content_parts.publicMetadata(a, row.content_id.get(), &metadata);
             const queue = try messageQueue(&row);
-            observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
+            observation.kind.message = .{
+                .content = try content_parts.publicValue(&metadata, .{ .message = queue.admission_id }),
+                .queue = queue,
+                .admitted_at = row.admitted_at.get(),
+            };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
                 .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),

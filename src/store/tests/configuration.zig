@@ -202,7 +202,7 @@ test "configure refuses a tool name the tool set lacks and a provider tool its p
     }
 }
 
-test "Store configuration requires model, Bash workspace and, on a Host serving several, a provider" {
+test "Store configuration requires Workspace and model and, on a Host serving several, a provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -325,7 +325,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     }.run);
 }
 
-test "creation requires every agent setting and accepts an unused Workspace" {
+test "creation accepts omitted Host settings and preserves its supplied Workspace without Bash" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -335,39 +335,41 @@ test "creation requires every agent setting and accepts an unused Workspace" {
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            inline for (.{ "model", "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
+            var missing_model = try completeConfiguration("missing-model", "", workspace, "model-a");
+            missing_model.configuration.model.state = .omitted;
+            const missing_model_reply = try storage.configure(&missing_model, .{});
+            try std.testing.expect(missing_model_reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, missing_model_reply.rejected.code);
+            inline for (.{ "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
                 var command = try completeConfiguration("missing-" ++ field, "", workspace, "model-a");
                 @field(command.configuration, field).state = .omitted;
                 const reply = try storage.configure(&command, .{});
-                try std.testing.expect(reply == .rejected);
-                try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+                try std.testing.expect(reply == .accepted);
+                const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
+                try std.testing.expectEqualStrings("model-a", observed.model.slice());
             }
             var missing = try completeConfiguration("unused-missing", "", "/does-not-exist/rui-unused-workspace", "model-a");
             missing.configuration.tools = try .of(&.{});
             const refused = try storage.configure(&missing, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_workspace, refused.rejected.code);
-            {
-                var key: [32]u8 = undefined;
-                const index: usize = 0;
-                var command = try completeConfiguration("unused-omitted", "", workspace, "model-a");
-                command.configuration.tools = try .of(&.{});
-                command.configuration.workspace.state = .omitted;
-                const reply = try storage.configure(&command, .{});
-                try std.testing.expect(reply == .accepted);
-                const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-                try expectToolSetNames(&storage, observed.tool_set_id, &.{});
-                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
-                var enable: wire_request.ConfigureCommand = .{};
-                try enable.key.set(try std.fmt.bufPrint(&key, "enable-{d}", .{index}));
-                enable.session = reply.accepted.session;
-                enable.configuration.tools = try .of(&.{"bash"});
-                try std.testing.expect(try storage.configure(&enable, .{}) == .accepted);
-                const enabled = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-                try std.testing.expectEqualStrings(observed.workspace.slice(), enabled.workspace.slice());
-                try std.testing.expectEqualStrings("/", enabled.workspace.slice());
-                try expectToolSetNames(&storage, enabled.tool_set_id, &.{"bash"});
-            }
+            var command = try completeConfiguration("unused-supplied", "", workspace, "model-a");
+            command.configuration.tools = try .of(&.{});
+            const reply = try storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+            try expectToolSetNames(&storage, observed.tool_set_id, &.{});
+            try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+            try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
+            var enable: wire_request.ConfigureCommand = .{};
+            try enable.key.set("enable-bash");
+            enable.session = reply.accepted.session;
+            enable.configuration.tools = try .of(&.{"bash"});
+            try std.testing.expect(try storage.configure(&enable, .{}) == .accepted);
+            const enabled = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+            try std.testing.expectEqualStrings(workspace, enabled.workspace.slice());
+            try expectToolSetNames(&storage, enabled.tool_set_id, &.{"bash"});
         }
     }.run);
 }
@@ -382,16 +384,17 @@ test "an omitted provider selects the Host's sole served provider" {
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
-            var command = try completeConfiguration("host-provider", "", "/", "model-a");
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("host-provider", "", workspace, "model-a");
             command.configuration.provider.state = .omitted;
-            command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
             command.require_model = true;
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
-            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort);
+            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
         }
     }.run);
 }
@@ -407,9 +410,10 @@ test "an omitted provider is refused on a Host serving several" {
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
-            var command = try completeConfiguration("several-providers", "", "/", "model-a");
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("several-providers", "", workspace, "model-a");
             command.configuration.provider.state = .omitted;
-            command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
@@ -1221,6 +1225,98 @@ test "definite rejections retain decisions without retaining payloads for config
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+        }
+    }.run);
+}
+
+test "parent creation uses inherited provider for omitted compaction across saved provider bindings" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var parent = try completeConfiguration("inherited-compaction-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            parent.configuration.tools.state = .value;
+            parent.configuration.tools.count = 0;
+            parent.configuration.tools.names.len = 0;
+            for (tool_defs.built_in_tool_set.records) |record| try parent.configuration.tools.insert(record.name);
+            const parent_session = (try storage.configure(&parent, .{})).accepted.session;
+            for ([_][]const u8{ "openai", "codex" }) |saved_provider| {
+                var child: wire_request.ConfigureCommand = .{};
+                var key: [64]u8 = undefined;
+                try child.key.set(try std.fmt.bufPrint(&key, "inherited-compaction-saved-{s}", .{saved_provider}));
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(parent_session.slice());
+                child.configuration.model.state = .value;
+                try child.configuration.model.value.set("gpt-6.1-sol");
+                const result = try storage.configure(&child, .{});
+                try std.testing.expect(result == .accepted);
+                const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
+                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+                try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
+                try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+                try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);
+            }
+        }
+    }.run);
+}
+
+test "standalone creation always requires Workspace and replays saved refusal across tool sets" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |creating_message| for ([_]?[]const []const u8{ null, &.{}, &.{"web_search"}, &.{"bash"} }) |tools| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var configure = try completeConfiguration("missing-workspace", "", workspace, "model-a");
+                configure.configuration.workspace.state = .omitted;
+                if (tools) |names| configure.configuration.tools = try .of(names) else configure.configuration.tools.state = .omitted;
+                if (creating_message) {
+                    var message: wire_request.MessageCommand = .{};
+                    try message.key.set("missing-workspace");
+                    message.configuration = configure.configuration;
+                    message.text = try testingBytesContent(&tmp, "missing-workspace-message", "create in my Workspace");
+                    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                    const refused = storage.submitMessageWithModel(&message, null, .{});
+                    try std.testing.expect(refused == .rejected);
+                    try std.testing.expectEqual(protocol.MessageRejection.incomplete_initial_configuration, refused.rejected.code);
+                    const replay = storage.submitMessageWithModel(&message, null, .{});
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                    try std.testing.expectEqual(refused.rejected.code, replay.rejected.code);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                    try message.key.set("supplied-workspace");
+                    message.configuration.?.workspace.state = .value;
+                    try message.configuration.?.workspace.value.set(workspace);
+                    const accepted = storage.submitMessageWithModel(&message, null, .{});
+                    try std.testing.expect(accepted == .accepted);
+                    const observed = try storage.inspectSessionForTesting(accepted.accepted.session.slice());
+                    try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
+                    try std.testing.expectEqualStrings("model-a", observed.model.slice());
+                } else {
+                    const refused = try storage.configure(&configure, .{});
+                    try std.testing.expect(refused == .rejected);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, refused.rejected.code);
+                    const replay = try storage.configure(&configure, .{});
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                    try std.testing.expectEqual(refused.rejected.code, replay.rejected.code);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                    try configure.key.set("supplied-workspace");
+                    configure.configuration.workspace.state = .value;
+                    try configure.configuration.workspace.value.set(workspace);
+                    const accepted = try storage.configure(&configure, .{});
+                    try std.testing.expect(accepted == .accepted);
+                    const observed = try storage.inspectSessionForTesting(accepted.accepted.session.slice());
+                    try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            };
         }
     }.run);
 }

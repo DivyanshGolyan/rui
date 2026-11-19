@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const os = @import("os/os.zig");
+const os = @import("os");
 const client = @import("client.zig");
 const process = @import("upgrade_process.zig");
+const upgrade_status = @import("upgrade_status.zig");
 
 const download_origin = "https://ruicode.com";
 pub const default_endpoint = download_origin ++ "/releases/latest";
@@ -28,8 +29,7 @@ pub const Version = struct {
     }
 
     pub fn order(a: Version, b: Version) std.math.Order {
-        const schema = std.math.order(a.schema, b.schema);
-        return if (schema == .eq) std.math.order(a.patch, b.patch) else schema;
+        return upgrade_status.Version.order(.{ .schema = a.schema, .patch = a.patch }, .{ .schema = b.schema, .patch = b.patch });
     }
 };
 

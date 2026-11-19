@@ -958,3 +958,88 @@ test "stop_action effective offer preserves the historical settings limit" {
         }
     }.run);
 }
+
+test "creation receipts retain maximum configured and loaded tools" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const extras = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var records: [127]tool_defs.Record = undefined;
+                const bytes = protocol.max_tool_list_name_bytes - "find_tools".len;
+                for (&records, 0..) |*record, index| {
+                    const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{index});
+                    const length = bytes / records.len + @intFromBool(index < bytes % records.len);
+                    record.* = .{
+                        .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .owner = .mcp,
+                        .server = "docs",
+                        .read_only = true,
+                        .description = "Read a page.",
+                        .input_schema = "{\"type\":\"object\"}",
+                    };
+                }
+                break :blk records;
+            };
+            const records = comptime testingHostToolRecords(&extras);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const host_tools: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var allowed: protocol.ToolsField = .{ .state = .value };
+            try allowed.insert("find_tools");
+            for (extras) |record| try allowed.insert(record.name);
+            try std.testing.expectEqual(protocol.max_tools, allowed.count);
+            try std.testing.expectEqual(protocol.max_tool_list_name_bytes, allowed.names.len - (allowed.count - 1));
+            var expected: [@import("../../tool_name.zig").max_names_bytes]u8 = undefined;
+            const expected_names = expected[0..allowed.names.len];
+            for (allowed.names.slice(), expected_names) |byte, *out| out.* = if (byte == ' ') ',' else byte;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("large-tools-config", "", workspace, "model-a");
+            create.configuration.tools = allowed;
+            create.configuration.loaded_tools = allowed;
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("large-tools-message");
+            message.text = try shared_fixtures.testingBytesContent(&tmp, "large-tools-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var config_session: protocol.Bounded(protocol.max_session_bytes) = undefined;
+            var message_session: protocol.Bounded(protocol.max_session_bytes) = undefined;
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
+                defer storage.close() catch unreachable;
+                var configured_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const configured = try storage.configureInto(&create, &configured_receipt, .{});
+                var submitted_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const submitted = storage.submitMessageWithModelInto(&message, null, &submitted_receipt, .{});
+                try std.testing.expect(configured == .accepted and submitted == .accepted);
+                config_session = configured.accepted.session;
+                message_session = submitted.accepted.session;
+                try check(configured.accepted.configuration, expected_names);
+                try check(submitted.accepted.configuration, expected_names);
+            }
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
+                defer storage.close() catch unreachable;
+                var configured_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const configured = try storage.configureInto(&create, &configured_receipt, .{});
+                var submitted_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const submitted = storage.submitMessageWithModelInto(&message, null, &submitted_receipt, .{});
+                try std.testing.expect(configured == .accepted and configured.accepted.replayed);
+                try std.testing.expect(submitted == .accepted and submitted.accepted.replayed);
+                try std.testing.expectEqualStrings(config_session.slice(), configured.accepted.session.slice());
+                try std.testing.expectEqualStrings(message_session.slice(), submitted.accepted.session.slice());
+                try check(configured.accepted.configuration, expected_names);
+                try check(submitted.accepted.configuration, expected_names);
+            }
+        }
+
+        fn check(receipt: ?*const @import("../../creation_receipt.zig").Configuration, expected: []const u8) !void {
+            try std.testing.expect(receipt != null);
+            try std.testing.expectEqualStrings(expected, receipt.?.tools.slice());
+            try std.testing.expectEqualStrings(expected, receipt.?.loaded_tools.slice());
+        }
+    }.run);
+}

@@ -38,6 +38,9 @@ pub const Code = enum {
     model_id_malformed,
     terminal_required,
     message_empty,
+    message_stdin_unselected,
+    message_parts_limit,
+    message_image_invalid,
     environment_too_large,
     internal_unexpected,
     host_not_serving,
@@ -91,6 +94,7 @@ pub const Code = enum {
     unknown_preset,
     preset_on_update,
     parent_on_update,
+    preferences_on_update,
     parent_provider_forbidden,
     parent_workspace_forbidden,
     tools_not_in_parent,
@@ -281,9 +285,12 @@ fn mapped(err: anyerror) ?Code {
         error.InvalidOutputSchema => .invalid_output_schema,
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
+        error.UnselectedStdin, error.DuplicateStdin => .message_stdin_unselected,
+        error.TooManyInputParts => .message_parts_limit,
+        error.ImageNotRegular, error.UnsupportedImage, error.TruncatedImage, error.MalformedImage, error.ImageMimeMismatch, error.ImageResourceLimit => .message_image_invalid,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
         error.InvalidInvocation, error.SettingsInvalid => .invocation_invalid,
-        error.CallerFailure => .internal_unexpected,
+        error.CallerFailure, error.ContentChanged => .internal_unexpected,
         error.InsecureDirectoryPermissions => .internal_unexpected,
         error.ConnectionSuperseded => .sign_in_connection_changed,
         error.ConnectionNotActive => .sign_in_connection_pending,
@@ -361,7 +368,7 @@ pub const Input = enum {
             .session => "--session / --to",
             .sender_handle => "RUI_SENDER_HANDLE",
             .preset => "preset",
-            .initial_configuration => "--workspace, --provider, --model",
+            .initial_configuration => "--model, --workspace, --provider",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
             .action => "--action",
@@ -391,7 +398,10 @@ pub fn facts(code: Code) Facts {
     return switch (code) {
         .model_id_malformed => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a model ID of 1-256 printable non-space ASCII bytes" }, .says = "The model ID has invalid syntax.", .next = "Supply --model MODEL using a supported ID or a valid unlisted ID with default limits." },
         .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --to ID with Message text on stdin." },
-        .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
+        .message_empty => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "nonempty text or an image" }, .says = "The Message is empty.", .next = "Provide nonempty Message text or an image." },
+        .message_stdin_unselected => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "stdin selected once with --text-file -" }, .says = "Standard input is not selected or is selected more than once.", .next = "Use --text-file - once to include piped input, or remove the unused input." },
+        .message_parts_limit => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "at most 1500 Message parts" }, .says = "The Message has too many parts.", .next = "Use fewer text and image operands." },
+        .message_image_invalid => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "a bounded regular PNG or JPEG file" }, .says = "An image could not be accepted.", .next = "Supply a valid local PNG or JPEG regular file within the image size limit." },
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
@@ -467,9 +477,10 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_not_in_tools => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "a subset of the Session's --tools, or none" }, .says = "A loaded tool is not one of the Session's tools.", .next = "Remove it from --loaded-tools, or add it to --tools first." },
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: --loaded-tools leaves tools out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
-        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "State every required setting; rui session start fills them for you." },
+        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "a model, a Workspace for standalone creation and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "Supply the missing model, Workspace or provider; Workspace may come from a preset or parent." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
+        .preferences_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "preferences only on creation" }, .says = "An existing Session cannot apply creation preferences.", .next = "Omit preferences from the update." },
         .parent_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "parent only on creation" }, .says = "spec.parent: an existing Session cannot change its parent. Nothing was changed.", .next = "Omit parent from the update." },
         .parent_provider_forbidden => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the parent's provider, inherited without naming provider" }, .says = "spec.provider: an agent always uses your provider.", .next = "Omit provider from the child spec." },
         .parent_workspace_forbidden => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the parent's Workspace, inherited without naming workspace" }, .says = "spec.workspace: an agent always works in your Workspace.", .next = "Omit workspace from the child spec." },
@@ -743,8 +754,9 @@ test "historical model immutability rejection explains its saved policy" {
 
 test "saved ambiguous causes do not invent missing flags or model restrictions" {
     const initial = facts(.incomplete_initial_configuration);
-    try std.testing.expectEqualStrings("model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several", initial.accepted.grammar);
+    try std.testing.expectEqualStrings("a model, a Workspace for standalone creation and a provider when the Host serves several", initial.accepted.grammar);
     try std.testing.expectEqualStrings("A new Session's spec is missing a required setting.", initial.says);
+    try std.testing.expectEqualStrings("Supply the missing model, Workspace or provider; Workspace may come from a preset or parent.", initial.next);
     try std.testing.expectEqualStrings("The model ID is empty.", facts(.invalid_model).says);
     try std.testing.expectEqual(Input.provider, facts(.model_capability_unavailable).input.?);
     try std.testing.expectEqualStrings("default or a decimal from 1 to 9223372036854775807", facts(.invalid_compaction_trigger).accepted.grammar);

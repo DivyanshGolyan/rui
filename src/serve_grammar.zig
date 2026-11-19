@@ -152,9 +152,14 @@ const serve_test = &[_]Option{
     hiddenFlag("test-retention-removal-failure"),
     hiddenNumber("test-provider-inactivity-seconds", 1, std.math.maxInt(i64) / 1_000_000_000),
     hiddenValue("test-retry-waits-ms"),
+    // Integration fixtures order handoff through the model.before_handoff and
+    // action.before_handoff pause points; only the model-retry qualification
+    // runner, which measures the release product, still separates admission
+    // from launch with this delay.
     hiddenNumber("test-before-launch-delay-ms", 0, 10_000),
+    // Fixtures hold results at the model.result_ready and action.result_ready
+    // pause points; only the model-control qualification runner still uses it.
     hiddenNumber("test-before-result-delay-ms", 0, 10_000),
-    hiddenValue("test-model-result-gate-path"),
     hiddenValue("test-retry-recovery-gate-path"),
     hiddenValue("test-inspection-reply-gate-path"),
     hiddenNumber("test-inspection-reply-delay-ms", 0, 60_000),
@@ -163,10 +168,6 @@ const serve_test = &[_]Option{
     hiddenNumber("test-observation-fd", 0, std.math.maxInt(c_int)),
     hiddenNumber("test-observation-state-fd", 0, std.math.maxInt(c_int)),
     hiddenValue("test-observation-plan"),
-    hiddenValue("test-transition"),
-    hiddenValue("test-transition-gate-path"),
-    hiddenValue("test-bash-observed-exit-gate-path"),
-    hiddenValue("test-shutdown-signalled-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),
     hiddenValue("test-control-gate-keys"),
     hiddenValue("test-control-gate-path"),
@@ -177,14 +178,13 @@ const serve_test = &[_]Option{
     hiddenNumber("test-request-scratch-limit", 0, std.math.maxInt(u64)),
     hiddenNumber("test-request-preparation-byte-allowance", 1, std.math.maxInt(usize)),
     hiddenNumber("test-request-preparation-item-allowance", 1, std.math.maxInt(usize)),
-    hiddenNumber("test-request-preparation-advance-delay-ms", 0, std.math.maxInt(i64)),
 };
 
 pub const definition: grammar.Definition = .{
     .resource = .host,
     .name = "serve",
     .description = "Run a foreground Host. Apply saved Host settings, then --settings FILE|- and repeated --set PATH=VALUE in order. Provider credentials belong to this Host, not its peer callers.",
-    .options = settings_options ++ serve_test,
+    .options = settings_options ++ serve_test ++ if (@import("build_options").test_pauses) &[_]Option{hiddenNumber("test-pause-fd", 0, std.math.maxInt(c_int))} else &[_]Option{},
     .retired_options = retired_options,
 };
 

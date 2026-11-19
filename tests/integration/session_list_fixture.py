@@ -1,5 +1,4 @@
 import os
-import pathlib
 import re
 import time
 
@@ -25,12 +24,12 @@ def session_values(page):
 
 
 def linux_resources(pid):
-    status = pathlib.Path(f"/proc/{pid}/status")
-    if not status.exists():
+    memory = os_semantics.process_memory(pid)
+    if memory is None:
         return None
-    rss = next(int(line.split()[1]) for line in status.read_text().splitlines() if line.startswith("VmRSS:"))
+    rss = memory["rss_kib"]
     identities = {}
-    for entry in pathlib.Path(f"/proc/{pid}/fd").iterdir():
+    for entry in os_semantics.descriptor_links(pid):
         metadata = entry.stat()
         identities[int(entry.name)] = (metadata.st_dev, metadata.st_ino,
                                       metadata.st_mode, os.readlink(entry))

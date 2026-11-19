@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (("tests/integration", (".py", ".sh")),)
 TOOL_LIST_SCANNED = (("src", (".zig",)), ("tests", (".py", ".sh", ".zig", ".go")))
 TOOL_OWNER = "src/built_in_tool.zig"
+# Generated from the statements' own text, which reads the list from TOOL_OWNER at compile time.
+STATEMENT_TABLE = "src/store/rsql_table.zig"
 PROSE_WORDS = 5
 SMALLEST_NUMBER = 1000
 SMALLEST_WINDOW = 100_000
@@ -114,7 +116,7 @@ def built_in_tools(root):
 def tool_list_findings(root, tools):
     quoted = [re.compile(rf"""["']{tool}["']""") for tool in tools]
     findings = []
-    for path, lines in files(root, TOOL_LIST_SCANNED, skip=(TOOL_OWNER,)):
+    for path, lines in files(root, TOOL_LIST_SCANNED, skip=(TOOL_OWNER, STATEMENT_TABLE)):
         for number, line in enumerate(lines, 1):
             if all(pattern.search(line) for pattern in quoted):
                 findings.append(f"{path}:{number}: {line.strip()[:120]}")

@@ -21,7 +21,7 @@ const completeMessage = store_testing.completeMessage;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
 
-test "explicit or retained null effort on a listed model refuses a mixed update before any changes" {
+test "explicit null effort resets mixed updates while omitted legacy null remains invalid on a listed model" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             for ([_]bool{ false, true }) |model_revision| {
@@ -34,12 +34,13 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var create = try completeConfiguration("effort-null-spec", "", workspace, if (model_revision) "model-a" else "gpt-6.1-sol");
                 const session = (try storage.configure(&create, .{})).accepted.session;
+                if (model_revision) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 var patch: wire_request.ConfigureCommand = .{};
                 patch.session = session;
                 if (!model_revision) {
-                    try patch.key.set("effort-set-low");
+                    try patch.key.set("effort-set-high");
                     patch.configuration.reasoning_effort.state = .value;
-                    try patch.configuration.reasoning_effort.value.set("low");
+                    try patch.configuration.reasoning_effort.value.set("high");
                     try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                 }
                 const before = try storage.inspectSessionForTesting(session.slice());
@@ -51,20 +52,30 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
                 }
                 patch.configuration.tools = try .of(&.{});
                 patch.configuration.label.state = .value;
-                try patch.configuration.label.value.set("must not apply");
-                const bytes = "must not import these instructions";
+                try patch.configuration.label.value.set("mixed update");
+                const bytes = "mixed update instructions";
                 patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
-                const refused = try storage.configure(&patch, .{});
-                try std.testing.expect(refused == .rejected);
-                try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
+                const result = try storage.configure(&patch, .{});
                 const after = try storage.inspectSessionForTesting(session.slice());
-                try std.testing.expectEqual(before.revision, after.revision);
-                try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
-                try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
-                try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
-                try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
-                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+                if (model_revision) {
+                    try std.testing.expect(result == .rejected);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, result.rejected.code);
+                    try std.testing.expectEqual(before.revision, after.revision);
+                    try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
+                    try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
+                    try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
+                    try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+                } else {
+                    try std.testing.expect(result == .accepted);
+                    try std.testing.expectEqual(before.revision + 1, after.revision);
+                    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label='mixed update'", .{session.slice()}));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{after.tool_set_id}));
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &after.instructions.digest);
+                    try std.testing.expect((try storage.configure(&patch, .{})).accepted.replayed);
+                }
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
             }
         }
@@ -192,6 +203,8 @@ test "effort refusal requires an emitted Operation update across configure cycle
                 create.configuration.reasoning_effort.state = if (initial == null) .explicit_null else .value;
                 if (initial) |value| try create.configuration.reasoning_effort.value.set(@tagName(value));
                 const session = (try storage.configure(&create, .{})).accepted.session;
+                // Retain the historical null case after fresh null requests became default resets.
+                if (initial == null) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 if (legacy_codec) try store_testing.exec(&storage, "UPDATE session SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
                 if (scenario != .first) try answerTestTurn(&storage, &tmp, session.slice(), "wire-effort-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
                 var change: wire_request.ConfigureCommand = .{};
@@ -274,6 +287,8 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                     try create.configuration.reasoning_effort.value.set(@tagName(value));
                 } else create.configuration.reasoning_effort.state = .explicit_null;
                 const session = (try storage.configure(&create, .{})).accepted.session;
+                // Retain the historical null case after fresh null requests became default resets.
+                if (effort == null) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 try answerTestTurn(&storage, &tmp, session.slice(), "provenance-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
                 if (legacy) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 const override = if (legacy) null else effort;
@@ -403,6 +418,8 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                     try create.configuration.reasoning_effort.value.set(@tagName(value));
                 } else create.configuration.reasoning_effort.state = .explicit_null;
                 const session = (try storage.configure(&create, .{})).accepted.session;
+                // Retain the historical null case after fresh null requests became default resets.
+                if (top == null) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
                 try answerTestTurn(&storage, &tmp, session.slice(), "carry-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
                 var change: wire_request.ConfigureCommand = .{};
                 change.session = session;
@@ -482,6 +499,79 @@ test "effort refusal eligibility excludes a source refused by any Operation" {
             const revision = (try storage.configure(&change, .{})).accepted.revision;
             try store_testing.exec(&storage, "UPDATE model_operation SET settings_revision=?1,effort_source_revision=?1,reasoning_effort='xhigh' WHERE operation_id=999", .{revision});
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
+        }
+    }.run);
+}
+
+test "sparse creation and default reset replay keep admitted catalog defaults" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]?protocol.ReasoningEffort{ .low, .high, null }) |initial| for ([_]protocol.FieldState{ .omitted, .explicit_null }) |state| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const catalog = @import("../../model_catalog.zig");
+                var efforts: catalog.Efforts = .{};
+                if (initial) |effort| efforts.insert(effort);
+                try storage.saveModelFacts(&.{.{ .id = "runtime-default", .context_window = 1000, .efforts = efforts, .openai_listed = true }}, null);
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("sparse-catalog-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "runtime-default");
+                create.configuration.tools.state = .omitted;
+                create.configuration.permission_mode.state = .omitted;
+                create.configuration.reasoning_effort.state = state;
+                create.configuration.compaction_trigger.state = state;
+                const created = try storage.configure(&create, .{});
+                try std.testing.expect(created == .accepted);
+                const session = created.accepted.session;
+                const first = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(initial, first.reasoning_effort);
+                try std.testing.expectEqual(@as(?u64, 900), first.compaction_trigger);
+                try std.testing.expectEqualStrings(@import("../../product_defaults.zig").permission_mode, first.permission_mode.slice());
+                try std.testing.expectEqual(@as(u64, tool_defs.built_in_tool_set.records.len), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{first.tool_set_id}));
+                var retained: wire_request.ConfigureCommand = .{ .session = session };
+                try retained.key.set("sparse-catalog-retain");
+                retained.configuration.label.state = .value;
+                try retained.configuration.label.value.set("preserve omitted defaults");
+                try std.testing.expect(try storage.configure(&retained, .{}) == .accepted);
+                const unchanged = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(initial, unchanged.reasoning_effort);
+                try std.testing.expectEqual(first.compaction_trigger, unchanged.compaction_trigger);
+
+                try storage.saveModelFacts(&.{.{ .id = "runtime-default", .context_window = 2000, .efforts = .init(.{ .medium = true }), .openai_listed = true }}, null);
+                const create_replay = try storage.configure(&create, .{});
+                try std.testing.expect(create_replay == .accepted and create_replay.accepted.replayed);
+                try std.testing.expectEqual(created.accepted.revision, create_replay.accepted.revision);
+                try std.testing.expectEqualStrings(session.slice(), create_replay.accepted.session.slice());
+                const after_create_replay = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(initial, after_create_replay.reasoning_effort);
+                try std.testing.expectEqual(@as(?u64, 900), after_create_replay.compaction_trigger);
+
+                var reset: wire_request.ConfigureCommand = .{ .session = session };
+                try reset.key.set("sparse-catalog-reset");
+                reset.configuration.reasoning_effort.state = .explicit_null;
+                reset.configuration.compaction_trigger.state = .explicit_null;
+                const resolved = try storage.configure(&reset, .{});
+                try std.testing.expect(resolved == .accepted);
+                const after_reset = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), after_reset.reasoning_effort);
+                try std.testing.expectEqual(@as(?u64, 1800), after_reset.compaction_trigger);
+
+                try storage.saveModelFacts(&.{.{ .id = "runtime-default", .context_window = 4000, .efforts = .init(.{ .high = true }), .openai_listed = true }}, null);
+                const reset_replay = try storage.configure(&reset, .{});
+                try std.testing.expect(reset_replay == .accepted and reset_replay.accepted.replayed);
+                try std.testing.expectEqual(resolved.accepted.revision, reset_replay.accepted.revision);
+                const after_reset_replay = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(after_reset.revision, after_reset_replay.revision);
+                try std.testing.expectEqual(after_reset.reasoning_effort, after_reset_replay.reasoning_effort);
+                try std.testing.expectEqual(after_reset.compaction_trigger, after_reset_replay.compaction_trigger);
+                try reset.key.set("sparse-catalog-fresh-reset");
+                try std.testing.expect(try storage.configure(&reset, .{}) == .accepted);
+                const fresh = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), fresh.reasoning_effort);
+                try std.testing.expectEqual(@as(?u64, 3600), fresh.compaction_trigger);
+            };
         }
     }.run);
 }

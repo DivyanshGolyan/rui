@@ -3,6 +3,8 @@ const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
+const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 pub const Destination = Renderer.Destination;
@@ -185,18 +187,19 @@ fn peerName(sink: anytype, peer: protocol.NamedPeer) !void {
     if (linked) try sink.feed(Text.link_close ++ Mark.reset ++ Mark.summary);
 }
 
-pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
-    const tenths = (bytes + 50) / 100;
-    if (tenths < 100) return std.fmt.bufPrint(buffer, "{d}.{d} KB", .{ tenths / 10, tenths % 10 }) catch unreachable;
-    return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
-}
-
 pub const Collapsed = struct {
     source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
-    content: protocol.ActivityItem.Content,
+    content: content_value.Value,
     row: bool,
+
+    pub fn at(self: Collapsed) value_reads.At {
+        return .{ .source = switch (self.source) {
+            .activity => .activity,
+            .conversation => .conversation,
+        }, .position = self.position, .ordinal = self.ordinal };
+    }
 };
 
 pub fn writeCollapsed(sink: anytype, value: Collapsed, bytes: []const u8) !void {
@@ -390,13 +393,6 @@ test "a Message's time is the local hour and minute of its Host second" {
     try std.testing.expectEqual(@as(?[]const u8, null), clock(std.math.maxInt(u64), &buffer));
 }
 
-test "sizes are thousands of bytes with one decimal below 9.95" {
-    var buffer: [24]u8 = undefined;
-    for ([_]struct { u64, []const u8 }{ .{ 9, "0.0 KB" }, .{ 1_025, "1.0 KB" }, .{ 1_049, "1.0 KB" }, .{ 1_050, "1.1 KB" }, .{ 9_949, "9.9 KB" }, .{ 9_950, "10 KB" }, .{ 10_499, "10 KB" }, .{ 10_500, "11 KB" }, .{ 65_536, "66 KB" } }) |case| {
-        try std.testing.expectEqualStrings(case[1], kilobytes(case[0], &buffer));
-    }
-}
-
 fn repeat(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
     comptime {
         var result: [text.len * count]u8 = undefined;
@@ -515,7 +511,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null } }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1199,32 +1195,41 @@ test "a queued Message is labelled only while work under way holds it" {
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-fn inputPrefix(sink: anytype, colour: bool, admitted_at: u64, action: ?u64) !void {
-    if (action) |id| {
-        try print(sink, "{s}Background Action {d}{s}\n", .{ Style.quiet.code(colour), id, Style.normal.code(colour) });
-    } else try userPrefix(sink, colour, admitted_at);
-}
-
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+    if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
-    const personal = value.source_action == null;
-    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(personal);
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    try inputPrefix(sink, colour, value.admitted_at, value.source_action);
+    try userPrefix(sink, colour, value.admitted_at);
+    const display = try open(requests, store, session, scratch, item, value.content);
     var body: UserBody(@TypeOf(sink)) = undefined;
-    try body.init(sink, value.content.length, false);
-    try content(requests, store, session, item, value.content, &body);
+    try body.init(sink, display.length, false);
+    try stream(requests, &display, &body);
     if (try body.finishMessage(block)) {
         try sink.feed("\n");
     } else try Text.writeBody(sink, "\n");
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(false);
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
-    if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, target)) |failure| return requests.failRead(failure);
+/// Opens the display of the value an activity entry shows. A parts value reads its
+/// certified list into `scratch`, which the returned Display borrows.
+fn open(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value) !value_reads.Display {
+    return switch (try value_reads.Display.open(requests, store, session, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal }, value, scratch)) {
+        .display => |display| display,
+        .failure => |failure| requests.failRead(failure),
+    };
+}
+
+fn stream(requests: client.Requests, display: *const value_reads.Display, target: anytype) !void {
+    if (try display.stream(requests, target)) |failure| return requests.failRead(failure);
+}
+
+fn content(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value, target: anytype) !void {
+    const display = try open(requests, store, session, scratch, item, value);
+    try stream(requests, &display, target);
 }
 
 pub const ToolHeaderFacts = struct {
@@ -1331,7 +1336,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
                     try expected.feed(case[1][glyph_end..]);
                     try expected.feed("\n");
                     try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .length = 0, .digest = @splat(0) }, .presentation = presentation } }));
+                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
                     try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
                 }
             }
@@ -1447,7 +1452,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1474,8 +1479,8 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         .{ "retry_exhausted", null, "× Retries ran out" },
         .{ "cancelled", null, "▪ Stopped" },
         .{ "provider_http_400", null, "× Provider refused the request" },
-        .{ "unknown\x1b[2J", null, "× Something went wrong" },
-        .{ "malformed_provider_output", null, "× Model reply unreadable" },
+        .{ "unknown\x1b[2J", null, "× That didn't work" },
+        .{ "malformed_provider_output", null, "× The model's reply didn't come through" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     inline for (cases) |case| {
@@ -1503,9 +1508,9 @@ test "turn and agent ending marks use their table tones" {
     try workEnded(&sink, "cancelled", null, true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
-    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Stopped\n" ++
-        "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 
@@ -1529,24 +1534,6 @@ test "ending tails are quiet and joined in destination then key order" {
     try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
 }
 
-pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
-    return value.state == .queued and !held and position == queued.oldest_position;
-}
-
-test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
-    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
-    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
-    try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
-    try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
-    try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    var taken = waiting;
-    taken.state = .applied;
-    try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
-    taken.state = .excluded;
-    try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
-}
-
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
 pub fn tight(value: protocol.ActivityItem.Value) bool {
@@ -1563,29 +1550,39 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
     return !(tool_pair or (above and below));
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
+    return value.source_action == null;
+}
+
+/// `scratch` holds the part list of a parts value while its row draws.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+    switch (item.value) {
+        .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
+        else => {},
+    }
     switch (item.value) {
         .admission => |value| {
-            if (!showsAtAdmission(item.position, value, queued, held)) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
-            return true;
+            _ = value;
+            _ = queued;
+            _ = held;
+            return false;
         },
-        .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
+        .received => |value| try message(requests, store, session, scratch, item, value, .none, sink, colour),
         .user => |value| {
             if (value.sender != null or value.source_action != null) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
+            try message(requests, store, session, scratch, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
             var answer: Answer(@TypeOf(sink)) = undefined;
             answer.init(sink, home, colour, destination);
-            try content(requests, store, session, item, assistant.content, &answer);
+            try content(requests, store, session, scratch, item, .{ .text = assistant.content }, &answer);
             try answer.finish();
             try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
             switch (fold) {
-                .none, .closed => try content(requests, store, session, item, result.content, &scan),
+                .none, .closed => try content(requests, store, session, scratch, item, result.content, &scan),
                 .open => |output| {
                     const Both = struct {
                         scan: *ToolHeaderScan,
@@ -1597,7 +1594,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     };
                     output.* = .{};
                     var both: Both = .{ .scan = &scan, .output = output };
-                    try content(requests, store, session, item, result.content, &both);
+                    try content(requests, store, session, scratch, item, result.content, &both);
                 },
             }
             try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour);
@@ -1615,7 +1612,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             } else try workEnded(sink, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
-            const excluded = try excludedAtStop(requests, store, session, item, sink, colour);
+            const excluded = try excludedAtStop(requests, store, session, scratch, item, sink, colour);
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
                 try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
@@ -1628,7 +1625,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
     return false;
 }
 
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
     if (stop.value.stop.cutoff == 0) return false;
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
     var first: ?u64 = null;
@@ -1656,11 +1653,11 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
         };
         for (page.facts.items[0..page.facts.count]) |item| {
             var value = item.value.admission;
-            if (value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
+            if (value.state != .queued or value.admission > stop.value.stop.cutoff or !visibleMessage(value)) continue;
             value.state = .excluded;
             if (wrote) try sink.feed("\n");
             wrote = true;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+            try message(requests, store, session, scratch, item, value, .lasting(false), sink, colour);
         }
         cursor = page.continuation() orelse return wrote;
     }
@@ -1860,17 +1857,4 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
-}
-
-test "background final input prefix names the Action instead of a person" {
-    const Sink = struct {
-        bytes: std.Io.Writer.Allocating,
-        pub fn feed(self: *@This(), text: []const u8) !void {
-            try self.bytes.writer.writeAll(text);
-        }
-    };
-    var sink: Sink = .{ .bytes = .init(std.testing.allocator) };
-    defer sink.bytes.deinit();
-    try inputPrefix(&sink, false, 1, 42);
-    try std.testing.expectEqualStrings("Background Action 42\n", sink.bytes.written());
 }

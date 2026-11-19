@@ -202,6 +202,7 @@ test "real SQLite full during import publishes no canonical prefix" {
                 .reload_capture = null,
                 .allocator = std.heap.c_allocator,
                 .committed = null,
+                .receipt = null,
                 .reply = &reply,
             } };
             break :configure transition.run(&entry, command_domain.Configure, &configuring, .{});

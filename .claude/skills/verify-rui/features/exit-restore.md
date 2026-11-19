@@ -6,7 +6,7 @@ Ctrl-C and SIGTERM close the client without stopping Host work. They restore the
 
 - `exit-ctrl-c`: Ctrl-C (byte 0x03 in raw mode) exits 0 and discards the unsent draft.
 - `exit-sigterm`: SIGTERM to Rui exits and restores the terminal.
-- `exit-restore`: `stty -g` before equals after (PENDIN/FLUSHO masked), the alternate screen is left, and `Detached. Host work continues.` and `Resume: …` are on the main screen.
+- `exit-restore`: `stty -g` before equals after (PENDIN/FLUSHO masked), the alternate screen is left, and `Your chats keep working while you are away.` and `Resume: …` are on the main screen.
 
 ## How to get to it (user POV)
 

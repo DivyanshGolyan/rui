@@ -1098,7 +1098,7 @@ pub const TestingAttempt = struct {
         try submitTestMessage(storage, tmp, "attempt-input", "attempt-message", session.slice(), "work");
         return .{
             .binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding,
-            .content = (try store_testing.observeCommandForTesting(storage, "attempt-message")).kind.message.?.content,
+            .content = (try store_testing.observeCommandForTesting(storage, "attempt-message")).kind.message.?.content.text,
         };
     }
 
@@ -1138,9 +1138,11 @@ pub const EntryPoint = enum {
     failedResponseBinding,
     readSessionReport,
     readSessionList,
+    publishRetryCrossings,
     actionContent,
     readAction,
     backgroundAction,
+    publishActionValue,
     stopAction,
     admitModelAttempt,
     advancePartsPressure,
@@ -1183,6 +1185,8 @@ pub const EntryPoint = enum {
     recordPrefixSeal,
     readHistoricalParts,
     readHistoricalMessagePart,
+    readPublicParts,
+    openPublicPart,
     readHistoricalToolResult,
     readTools,
     readProviderTool,
@@ -1213,9 +1217,11 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .failedResponseBinding = 1,
     .readSessionReport = 6,
     .readSessionList = 7,
+    .publishRetryCrossings = 1,
     .actionContent = 2,
     .readAction = 1,
     .backgroundAction = 2,
+    .publishActionValue = 3,
     .stopAction = 3,
     .admitModelAttempt = 2,
     .advancePartsPressure = 1,
@@ -1258,6 +1264,8 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .recordPrefixSeal = 2,
     .readHistoricalParts = 0,
     .readHistoricalMessagePart = 1,
+    .readPublicParts = 1,
+    .openPublicPart = 2,
     .readHistoricalToolResult = 1,
     .readTools = 1,
     .readProviderTool = 1,

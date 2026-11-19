@@ -25,7 +25,7 @@ ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
 REQUIRED_SOURCES = (
-    "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/client_defaults.zig",
+    "src/cli.zig", "src/cli_args.zig", "src/client.zig",
     "src/configure_input.zig", "src/new_session_selection.zig", "src/Overview.zig",
     "src/overview_view.zig", "src/OverviewLines.zig", "src/SessionFrontend.zig",
     "src/SessionSubmission.zig", "src/SessionInput.zig", "src/session_view.zig",
@@ -37,17 +37,12 @@ REQUIRED_SOURCES = (
 # New pairs are forbidden once this file exists at the trusted review base.
 ALLOWED = {
     ("src/HostLifecycle.zig", "imports product_defaults.zig"): "#1621",
-    ("src/Overview.zig", "imports product_defaults.zig"): "#1621",
     ("src/SignIn.zig", "imports product_defaults.zig"): "#1621",
     ("src/app_settings.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli_args.zig", "imports product_defaults.zig"): "#1621",
-    ("src/client_defaults.zig", "imports product_defaults.zig"): "#1621",
-    ("src/configure_input.zig", "imports product_defaults.zig"): "#1621",
     ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1621",
     ("src/status_page.zig", "imports product_defaults.zig"): "#1621",
-    ("src/attention.zig", "classifies Session work"): "#1622",
-    ("src/overview_view.zig", "classifies Session work"): "#1622",
 }
 
 WORK_KINDS = frozenset("idle pending working retrying bash approval stopping finished failed stopped".split())

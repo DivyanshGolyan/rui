@@ -257,9 +257,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--running-host", action="store_true",
                         help="previous is an unpacked release; leave its Host running during release/install.sh")
+    parser.add_argument("--candidate-release", type=pathlib.Path,
+                        help="with --running-host: install this release executable instead of building the upgrade fixture")
     parser.add_argument("previous", type=pathlib.Path)
     parser.add_argument("candidate", type=pathlib.Path)
     args = parser.parse_args()
+    if args.candidate_release and not args.running_host:
+        parser.error("--candidate-release requires --running-host")
     previous, candidate = args.previous.resolve(), args.candidate.resolve()
     if not args.running_host:
         previous_format = supported_format(previous)
@@ -276,8 +280,12 @@ def main():
         os.environ["HOME"] = str(home)
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "absent-credentials.json")
         fixture.ROOT = workspace
-        publisher = (build_candidate_release(candidate, root) if args.running_host
-                     else install(candidate).resolve())
+        if not args.running_host:
+            publisher = install(candidate).resolve()
+        elif args.candidate_release:
+            publisher = args.candidate_release.resolve()
+        else:
+            publisher = build_candidate_release(candidate, root)
         candidate_cli = Dialect(publisher)
         binary = install(previous, publisher, released=args.running_host)
         previous_artifact = binary.resolve()

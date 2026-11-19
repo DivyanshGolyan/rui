@@ -502,25 +502,30 @@ class WaitTimeout(AssertionError):
 WAIT_HOOKS = []
 
 
-def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True):
+def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True,
+             clock=None):
+    """Poll observe until ready. clock is any object with monotonic() and sleep(); a clock that is not
+    the time module sleeps instead of waiting on descriptors, because its timeouts are not real."""
+    if clock is None:
+        clock = time
     if deadline is None:
-        deadline = time.monotonic() + timeout
+        deadline = clock.monotonic() + timeout
     value = None
-    while time.monotonic() < deadline:
+    while clock.monotonic() < deadline:
         if drain:
             for hook, _readers in WAIT_HOOKS:
                 hook()
         value = observe()
-        if time.monotonic() >= deadline:
+        if clock.monotonic() >= deadline:
             break
         if ready(value):
             return value
         readers = [fd for _hook, descriptors in WAIT_HOOKS for fd in descriptors()] if drain else []
-        pause = min(interval, max(0, deadline - time.monotonic()))
-        if readers:
+        pause = min(interval, max(0, deadline - clock.monotonic()))
+        if readers and clock is time:
             select.select(readers, [], [], pause)
         else:
-            time.sleep(pause)
+            clock.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
 
 
@@ -791,6 +796,45 @@ class _H2StreamWriter:
         pass
 
 
+class PauseGate:
+    """Own one private child endpoint and its armed Action selection."""
+
+    def __init__(self, point, occurrence=None):
+        from pause_client import PauseClient
+        parent, self.child = socket.socketpair()
+        self.client = PauseClient(parent)
+        self.point = point
+        self.occurrence = occurrence
+        self.arrival = None
+
+    def arguments(self):
+        return ["--test-pause-fd", str(self.child.fileno())]
+
+    def started(self, process):
+        self.client.attach_process(process)
+        self.child.close()
+        self.client.arm(self.point, occurrence=self.occurrence)
+        self.client.start()
+
+    def wait(self, action=None, operation=None):
+        context = {}
+        if action is not None:
+            context["action"] = int(action)
+        if operation is not None:
+            context["operation"] = int(operation)
+        self.arrival = self.client.wait(self.point, context or None, occurrence=self.occurrence)
+        return self.arrival
+
+    def release(self):
+        if self.arrival is not None:
+            self.client.release(self.arrival["id"])
+            self.arrival = None
+
+    def close(self):
+        self.child.close()
+        self.client.close()
+
+
 class ReleaseGate:
 
     def __init__(self, path):
@@ -803,15 +847,15 @@ class ReleaseGate:
             raise
 
     def assert_held(self):
-        assert self.fd is not None, "transition gate was released"
+        assert self.fd is not None, "gate was released"
         descriptor, name = os.fstat(self.fd), self.path.lstat()
-        assert stat.S_ISFIFO(name.st_mode), "transition gate is not a FIFO"
-        assert (descriptor.st_dev, descriptor.st_ino) == (name.st_dev, name.st_ino), "transition gate was replaced"
+        assert stat.S_ISFIFO(name.st_mode), "gate is not a FIFO"
+        assert (descriptor.st_dev, descriptor.st_ino) == (name.st_dev, name.st_ino), "gate was replaced"
         try:
             credit = os.read(self.fd, 1)
         except BlockingIOError:
             return
-        raise AssertionError(f"transition gate was not held: {credit!r}")
+        raise AssertionError(f"gate was not held: {credit!r}")
 
     def release(self):
         if self.fd is not None:
@@ -929,8 +973,6 @@ class HostDiagnostics:
             plans = ("request_wait",)
         elif phase == "effect_stop_requested":
             plans = ("interrupt",)
-        elif phase in ("action_attempt_admitted", "action_result_ready", "action_result_committed"):
-            plans = ("recovery", "status") if phase == "action_attempt_admitted" else ("recovery",)
         elif phase in ("preparation_completed", "codex_transfer"):
             plans = ("managed",)
         elif phase == "prepared_before_handoff":
@@ -1229,19 +1271,15 @@ def isolated_host_arguments(args):
     return args
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_providers=True):
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_providers=True, pause=None):
     args = list(map(str, args))
     if isolate_providers:
         args = isolated_host_arguments(args)
+    if pause is not None:
+        args += pause.arguments()
     if "--test-retry-recovery-gate-path" in args:
         observations = observations or "dispatch"
         assert observations == "dispatch", "retry recovery gate requires a selecting native plan"
-    if "--test-transition" in args and args[args.index("--test-transition") + 1] in (
-            "action-attempt-admitted", "prepared-before-handoff", "action-result-ready", "action-result-committed"):
-        transition = args[args.index("--test-transition") + 1]
-        observations = observations or "recovery"
-        plans = ("recovery", "status") if transition == "action-attempt-admitted" else ("recovery",)
-        assert observations in plans, "Bash crash cut requires a selecting native plan"
     destination = _failure_destination((env if env is not None else os.environ).get("RUI_FAILURE_ARTIFACTS")) if observations is not None else None
     if destination is not None and "--store" in args:
         root = pathlib.Path(args[args.index("--store") + 1]).resolve().parent
@@ -1267,11 +1305,22 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
             state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_WRITE)
             args += ["--test-observation-fd", str(writer), "--test-observation-plan", observations,
                      "--test-observation-state-fd", str(state_file.fileno())]
-        process = subprocess.Popen(
-            args, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1], env=env,
-            pass_fds=() if writer is None else (writer, state_file.fileno()),
-        )
+        try:
+            process = subprocess.Popen(
+                args, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE if stderr_pipe is None else stderr_pipe[1], env=env,
+                pass_fds=(() if writer is None else (writer, state_file.fileno())) + (() if pause is None else (pause.child.fileno(),)),
+            )
+        except BaseException:
+            if pause is not None:
+                pause.close()
+            raise
+        if pause is not None:
+            try:
+                pause.started(process)
+            except BaseException:
+                dispose_all(pause.close, lambda: stop_process(process))
+                raise
         if observations is not None:
             process.rui_failure_destination = destination
             process.rui_observations = _Observations(process, reader, observations, state)
@@ -1357,7 +1406,10 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
                     "Host exited before ready", process, stdout, stderr_tail
                 )
     except BaseException:
-        stop_process(process)
+        if pause is not None:
+            dispose_all(pause.close, lambda: stop_process(process))
+        else:
+            stop_process(process)
         raise
     finally:
         selector.close()

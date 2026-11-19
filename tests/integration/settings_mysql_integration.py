@@ -19,6 +19,8 @@ import store_rounds_cases
 from request_routing_cases import capture_routing
 from attached_creation_cases import attached_creation
 from preset_creation_cases import preset_creation
+from empty_creation_cases import empty_creation
+from preferences_bridge_cases import preferences_bridge
 
 
 def main():
@@ -81,10 +83,8 @@ def main():
             if path.is_file():
                 data = path.read_bytes()
                 assert url.encode() not in data and password.encode() not in data, "login reached a runtime file"
-        if os_semantics.PROC_FS:
-            for name in ("cmdline", "environ"):
-                data = pathlib.Path(f"/proc/{child.pid}/{name}").read_bytes()
-                assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
+        for name, data in (os_semantics.launch_records(child.pid) or {}).items():
+            assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
 
     def close(child):
         host_process.close_stdin(child)
@@ -158,7 +158,7 @@ def main():
         locked = launch(dict(good, interface=dict(good["interface"], dir=str(other))))
         assert frame_host.refusal(locked)["code"] == "store_locked"
         create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
-                  "session": "", "preset": "review", "configuration": {"label": None}}
+                  "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         configured = frame_host.post(sock, "configure", create)
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
@@ -171,6 +171,7 @@ def main():
         assert observed["session"]["reference"] == session, observed
         saved = observed["session"]
         assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+        assert saved["workspace"] == str(root), saved
         assert saved["compaction_trigger_override"] == "100000", saved
         assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
         env = dict(os.environ, RUI_RUNTIME_DIR=str(runtime))
@@ -232,6 +233,8 @@ def main():
                     released()
 
         preset_creation(rui, root / "cli-presets", good["store"], os.environ)
+        released()
+        empty_creation(rui, root / "empty-creation", good["store"], os.environ)
         released()
 
         attached_directory = root / "attached-host"
@@ -300,6 +303,8 @@ def main():
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
+        preferences_bridge(rui, root / "preferences-bridge", good["store"], os.environ)
+        released()
         print("MySQL settings document: readiness, Session round trip, stable id, selector repair and refusal, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()

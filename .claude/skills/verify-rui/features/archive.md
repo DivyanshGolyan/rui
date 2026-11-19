@@ -5,7 +5,7 @@ Archiving removes a chat from the usual list and keeps its conversation availabl
 ## Sub-features
 
 - Alt-A on a selected or open chat, `/archive`, or **Archive** in Chat info requests archive.
-- **Sessions** and **Archived** sit below the separate **+ New Session** action. Archived remains available even when empty.
+- **Sessions** and **Archived** sit below the separate **+ New chat** action. Archived remains available even when empty.
 - Home then Down selects the tabs. Right selects Archived; Left returns to Sessions; Enter opens the selected view.
 - Clicking **Archived** opens that list. Esc returns to the usual list.
 - `/unarchive` restores an open archived chat. Copy feedback can appear alongside the durable archived state.

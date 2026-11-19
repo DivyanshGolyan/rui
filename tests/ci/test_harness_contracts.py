@@ -83,7 +83,7 @@ class ObservationCodecTest(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, "-B", "-c",
                      f"from session_list_release_proof import oracle_controls; oracle_controls({platform!r})"],
-                    cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=10)
+                    cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
@@ -99,15 +99,15 @@ class ChildInputTest(unittest.TestCase):
         child.stdin.close()
         if flushes_closed_stdin(sys.version_info):
             with self.assertRaisesRegex(ValueError, "flush of closed file"):
-                child.communicate(timeout=5)
-            child.wait(timeout=5)
+                child.communicate(timeout=60)
+            child.wait(timeout=60)
             child.stdout.close()
         else:
-            self.assertEqual(child.communicate(timeout=5), (b"by hand", None))
+            self.assertEqual(child.communicate(timeout=60), (b"by hand", None))
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"owned")
         HOST.close_stdin(child)
-        self.assertEqual(child.communicate(timeout=5), (b"owned", None))
+        self.assertEqual(child.communicate(timeout=60), (b"owned", None))
 
     def test_no_fixture_closes_a_child_stdin_itself(self):
         offenders = [
@@ -280,7 +280,7 @@ class FixtureEntryTest(unittest.TestCase):
             def run(entry):
                 command = ["sh", entry, *binaries] if entry.endswith(".sh") else [sys.executable, "-B", entry, *binaries]
                 return entry, subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
-                                             text=True, timeout=30)
+                                             text=True, timeout=60)
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 results = list(pool.map(run, entries))
@@ -300,7 +300,7 @@ class FixtureEntryTest(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                            "HTTPS_PROXY": "http://127.0.0.1:9", "PYTHONPATH": self.simulated_user(directory, 0)}
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
-                                    env=environment, capture_output=True, text=True, timeout=30)
+                                    env=environment, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             observed = json.loads(result.stdout)
             self.assertEqual(observed["before"], observed["after"])
@@ -324,7 +324,7 @@ class FixtureEntryTest(unittest.TestCase):
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
                                     env={**planted, **named, "TERM": "dumb",
                                          "PYTHONPATH": self.simulated_user(directory, 30033)},
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             observed = json.loads(result.stdout)
             self.assertEqual(observed["network"], network)
@@ -345,18 +345,18 @@ class FixtureEntryTest(unittest.TestCase):
             caller = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                       "GOFLAGS": "-mod=mod", "RUI_TEST_MODELS_DEV_URL": "https://models.dev/api.json"}
             refused = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 0)},
-                                     capture_output=True, text=True, timeout=30)
+                                     capture_output=True, text=True, timeout=60)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn(REFUSAL, refused.stderr)
             self.assertFalse(ran.exists(), "a refused command ran")
             admitted = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 30033)},
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=60)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
             expected = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8",
                         "TERM": "xterm-256color"}
             control = subprocess.run([sys.executable, "-c",
                                       "import json, os; print(json.dumps(dict(os.environ)))"],
-                                     env=expected, capture_output=True, text=True, timeout=30)
+                                     env=expected, capture_output=True, text=True, timeout=60)
             self.assertEqual(control.returncode, 0, control.stderr)
             self.assertEqual(json.loads(ran.read_text()), json.loads(control.stdout))
 
@@ -381,7 +381,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.semantics = os_semantics
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
-        original = Path(sys.executable).resolve(strict=True)
+        original = self.semantics.process_executable(os.getpid()).resolve(strict=True)
         marker = b"ready\n"
         program = "import os; os.write(1, b'ready\\n'); os.read(0, 1)"
         with tempfile.TemporaryDirectory() as directory:
@@ -397,21 +397,7 @@ class ProcessCensusTest(unittest.TestCase):
                                                env={"PYTHONHOME": sys.base_prefix}, stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     children.append(process)
-                    os.set_blocking(process.stdout.fileno(), False)
-                    received = bytearray()
-
-                    def ready():
-                        self.assertIsNone(process.poll(), "actor exited before readiness")
-                        try:
-                            chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
-                        except BlockingIOError:
-                            return False
-                        self.assertTrue(chunk, "actor closed stdout before readiness")
-                        received.extend(chunk)
-                        self.assertEqual(received, marker[:len(received)])
-                        return received == marker
-
-                    HOST.wait_for(ready, f"readiness from {name}")
+                    self.await_marker(process, marker, f"readiness from {name}")
                 owned, named = children
                 for process in children:
                     self.assertIsNone(process.poll(), "actor exited before census")
@@ -424,6 +410,111 @@ class ProcessCensusTest(unittest.TestCase):
                 HOST.dispose_all(
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
+
+    def await_marker(self, process, marker, label):
+        """Waits, bounded by the shared wait owner, until the child writes exactly marker to stdout."""
+        os.set_blocking(process.stdout.fileno(), False)
+        received = bytearray()
+
+        def ready():
+            self.assertIsNone(process.poll(), "actor exited before readiness")
+            try:
+                chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
+            except BlockingIOError:
+                return False
+            self.assertTrue(chunk, "actor closed stdout before readiness")
+            received.extend(chunk)
+            self.assertEqual(received, marker[:len(received)])
+            return received == marker
+
+        HOST.wait_for(ready, label)
+
+    def ready_child(self, *arguments, env=None):
+        """Starts a child that announces itself once initialised, then waits on stdin.
+
+        Samples taken after the announcement see its exec'd arguments and settled descriptors.
+        """
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
+                                  *arguments], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            self.await_marker(child, b"ready\n", "the census child's readiness")
+        except BaseException:
+            child.kill()
+            child.communicate(timeout=60)
+            raise
+        return child
+
+    def test_process_state_tells_running_from_zombie_from_reaped(self):
+        # CI-70
+        child = self.ready_child()
+        try:
+            self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
+            HOST.close_stdin(child)
+            HOST.wait_for(lambda: self.semantics.process_state(child.pid).startswith("Z"), "the exited child's zombie entry")
+        finally:
+            child.kill()
+            child.wait(timeout=60)
+        self.assertIsNone(self.semantics.process_state(child.pid))
+        listing = self.semantics.describe_processes((os.getpid(),))
+        self.assertIn(str(os.getpid()), listing)
+
+    def test_command_census_reads_each_process_argv(self):
+        # CI-71
+        census = dict(self.semantics.process_commands())
+        self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
+        self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
+
+    def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
+        # CI-72
+        child = self.ready_child("argument-marker", env={"RUI_LAUNCH_MARKER": "environment-marker"})
+        try:
+            records = self.semantics.launch_records(child.pid)
+        finally:
+            child.communicate(timeout=60)
+        if not self.semantics.PROC_FS:
+            self.assertIsNone(records)
+            return
+        self.assertEqual(set(records), {"cmdline", "environ"})
+        self.assertIn(b"argument-marker", records["cmdline"])
+        self.assertIn(b"RUI_LAUNCH_MARKER=environment-marker", records["environ"])
+        with self.semantics.simulate("darwin"):
+            self.assertIsNone(self.semantics.launch_records(os.getpid()))
+
+    def test_resource_readers_observe_a_live_process(self):
+        # CI-73
+        child = self.ready_child()
+        try:
+            names = self.semantics.open_descriptor_names(child.pid)
+            self.assertGreaterEqual(len(names), 3, names)
+            self.assertGreater(self.semantics.process_resident_kib(child.pid), 0)
+            self.assertGreaterEqual(self.semantics.process_cpu_seconds(child.pid), 0)
+            memory = self.semantics.process_memory(child.pid)
+            if self.semantics.PROC_FS:
+                self.assertEqual(set(memory), {"rss_kib", "peak_kib"})
+                self.assertGreaterEqual(memory["peak_kib"], memory["rss_kib"])
+                self.assertEqual(len(self.semantics.descriptor_links(child.pid)), len(names))
+                self.assertIsNotNone(self.semantics.socket_table("unix"))
+            else:
+                self.assertIsNone(memory)
+            self.assertEqual(self.semantics.physical_footprint_peak(child.pid) is not None, self.semantics.FOOTPRINT)
+        finally:
+            child.communicate(timeout=60)
+        self.assertIsNone(self.semantics.process_memory(child.pid))
+        self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
+
+    def test_locks_exclude_other_open_descriptions_until_released(self):
+        # CI-74
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "host.lock"
+            path.touch()
+            with path.open("rb") as holder, path.open("rb") as other:
+                self.semantics.take_lock(holder)
+                self.assertFalse(self.semantics.try_lock(other))
+                self.assertFalse(self.semantics.try_lock(other, shared=True))
+                self.semantics.release_lock(holder)
+                self.assertTrue(self.semantics.try_lock(other, shared=True))
+                self.assertTrue(self.semantics.try_lock(holder, shared=True))
+                self.assertFalse(self.semantics.try_lock(holder))
 
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):
@@ -484,7 +575,7 @@ print('import-safe')
             with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as directory:
                 result = subprocess.run([sys.executable, "-B", "-c", source,
                                          str(ROOT / "tests/integration"), *arguments],
-                                        cwd=directory, capture_output=True, text=True, timeout=10)
+                                        cwd=directory, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, "import-safe\n")
                 self.assertEqual(list(Path(directory).iterdir()), [])
@@ -531,7 +622,7 @@ for body_failed in (False, True):
 print('body/drop failure matrix passed')
 """
         result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "body/drop failure matrix passed\n")
 

@@ -495,6 +495,12 @@ fn dropCompoundContentUpgradeShape(storage: *Store) !void {
 }
 
 fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_value", .{}));
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "DROP TABLE action_value");
+    } else {
+        try sqlite.exec(storage.sqliteDatabase(), "DROP TABLE action_value");
+    }
     try dropCompoundContentUpgradeShape(storage);
     @setEvalBranchQuota(200_000);
     const Native = struct {
@@ -503,6 +509,38 @@ fn dropFinalInputUpgradeShape(storage: *Store) !void {
             return sqlite.exec(store.sqliteDatabase(), sql);
         }
     };
+    if (storage.engine == .mysql) {
+        const child_fk = " FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='conversation_entry' AND COLUMN_NAME='source_kind' AND REFERENCED_TABLE_NAME='message_admission'";
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`')" ++ child_fk ++ ")");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='conversation_entry' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_kind',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "ALTER TABLE conversation_entry DROP INDEX conversation_entry_activity_user, DROP INDEX conversation_entry_activity_assistant");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP INDEX `',REPLACE(INDEX_NAME,'`','``'),'`') FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='conversation_entry' GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)='source_admission_id,source_kind')");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "ALTER TABLE conversation_entry DROP COLUMN source_kind");
+        try Native.exec(storage, "ALTER TABLE message_admission DROP INDEX message_admission_activity");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP INDEX `',REPLACE(INDEX_NAME,'`','``'),'`') FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_admission' AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)='admission_id,source_kind')");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "SET @rui_input_ddl=NULL");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        try Native.exec(storage, "ALTER TABLE conversation_entry RENAME TO upgrade_conversation_entry");
+        try Native.exec(storage, @import("schema.zig").migrations[59 - @import("schema.zig").migration_baseline].sqlite[2]);
+        try Native.exec(storage, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM upgrade_conversation_entry");
+        try Native.exec(storage, "DROP TABLE upgrade_conversation_entry");
+        try Native.exec(storage, "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)");
+        try std.testing.expectEqual(@as(u64, 0), try sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
     if (storage.engine == .mysql) {
         try Native.exec(storage, "ALTER TABLE message_admission MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL THEN session_ref END) STORED");
         const kind_checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_kind',cc.CHECK_CLAUSE)>0 LIMIT 1";
@@ -561,6 +599,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_kind NOT IN (1,2)", .{}));
     // Reject unrepresentable compound values before any dialect starts DDL.
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content WHERE form<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content_part", .{}));
@@ -699,57 +738,6 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
     }
 }
 
-pub const fixture_sqlite_words = [_][]const u8{
-    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
-    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
-};
-
-pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
-
-pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
-    comptime {
-        @setEvalBranchQuota(1000 * text.len + 10000);
-        if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| return message;
-        var index: usize = 0;
-        var previous: []const u8 = "";
-        while (index < text.len) {
-            if (text[index] == '\'') {
-                index += 1;
-                while (index < text.len) : (index += 1) {
-                    if (text[index] != '\'') continue;
-                    if (index + 1 < text.len and text[index + 1] == '\'') {
-                        index += 1;
-                        continue;
-                    }
-                    break;
-                }
-                index += 1;
-                previous = "";
-                continue;
-            }
-            if (!isWordByte(text[index])) {
-                if (!std.ascii.isWhitespace(text[index])) previous = "";
-                index += 1;
-                continue;
-            }
-            var end = index;
-            while (end < text.len and isWordByte(text[end])) end += 1;
-            const word = text[index..end];
-            index = end;
-            for (fixture_sqlite_words) |sqlite_word| {
-                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            for (fixture_sqlite_prefixes) |prefix| {
-                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
-                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
-            previous = word;
-        }
-        return null;
-    }
-}
-
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
@@ -761,13 +749,9 @@ pub const expected_mysql_rows: [:0]const u8 = blk: {
     break :blk @embedFile("migration_expected_content.mysql.sql") ++ expected_rows[first..];
 };
 comptime {
-    if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
-    if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
-    if (fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
-}
-
-fn isWordByte(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
+    if (rsql.fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
 }
 
 pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
@@ -789,13 +773,7 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
 };
 
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
-    if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
-    if (comptime rsql.fixtureError(text)) |message| @compileError("fixture: " ++ message ++ ": " ++ text);
-    switch (comptime rsql.mysqlRendering(text)) {
-        .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
-        .rendered => {},
-    }
-    mysql_dialect_check.shadowPrepareFixture(text);
+    mysql_dialect_check.shadowPrepareFixture(comptime rsql.fixtureTemplate(text));
     return text;
 }
 
@@ -889,7 +867,7 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
 pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
-    if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
+    if (comptime rsql.fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
     if (storage.engine == .mysql) return mysql_testing.exec(storage, "UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")", .{});
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }

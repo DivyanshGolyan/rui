@@ -26,7 +26,7 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
         .final => {},
     }
     const result = try arena.create(action_read.Read);
-    try store.readActionForTool(&.{ .session = input.session, .action_id = arguments.action }, result);
+    try store.readAction(&.{ .session = input.session, .action_id = arguments.action }, result);
     const rendered = try arena.alloc(u8, protocol.action_read_reply.max_bytes);
     var writer: std.Io.Writer = .fixed(rendered);
     try host_reply.renderActionRead(.{ .writer = &writer }, result);
@@ -263,12 +263,12 @@ test "read_action and stop_action return verified typed Resolution references wi
                     try std.testing.expect(result.status == .resolved);
                     const text = result.status.resolved.window.text.slice();
                     var retained: action_read.Read = undefined;
-                    try database.readActionForTool(&request, &retained);
+                    try database.readAction(&request, &retained);
                     try std.testing.expect(retained.status == .resolved_parts);
                     const resolution = retained.status.resolved_parts;
                     try std.testing.expectEqualStrings("succeeded", resolution.code.slice());
                     try std.testing.expectEqual(original_position, resolution.position);
-                    try std.testing.expectEqual(original_length, resolution.content.length);
+                    try std.testing.expectEqual(original_length, resolution.content.parts.identity.length);
                     if (choice == .read_offset) {
                         try std.testing.expectEqualStrings("failed", result.status.resolved.resolution.code.slice());
                         try std.testing.expect(std.mem.indexOf(u8, text, "offset") != null);
@@ -282,10 +282,10 @@ test "read_action and stop_action return verified typed Resolution references wi
                         try std.testing.expectEqualStrings("parts", final.get("content").?.object.get("type").?.string);
                         try std.testing.expectEqualStrings("succeeded", final.get("code").?.string);
                         try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.position}), final.get("position").?.string);
-                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.content.length}), final.get("content").?.object.get("bytes").?.string);
-                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(resolution.content.digest, .lower), final.get("content").?.object.get("sha256").?.string);
+                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.content.parts.identity.length}), final.get("content").?.object.get("bytes").?.string);
+                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(resolution.content.parts.identity.digest, .lower), final.get("content").?.object.get("sha256").?.string);
+                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{selected.action_id}), final.get("content").?.object.get("owner").?.object.get("action").?.string);
                     }
-                    try std.testing.expectError(error.InputPartsNotSupported, database.readAction(&request, &retained));
                     try std.testing.expectEqual(content_id, try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}));
                     try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_stop WHERE target_action_id=?1", .{selected.action_id}));
                     try std.testing.expect(!database.isFenced());
@@ -322,7 +322,7 @@ test "client stop replays an existing compound Resolution after reopen" {
             });
             const request: action_read.Request = .{ .session = session, .action_id = selected.action_id };
             var original: action_read.Read = undefined;
-            try database.readActionForTool(&request, &original);
+            try database.readAction(&request, &original);
             try std.testing.expect(original.status == .resolved_parts);
             const resolution = original.status.resolved_parts;
             try std.testing.expectEqualStrings("succeeded", resolution.code.slice());
@@ -345,12 +345,12 @@ test "client stop replays an existing compound Resolution after reopen" {
             try std.testing.expectEqual(result.accepted.action_id, replay.accepted.action_id);
             try std.testing.expectEqual(result.accepted.resolution, replay.accepted.resolution);
             var retained: action_read.Read = undefined;
-            try database.readActionForTool(&request, &retained);
+            try database.readAction(&request, &retained);
             try std.testing.expect(retained.status == .resolved_parts);
             try std.testing.expectEqual(resolution.position, retained.status.resolved_parts.position);
             try std.testing.expectEqualStrings(resolution.code.slice(), retained.status.resolved_parts.code.slice());
-            try std.testing.expectEqual(resolution.content.length, retained.status.resolved_parts.content.length);
-            try std.testing.expectEqualSlices(u8, &resolution.content.digest, &retained.status.resolved_parts.content.digest);
+            try std.testing.expectEqualDeep(resolution.content, retained.status.resolved_parts.content);
+            try std.testing.expectEqualDeep(@import("content_value.zig").Owner{ .action = selected.action_id }, retained.status.resolved_parts.content.parts.owner);
             try std.testing.expectEqual(content_id, try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}));
             try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_stop WHERE target_action_id=?1", .{selected.action_id}));
             try std.testing.expect(!database.isFenced());

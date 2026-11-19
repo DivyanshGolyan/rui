@@ -53,29 +53,10 @@ test "a frame the closed terminal refused ends App as the end of input does; any
 
 pub fn detached(store: []const u8, opened: ?[]const u8, action: ?u64) void {
     const protocol = @import("protocol.zig");
-    const Text = @import("TerminalText.zig");
+    const session_notice = @import("session_notice.zig");
     var buffer: [4 * (4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128)]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
-    notice.writeAll("\nDetached. Host work continues.\n") catch unreachable;
-    if (opened) |session| {
-        notice.writeAll("Resume: rui session resume --store ") catch unreachable;
-        Text.writeShellWord(&notice, store) catch unreachable;
-        Text.writeShellSession(&notice, session, true) catch unreachable;
-        notice.writeByte('\n') catch unreachable;
-        if (action) |id| {
-            notice.writeAll("Pending Action: inspect the complete proposal before deciding.\n") catch unreachable;
-            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
-                notice.print("rui action {s} --store ", .{command}) catch unreachable;
-                Text.writeShellWord(&notice, store) catch unreachable;
-                Text.writeShellSession(&notice, session, false) catch unreachable;
-                notice.print(" --action {d}\n", .{id}) catch unreachable;
-            }
-        }
-    } else {
-        notice.writeAll("Overview: rui --store ") catch unreachable;
-        Text.writeShellWord(&notice, store) catch unreachable;
-        notice.writeByte('\n') catch unreachable;
-    }
+    session_notice.writeDeparture(&notice, .{ .store = store, .opened = opened, .action = action }) catch unreachable;
     _ = @import("stderr.zig").write(notice.buffered());
 }
 

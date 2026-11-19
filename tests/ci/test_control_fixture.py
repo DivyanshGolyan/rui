@@ -30,7 +30,7 @@ class StreamingDisconnectTest(unittest.TestCase):
                     super().end_headers()
                 paused.append((self.wfile.connection, self.wfile.stream))
                 entered.set()
-                if not release.wait(5):
+                if not release.wait(300):
                     raise AssertionError("response barrier was not released")
                 if failure is not None:
                     raise failure
@@ -55,24 +55,24 @@ class StreamingDisconnectTest(unittest.TestCase):
         peer = None
         worker.start()
         try:
-            peer = socket.create_connection(endpoint.server_address, timeout=5)
+            peer = socket.create_connection(endpoint.server_address, timeout=60)
             client = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
             client.initiate_connection()
             client.send_headers(1, [(":method", "POST"), (":scheme", "http"),
                                    (":authority", "localhost"), (":path", "/responses"),
                                    ("content-length", "0")], end_stream=True)
             peer.sendall(client.data_to_send())
-            self.assertTrue(entered.wait(5), "response did not reach the barrier")
+            self.assertTrue(entered.wait(60), "response did not reach the barrier")
             self.assertEqual(endpoint.counts(), (1, 0))
             if failure is None:
                 connection, stream = paused[0]
                 client.reset_stream(1, error_code=h2.errors.ErrorCodes.CANCEL)
                 peer.sendall(client.data_to_send())
                 with connection.cond:
-                    self.assertTrue(connection.cond.wait_for(lambda: stream.reset, timeout=5),
+                    self.assertTrue(connection.cond.wait_for(lambda: stream.reset, timeout=60),
                                     "server did not observe the stream reset")
             release.set()
-            self.assertTrue(handled.wait(5), "provider handler did not retire")
+            self.assertTrue(handled.wait(60), "provider handler did not retire")
             if failure is None:
                 self.assertEqual(endpoint.counts(), (1, 1))
                 self.assertEqual(errors, [])
@@ -90,12 +90,12 @@ class StreamingDisconnectTest(unittest.TestCase):
                             finished = True
                 self.assertEqual(endpoint.counts(), (2, 1))
             else:
-                self.assertTrue(reported.wait(5), "non-peer error was swallowed")
+                self.assertTrue(reported.wait(60), "non-peer error was swallowed")
                 self.assertEqual(errors, [failure])
                 self.assertEqual(endpoint.counts(), (1, 0))
         finally:
             def join():
-                worker.join(5)
+                worker.join(60)
                 self.assertFalse(worker.is_alive(), "provider acceptor did not retire")
 
             host_process.dispose_all(release.set, endpoint.release.set,

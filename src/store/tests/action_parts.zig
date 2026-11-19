@@ -33,7 +33,7 @@ fn hostToolSet(digests: *[records.len][32]u8) tools.HostToolSet {
     return .{ .records = &records, .digests = digests };
 }
 
-fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
+pub fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
     var workspace: [protocol.max_workspace_bytes]u8 = undefined;
     var configure = try testing.completeConfiguration("action-parts-config", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
     const name = if (runner == .bash) "bash" else "fetch_page";
@@ -177,7 +177,8 @@ fn exercise(case: *testing.Case, background: bool) !void {
                 var read: action_read.Read = undefined;
                 const request: action_read.Request = .{ .session = session, .action_id = selected.action_id };
                 if (compound) {
-                    try std.testing.expectError(error.InputPartsNotSupported, storage.readAction(&request, &read));
+                    try storage.readAction(&request, &read);
+                    try std.testing.expectEqual(@import("../../content_value.zig").Owner{ .action = selected.action_id }, read.status.resolved_parts.content.parts.owner);
                 } else {
                     try storage.readAction(&request, &read);
                     try std.testing.expectEqualStrings(parts[0].bytes, read.status.resolved.window.text.slice());

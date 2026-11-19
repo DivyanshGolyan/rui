@@ -19,7 +19,7 @@ import build_files
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
 TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "src/parser_fuzz_tests.zig", "tests/integration/mysql_wire_test.zig")
-MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig", "src/url.zig")
+MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig", "src/url.zig", "src/os/os.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"
 STORE_FACADE = "src/store.zig"
@@ -162,7 +162,8 @@ def store_boundary(root):
                 raise ValueError(f"{source} imports {target}; a wire client imports only wire/")
             if target.startswith(STORE_WIRE):
                 continue
-            if source == "src/logic_tests.zig" and target == "src/store/engine/mysql_refusal.zig":
+            if source == "src/logic_tests.zig" and target in ("src/store/command_replay.zig", "src/store/engine/mysql_refusal.zig", "src/store/pass_plan.zig",
+                                                                 "src/store/round_order.zig", "src/store/write_batch.zig"):
                 continue
             if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
                 raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")

@@ -130,9 +130,9 @@ def leave(tty):
 
 def escaped_overview(tty, conversation):
     tty.wait(lambda: all(marker in tty.screen.completed for marker in
-                         ("+ New Session", conversation, "Settings")),
+                         ("+ New chat", conversation, "Settings")),
              label="overview after expired standalone Esc")
-    assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
+    assert "What shall we work on?" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
     assert not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", tty.screen.completed), \
         ("overview has a composer", tty.screen.completed)
 

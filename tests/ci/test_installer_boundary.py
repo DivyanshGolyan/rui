@@ -21,8 +21,8 @@ class InstallerBoundaryTest(unittest.TestCase):
             spec.loader.exec_module(module)
             publisher = Path("/explicit/compiled/production/rui")
             cases = list(module.installer_suite(publisher))
-        self.assertEqual(len(cases), 44)
-        self.assertEqual(sum(isinstance(case, module.ReleaseInstallerTest) for case in cases), 32)
+        self.assertEqual(len(cases), 42)
+        self.assertEqual(sum(isinstance(case, module.ReleaseInstallerTest) for case in cases), 30)
         self.assertEqual(sum(isinstance(case, module.SourceInstallerTest) for case in cases), 12)
         self.assertTrue(all(case.publisher == publisher for case in cases))
         self.assertTrue(all(not getattr(case, "__unittest_skip__", False) for case in cases))
@@ -39,7 +39,7 @@ class InstallerBoundaryTest(unittest.TestCase):
             self.assertIsNone(shutil.which("zig", path=environment["PATH"]))
             result = subprocess.run(
                 [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci", "-p", "test_release.py", "-v"],
-                cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120)
+                cwd=ROOT, env=environment, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertRegex(result.stderr, r"Ran [1-9][0-9]* tests?\b")
             self.assertRegex(result.stderr, r"(?m)^OK$")

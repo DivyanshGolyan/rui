@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const Kind = union(enum) { text: usize, choice: usize, content, tools, decimal_policy };
-pub const Create = enum { optional, must_value, must_state };
+pub const Create = enum { optional, must_value };
 pub const Cli = struct {
     name: []const u8,
     group: enum { binding, settings } = .settings,
@@ -25,13 +25,13 @@ pub const entries = [_]Entry{
     .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
     .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
     .{ .field = "instructions", .spec = "instructions", .kind = .content, .cli = .{ .name = "instructions", .on_start = false }, .column = "instructions_content_id" },
-    .{ .field = "tools", .spec = "tools", .kind = .tools, .create = .must_value, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
+    .{ .field = "tools", .spec = "tools", .kind = .tools, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
     .{ .field = "loaded_tools", .spec = "loadedTools", .kind = .tools, .cli = .{ .name = "loaded-tools" }, .digest = .unless_omitted, .column = "loaded_tool_set_id" },
-    .{ .field = "permission_mode", .spec = "permissionMode", .kind = .{ .choice = 16 }, .create = .must_value, .cli = .{ .name = "permission-mode" }, .column = "permission_mode" },
+    .{ .field = "permission_mode", .spec = "permissionMode", .kind = .{ .choice = 16 }, .cli = .{ .name = "permission-mode" }, .column = "permission_mode" },
     .{ .field = "output_schema", .spec = "outputSchema", .kind = .content, .json_object = true, .nullable = true, .cli = .{ .name = "output-schema", .on_start = false }, .column = "output_schema_content_id" },
-    .{ .field = "compaction_trigger", .spec = "compactAt", .kind = .decimal_policy, .nullable = true, .create = .must_value, .cli = .{ .name = "compaction-trigger" }, .column = "compaction_trigger" },
+    .{ .field = "compaction_trigger", .spec = "compactAt", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "compaction-trigger" }, .column = "compaction_trigger" },
     .{ .field = "output_reservation", .spec = "outputReservation", .kind = .decimal_policy, .nullable = true, .cli = .{ .name = "output-reservation" }, .column = "output_reservation" },
-    .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .create = .must_state, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },
+    .{ .field = "reasoning_effort", .spec = "effort", .kind = .{ .choice = 16 }, .nullable = true, .cli = .{ .name = "reasoning-effort" }, .column = "reasoning_effort" },
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
 };
 
@@ -68,4 +68,10 @@ test "Session settings revision tags retain persisted names ordinals and backing
     try std.testing.expectEqualStrings("reasoning_effort_refused", actual.field_names[expected.field_names.len]);
     try std.testing.expectEqual(expected.field_names.len, @backingInt(SessionField.reasoning_effort_refused));
     inline for (entries) |entry| try std.testing.expect(!std.mem.eql(u8, entry.field, "reasoning_effort_refused"));
+}
+
+test "creation metadata requires only model and keeps Host defaults optional" {
+    inline for (entries) |entry| {
+        try std.testing.expectEqual(if (std.mem.eql(u8, entry.field, "model")) Create.must_value else Create.optional, entry.create);
+    }
 }

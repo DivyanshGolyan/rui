@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 
-from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_message_background_and_stop, prove_client_action_stop
+from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_message_background_and_stop, prove_client_action_stop, prove_background_action_values
 import host_process
 from host_process import canonical_fixture_root
 
@@ -14,6 +14,9 @@ def main():
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    if "--values-only" in sys.argv:
+        print(prove_background_action_values(state))
+        return
     if "--stop-only" in sys.argv:
         print(prove_client_action_stop(state))
         return
@@ -24,6 +27,7 @@ def main():
         print(prove_automatic_background(state))
         return
     print(prove_client_action_stop(state))
+    print(prove_background_action_values(state))
     print(prove_native_background(state))
     print(prove_model_action_read(state))
     print(prove_automatic_background(state))

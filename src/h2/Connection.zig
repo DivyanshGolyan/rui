@@ -10,6 +10,7 @@ const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
 const proxy = @import("proxy.zig");
 const sec_trust = @import("sec_trust.zig");
+const socket_os = @import("os").socket;
 const Connection = @This();
 
 pub const State = enum(u8) { free = 0, resolving, connecting, tunneling, handshaking, verifying, awaiting_settings, ready, draining };
@@ -252,7 +253,7 @@ fn attempt(self: *Connection, time: u64) enum { connected, in_flight, refused, l
     if (fd < 0) return .local_failure;
     self.earlier = self.socket;
     self.socket = fd;
-    if (!configureSocket(fd, true)) return .local_failure;
+    if (!socket_os.configure(fd, true)) return .local_failure;
     while (true) {
         switch (std.posix.errno(std.c.connect(fd, @ptrCast(&address.storage), address.length))) {
             .SUCCESS => return .connected,
@@ -285,19 +286,6 @@ fn connectSucceeded(fd: std.posix.fd_t) bool {
 
 fn closeSocket(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
-}
-
-fn configureSocket(fd: std.posix.fd_t, tcp: bool) bool {
-    if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return false;
-    const flags = std.c.fcntl(fd, std.c.F.GETFL);
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return false;
-    const one: c_int = 1;
-    if (tcp and std.c.setsockopt(fd, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &one, @sizeOf(c_int)) != 0) return false;
-    if (builtin.os.tag.isDarwin()) {
-        if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int)) != 0) return false;
-    }
-    return true;
 }
 
 fn connected(self: *Connection) void {
@@ -642,7 +630,7 @@ fn writeSocket(self: *Connection, bytes: []const u8) Transfer {
         .closed => .closed,
     };
     while (true) {
-        const sent = std.c.send(self.socket, bytes.ptr, bytes.len, tls.send_flags);
+        const sent = std.c.send(self.socket, bytes.ptr, bytes.len, socket_os.send_flags);
         if (sent >= 0) return .{ .bytes = @intCast(sent) };
         switch (std.posix.errno(sent)) {
             .AGAIN => return .again,

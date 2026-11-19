@@ -6,6 +6,7 @@ import subprocess
 from canonical_fixture import announced
 import host_process
 import settings_fixture
+from product_defaults import compaction_trigger, start_effort
 
 
 def preset_creation(binary, root, store_settings, env):
@@ -186,25 +187,34 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         assert changed["compaction_trigger_override"] == "2000" and changed["output_reservation_override"] is None, changed
         assert changed["label"] is None and changed["output_schema"] is None and changed["instructions"]["bytes"] == "0", changed
 
-        # Null effort is admitted for a catalogued model with no efforts and an
-        # unlisted model, but is refused for a catalogued model with efforts.
+        # Explicit policy nulls now ask the Host for the selected model's
+        # defaults, including when they override a preset's explicit policies.
         unknown_model = "unlisted-preset-model"
         unknown_effort, unknown_effort_capture = capture("--preset", "restricted", "--model", unknown_model,
             "--reasoning-effort", "default", "--test-drop-reply", "after-commit", unlisted=unknown_model)
         assert unknown_effort_capture["configuration"] == {"model": unknown_model, "effort": None}, unknown_effort_capture
         unknown_effort_session = recover(unknown_effort)["context"]["session"]
         unknown_saved = inspect(unknown_effort_session)["session"]
-        assert unknown_saved["model"] == unknown_model and unknown_saved["reasoning_effort_override"] is None, unknown_saved
-        rejected_effort, rejected_effort_capture = capture("--preset", "restricted", "--model", "gpt-6-luna",
-            "--reasoning-effort", "default", expect=3)
-        assert rejected_effort_capture["configuration"] == {"model": "gpt-6-luna", "effort": None}, rejected_effort_capture
-        rejected_effort_reply = recover(rejected_effort, expect=3)["answer"]
-        assert rejected_effort_reply["code"] == "unsupported_reasoning_effort" and rejected_effort_reply["replayed"] is True, rejected_effort_reply
+        assert unknown_saved["model"] == unknown_model, unknown_saved
+        assert unknown_saved["reasoning_effort_override"] == start_effort(unknown_model), unknown_saved
+        reset_effort, reset_effort_capture = capture("--preset", "restricted", "--model", "gpt-6-luna",
+            "--reasoning-effort", "default", "--test-drop-reply", "after-commit")
+        assert reset_effort_capture["configuration"] == {"model": "gpt-6-luna", "effort": None}, reset_effort_capture
+        reset_effort_reply = recover(reset_effort)
+        assert reset_effort_reply["answer"]["replayed"] is True, reset_effort_reply
+        reset_effort_session = reset_effort_reply["context"]["session"]
+        reset_saved = inspect(reset_effort_session)["session"]
+        assert reset_saved["model"] == "gpt-6-luna", reset_saved
+        assert reset_saved["reasoning_effort_override"] == start_effort("gpt-6-luna"), reset_saved
 
-        invalid, invalid_capture = capture("--preset", "restricted", "--compaction-trigger", "default", expect=3)
-        assert invalid_capture["configuration"] == {"compactAt": None}, invalid_capture
-        invalid_reply = recover(invalid, expect=3)["answer"]
-        assert invalid_reply["code"] == "invalid_compaction_trigger" and invalid_reply["replayed"] is True, invalid_reply
+        reset_compact, reset_compact_capture = capture("--preset", "restricted", "--compaction-trigger", "default",
+                                                       "--test-drop-reply", "after-commit")
+        assert reset_compact_capture["configuration"] == {"compactAt": None}, reset_compact_capture
+        reset_compact_reply = recover(reset_compact)
+        assert reset_compact_reply["answer"]["replayed"] is True, reset_compact_reply
+        reset_compact_session = reset_compact_reply["context"]["session"]
+        compact_saved = inspect(reset_compact_session)["session"]
+        assert compact_saved["compaction_trigger_override"] == str(compaction_trigger("openai", preset["model"])), compact_saved
 
         missing, _ = capture("--preset", "missing", expect=3)
         assert recover(missing, expect=3)["answer"]["code"] == "unknown_preset"
@@ -228,7 +238,8 @@ def _preset_creation(binary, root, store_settings, env, runtime):
                          input="must not start a task", expect=2)
         assert "[option_unknown]" in refused.stderr and "rui session start:" in refused.stderr and "preset" in refused.stderr, refused
         assert not start_record.exists(), refused
-        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session}
+        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session,
+                                                reset_effort_session, reset_compact_session}
 
         # A later configuration must not rewrite the original Configure admission answer.
         invoke("session", "configure", "--store", store, "--session", session, "--label", "Later label")
@@ -238,6 +249,8 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         assert recover(base)["answer"]["session"] == session
         assert recover(override)["answer"]["session"] == changed_session
         assert recover(loaded_only)["answer"]["session"] == loaded_session
+        assert recover(reset_effort)["answer"]["session"] == reset_effort_session
+        assert recover(reset_compact)["answer"]["session"] == reset_compact_session
         for handle, code in loaded_refusals:
             refusal = recover(handle, expect=3)["answer"]
             assert refusal["replayed"] is True and refusal["code"] == code, refusal
@@ -248,6 +261,8 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         assert recover(base, expect=3)["answer"]["status"] == "conflict"
         assert recover(loaded_only, expect=3)["answer"]["status"] == "conflict"
         assert recover(override)["answer"]["replayed"] is True
+        assert recover(reset_effort)["answer"]["replayed"] is True
+        assert recover(reset_compact, expect=3)["answer"]["status"] == "conflict"
         for handle, code in ((missing, "unknown_preset"), (update, "preset_on_update"), (unknown_update, "preset_on_update")):
             refusal = recover(handle, expect=3)["answer"]
             assert refusal["replayed"] is True and refusal["code"] == code, refusal
@@ -256,13 +271,14 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         assert inspect(session)["session"]["model"] == preset["model"]
 
         launch({})
-        for handle in (base, loaded_only, override):
+        for handle in (base, loaded_only, override, reset_effort, reset_compact):
             assert recover(handle, expect=3)["answer"]["status"] == "conflict"
         for handle, code in ((missing, "unknown_preset"), (update, "preset_on_update"), (unknown_update, "preset_on_update")):
             refusal = recover(handle, expect=3)["answer"]
             assert refusal["replayed"] is True and refusal["code"] == code, refusal
         assert value("request", "inspect", unknown_update)["observation"] == unknown_refusal
-        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session}
+        assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session,
+                                                reset_effort_session, reset_compact_session}
         assert value("request", "inspect", base)["observation"] == original_admission
         for record, original, routing, route in captures:
             assert record.read_bytes() == original and routing.read_bytes() == route

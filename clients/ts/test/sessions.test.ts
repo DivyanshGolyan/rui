@@ -24,7 +24,7 @@ async function connect(settings: Partial<HostSettings> = {}): Promise<Rui> {
 	}, { binary: binary ?? "rui" });
 }
 
-const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" } satisfies AgentSpec;
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -92,6 +92,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const idle = await session.status();
 		assert.deepEqual(idle, {
 			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, interruptTarget: null, pendingMessages: "0",
+			attention: null, group: "done", canStop: false, decide: null,
 			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
@@ -100,6 +101,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const queued = await session.status();
 		assert.deepEqual(queued, {
 			...idle, state: "pending", since: queued.since, pendingMessages: "1", label: "Queued work", effort: "high",
+			attention: null, group: "queued", canStop: true, decide: null,
 		});
 		assert.match(queued.since, /^[1-9][0-9]*$/);
 		await session.interrupt();
@@ -283,7 +285,8 @@ test("create parent inherits binding and refuses widening as field-specific requ
 			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
 			[{ parent: "zzzzzz" }, "unknown_session"],
 		] as const) {
-			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides }, { idempotencyKey: `parent:${code}` }),
+			// Exercise Host validation for values a JavaScript caller can still send.
+			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides } as never, { idempotencyKey: `parent:${code}` }),
 				(error: unknown) => error instanceof RuiRequestError && error.code === code);
 		}
 	} finally {

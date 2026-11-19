@@ -30,7 +30,7 @@ Make reversible choices inside the accepted contract yourself.
 For unresolved behavior, architecture, scope or access, finish independent authorized work, then present bounded options with a recommendation and consequences.
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
-Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a ready PR, commenting `@codex review`, resolving review threads your fixes answered, marking an older draft ready to overlap CI and review, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
+Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking a draft ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
 Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
 Honor narrower user limits and one-way-door approvals.
 

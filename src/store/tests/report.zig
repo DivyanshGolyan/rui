@@ -684,6 +684,14 @@ test "served work intents imply admission across permission and control states" 
                     const permissions = report.value.object.get("actionable_permissions").?.array.items;
                     try std.testing.expectEqual(@as(usize, if (scenario == .mixed) 2 else 0), permissions.len);
                     for (permissions) |permission| try std.testing.expect((try std.fmt.parseInt(u64, permission.object.get("action").?.string, 10)) != old_action);
+                    const observed = try store_testing.observeCommandForTesting(&storage, "intent-next");
+                    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
+                    try std.testing.expectEqualDeep(work, observed.kind.message.?.work.?);
+                    if (scenario == .message_decline) {
+                        const original = try store_testing.observeCommandForTesting(&storage, "intent-first");
+                        try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, original.requestState().?);
+                        try std.testing.expectEqualDeep(work, original.kind.message.?.work.?);
+                    }
                 }
                 switch (intent) {
                     .stop => if (work.actions.stop) {

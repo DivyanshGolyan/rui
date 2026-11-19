@@ -5,7 +5,7 @@ const h2 = @import("h2.zig");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Connection = @import("Connection.zig");
-const Waker = @import("Waker.zig");
+const Waker = @import("os").Waker;
 const Resolver = @import("Resolver.zig");
 const tls = @import("tls.zig");
 const proxy = @import("proxy.zig");
@@ -763,7 +763,6 @@ fn nextDeadline(self: *Engine) ?u64 {
 }
 
 test "a large table stays unwritten until connections need it" {
-    if (builtin.os.tag != .linux and !builtin.os.tag.isDarwin()) return error.SkipZigTest;
     var client: h2.Client = undefined;
     try client.init(std.heap.page_allocator, std.testing.io, .{
         .stream_capacity = 10_000,
