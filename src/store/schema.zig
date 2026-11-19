@@ -3763,11 +3763,12 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
 }
 
-test "schema 86 adds the unaccepted action partial index on SQLite and MySQL" {
+test "schema 86 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {
     const step = migrations[85 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 85), step.from);
-    try std.testing.expectEqual(@as(usize, 1), step.sqlite.len);
+    try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
     try std.testing.expectEqualStrings("CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL", step.sqlite[0]);
+    try std.testing.expectEqualStrings("CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL", step.sqlite[1]);
     var raw: ?*c.sqlite3 = null;
     defer _ = c.sqlite3_close(raw);
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
@@ -3782,6 +3783,7 @@ test "schema 86 adds the unaccepted action partial index on SQLite and MySQL" {
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted'"));
     for (step.sqlite) |statement| try sqlite.exec(database, statement);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted' AND tbl_name='action_operation'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='turn_outcome_unpositioned' AND tbl_name='turn'"));
     const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM action_operation INDEXED BY action_operation_unaccepted WHERE acceptance_position IS NULL");
     defer _ = c.sqlite3_finalize(plan);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
