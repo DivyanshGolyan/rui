@@ -31,6 +31,7 @@ pub const Rejection = enum {
     model_is_immutable,
     revision_exhausted,
     skills_unavailable,
+    preferences_on_update,
 };
 
 const std = @import("std");

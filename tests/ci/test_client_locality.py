@@ -256,6 +256,14 @@ class ClientAllowanceRatchetTest(unittest.TestCase):
         self.assertEqual(found, [f"{file}: {rule}: allowance exceeds the trusted review base: {MESSAGE}"
                                  for file, rule in sorted((removed, new))])
 
+    def test_removed_allowance_cannot_be_reintroduced(self):
+        pair = ("src/client_defaults.zig", DEFAULT_IMPORT)
+        self.write_allowances({})
+        self.commit(trusted=True)
+        self.write_allowances({pair: "#1621"})
+        self.assertEqual(allowance_growth(self.root),
+                         [f"{pair[0]}: {pair[1]}: allowance exceeds the trusted review base: {MESSAGE}"])
+
     def test_candidate_cannot_supply_its_own_trusted_baseline(self):
         self.write_allowances({})
         self.commit(trusted=True)

@@ -6,7 +6,6 @@ const Footer = @import("widgets/Footer.zig");
 const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
-const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
@@ -518,7 +517,8 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
             try status.writeGrouped(&context.writer, tokens);
             try context.writer.writeAll(" of ");
-            try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
+            // Current validation requires a reported trigger whenever it reports an estimate.
+            try status.writeGrouped(&context.writer, self.session.compaction_trigger.?);
             self.fields[5].value = context.written();
         }
     }
@@ -1296,6 +1296,34 @@ test "Chat info Context appears only for measured estimates regardless of work o
     const unavailable = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "Context") == null);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
+}
+
+test "Chat info Context shows the Host reported threshold" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { estimate: ?u64, trigger: ?u64, value: ?[]const u8 }{
+        .{ .estimate = null, .trigger = null, .value = null },
+        .{ .estimate = null, .trigger = 244_800, .value = null },
+        .{ .estimate = 0, .trigger = 115_200, .value = "0 of 115,200" },
+        .{ .estimate = 18, .trigger = 244_800, .value = "18 of 244,800" },
+        .{ .estimate = 31_200, .trigger = 12_345, .value = "31,200 of 12,345" },
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| for (cases) |case| {
+        fixture.session.context_estimate = case.estimate;
+        fixture.session.compaction_trigger = case.trigger;
+        fixture.unicode = unicode;
+        page.refresh();
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 14);
+        try std.testing.expectEqual(case.value != null, page.fields[5].visible);
+        if (case.value) |value| {
+            try std.testing.expectEqualStrings(value, page.fields[5].value);
+            try std.testing.expect(std.mem.indexOf(u8, text, value) != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, text, "Context") == null);
+        _ = arena.reset(.retain_capacity);
+    };
 }
 
 test "Chat info hidden Context preserves action IDs failures and the blank action separator" {

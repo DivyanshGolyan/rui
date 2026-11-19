@@ -429,9 +429,13 @@ fn configurationShape(comptime name: []const u8) type {
     };
 }
 
+const PreferencesShape = struct {
+    pub const openapi_shape = .{ "{", Optional(.{ "\"reasoning_effort\":\"", Hole{ .tag = protocol.ReasoningEffort }, "\"" }), Optional(.{ ",\"permission_mode\":\"", Hole{ .tag = protocol.PermissionMode }, "\"" }), "}" };
+};
+
 fn configurationMembers(comptime index: usize) type {
     if (index == session_settings.spec_entries.len) return struct {
-        const shape = .{"}"};
+        const shape = .{ Optional(.{ ",\"preferences\":", PreferencesShape }), "}" };
     };
     const entry = session_settings.spec_entries[index];
     const value = switch (entry.kind) {
@@ -826,9 +830,11 @@ pub const Document = struct {
     fn settingsSchemas(d: *Document) !void {
         const start_agent = try std.json.parseFromSliceLeaky(Value, d.arena, core_tools.start_agent_schema, .{});
         var spec = start_agent.object.get("properties").?.object.get("spec").?;
-        try spec.object.put(d.arena, "required", try d.array(&.{
-            .{ .string = "model" }, .{ .string = "effort" }, .{ .string = "compactAt" }, .{ .string = "tools" }, .{ .string = "permissionMode" },
-        }));
+        var required: std.json.Array = .init(d.arena);
+        inline for (session_settings.entries) |entry| {
+            if (entry.create == .must_value) try required.append(.{ .string = entry.spec });
+        }
+        try spec.object.put(d.arena, "required", .{ .array = required });
         const spec_properties = spec.object.getPtr("properties").?;
         try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
         try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));

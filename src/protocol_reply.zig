@@ -2038,6 +2038,7 @@ pub const CommandObservation = struct {
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
                 .processing => if (self.binding == null) return error.InvalidObservation,
+                // A newer Message hides the decision while automatic denial is pending.
                 .waiting_for_permission => {},
                 .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
             }
@@ -3763,6 +3764,21 @@ test "keyed observation rejects malformed consequential fields before outcome in
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     var oversized: [protocol.command_observation_reply.max_bytes + 1]u8 = undefined;
     try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
+}
+
+test "keyed observation retains superseded approval work without a decision" {
+    inline for (.{ "", testing_observation_binding }) |binding| {
+        const facts = testing_observation_message ++ ",\"state\":\"waiting_for_permission\"" ++ testing_observation_input ++ testing_observation_queue ++ binding ++
+            ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"37\",\"step\":\"0\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(.waiting_for_permission, observed.state.?);
+        try std.testing.expect(observed.work.?.first_action == null and observed.work.?.actions.decide == null);
+        try std.testing.expectEqual(.needs_you, observed.work.?.group);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
 }
 
 test "keyed observation rejects contradictory permission work variants" {

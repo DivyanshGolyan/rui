@@ -2365,7 +2365,6 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var compaction_buffer: [20]u8 = undefined;
     if (input.session == .create and !input.preset.present) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
@@ -2382,14 +2381,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             input.model = .{ .present = true, .value = binding.model.slice() };
             if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
-        input.completeCreation(
-            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
-            input.model.value,
-            @import("os/read_image_file.zig").available,
-            saved_effort,
-            snapshot.defaults.permission_mode,
-            &compaction_buffer,
-        );
+        input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -2416,19 +2408,6 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
-    var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and !input.preset.present and input.resetsToDefault()) {
-        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        var current_provider: protocol.Provider = undefined;
-        {
-            var discard: std.Io.Writer.Discarding = .init(&.{});
-            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
-            defer observed.file.close(io);
-            try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
-            current_provider = observed.current.settings.provider.value;
-        }
-        input.completeReset(current_provider, current_model.slice(), &compaction_buffer);
-    }
 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
@@ -2543,9 +2522,15 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
+    const admitted = (try reply.answer).result.accepted.message.configuration orelse return error.InvalidResponse;
+    const receipt = configuration.?.receipt.observed(
+        @tagName(admitted.provider),
+        admitted.model.slice(),
+        if (admitted.reasoning_effort) |effort| @tagName(effort) else null,
+    );
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    writeMutationJson(writer, reply, configuration.?.receipt) catch |err| return output.failure(err);
+    writeMutationJson(writer, reply, receipt) catch |err| return output.failure(err);
     writer.writeByte('\n') catch |err| return output.failure(err);
     try output.finish();
 }
@@ -3881,6 +3866,7 @@ const StartConfiguration = struct {
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
+    saved_effort: ?model_capability.ReasoningEffort = null,
 
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
@@ -3889,10 +3875,38 @@ const StartConfiguration = struct {
             .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
-            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
+            .effort_source = if (effort_flag) .flag else .model_default,
+            .saved_effort = saved_effort,
         };
     }
+
+    fn observed(self: StartConfiguration, provider: []const u8, model: []const u8, effort: ?[]const u8) StartConfiguration {
+        var result = self;
+        result.provider = if (self.parent == null) provider else null;
+        result.model = model;
+        result.reasoning_effort = effort;
+        if (self.effort_source != .flag) result.effort_source = if (self.saved_effort != null and effort != null and std.mem.eql(u8, @tagName(self.saved_effort.?), effort.?)) .saved else .model_default;
+        return result;
+    }
 };
+
+fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_receipt.zig").Configuration) !void {
+    try writer.writeAll(",\"configuration\":{\"provider\":");
+    try std.json.Stringify.value(@tagName(config.provider), .{}, writer);
+    try writer.writeAll(",\"model\":");
+    try std.json.Stringify.value(config.model.slice(), .{}, writer);
+    try writer.writeAll(",\"reasoning_effort\":");
+    try std.json.Stringify.value(if (config.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
+    try writer.writeAll(",\"workspace\":");
+    try std.json.Stringify.value(config.workspace.slice(), .{}, writer);
+    try writer.writeAll(",\"tools\":");
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }).writeJson(writer);
+    try writer.writeAll(",\"loaded_tools\":");
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }).writeJson(writer);
+    try writer.print(",\"permission_mode\":\"{s}\",\"compaction_trigger\":", .{@tagName(config.permission_mode)});
+    if (config.compaction_trigger) |trigger| try writer.print("\"{d}\"", .{trigger}) else try writer.writeAll("null");
+    try writer.writeByte('}');
+}
 
 fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, configuration: ?StartConfiguration) !void {
     try writer.writeAll("{\"context\":");
@@ -3906,7 +3920,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
         if (value.parent != null) {
-            try std.json.Stringify.value(value, .{}, writer);
+            try std.json.Stringify.value(.{ .provider = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
         } else {
             try std.json.Stringify.value(.{
                 .provider = value.provider,
@@ -3948,8 +3962,12 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             .configure => |value| {
                 try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created });
                 if (value.skills) |status| try writer.print(",\"skills\":\"{s}\"", .{@tagName(status)});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
             },
-            .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
+            .message => |value| {
+                try writer.print(",\"admission\":\"{d}\"", .{value.admission});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
+            },
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
                 if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
@@ -3984,7 +4002,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     try writer.writeByte('}');
 }
 
-test "session start configuration reports resolved effort and its source" {
+fn checkStartEffortSources() !void {
     const Case = struct {
         model: []const u8 = "gpt-6.1-sol",
         override: ?[]const u8 = "low",
@@ -4017,7 +4035,8 @@ test "session start configuration reports resolved effort and its source" {
         }, case.flag, case.saved);
         try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
-        try std.testing.expectEqual(case.source, value.effort_source);
+        const observed = value.observed("openai", case.model, case.effort);
+        try std.testing.expectEqual(case.source, observed.effort_source);
         if (case.effort) |effort| {
             try std.testing.expect(value.reasoning_effort != null);
             try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
@@ -4025,34 +4044,53 @@ test "session start configuration reports resolved effort and its source" {
     }
 }
 
-test "session start mutation receipt adds configuration without changing send" {
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
-    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "", .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } });
-    try reply.context.store.set("/store");
-    try reply.context.key.set("handle");
-    reply.context.kind = .message;
-    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"handle\",\"kind\":\"message\"}";
-    const tail = ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
-    var buffer: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    const attached = StartConfiguration.resolve(.{
+fn checkStartHostSettings() !void {
+    const requested = StartConfiguration.resolve(.{
         .store = "/store",
         .session = .create,
-        .parent = .{ .present = true, .value = "09azvw" },
-        .model = .{ .present = true, .value = "unlisted-model" },
-        .reasoning_effort = .{ .present = true, .value = "low" },
+        .provider = .{ .present = true, .value = "openai" },
+        .model = .{ .present = true, .value = "model-requested" },
     }, false, null);
-    try std.testing.expect(attached.provider == null);
-    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
-    try writeMutationJson(&writer, reply, attached);
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    reply.target.message.creates_session = false;
-    try writeMutationJson(&writer, reply, null);
-    try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+    try std.testing.expect(requested.reasoning_effort == null);
+    const report = requested.observed("codex", "model-served", "high");
+    try std.testing.expectEqualStrings("codex", report.provider.?);
+    try std.testing.expectEqualStrings("model-served", report.model);
+    try std.testing.expectEqualStrings("high", report.reasoning_effort.?);
+    try std.testing.expectEqual(requested.effort_source, report.effort_source);
+    var saved = requested;
+    saved.saved_effort = .max;
+    try std.testing.expectEqual(.model_default, saved.observed("codex", "model-served", "high").effort_source);
+    try std.testing.expectEqual(.saved, saved.observed("codex", "model-served", "max").effort_source);
+    saved.effort_source = .flag;
+    try std.testing.expectEqual(.flag, saved.observed("codex", "model-served", "high").effort_source);
+    try std.testing.expect(report.observed("codex", "no-effort", null).reasoning_effort == null);
+    var attached = requested;
+    attached.parent = "k7m2qx";
+    const attached_report = attached.observed("codex", "model-served", "high");
+    try std.testing.expect(attached_report.provider == null);
+    try std.testing.expectEqualStrings("k7m2qx", attached_report.parent.?);
+}
+
+test "CLI-6 start_receipt_configuration" {
+    try checkStartEffortSources();
+    try checkStartHostSettings();
+
+    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"" ++ config ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "", target);
+    const requested = StartConfiguration.resolve(.{ .store = "/store", .session = .create }, false, .high);
+    const observed = requested.observed("codex", "gpt-5.5", "high");
+    var bytes: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeMutationJson(&writer, reply, observed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const receipt = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("codex", receipt.get("provider").?.string);
+    try std.testing.expectEqualStrings("gpt-5.5", receipt.get("model").?.string);
+    try std.testing.expectEqualStrings("high", receipt.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
 }
 
 test "Message mutation JSON preserves accepted parts owners and rejected receipts" {
@@ -4099,17 +4137,17 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
     const failed_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
-    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
+    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
     const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
-        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
+        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: false\n",
         "Rui: Configured.\n",
     };
     const failed_expected = [_][]const u8{
@@ -4930,7 +4968,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --model, --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a model, a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing model, Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;

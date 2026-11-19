@@ -1623,11 +1623,16 @@ def main(selected="all"):
     import canonical_fixture
     import fresh_tool_profile_cases
     import session_chrome_cases
+    import start_receipt_cases
     import terminal_restoration_cases
     import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt"), selected
+    if selected in ("all", "callers", "caller-core", "start-receipt"):
+        start_receipt_cases.main()
+    if selected == "start-receipt":
+        return
     if selected in ("all", "callers", "caller-core", "tool-intent"):
         tool_intent_cases.main()
     if selected == "tool-intent":
@@ -2157,9 +2162,15 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))
         assert json.loads(run(home, "request", "recover", config["request"]))["answer"]["replayed"] is True
-        assert json.loads(run(home, "request", "recover", config["request"])) == {
+        creation = {"provider": "codex", "model": "gpt-6-sol", "reasoning_effort": "low",
+                    "workspace": str(workspace.resolve()), "tools": ["bash"], "loaded_tools": ["bash"],
+                    "permission_mode": "ask", "compaction_trigger": str(compaction_trigger("codex", "gpt-6-sol"))}
+        assert config["admission"]["answer"]["configuration"] == creation, config
+        recovered = json.loads(run(home, "request", "recover", config["request"]))
+        assert recovered == {
             "context": {"store": str(store), "session": session, "key": config["request"], "kind": "configure"},
-            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True}}
+            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True,
+                       "configuration": creation}}, recovered
 
         text = state / "input"
         text.write_text("first input")

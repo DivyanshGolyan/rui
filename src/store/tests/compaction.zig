@@ -298,9 +298,13 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 try patch.key.set("inherit");
                 patch.configuration.compaction_trigger.state = .explicit_null;
                 patch.configuration.output_reservation.state = .explicit_null;
-                const refused_clear = try storage.configure(&patch, .{});
-                try std.testing.expect(refused_clear == .rejected);
-                try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused_clear.rejected.code);
+                const cleared = try storage.configure(&patch, .{});
+                try std.testing.expect(cleared == .accepted);
+                const codex_limit: u64 = if (std.mem.eql(u8, model, "gpt-6.1-sol") or std.mem.eql(u8, model, "gpt-6.1-terra")) 450000 else 244800;
+                const host_default = @min(expected.?, codex_limit);
+                const cleared_settings = try storage.inspectSessionForTesting(created_session_0.slice());
+                try std.testing.expectEqual(@as(?u64, host_default), cleared_settings.compaction_trigger);
+                try std.testing.expectEqual(@as(u64, 0), cleared_settings.output_reservation);
                 try patch.key.set("explicit-threshold");
                 patch.configuration.compaction_trigger = configure.configuration.compaction_trigger;
                 try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);

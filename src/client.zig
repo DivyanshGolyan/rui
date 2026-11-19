@@ -2640,6 +2640,22 @@ const Capture = struct {
                 }
             }
         }
+        if (input.preferences.reasoning_effort != null or input.preferences.permission_mode != null) {
+            try self.write(separator);
+            try self.write("\"preferences\":{");
+            var preference_separator: []const u8 = "";
+            if (input.preferences.reasoning_effort) |effort| {
+                try self.write("\"reasoning_effort\":");
+                try self.writeJsonString(@tagName(effort));
+                preference_separator = ",";
+            }
+            if (input.preferences.permission_mode) |mode| {
+                try self.write(preference_separator);
+                try self.write("\"permission_mode\":");
+                try self.writeJsonString(@tagName(mode));
+            }
+            try self.write("}");
+        }
         try self.write("}");
     }
 
@@ -3623,25 +3639,43 @@ test "transport failure provenance excludes local sinks, valid physical EOF and 
     }
 }
 
-test "observation transport owns a larger buffer without growing ordinary replies" {
+test "observation transport enforces its own bound independently of ordinary replies" {
     try std.testing.expectEqual(@sizeOf(protocol.ResponseBuffer), @sizeOf(ReplyBuffer));
     try std.testing.expectEqual(@sizeOf(protocol.CommandObservationBuffer), @sizeOf(ObservationBuffer));
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
-    var body: [protocol.max_response_bytes + 1]u8 = @splat(' ');
+    const capacity: c_int = 1024;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.setsockopt(sockets[1], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &capacity, @sizeOf(c_int)));
+    var body: [protocol.command_observation_reply.max_bytes]u8 = @splat(' ');
     body[0] = '{';
     body[1] = '}';
     var header: [256]u8 = undefined;
     try writeAll(sockets[1], try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
-    try writeAll(sockets[1], &body);
+    const Writer = struct {
+        fd: std.posix.fd_t,
+        bytes: []const u8,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            writeAll(self.fd, self.bytes) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var producer: Writer = .{ .fd = sockets[1], .bytes = &body };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{&producer});
     var observation: ObservationBuffer = .{};
     const read = readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &observation, .{}, null);
+    // If reading failed, wake a writer that may be blocked on a full socket.
+    _ = socket_os.shutdown(sockets[0], std.c.SHUT.RD);
+    writer.join();
+    if (producer.failure) |err| return err;
     try std.testing.expectEqual(@as(?anyerror, null), if (read) |_| @as(?anyerror, null) else |err| @as(?anyerror, err));
     const reply = try read;
     try std.testing.expectEqualStrings(&body, reply.body);
-    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = body.len, .total = null, .next = null };
     var ordinary: ReplyBuffer = .{};
+    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = ordinary.bytes.len + 1, .total = null, .next = null };
     try std.testing.expectError(error.ResponseTooLarge, readCommandBodyUntil(.{ .io = std.testing.io }, sockets[0], head, &ordinary, .{}, null));
     var too_large = head;
     too_large.content_length = observation.bytes.len + 1;
@@ -3974,7 +4008,7 @@ test "client recovery rejects noncanonical Session references without retransmis
     }
 }
 
-test "capture creating Messages writes configuration and optional model admission" {
+fn checkCreatingMessageCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -4014,7 +4048,7 @@ test "capture creating Messages writes configuration and optional model admissio
     }
 }
 
-test "capture configure requests a Store allocated Session and retains model admission" {
+fn checkCreatingConfigureCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6634,7 +6668,7 @@ test "read-only capture routing does not eagerly validate a replay body" {
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }
 
-test "capture semantic tool arrays distinguish singleton none from the CLI sentinel" {
+fn checkSemanticToolsCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6676,7 +6710,7 @@ test "capture semantic tool arrays distinguish singleton none from the CLI senti
     }
 }
 
-test "parent relation survives Configure and creating Message capture through native ingress" {
+fn checkParentCapture() !void {
     const host_request = @import("wire_request.zig");
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6735,7 +6769,7 @@ test "parent relation survives Configure and creating Message capture through na
     }
 }
 
-test "preset Configure capture reopens with sparse settings through native ingress" {
+fn checkPresetCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6798,6 +6832,41 @@ test "Action stop captures preserve target and bytes through generated and expli
     for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
         try std.testing.expectError(error.InvalidTarget, captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root }));
     }
+}
+
+fn checkPreferencesCapture() !void {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureConfigure(io, .{
+        .store = root,
+        .session = .create,
+        .reasoning_effort = .{ .present = true, .value = "low" },
+        .preferences = .{ .reasoning_effort = .high, .permission_mode = .ask },
+    }, .{ .generated = root }).get();
+    defer captured.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try captured.file.readPositionalAll(io, &bytes, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
+    const configuration = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("low", configuration.get("effort").?.string);
+    try std.testing.expect(!configuration.contains("model"));
+    const prefs = configuration.get("preferences").?.object;
+    try std.testing.expectEqualStrings("high", prefs.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("ask", prefs.get("permission_mode").?.string);
+}
+
+test "CLI-4 configuration_intent" {
+    try checkCreatingMessageCapture();
+    try checkCreatingConfigureCapture();
+    try checkSemanticToolsCapture();
+    try checkParentCapture();
+    try checkPresetCapture();
+    try checkPreferencesCapture();
 }
 
 test "ADM-24 frozen multipart request recovers canonical identity" {

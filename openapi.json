@@ -3664,6 +3664,30 @@
               "null"
             ]
           },
+          "preferences": {
+            "type": "object",
+            "properties": {
+              "reasoning_effort": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "permission_mode": {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "bypass"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
           "provider": {
             "type": "string",
             "enum": [
@@ -3678,11 +3702,7 @@
         },
         "additionalProperties": false,
         "required": [
-          "model",
-          "effort",
-          "compactAt",
-          "tools",
-          "permissionMode"
+          "model"
         ]
       },
       "CallActivity": {
@@ -3831,6 +3851,9 @@
             "type": "string",
             "maxLength": 6,
             "x-rui-max-bytes": 6
+          },
+          "preferences": {
+            "$ref": "#/components/schemas/PreferencesShape"
           }
         },
         "required": [],
@@ -3989,6 +4012,155 @@
                     "$ref": "#/components/schemas/Decimal"
                   },
                   "created": {
+                    "type": "boolean"
+                  },
+                  "configuration": {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "enum": [
+                          "codex",
+                          "openai",
+                          "chatgpt"
+                        ]
+                      },
+                      "model": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "x-rui-max-bytes": 256
+                      },
+                      "reasoning_effort": {
+                        "enum": [
+                          "none",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          null
+                        ]
+                      },
+                      "workspace": {
+                        "type": "string",
+                        "maxLength": 4096,
+                        "x-rui-max-bytes": 4096
+                      },
+                      "tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "maxItems": 128,
+                        "uniqueItems": true,
+                        "x-rui-max-bytes": 4096,
+                        "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                      },
+                      "loaded_tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "maxItems": 128,
+                        "uniqueItems": true,
+                        "x-rui-max-bytes": 4096,
+                        "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                      },
+                      "permission_mode": {
+                        "type": "string",
+                        "enum": [
+                          "ask",
+                          "bypass"
+                        ]
+                      },
+                      "compaction_trigger": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "model",
+                      "reasoning_effort",
+                      "workspace",
+                      "tools",
+                      "loaded_tools",
+                      "permission_mode",
+                      "compaction_trigger"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "revision",
+                  "created",
+                  "configuration"
+                ],
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "const": "direct_reply_does_not_wait_for_model_processing"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "configuration_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "revision": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "created": {
                     "const": false
                   },
                   "skills": {
@@ -4090,7 +4262,8 @@
                       "provider_is_immutable",
                       "model_is_immutable",
                       "revision_exhausted",
-                      "skills_unavailable"
+                      "skills_unavailable",
+                      "preferences_on_update"
                     ]
                   },
                   "message": {
@@ -6896,6 +7069,168 @@
                 "type": "object",
                 "properties": {
                   "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "admission": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "configuration": {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "enum": [
+                          "codex",
+                          "openai",
+                          "chatgpt"
+                        ]
+                      },
+                      "model": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "x-rui-max-bytes": 256
+                      },
+                      "reasoning_effort": {
+                        "enum": [
+                          "none",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          null
+                        ]
+                      },
+                      "workspace": {
+                        "type": "string",
+                        "maxLength": 4096,
+                        "x-rui-max-bytes": 4096
+                      },
+                      "tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "maxItems": 128,
+                        "uniqueItems": true,
+                        "x-rui-max-bytes": 4096,
+                        "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                      },
+                      "loaded_tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "maxItems": 128,
+                        "uniqueItems": true,
+                        "x-rui-max-bytes": 4096,
+                        "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+                      },
+                      "permission_mode": {
+                        "type": "string",
+                        "enum": [
+                          "ask",
+                          "bypass"
+                        ]
+                      },
+                      "compaction_trigger": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "model",
+                      "reasoning_effort",
+                      "workspace",
+                      "tools",
+                      "loaded_tools",
+                      "permission_mode",
+                      "compaction_trigger"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "admission",
+                  "configuration"
+                ],
+                "additionalProperties": false
+              },
+              "input": {
+                "$ref": "#/components/schemas/MessageInput"
+              },
+              "queue": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "queued"
+                  },
+                  "admission": {
+                    "$ref": "#/components/schemas/Decimal"
+                  }
+                },
+                "required": [
+                  "status",
+                  "admission"
+                ],
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "queued"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "input",
+              "queue",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "message_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
                     "const": "rejected"
                   },
                   "replayed": {
@@ -6942,6 +7277,7 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
+                      "preferences_on_update",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -7071,6 +7407,7 @@
                       "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
+                      "preferences_on_update",
                       "skill_file_unavailable",
                       "skill_file_too_large",
                       "skill_text_invalid"
@@ -11853,6 +12190,31 @@
           "action",
           "decision"
         ],
+        "additionalProperties": false
+      },
+      "PreferencesShape": {
+        "type": "object",
+        "properties": {
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "permission_mode": {
+            "type": "string",
+            "enum": [
+              "ask",
+              "bypass"
+            ]
+          }
+        },
+        "required": [],
         "additionalProperties": false
       },
       "PublicPart": {

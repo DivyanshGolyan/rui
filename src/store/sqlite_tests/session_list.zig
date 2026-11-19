@@ -368,3 +368,191 @@ test "a stopping Turn with queued work adds no list read rounds or passes" {
     const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
     try std.testing.expect(work.state == .stopping and work.actions.stop);
 }
+
+test "creating Message replay reads independently of Session history in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    const settings = try completeConfiguration("receipt-steps", "", workspace, "model-a");
+    var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+    try message.key.set("receipt-steps");
+    message.text = try tests.testingBytesContent(&tmp, "receipt-steps-input", "initial");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = storage.submitMessageWithModelInto(&message, null, &created_receipt, .{});
+    try std.testing.expect(created == .accepted);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const wire_request.MessageCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const replay = store.submitMessageWithModelInto(command, null, &replay_receipt, .{});
+            counter.end(store.sqliteDatabase());
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &message);
+    const few = try Counter.steps(&storage, &message);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &message));
+}
+
+test "creating configuration receipt replay reads independently of Session history in SQLite steps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("configure-receipt-steps", "", workspace, "model-a");
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = try storage.configureInto(&create, &created_receipt, .{});
+    try std.testing.expect(created == .accepted and created.accepted.configuration != null);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const @import("../../wire_request.zig").ConfigureCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            var result_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const result = store.configureInto(command, &result_receipt, .{});
+            counter.end(store.sqliteDatabase());
+            const replay = try result;
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed and replay.accepted.configuration != null);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &create);
+    const few = try Counter.steps(&storage, &create);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-revision-{d}", .{index});
+        var update = try completeConfiguration(name, session.slice(), workspace, if (index % 2 == 0) "model-b" else "model-a");
+        try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &create));
+}
+
+test "creation receipt rejects stored tool names with empty comma segments" {
+    const wire_request = @import("../../wire_request.zig");
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_][]const u8{ ",bad", "bad,", "bad,,name", "bad,name" }) |invalid| for ([_]bool{ false, true }) |forged_count| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("comma-receipt", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("comma-receipt");
+            message.text = try tests.testingBytesContent(&tmp, "comma-receipt-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const record = try store_testing.sqlite_only.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1) AND ordinal=0", .{session.slice()});
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+            try store_testing.sqlite_only.exec(&storage, "UPDATE tool_record SET name=?1 WHERE tool_record_id=?2", .{ invalid, record });
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+            if (forged_count) {
+                var apparent_count: u64 = 1;
+                for (invalid) |byte| if (byte == ',') {
+                    apparent_count += 1;
+                };
+                try store_testing.sqlite_only.exec(&storage, "UPDATE tool_set SET member_count=?1 WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?2 AND revision=1)", .{ apparent_count, session.slice() });
+            }
+            if (as_message) {
+                try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure);
+            } else {
+                try std.testing.expect((try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure);
+            }
+            try std.testing.expect(storage.isFenced());
+        };
+    }
+}
+
+test "creation receipt corruption work is bounded by ordinal range in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    const Run = struct {
+        fn steps(as_message: bool, replay: bool, extra: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("ordinal-seed", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            create.configuration.loaded_tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("ordinal-seed");
+            message.text = try tests.testingBytesContent(&tmp, "ordinal-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const set = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+            const record = try store_testing.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set});
+            for (0..extra) |index| {
+                try store_testing.exec(&storage, "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES(?1,?2,?3)", .{ set, @as(u64, @intCast(128 + index)), record });
+            }
+            if (!replay) {
+                try create.key.set("ordinal-target");
+                try message.key.set("ordinal-target");
+            }
+            var counter: TestingSteps = .{};
+            counter.begin(storage.sqliteDatabase());
+            const failed = if (as_message)
+                storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure
+            else
+                (try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure;
+            counter.end(storage.sqliteDatabase());
+            try std.testing.expect(failed and storage.isFenced());
+            return counter.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_]bool{ false, true }) |replay| {
+            const few = try Run.steps(as_message, replay, 1);
+            const many = try Run.steps(as_message, replay, 1024);
+            try std.testing.expect(few > 0);
+            try std.testing.expectEqual(few, many);
+        }
+    }
+}

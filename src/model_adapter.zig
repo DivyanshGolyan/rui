@@ -1585,7 +1585,7 @@ test "real preparation consumes the configured allowance across multiple advance
     const expected = try requestGolden(
         workspace,
         session.slice(),
-        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" ++ text ++ "\"}]}," ++
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" ++ text ++ "\"}]}," ++
             declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
     );
     defer std.testing.allocator.free(expected);
@@ -1714,6 +1714,19 @@ const PreparationTestSetup = struct {
         const configured = try self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
+        return configured.accepted.session;
+    }
+
+    fn configureImagePolicy(self: *PreparationTestSetup, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+        // Start with a model that has no reasoning effort, so later model
+        // switches exercise image policy rather than retained-effort admission.
+        var command = try store.testing.completeConfiguration(key, "", self.workspace, "gpt-4.1");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.loaded_tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.reasoning_effort.state = .explicit_null;
+        try command.configuration.compaction_trigger.value.set("10000");
+        const configured = try self.storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
         return configured.accepted.session;
     }
 
@@ -2129,7 +2142,7 @@ const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
 const composed_expected =
-    "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+    "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
     declared_bash_json ++ "," ++
     composed_replayed ++ "," ++
@@ -2245,7 +2258,7 @@ test "request preparation minimal golden is exact across schedules" {
     defer workspace_dir.close(std.testing.io);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
@@ -2314,7 +2327,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}," ++ declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}," ++ declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -2397,7 +2410,7 @@ test "request preparation escapes instructions and user content" {
     const expected = try requestGolden(
         setup.workspace,
         session.slice(),
-        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"a\\\"b\\\\c\\n\\u0000\\u0001d\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u\\\"v\\\\w\\u0000\x7fé\"}]}," ++
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"a\\\"b\\\\c\\n\\u0000\\u0001d\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u\\\"v\\\\w\\u0000\x7fé\"}]}," ++
             declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
     );
     defer std.testing.allocator.free(expected);
@@ -2505,7 +2518,7 @@ test "request preparation frozen selection excludes later messages" {
 }
 
 test "request preparation keeps the starting effort at the top and changes it at its Operation" {
-    const Case = struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 };
+    const Case = struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8, reset: bool = false };
     const unlisted = comptime blk: {
         const efforts = std.enums.values(protocol.ReasoningEffort);
         var cases: [efforts.len]Case = undefined;
@@ -2516,7 +2529,8 @@ test "request preparation keeps the starting effort at the top and changes it at
         .{ .model = "gpt-6-luna", .expected = "medium" },
         .{ .model = "gpt-6-astra", .expected = "low" },
         .{ .model = "gpt-5.5", .override = "high", .expected = "high" },
-        .{ .model = "model-a", .expected = null },
+        .{ .model = "model-a", .expected = "low", .reset = true },
+        .{ .model = "kimi-k2.6", .expected = null },
     } ++ unlisted) |case| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -2534,7 +2548,7 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        if (case.override orelse case.expected) |effort| {
+        if (if (case.reset) null else case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
         } else command.configuration.reasoning_effort.state = .explicit_null;
@@ -2630,7 +2644,7 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
         declared_bash_json ++ "],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}";
     const full_expected = try requestGolden(setup.workspace, session.slice(), expected);
     defer std.testing.allocator.free(full_expected);
@@ -3077,7 +3091,7 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         defer std.testing.allocator.free(rebuilt.bytes);
         try std.testing.expectEqual(@as(usize, 0), rebuilt.copied);
         const golden =
-            "{\"model\":\"model-b\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+            "{\"model\":\"model-b\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[" ++
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
             declared_bash_json ++ "," ++ composed_replayed_call_a ++ "," ++ composed_replayed_call_b ++ "," ++
             "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
@@ -3368,7 +3382,7 @@ test "request preparation replays reasoning continuation without its private rea
         const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
         const body = try std.mem.concat(std.testing.allocator, u8, &.{
-            "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
+            "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[",
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]}," ++ declared_bash_json ++ ",",
             case.replayed,
             ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
@@ -3825,7 +3839,7 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
+    if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("configuration_defaults.zig").startEffort(model_catalog.shipped, model) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
         try command.configuration.reasoning_effort.value.set(@tagName(effort));
     } else command.configuration.reasoning_effort.state = .explicit_null;
@@ -4140,6 +4154,8 @@ test "a refused effort change retries without the update and later Operations ke
         if (initial) |effort| try change.configuration.reasoning_effort.value.set(@tagName(effort));
 
         try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+        // Older stored sessions can still have no effective effort.
+        if (initial == null) try store.testing.setLegacyNullEffortForTesting(&setup.storage, session.slice());
         try setup.submit("refusal-message", "refusal-message", session.slice(), "continue after a refused change");
         const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
@@ -5583,6 +5599,12 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
     try setup.init();
     defer setup.close();
     const session = try setup.configure("image-codec-config");
+    const effort = (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort;
+    const reasoning = if (effort) |value|
+        try std.fmt.allocPrint(std.testing.allocator, ",\"reasoning\":{{\"effort\":\"{s}\"}}", .{@tagName(value)})
+    else
+        try std.testing.allocator.dupe(u8, "");
+    defer std.testing.allocator.free(reasoning);
     try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -5603,9 +5625,9 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
         const top = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
         const prefix = if (codec == .@"openai-responses/1")
-            try std.fmt.allocPrint(std.testing.allocator, "{s},\"instructions\":{s},\"input\":[", .{ top, encoded_context })
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"instructions\":{s},\"input\":[", .{ top, reasoning, encoded_context })
         else
-            try std.fmt.allocPrint(std.testing.allocator, "{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, encoded_context });
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, reasoning, encoded_context });
         defer std.testing.allocator.free(prefix);
         const full_expected = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, expected[1..] });
         defer std.testing.allocator.free(full_expected);
@@ -5835,9 +5857,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Scenario = enum { pages, tool_results, bounds };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "e35c834b4c7c13652e2dc78cd22c71583ce9ef19266f5099869b7ffac741abc0",
-            .tool_results = "f84b0ff9e9b9798f67365d166add1f04fa9e2ee922eff7d74a4aa91c3aecdc95",
-            .bounds = "6c57cac5d8d2e211d9074f7794153d0f0f684acfaf61ebaef61ecfdfdd4b8d16",
+            .pages = "f7827100070720d422de63bbfa64fa2e7322ff73428bb605855755ebd276b035",
+            .tool_results = "e232738ad0194f4409caabeb56053e7a36ae18b17b995e880ef3b0c1df4f44f4",
+            .bounds = "909467844475aac9ba18d00713ec47619b28bf918b4f717db23c451643be34ff",
         });
     };
     const testing = store.testing;
@@ -6621,7 +6643,7 @@ test "image model policy checks retained Message and Action inputs" {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
             defer setup.close();
-            const session = try setup.configure("image-policy-config");
+            const session = try setup.configureImagePolicy("image-policy-config");
             var change: wire_request.ConfigureCommand = .{};
             try change.key.set("image-policy-model");
             change.session = session;
@@ -6668,7 +6690,7 @@ test "image model policy rechecks retained inputs after model switch" {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
             defer setup.close();
-            const session = try setup.configure("image-switch-config");
+            const session = try setup.configureImagePolicy("image-switch-config");
             try submitOrderedForTesting(&setup, session.slice(), "image-switch-first", if (producer == 1) &.{image} else &.{text}, null, null);
             var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             if (producer == 2) {
