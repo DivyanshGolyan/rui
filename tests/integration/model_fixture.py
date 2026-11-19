@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from host_process import HeldReplies, TestHTTPServer, hold, disposed_store, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, READY_TRANSPORT, TestHTTPServer, hold, disposed_store, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
 import runtime_leftovers
 from host_process import dispose_all
 
@@ -525,7 +525,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
         stderr_pipe=stderr_pipe,
         pause=pause,
         required_fields=(
-            {"execution": "enabled", "nghttp2": "1.70.0"}
+            READY_TRANSPORT
             if endpoint is not None
             else {"execution": "unavailable"}
         ),

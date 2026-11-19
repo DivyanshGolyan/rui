@@ -13,7 +13,7 @@ import time
 
 import model_fixture as dispatch
 from product_defaults import compaction_trigger
-from host_process import HostDiagnostics, PauseGate, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, PauseGate, READY_TRANSPORT, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
 from h2_fixture import Endpoint, closed_host_request
 
@@ -136,7 +136,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             "--set", "network.caFile=" + str(ca_file),
             active_capacity=capacity,
         ),
-        required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
+        required_fields=READY_TRANSPORT,
         observations="transport",
     )
     try:
