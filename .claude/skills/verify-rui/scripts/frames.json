@@ -6296,7 +6296,7 @@
     },
     {
       "name": "provider-unserved-night",
-      "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; the chat settles and shows the Session's own message",
+      "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; a message typed in the composer then says its provider isn't served by this Host (the cast turn's earlier Sign-in notice stays in history)",
       "theme": "night",
       "open": "Unserved night witness",
       "cast": [
@@ -6327,11 +6327,30 @@
           "serve": [
             "openai"
           ]
+        },
+        {
+          "sleep": 2
+        },
+        {
+          "text": "Unserved send witness"
+        },
+        {
+          "wait": "Unserved send witness"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "ChatGPT (device code) isn't served by",
+          "empty_composer": true
         }
       ],
       "expect": [
         "Provider unserved witness",
-        "gpt-6.1-sol"
+        "gpt-6.1-sol",
+        "ChatGPT (device code) isn't served by"
       ],
       "absent": [
         "Sending…",

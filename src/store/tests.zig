@@ -579,7 +579,8 @@ pub fn testingSessionListReport(storage: *Store, request: *const protocol.ListSe
     try capture.create(scratch_path, request_number, false);
     errdefer capture.deinit();
     var reply: TestingListReply = .{ .capture = &capture };
-    try storage.readSessionList(request, &reply);
+    var pages: session_list_read_domain.Scratch = undefined;
+    try storage.readSessionList(request, &reply, &pages);
     return capture.seal();
 }
 

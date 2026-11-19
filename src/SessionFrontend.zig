@@ -164,6 +164,7 @@ const rejection_suffix = " · /discard";
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
 const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
+    session_notice.unserved_capacity + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
 );
 const notice_capacity = @max(2048, slash_commands_shared.result_notice_bytes);
@@ -2771,10 +2772,15 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
         },
         .rejected => |rejected| {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
-            var text: TerminalText = .{ .mode = .line };
-            try writer.writeAll(if (rejected.kind == .decision) "! Decision rejected: " else "! Input rejected: ");
-            try text.feed(&writer, rejected.code.slice());
-            try text.finish(&writer);
+            // A Message to an existing Session gets this code only from Store admission's served-provider check (SubmitMessage.decide).
+            if (rejected.kind == .message and std.mem.eql(u8, rejected.code.slice(), @tagName(protocol.MessageRejection.model_capability_unavailable))) {
+                try session_notice.writeUnserved(&writer, self.line.provider);
+            } else {
+                var text: TerminalText = .{ .mode = .line };
+                try writer.writeAll(if (rejected.kind == .decision) "! Decision rejected: " else "! Input rejected: ");
+                try text.feed(&writer, rejected.code.slice());
+                try text.finish(&writer);
+            }
             try writer.writeAll(rejection_suffix);
             self.holdFailure(.{ .line = writer.buffered(), .key = .discard }, null);
         },
@@ -6381,6 +6387,24 @@ test "App Session retains Permission Decision state past a key and five seconds"
     try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Decision not confirmed") != null);
     try std.testing.expect(std.mem.endsWith(u8, unconfirmed[22], "ctrl+r retries original"));
     try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
+}
+
+test "SessionFrontend names the unserved provider when the Host refuses a chat Message" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const original = self.input.submitText("original model input");
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
+    defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    self.line.provider = .openai;
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("model_capability_unavailable");
+    try self.presentAdmission(.{ .rejected = .{ .kind = .message, .code = code } });
+    const rejected = try fixture.rows();
+    const note = ChromeFixture.find(&rejected, "! OpenAI isn't served by this Host.");
+    try std.testing.expect(note != null);
+    try std.testing.expect(ChromeFixture.find(&rejected, "! Input rejected") == null);
 }
 
 test "SessionFrontend attached rejection keeps its code until discard past a key and five seconds" {

@@ -188,6 +188,7 @@ A pending or failed save is shown on the Model field; a failed save is not silen
 The prospective binding comes from the launch selectors and saved defaults, without an overview per-start override.
 The admitted creation snapshot supplies saved effort only when the launch uses defaults and has a resolved binding; `ConfigureInput.applySavedCreation` sends only personal saved choices with the new empty Session’s captured configuration, leaving omitted settings to Host admission. Saved permission and effort are copied from the same admission-time preference observation. App Settings reads its saved page values directly; the removed overview footer has no standalone Settings choice or cached creation-effort projection. Per-Session footer choices remain owned by Chat Info.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
+A chat Message to an existing Session captures `require_model`, so chat Messages require the Session's provider to be served: the Host refuses one while it is unserved, and the chat names that provider and `rui host settings`.
 Scripts use `session start` with stdin.
 A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
 

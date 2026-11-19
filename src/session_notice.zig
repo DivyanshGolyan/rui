@@ -2,6 +2,7 @@ const std = @import("std");
 const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Text = @import("TerminalText.zig");
+const protocol = @import("protocol.zig");
 
 pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
 
@@ -20,6 +21,18 @@ pub const Presentation = struct {
 };
 
 pub const too_large = "! Environment too large; nothing sent · details";
+
+/// The refusal of a chat Message whose Session's provider this Host does not serve; the fix is in the Host's settings.
+pub fn writeUnserved(writer: *std.Io.Writer, provider: ?protocol.Provider) !void {
+    try writer.print("! {s}{s}", .{ if (provider) |known| known.shown() else "This Session's provider", unserved_advice });
+}
+
+const unserved_advice = " isn't served by this Host. Check rui host settings, then rui host pause and rui host start.";
+pub const unserved_capacity = blk: {
+    var longest: usize = "This Session's provider".len;
+    for (std.meta.tags(protocol.Provider)) |provider| longest = @max(longest, provider.shown().len);
+    break :blk "! ".len + longest + unserved_advice.len;
+};
 
 pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
     var result: Presentation = .{};
@@ -369,4 +382,14 @@ test "SUI-62 departure names the Store, the Session and the pending Action" {
         try std.testing.expectEqualSlices(u8, store, word.value);
         try std.testing.expectEqualStrings("\n", rest[prefix.len + word.end ..]);
     }
+}
+
+test "a refused chat Message names its unserved provider and the settings fix" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeUnserved(&writer, .openai);
+    try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeUnserved(&writer, null);
+    try std.testing.expectEqualStrings("! This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
 }
