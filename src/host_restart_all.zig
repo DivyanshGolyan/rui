@@ -193,7 +193,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         }
         entry.directory = if (candidate.directory) |path| try allocator.dupe(u8, path) else null;
         entry.state = switch (candidate.result) {
-            .stale => unreachable,
+            .stale, .unanswered => unreachable,
             .failed => |err| .{ .failed = try .of(allocator, .discovery, err) },
             .observed => |facts| state: {
                 entry.store = try allocator.dupe(u8, facts.facts.store.slice());
