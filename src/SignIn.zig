@@ -1622,11 +1622,14 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
         };
         const overflow = try arena.allocator().alloc(u8, editor.area.buffer.len + 1);
         @memset(overflow, 'x');
+        const valid = try arena.allocator().dupe(u8, editor.text());
+        // Typing a whole field's worth of keys draws once per key, too slow for a Debug test; start one byte short of full.
+        if (fault == .typed_overflow) try std.testing.expect(editor.set(overflow[0 .. overflow.len - 2], overflow.len - 2) == null);
         const before = try arena.allocator().dupe(u8, editor.text());
         // Every fault reaches the field as the person's keys, through the drawn view.
         switch (fault) {
             .unbound => try testingSend(&page, &ctx, "\x1bx", 90, 28),
-            .typed_overflow => try testingSend(&page, &ctx, overflow, 90, 28),
+            .typed_overflow => try testingSend(&page, &ctx, "xx", 90, 28),
             .typed_invalid_utf8 => try testingSend(&page, &ctx, "\xff", 90, 28),
             .typed_invalid_scalar => try testingSend(&page, &ctx, "\u{200b}", 90, 28),
             .paste_invalid => try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28),
@@ -1646,6 +1649,7 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
             @memset(deletes, 0x7f);
             try testingSend(&page, &ctx, deletes, 90, 28);
             try std.testing.expectEqualStrings(before, editor.text());
+            if (fault == .typed_overflow) try std.testing.expect(editor.set(valid, valid.len) == null);
             try std.testing.expect(try page.freeze(.key, .connect));
         } else {
             // The Status row wraps, so match the field-naming prefix; the full sentence is in pasteStatus.
