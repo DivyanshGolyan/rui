@@ -96,6 +96,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("steps.starve.outcome != 'success' || steps.stall.outcome != 'success'", text)
         self.assertIn('race_sweep.py file --run-url "$RUN_URL" --sha "$GITHUB_SHA"', text)
         self.assertNotIn("report_issue.py", text)
+        self.assertIn('echo "found=true" >> "$GITHUB_OUTPUT"', text)
+        self.assertIn("if: ${{ failure() && needs.sweep.outputs.found == 'true' }}", text)
 
 
 if __name__ == "__main__":
