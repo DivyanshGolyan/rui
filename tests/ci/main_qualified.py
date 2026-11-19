@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """Own the `main-qualified` record: which main commits passed the full tier.
 
-Qualify main (main-qualifier.yml) runs the full Promote qualification tier on
-main HEAD every three hours when HEAD has no verdict yet, and Promote
-(promote.yml) runs it when the commit it publishes has none. Each run records
-its verdict as a commit status named `main-qualified` whose target is the run
-that built and tested the release archives. Promote publishes a commit with a
-green record from those archives, without qualifying it again.
+Promote (promote.yml) runs every three hours and by hand. It runs the full
+qualification tier (qualification-tier.yml) on the commit it publishes when
+that commit has no verdict yet, and publishes a commit with a green record from
+the archives that run built and tested, without qualifying it again. Each run
+records its verdict as a commit status named `main-qualified` whose target is
+that run. A scheduled run skips a HEAD whose record is red: the failing run
+already filed its issues.
 
 Commands (each prints KEY=VALUE lines for $GITHUB_OUTPUT):
 
-  batch --head SHA
-      Name the batch Qualify main tests: its base is the newest first-parent
-      ancestor of SHA after `stable` with a green record, else `stable`.
-      `needed` is false when SHA already has a verdict or stable holds it.
-  choose --main SHA [--sha SHA|qualified]
+  choose --main SHA [--sha SHA|qualified] [--scheduled]
       Promote's commit: main HEAD, a named first-parent commit of main after
       stable, or the newest green one; with `reuse`, `run` and `version` when
-      its green record's archives can still be published.
+      its green record's archives can still be published. A scheduled run with
+      a red HEAD promotes nothing (size 0) instead of refusing.
   verdict RESULT...
       The record's state for the tier job results.
   record --sha SHA --state STATE --run-id ID [--version V]
       Write the record.
 
 Only GitHub Actions in this repository writes the record; a status from any
-other creator is ignored. A red record refuses publication: fix forward and
-promote a later commit, or choose an earlier green one.
+other creator is ignored. A red record refuses a manual publication: fix
+forward and promote a later commit, or choose an earlier green one.
 """
 import argparse
 from dataclasses import dataclass
@@ -41,6 +39,7 @@ from report_issue import gh
 
 CONTEXT = "main-qualified"
 CREATOR = "github-actions[bot]"
+# Green records Qualify main wrote stay publishable until their archives expire (seven days).
 WORKFLOWS = (".github/workflows/main-qualifier.yml", ".github/workflows/promote.yml")
 PLATFORMS = ("linux-x86_64", "linux-arm64", "darwin-arm64")
 # What Release publishes from a qualifying run (release-build.yml uploads them).
@@ -136,15 +135,6 @@ def stable(head):
     return floor
 
 
-def batch(commits, floor, record):
-    """Qualify main's batch for COMMITS after stable FLOOR, newest (HEAD) first: (base, needed)."""
-    if not commits:
-        return floor, False
-    own = record(commits[0])
-    needed = own is None or own.state not in ("success", "failure")
-    return last_green(commits[1:], record) or floor, needed
-
-
 def reusable(record, run, artifacts, planned, sha, now):
     """Why the green RECORD's archives cannot be published for SHA, or None when they can."""
     if record is None or record.state != "success":
@@ -167,9 +157,10 @@ def plan(sha):
     return release.plan(sha) or ""
 
 
-def choose(main, sha, commits, record, publishable):
+def choose(main, sha, commits, record, publishable, scheduled=False):
     """Promote's commit among COMMITS after stable (newest, main first) and its green record when
-    PUBLISHABLE(record, commit) finds no reason to qualify again: (commit, record or None, reason)."""
+    PUBLISHABLE(record, commit) finds no reason to qualify again: (commit, record or None, reason).
+    A SCHEDULED run whose commit failed promotes nothing: (None, None, reason)."""
     if sha in ("", main):
         chosen = main
     elif sha == "qualified":
@@ -184,6 +175,9 @@ def choose(main, sha, commits, record, publishable):
         return chosen, None, "stable already holds it"
     own = record(chosen)
     if own is not None and own.state == "failure":
+        if scheduled:
+            return None, None, (f"{chosen} failed qualification in run {own.run_id}; "
+                                "the next scheduled run waits for a fix on main")
         raise SystemExit(f"{chosen} failed qualification in run {own.run_id}; fix forward and promote a later "
                          "commit, or choose an earlier green one with sha=qualified")
     reason = publishable(own, chosen) if own is not None and own.state == "success" else "no green record"
@@ -214,11 +208,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     commands = parser.add_subparsers(dest="command", required=True)
-    named = commands.add_parser("batch")
-    named.add_argument("--head", required=True)
     chosen = commands.add_parser("choose")
     chosen.add_argument("--main", required=True)
     chosen.add_argument("--sha", default="")
+    chosen.add_argument("--scheduled", action="store_true")
     judged = commands.add_parser("verdict")
     judged.add_argument("results", nargs="+")
     written = commands.add_parser("record")
@@ -232,18 +225,7 @@ def main():
     def recorded(sha):
         return record_of(repository, sha)
 
-    if args.command == "batch":
-        floor = stable(args.head)
-        commits = first_parent(floor, args.head)
-        base, needed = batch(commits, floor, recorded)
-        size = len(first_parent(base, args.head))
-        lines = [f"Qualifying {size} main commits after {base}, up to {args.head}:", *batch_log(base, args.head)]
-        if not commits:
-            lines = ["stable already holds main HEAD; nothing to qualify"]
-        elif not needed:
-            lines.append(f"{args.head} already has a {CONTEXT} verdict; nothing to qualify")
-        emit({"base": base, "head": args.head, "size": str(size), "needed": str(needed).lower()}, lines)
-    elif args.command == "choose":
+    if args.command == "choose":
         floor = stable(args.main)
         commits = first_parent(floor, args.main)
 
@@ -252,7 +234,10 @@ def main():
             artifacts = api(f"repos/{repository}/actions/runs/{own.run_id}/artifacts?per_page=100")["artifacts"] if run else []
             return reusable(own, run, artifacts, plan(sha), sha, datetime.now(timezone.utc))
 
-        chosen, own, reason = choose(args.main, args.sha, commits, recorded, publishable)
+        chosen, own, reason = choose(args.main, args.sha, commits, recorded, publishable, args.scheduled)
+        if chosen is None:
+            emit({"head": "", "base": floor, "size": "0", "reuse": "false", "run": "", "version": ""}, [reason])
+            return 0
         size = len(first_parent(floor, chosen))
         lines = [f"Promoting {size} main commits after stable {floor}, up to {chosen}:", *batch_log(floor, chosen)]
         outputs = {"head": chosen, "base": floor, "size": str(size), "reuse": "false", "run": "", "version": ""}
