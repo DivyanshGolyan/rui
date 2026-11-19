@@ -984,15 +984,27 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     return writer.written();
 }
 fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
+    try appendLines(rows, ctx, label, text, control, action, width, .cells);
+}
+/// Prose (Status) breaks at spaces so a sentence never clips; links and commands fill each line.
+fn appendProse(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, width: u16) !void {
+    try appendLines(rows, ctx, label, text, null, null, width, .words);
+}
+fn appendLines(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: ?core.Control, action: ?core.Action, width: u16, breaks: enum { cells, words }) !void {
     const value_width = Panel.valueWidth(width);
-    const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
-    try append(rows, ctx.arena, label, first, control, action);
-    var at = first.len;
-    while (at < text.len and value_width > 0) {
-        const part = line.fit(ctx, text[at..], value_width).text;
-        if (part.len == 0) break;
-        try append(rows, ctx.arena, "", part, null, if (action == .open) action else null);
+    var at: usize = 0;
+    var first = true;
+    while (first or (at < text.len and value_width > 0)) {
+        var part = if (value_width > 0) line.fit(ctx, text[at..], value_width).text else "";
+        if (breaks == .words and at + part.len < text.len and text[at + part.len] != ' ') {
+            if (std.mem.lastIndexOfScalar(u8, part, ' ')) |space| part = part[0 .. space + 1];
+        }
+        if (!first and part.len == 0) break;
+        const shown = if (breaks == .words) std.mem.trimEnd(u8, part, " ") else part;
+        if (first) try append(rows, ctx.arena, label, shown, control, action) else try append(rows, ctx.arena, "", shown, null, if (action) |act| if (act == .open) act else null else null);
         at += part.len;
+        if (breaks == .words) while (at < text.len and text[at] == ' ') : (at += 1) {};
+        first = false;
     }
 }
 
@@ -1118,8 +1130,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
     }
     if (try self.pasteStatus(a)) |message| {
-        try append(&rows, a, "Status", message, null, null);
-    } else if (self.issue) |issue| try append(&rows, a, "Status", issue, null, null);
+        try appendProse(&rows, ctx, "Status", message, width);
+    } else if (self.issue) |issue| try appendProse(&rows, ctx, "Status", issue, width);
     const fields = try a.alloc(Panel.Field, rows.items.len);
     const labels = try a.alloc([]const u8, buttons.items.len);
     var selected: usize = 0;
@@ -1688,6 +1700,23 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
             }
         }
     };
+}
+
+test "SUI-63 Sign-in Status shows the whole refusal at every width, breaking only between words" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 90, 140 }) |width| {
+        errdefer std.debug.print("width={d}\n", .{width});
+        var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
+        defer page.closeForm();
+        _ = try page.ensureForm();
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", width, 30);
+        const text = try testingText(try testingDraw(&page, ctx.alloc, width, 30), ctx.alloc);
+        var words = std.mem.tokenizeScalar(u8, (try page.pasteStatus(ctx.alloc)).?, ' ');
+        while (words.next()) |word| try std.testing.expect(std.mem.indexOf(u8, text, word) != null);
+    }
 }
 
 test "SUI-63 Sign-in cross-field paste refusals name the locked field and only Enter or an edit in it releases" {
