@@ -2264,6 +2264,50 @@ test "inspectConnection reports the key source the Host will use" {
     try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, from_unset.readiness);
     try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_unset.key_source.?)).env, std.meta.activeTag(from_unset.key_source.?));
     try std.testing.expectEqualStrings("RUI_TEST_OPENAI_KEY_ABSENT", from_unset.key_source.?.env.slice());
+
+    const Readiness = @import("provider_selection.zig").Readiness;
+    const rui_dir = try std.fs.path.join(a, &.{ home, ".config", "rui" });
+    var rui = try std.Io.Dir.openDirAbsolute(io, rui_dir, .{});
+    defer rui.close(io);
+
+    // Configured file readable by others: refused as insecure, and the named file is the reported source.
+    const insecure_path = try std.fs.path.join(a, &.{ rui_dir, "insecure.key" });
+    try api_key.install(insecure_path, "sk-inspect-insecure-key-0001");
+    try rui.setFilePermissions(io, "insecure.key", .fromMode(0o644), .{});
+    const insecure_dir = try std.fs.path.join(a, &.{ home, "insecure" });
+    const insecure_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{insecure_path});
+    try savedEdit(init, insecure_dir, "providers", insecure_edit, &failure);
+    const from_insecure = try inspectConnection(init, insecure_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_insecure.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_insecure.key_source.?)).file, std.meta.activeTag(from_insecure.key_source.?));
+    try std.testing.expectEqualStrings(insecure_path, from_insecure.key_source.?.file.slice());
+
+    // Configured file whose content is not one key (a space inside): unreadable, and the file is the reported source.
+    const invalid_path = try std.fs.path.join(a, &.{ rui_dir, "invalid.key" });
+    try rui.writeFile(io, .{ .sub_path = "invalid.key", .data = "sk-two words\n" });
+    try rui.setFilePermissions(io, "invalid.key", .fromMode(0o600), .{});
+    const invalid_dir = try std.fs.path.join(a, &.{ home, "invalid" });
+    const invalid_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{invalid_path});
+    try savedEdit(init, invalid_dir, "providers", invalid_edit, &failure);
+    const from_invalid = try inspectConnection(init, invalid_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_invalid.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_invalid.key_source.?)).file, std.meta.activeTag(from_invalid.key_source.?));
+    try std.testing.expectEqualStrings(invalid_path, from_invalid.key_source.?.file.slice());
+
+    // Explicit providers that omit openai, with the default key file present: no OpenAI key and no source.
+    const omitted_dir = try std.fs.path.join(a, &.{ home, "omitted" });
+    try savedEdit(init, omitted_dir, "providers", "{\"chatgpt\":{}}", &failure);
+    const from_omitted = try inspectConnection(init, omitted_dir);
+    try std.testing.expectEqual(Readiness.missing, from_omitted.readiness);
+    try std.testing.expectEqual(false, from_omitted.key_source != null);
+
+    // Unauthenticated: no credential is sent, so it names no key source.
+    const open_dir = try std.fs.path.join(a, &.{ home, "open" });
+    try savedEdit(init, open_dir, "providers", "{\"openai\":{\"unauthenticated\":true}}", &failure);
+    const from_open = try inspectConnection(init, open_dir);
+    try std.testing.expectEqual(true, from_open.unauthenticated);
+    try std.testing.expectEqual(Readiness.configured, from_open.readiness);
+    try std.testing.expectEqual(false, from_open.key_source != null);
 }
 
 test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {

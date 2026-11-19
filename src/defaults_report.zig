@@ -51,6 +51,32 @@ pub const Defaults = struct {
 /// Where the Store's Host reads the OpenAI API key from, when a source was found.
 pub const KeySource = union(enum) { file: []const u8, env: []const u8 };
 
+/// The Store's Host inspect result for the OpenAI key, as the shell copies it.
+pub const Inspected = struct {
+    readiness: provider_selection.Readiness,
+    unauthenticated: bool = false,
+    key_source: ?KeySource = null,
+};
+
+/// The OpenAI readiness and key source one Store reads, with the local readiness for every other provider.
+pub const Overlay = struct {
+    readiness: provider_selection.Readinesses,
+    key_source: ?KeySource = null,
+};
+
+/// The one rule for the OpenAI key as a Store's Host reads it: the inspect result overrides the local
+/// OpenAI readiness only when it names a key source and is not unauthenticated. Otherwise the local
+/// readiness stands and no source is reported.
+pub fn overlayStore(local: provider_selection.Readinesses, inspected: ?Inspected) Overlay {
+    var overlay: Overlay = .{ .readiness = local };
+    const info = inspected orelse return overlay;
+    const source = info.key_source orelse return overlay;
+    if (info.unauthenticated) return overlay;
+    overlay.readiness.set(.openai, info.readiness);
+    overlay.key_source = source;
+    return overlay;
+}
+
 pub const Facts = struct {
     changed: bool,
     values: preference_document.Values,
@@ -288,7 +314,18 @@ pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection
                 try writer.writeAll(".\n");
             },
         } else try writer.writeAll("OpenAI API key: missing.\n"),
-        .refresh_required, .credential_error => try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor(.openai)}),
+        .refresh_required, .credential_error => if (source) |key| switch (key) {
+            .file => |path| {
+                try writer.writeAll("OpenAI API key: ");
+                try safeText(writer, path);
+                try writer.writeAll(" is unreadable, not owner-only or not one key; fix that file.\n");
+            },
+            .env => |name| {
+                try writer.writeAll("OpenAI API key: environment variable ");
+                try safeText(writer, name);
+                try writer.writeAll(" is not one valid key; fix it.\n");
+            },
+        } else try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor(.openai)}),
     }
 }
 
@@ -431,13 +468,24 @@ test "CLI-30 the defaults report is a function of its facts" {
             try writeSignIns(&output, &readiness, null, &names, row[1]);
             try std.testing.expect(std.mem.endsWith(u8, output.buffered(), row[2]));
         }
-        // The source is reported only with a readiness that names it; unreadable keys keep their sentence.
-        var unreadable = provider_selection.Readinesses.initFill(.missing);
-        unreadable.set(.openai, .credential_error);
-        var unreadable_buffer: [1024]u8 = undefined;
-        var unreadable_out = std.Io.Writer.fixed(&unreadable_buffer);
-        try writeSignIns(&unreadable_out, &unreadable, null, &names, .{ .file = "/keys/openai.key" });
-        try std.testing.expect(std.mem.endsWith(u8, unreadable_out.buffered(), "OpenAI API key: unreadable, not owner-only or not one key; save it again with `rui auth login openai`.\n"));
+        // An unreadable key names its source when one is known; without a source it keeps the login sentence.
+        const unreadable_rows = [_]struct { Readiness, ?KeySource, []const u8 }{
+            .{ .credential_error, .{ .file = "/keys/openai.key" }, "OpenAI API key: /keys/openai.key is unreadable, not owner-only or not one key; fix that file.\n" },
+            .{ .refresh_required, .{ .file = "/keys/openai.key" }, "OpenAI API key: /keys/openai.key is unreadable, not owner-only or not one key; fix that file.\n" },
+            .{ .credential_error, .{ .env = "RUI_OPENAI_KEY" }, "OpenAI API key: environment variable RUI_OPENAI_KEY is not one valid key; fix it.\n" },
+            .{ .refresh_required, .{ .env = "RUI_OPENAI_KEY" }, "OpenAI API key: environment variable RUI_OPENAI_KEY is not one valid key; fix it.\n" },
+            .{ .credential_error, null, "OpenAI API key: unreadable, not owner-only or not one key; save it again with `rui auth login openai`.\n" },
+        };
+        for (unreadable_rows) |row| {
+            var readiness = provider_selection.Readinesses.initFill(.missing);
+            readiness.set(.openai, row[0]);
+            var unreadable_buffer: [1024]u8 = undefined;
+            var unreadable_out = std.Io.Writer.fixed(&unreadable_buffer);
+            try writeSignIns(&unreadable_out, &readiness, null, &names, row[1]);
+            const got = unreadable_out.buffered();
+            try std.testing.expect(got.len >= row[2].len);
+            try std.testing.expectEqualStrings(row[2], got[got.len - row[2].len ..]);
+        }
         // JSON carries the source as an object for file and env, and null when none was found.
         const json_cases = [_]struct { ?KeySource, []const u8 }{
             .{ .{ .file = "/keys/openai.key" }, "\"openai_key_source\":{\"file\":\"/keys/openai.key\"},\"next_session\"" },
@@ -608,4 +656,52 @@ test "CLI-30 the defaults report is a function of its facts" {
     var writer = std.Io.Writer.fixed(&output);
     try writeJson(&writer, &wire_facts);
     try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"provider\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
+}
+
+test "Store overlay reports the OpenAI key source only when the Store names one" {
+    const Tag = std.meta.Tag(KeySource);
+    const tagOf = struct {
+        fn of(source: ?KeySource) ?Tag {
+            return if (source) |value| std.meta.activeTag(value) else null;
+        }
+    }.of;
+    const Readiness = provider_selection.Readiness;
+    var local = provider_selection.Readinesses.initFill(.missing);
+    local.set(.openai, .configured);
+
+    // No inspect result (the inspect failed, or there is no Store): the local readiness stands, with no source.
+    const none = overlayStore(local, null);
+    try std.testing.expectEqual(Readiness.configured, none.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, null), tagOf(none.key_source));
+
+    // A configured file source overrides the local readiness and is reported.
+    const configured = overlayStore(local, .{ .readiness = .configured, .key_source = .{ .file = "/keys/configured.key" } });
+    try std.testing.expectEqual(Readiness.configured, configured.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, .file), tagOf(configured.key_source));
+    try std.testing.expectEqualStrings("/keys/configured.key", configured.key_source.?.file);
+
+    // A missing file source overrides a readable local key: the Store's Host reads no key.
+    const absent = overlayStore(local, .{ .readiness = .missing, .key_source = .{ .file = "/keys/absent.key" } });
+    try std.testing.expectEqual(Readiness.missing, absent.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, .file), tagOf(absent.key_source));
+    try std.testing.expectEqualStrings("/keys/absent.key", absent.key_source.?.file);
+
+    // An unreadable environment source overrides the local readiness and is reported.
+    const unreadable = overlayStore(local, .{ .readiness = .credential_error, .key_source = .{ .env = "RUI_OPENAI_KEY" } });
+    try std.testing.expectEqual(Readiness.credential_error, unreadable.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, .env), tagOf(unreadable.key_source));
+    try std.testing.expectEqualStrings("RUI_OPENAI_KEY", unreadable.key_source.?.env);
+
+    // Explicit providers that omit openai name no source: the local readiness stands.
+    const omitted = overlayStore(local, .{ .readiness = .missing, .key_source = null });
+    try std.testing.expectEqual(Readiness.configured, omitted.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, null), tagOf(omitted.key_source));
+
+    // Unauthenticated sends no key, so it never overrides the local readiness, whatever source it names.
+    const open = overlayStore(local, .{ .readiness = .configured, .unauthenticated = true, .key_source = null });
+    try std.testing.expectEqual(Readiness.configured, open.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, null), tagOf(open.key_source));
+    const open_with_source = overlayStore(provider_selection.Readinesses.initFill(.missing), .{ .readiness = .configured, .unauthenticated = true, .key_source = .{ .env = "RUI_OPENAI_KEY" } });
+    try std.testing.expectEqual(Readiness.missing, open_with_source.readiness.get(.openai));
+    try std.testing.expectEqual(@as(?Tag, null), tagOf(open_with_source.key_source));
 }
