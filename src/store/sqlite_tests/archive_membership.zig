@@ -195,7 +195,6 @@ test "the Archived window pages read session_tab in key order with no sort and n
         var uses_tab = false;
         while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
             const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
-            std.debug.print("WINDOW PLAN: {s}\n", .{detail});
             try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
             try std.testing.expect(std.mem.indexOf(u8, detail, "SCAN session") == null);
             if (std.mem.indexOf(u8, detail, "session_tab") != null) uses_tab = true;
