@@ -490,6 +490,20 @@ fn observationSchema(d: *Document) anyerror!Value {
     kinds[0] = try d.shapeSchema(o.absent);
     kinds[kinds.len - 1] = try d.shapeSchema(o.not_modified);
     inline for (comptime std.meta.tags(protocol.CommandKind), 1..) |kind, index| {
+        if (comptime kind == .message) {
+            const observation = command_spec.spec(kind).Observation;
+            const accepted = observation.accepted(protocol).values;
+            const rejected = observation.rejected(protocol).values;
+            var variants: [accepted.len + rejected.len]Value = undefined;
+            inline for (accepted, 0..) |body, at| {
+                variants[at] = try d.shapeSchema(tuple(o.statusHead(kind, .accepted)) ++ body ++ o.tail);
+            }
+            inline for (rejected, accepted.len..) |body, at| {
+                variants[at] = try d.shapeSchema(tuple(o.statusHead(kind, .rejected)) ++ o.code ++ body ++ o.tail);
+            }
+            kinds[index] = try d.anyOf(&variants);
+            continue;
+        }
         const bodies = command_spec.spec(kind).Observation.shapes(protocol).values;
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
@@ -1781,12 +1795,29 @@ fn publishedReplyExamples() !void {
     try message_session.set("k7m2qx");
     const message_content: reply.ContentReference = .{ .length = 4, .digest = protocol.contentDigest("task") };
     for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        const content: protocol.content_value.Value = switch (form) {
+            .bytes => .{ .text = message_content },
+            .parts => .{ .parts = .{ .identity = message_content, .owner = .{ .message = 1 } } },
+        };
         for ([_]reply.MessageReply{
-            .{ .accepted = .{ .form = form, .replayed = false, .session = message_session, .admission_id = 1, .content = message_content } },
+            .{ .accepted = .{ .replayed = false, .session = message_session, .admission_id = 1, .content = content } },
             .{ .rejected = .{ .form = form, .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = message_content } },
         }) |message| {
             try host_reply.renderMessageReply(.{ .writer = &out.writer }, message_session.slice(), message);
             try Case.check(schemas, "MessageReply", out.written(), a);
+            var wire = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+            const input = &wire.object.getPtr("input").?.object;
+            if (message == .accepted and form == .parts) {
+                const owner = &input.getPtr("owner").?.object;
+                const admission = owner.fetchOrderedRemove("message").?.value;
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+                try owner.put(a, "action", admission);
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+            } else {
+                const owner = try std.json.parseFromSliceLeaky(Value, a, "{\"message\":\"1\"}", .{});
+                try input.put(a, "owner", owner);
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+            }
             out.clearRetainingCapacity();
         }
     }
@@ -1922,6 +1953,21 @@ test "Message observation schema requires Host state and bounds recovery" {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
         try std.testing.expect(conforms(schemas, schema, value));
     }
+    var queued = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
+    const queued_facts = &queued.object.getPtr("observation").?.object;
+    const queued_input = &queued_facts.getPtr("input").?.object;
+    try queued_input.put(allocator, "type", .{ .string = "parts" });
+    try std.testing.expect(!conforms(schemas, schema, queued));
+    try queued_input.put(allocator, "owner", try std.json.parseFromSliceLeaky(Value, allocator, "{\"action\":\"1\"}", .{}));
+    try std.testing.expect(!conforms(schemas, schema, queued));
+    try queued_input.put(allocator, "owner", try std.json.parseFromSliceLeaky(Value, allocator, "{\"message\":\"1\"}", .{}));
+    try std.testing.expect(conforms(schemas, schema, queued));
+    var rejected = try std.json.parseFromSliceLeaky(Value, allocator, cases[0], .{});
+    try rejected.object.getPtr("observation").?.object.put(allocator, "input", queued_facts.get("input").?);
+    try std.testing.expect(!conforms(schemas, schema, rejected));
+    try queued_facts.put(allocator, "status", .{ .string = "rejected" });
+    try std.testing.expect(!conforms(schemas, schema, queued));
+
     for ([_][]const u8{ "attention", "group", "actions" }) |name| {
         var missing = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
         const work = &missing.object.getPtr("observation").?.object.getPtr("work").?.object;

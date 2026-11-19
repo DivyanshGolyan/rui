@@ -4,6 +4,7 @@ const parts = @import("../../input_parts.zig");
 const capture = @import("../../InputCapture.zig");
 const custody = @import("../../content_custody.zig");
 const content = @import("content.zig");
+const content_value = @import("../../content_value.zig");
 const core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 
@@ -399,21 +400,30 @@ pub const Cursor = struct {
     }
 };
 
-pub fn verify(a: anytype, value: content.Value) !void {
-    // Parts projections are rare. One mapped Cursor belongs to this call and
-    // releases its bounded workspace when verification ends.
-    const mapped = try @import("../../os/pages.zig").Mapped(Cursor).map();
-    defer mapped.unmap();
-    mapped.value.init(value);
-    while (try mapped.value.next(a)) |_| {}
+/// The single public projection of a stored value. Pure: no Store access.
+/// A parts value exists only under a Message or an Action Resolution, so a parts
+/// row with no owner is CorruptStore. Manifest certification belongs to the parts
+/// list read, as byte authentication belongs to the content read.
+pub fn publicValue(row: *const content.content_metadata.Row, owner: ?content_value.Owner) error{CorruptStore}!content_value.Value {
+    if (row.private) return error.CorruptStore;
+    const identity: content_value.Reference = .{ .length = row.byte_length, .digest = row.digest };
+    return switch (try parts.Form.decode(row.form)) {
+        .bytes => .{ .text = identity },
+        .parts => .{ .parts = .{ .identity = identity, .owner = owner orelse return error.CorruptStore } },
+    };
 }
 
-/// A byte-oriented projection verifies compound values before declining them.
-pub fn publicMetadata(a: anytype, content_id: u64, row: *const content.content_metadata.Row) !content.ContentMetadata {
-    if (row.private) return error.CorruptStore;
-    if (try parts.Form.decode(row.form) == .parts) {
-        try verify(a, try content.Value.of(content_id, row.form, row.byte_length, row.digest));
-        return error.InputPartsNotSupported;
-    }
-    return content.publicMetadata(row);
+test "INS-12 publicValue projects every form and owner without Store access" {
+    const digest: [32]u8 = @splat(7);
+    for ([_]bool{ false, true }) |private| for ([_]u8{ 0, 1, 2 }) |form| for ([_]?content_value.Owner{ null, .{ .message = 3 }, .{ .action = 4 } }) |owner| {
+        const row: content.content_metadata.Row = .{ .byte_length = 9, .digest = digest, .private = private, .form = form };
+        const projected = publicValue(&row, owner);
+        if (private or form > 1 or (form == 1 and owner == null)) {
+            try std.testing.expectError(error.CorruptStore, projected);
+            continue;
+        }
+        const value = try projected;
+        try std.testing.expectEqualDeep(content_value.Reference{ .length = 9, .digest = digest }, value.identity());
+        if (form == 0) try std.testing.expect(value == .text) else try std.testing.expectEqualDeep(owner.?, value.parts.owner);
+    };
 }

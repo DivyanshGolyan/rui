@@ -59,6 +59,11 @@ fn rsqlTable(b: *std.Build) RsqlTable {
     return rsql_table.?;
 }
 
+/// Whether this is a collect build (-Drsql-collect=true), which exports every Store statement.
+pub fn rsqlCollect(b: *std.Build) bool {
+    return rsqlTable(b).collect;
+}
+
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
     configurePauses(b, compile, true);
     configureSqlite(b, compile);
@@ -360,42 +365,59 @@ fn transportEnabled(target: std.Build.ResolvedTarget) bool {
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
 }
 
-pub fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const module = compile.root_module;
-    const yaml = b.dependency("yaml", .{});
-    if (module.root_source_file != null) {
-        const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
-        yaml_bindings.addIncludePath(yaml.path("include"));
+const CComponent = enum { sqlite, yaml };
+const CMemo = struct {
+    owner: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    component: CComponent,
+    library: *std.Build.Step.Compile,
+};
+var c_memo: std.ArrayList(CMemo) = .empty;
+
+fn componentLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, component: CComponent) *std.Build.Step.Compile {
+    for (c_memo.items) |entry| {
+        if (entry.owner == b and entry.target.query.eql(target.query) and entry.optimize == optimize and entry.component == component) return entry.library;
     }
-    module.addIncludePath(yaml.path("include"));
-    module.addIncludePath(yaml.path("src"));
-    module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
-    module.addCMacro("YAML_VERSION_MAJOR", "0");
-    module.addCMacro("YAML_VERSION_MINOR", "2");
-    module.addCMacro("YAML_VERSION_PATCH", "5");
-    for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
-        // api.c uses POSIX strdup; expose its declaration in strict C99 only
-        // for these dependency sources, never the consumer's other C files.
-        module.addCSourceFile(.{
-            .file = yaml.path(b.fmt("src/{s}", .{source})),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        });
+    const library = b.addLibrary(.{
+        .name = switch (component) {
+            .sqlite => "rui-sqlite",
+            .yaml => "rui-yaml",
+        },
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    const module = library.root_module;
+    switch (component) {
+        .sqlite => {
+            const sqlite = b.dependency("sqlite", .{});
+            module.addIncludePath(sqlite.path("."));
+            sqliteMacros(module);
+            module.addCSourceFile(.{ .file = sqlite.path("sqlite3.c"), .flags = &.{ "-std=c99", "-fno-strict-aliasing" } });
+        },
+        .yaml => {
+            const yaml = b.dependency("yaml", .{});
+            module.addIncludePath(yaml.path("include"));
+            module.addIncludePath(yaml.path("src"));
+            module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
+            module.addCMacro("YAML_VERSION_MAJOR", "0");
+            module.addCMacro("YAML_VERSION_MINOR", "2");
+            module.addCMacro("YAML_VERSION_PATCH", "5");
+            for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
+                // api.c uses POSIX strdup, exposed only for the dependency sources.
+                module.addCSourceFile(.{ .file = yaml.path(b.fmt("src/{s}", .{source})), .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" } });
+            }
+        },
     }
+    c_memo.append(b.allocator, .{ .owner = b, .target = target, .optimize = optimize, .component = component, .library = library }) catch @panic("OOM");
+    return library;
 }
 
-fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const sqlite = b.dependency("sqlite", .{});
-    const module = compile.root_module;
-    if (module.root_source_file != null) {
-        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
-        bindings.addIncludePath(sqlite.path("."));
-    }
-    module.link_libc = true;
-    module.addIncludePath(sqlite.path("."));
-    module.addCSourceFile(.{
-        .file = sqlite.path("sqlite3.c"),
-        .flags = &.{ "-std=c99", "-fno-strict-aliasing" },
-    });
+pub fn yamlLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    return componentLibrary(b, target, optimize, .yaml);
+}
+
+fn sqliteMacros(module: *std.Build.Module) void {
     module.addCMacro("SQLITE_THREADSAFE", "1");
     module.addCMacro("SQLITE_DEFAULT_PAGE_SIZE", "4096");
     module.addCMacro("SQLITE_MAX_DEFAULT_PAGE_SIZE", "4096");
@@ -414,6 +436,30 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_DEFAULT_PCACHE_INITSZ", "0");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const yaml = b.dependency("yaml", .{});
+    if (module.root_source_file != null) {
+        const bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
+        bindings.addIncludePath(yaml.path("include"));
+    }
+    module.addIncludePath(yaml.path("include"));
+    module.addIncludePath(yaml.path("src"));
+    module.linkLibrary(yamlLibrary(b, module.resolved_target.?, module.optimize.?));
+}
+
+fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const sqlite = b.dependency("sqlite", .{});
+    const module = compile.root_module;
+    if (module.root_source_file != null) {
+        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
+        bindings.addIncludePath(sqlite.path("."));
+    }
+    module.link_libc = true;
+    module.addIncludePath(sqlite.path("."));
+    module.linkLibrary(componentLibrary(b, module.resolved_target.?, module.optimize.?, .sqlite));
 }
 
 fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
@@ -493,6 +539,7 @@ pub fn addSqliteShell(
         }),
     });
     configureSqlite(b, executable);
+    sqliteMacros(executable.root_module);
     executable.root_module.addCSourceFile(.{
         .file = sqlite.path("shell.c"),
         .flags = &.{"-std=gnu99"},

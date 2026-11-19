@@ -164,7 +164,7 @@ This is one reader per active capture/recovery, fixed content windows and bounde
 Generated recovery decodes only configuration, Message and Permission Decision records; Session stop and Model Interruption keep their explicit record/retry routes.
 
 Client also owns typed decoding of these six mutation replies before callers interpret admission.
-One fixed-storage parse validates the complete bounded envelope, consumed-field duplicates, operation/status/replay semantics, echoed Session and control target, and Message decoded length/domain-separated digest and queue admission against the pinned capture. For compound input the reply identifies the ordered canonical parts manifest by its encoded length and domain-separated digest, including validated image metadata; scalar text retains its existing identity.
+One fixed-storage parse validates the complete bounded envelope, consumed-field duplicates, operation/status/replay semantics, echoed Session and control target, and Message decoded length/domain-separated digest and queue admission against the pinned capture. For compound input the reply identifies the ordered canonical parts manifest by its encoded length and domain-separated digest, including validated image metadata. An accepted parts input also names its Message admission as owner; a rejected submission has no owner and returns only its submitted-input identity.
 Invalid or mismatched replies are unconfirmed invocations, not durable rejection or proof of noncommit; retain the original recovery key.
 A canonical invocation failure retains its independent Host-fence authority.
 Typed facts, original request identity/target and bounded invocation status/type/code are owned values that survive capture closure and response-buffer reuse.
@@ -188,7 +188,7 @@ Supported metadata for CLI consumers is:
 | --- | --- |
 | Common | Key; absent, accepted or rejected admission; kind, original Session and rejection code when present; CLI `request inspect` adds top-level `as_of`, its Unix seconds at render as a canonical decimal string |
 | Configure | Accepted revision and created flag |
-| Message | Required Host-derived `state`; input text length/digest reference; `queue` admission and `admitted_at`; optional `binding` Turn/Operation/Attempt; nonterminal `work` with Session work `state` and nullable `first_action`; optional retained `recovery`; terminal result status/code or answer text reference |
+| Message | Required Host-derived `state`; accepted input content value and `queue` admission and `admitted_at`; optional `binding` Turn/Operation/Attempt; nonterminal `work` with Session work `state` and nullable `first_action`; optional retained `recovery`; terminal result status/code or answer text reference. Rejected observations carry no input or queue. |
 | Session stop | Original selected nullable Turn, admission cutoff and pending/completed semantic completion |
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
