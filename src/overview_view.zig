@@ -9237,11 +9237,12 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     };
     try D.checkBoundaries();
     // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
-    // Re-recorded again: an Archived window row has no work state, so it draws no mark. Main drew each row's own
-    // work mark (the archived row's state mark), so the mark cell is the change from main's matrix. The Archived
-    // view is also flat (no pin-first order, no nesting), which main did not do, so this golden is not yet
-    // proven to differ from main's only in the mark cell: see the report.
-    try std.testing.expectEqual(@as(u64, 0xa434ddb7ed5fc5b), bytes_and_styles);
+    // Re-recorded for the Archived window (Fix 3c). What moved, and only this:
+    // - The Sessions frames (filter active, every archive state) equal main's: 431d67fdd2f5901d.
+    // - An Archived row shows no mark and no work word: archived rows carry no work state.
+    // - Every Archived row shows its age since stop, from the window row's stopped_at.
+    // - The Archived view is flat, in the Host's order: no pin-first order and no nesting.
+    try std.testing.expectEqual(@as(u64, 0x55abcd8ea50af260), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {
