@@ -1,0 +1,83 @@
+name: Race sweep
+# Shakes main for latent scheduling races (docs/verification/gates.md#race-sweep).
+# Promote calls it on its first run of each day; also runnable by hand. One Linux
+# runner: starve the targets on two cores, then a few seeded syscall stalls.
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed for the stall runs (empty uses the run number)
+        type: string
+        required: false
+        default: ''
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: race-sweep
+jobs:
+  sweep:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      STARVE: '["test-native","pause-socket-test","request-wait-integration","human-cli-integration"]'
+      STALL: '["test-native","pause-socket-test"]'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ env.STARVE }}
+          cache-part: compiled
+          publish-caches: 'false'
+      - name: Install strace and the pinned packages tests/ci imports
+        run: |
+          set -euo pipefail
+          sudo apt-get install -yq strace
+          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
+      - name: Compile the swept targets
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/build_artifact.py compile "$STARVE"
+          zig build --fetch=all
+      - name: Starve the targets on two cores
+        id: starve
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python3 -B tests/ci/race_sweep.py starve "$STARVE"
+      - name: Stall one syscall site per run
+        id: stall
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          SEED: ${{ inputs.seed || github.run_number }}
+        run: python3 -B tests/ci/race_sweep.py stall "$STALL" --seed "$SEED" --runs 2
+      - name: Fail for each shaker that found a failure
+        if: ${{ steps.starve.outcome != 'success' || steps.stall.outcome != 'success' }}
+        env:
+          STARVED: ${{ steps.starve.outcome }}
+          STALLED: ${{ steps.stall.outcome }}
+        run: |
+          echo "::error::starve: $STARVED; stall: $STALLED. The step summary gives each reproduction command."
+          exit 1
+  report:
+    # One issue per failure signature, labelled race-sweep.
+    needs: sweep
+    if: ${{ failure() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: ${{ github.workflow }}
+        run: python3 -B tests/ci/report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --label race-sweep

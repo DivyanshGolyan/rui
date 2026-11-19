@@ -1169,7 +1169,7 @@ class ReleaseFlowTest(unittest.TestCase):
 
     def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
         text = PROMOTE.read_text()
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag', 'race_sweep'])
         self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
         self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
         qualify = job(text, 'qualify')
