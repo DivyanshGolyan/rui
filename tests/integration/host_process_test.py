@@ -196,12 +196,12 @@ def main():
     assert "readiness exceeded 16 KiB" in str(stdout_error)
     assert len(str(stdout_error)) <= error_text_limit
     process, fields = start_ready_process(
-        child("print('ready execution=enabled nghttp2=1.70.0'); time.sleep(10)"),
+        child("print('ready execution=enabled nghttp2=9.9.9'); time.sleep(10)"),
         timeout=1,
-        required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
+        required_fields={"execution": "enabled", "nghttp2": "9.9.9"},
     )
     try:
-        assert fields == {"execution": "enabled", "nghttp2": "1.70.0"}
+        assert fields == {"execution": "enabled", "nghttp2": "9.9.9"}
         assert process.poll() is None
     finally:
         stop_process(process)
@@ -716,7 +716,7 @@ fields = ((0, phase), (1, '1234567'), (11, '12345'))
 body = b''.join(struct.pack('<BH', index, len(value)) + value.encode() for index, value in fields)
 for sequence in range(1, count + 1):
     os.write(int(arg('--test-observation-fd')), struct.pack('<HBBQQQ', 28 + len(body), 1, int(case == 'lost'), sequence, 37, os.getpid()) + body)
-print('ready execution=enabled nghttp2=1.70.0', flush=True)
+print('ready execution=enabled nghttp2=9.9.9', flush=True)
 time.sleep(30)
 '''
     option, phase, plan = '--test-retry-recovery-gate-path', 'exhausted_retry_recovery_held', 'dispatch'

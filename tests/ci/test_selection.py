@@ -1186,6 +1186,26 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("login-signal-integration", result["targets"])
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
+    def test_sqlite_pin_change_runs_the_store_suite_on_the_pr(self):
+        zon = """.{
+        .openssl = .{
+            .url = "https://example.invalid/openssl-3.0.zip",
+            .hash = "1220aaaa",
+        },
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "1220bbbb",
+        },
+}
+"""
+        pin_bump = zon.replace("sqlite-amalgamation-3540100", "sqlite-amalgamation-3541000").replace("1220bbbb", "1220cccc")
+        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, pin_bump)})
+        self.assertIn("test-store", result["fast_targets"])
+        self.assertTrue(covers("test-store", set(result["targets"])))
+        other_dependency = zon.replace("openssl-3.0", "openssl-3.1").replace("1220aaaa", "1220dddd")
+        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, other_dependency)})
+        self.assertNotIn("test-store", result["fast_targets"])
+
     def test_transport_inputs_keep_both_native_h2_owners(self):
         for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",
                      "tests/integration/h2_fixture.py", "tests/integration/codex_h2_cases.py"):

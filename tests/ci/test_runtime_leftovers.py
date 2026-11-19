@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -113,6 +114,57 @@ class RuntimeLeftovers(unittest.TestCase):
                 self.assertTrue(accepting.exists() and accepting.with_suffix(".store").exists())
             finally:
                 listening.close()
+
+    def test_retire_under_removes_refusing_sockets_for_stores_below_a_root(self):
+        # Shell fixtures retire by their state directory; a sibling sharing the prefix stays.
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            state = root / "state"
+            listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                def refusing(name, store):
+                    path = root / name
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    probe.bind(str(path))
+                    probe.close()
+                    path.with_suffix(".store").write_text(str(store))
+                    return path
+                below = refusing("below.sock", state / "format-store")
+                sibling = refusing("sibling.sock", root / "state-other" / "store")
+                accepting = root / "accepting.sock"
+                listening.bind(str(accepting))
+                listening.listen(1)
+                accepting.with_suffix(".store").write_text(str(state / "store"))
+                runtime_leftovers.retire_under(state, root)
+                self.assertFalse(below.exists() or below.with_suffix(".store").exists())
+                self.assertTrue(sibling.exists() and accepting.exists())
+            finally:
+                listening.close()
+
+    def test_retire_settles_a_host_that_dies_after_its_wrapper(self):
+        # strace --kill-on-exit: the reaped wrapper's Host still accepts for a moment.
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            store = root / "store"
+            path = root / "late.sock"
+            listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listening.bind(str(path))
+            listening.listen(1)
+            path.with_suffix(".store").write_text(str(store))
+            closer = threading.Timer(0.2, listening.close)
+            closer.start()
+            saved = os.environ.get(runtime_leftovers.OVERRIDE)
+            os.environ[runtime_leftovers.OVERRIDE] = str(root)
+            try:
+                HOST.retire_settled(store)
+            finally:
+                closer.cancel()
+                listening.close()
+                if saved is None:
+                    os.environ.pop(runtime_leftovers.OVERRIDE, None)
+                else:
+                    os.environ[runtime_leftovers.OVERRIDE] = saved
+            self.assertFalse(path.exists() or path.with_suffix(".store").exists())
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
         # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no

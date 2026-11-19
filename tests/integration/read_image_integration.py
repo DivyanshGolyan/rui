@@ -79,7 +79,7 @@ def prove_case(root, name):
             processes.append(host_process.start_ready_process(
                 [tracer, "--kill-on-exit", "-f", "-o", trace, "-s", "4096", "-e", "trace=%file",
                  *fixture.host_arguments(store, url, active_capacity=2)],
-                required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
+                required_fields=host_process.READY_TRANSPORT,
             )[0])
         else:
             processes.append(fixture.start_host(store, url, active_capacity=2))
