@@ -53,6 +53,7 @@ const cores = .{
     .{ "creation_receipt.zig", @import("creation_receipt.zig") },
     .{ "creation_receipt_wire.zig", @import("creation_receipt_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
+    .{ "defaults_report.zig", @import("defaults_report.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "display_text.zig", @import("display_text.zig") },
     .{ "download_policy.zig", @import("download_policy.zig") },
