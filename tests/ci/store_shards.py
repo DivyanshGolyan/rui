@@ -244,7 +244,7 @@ def cancellation(stop):
 def run(binary, arguments, timeout, mode, environ, output=None):
     started = time.monotonic()
     record = environ.get(live_engines.MYSQL_RECORD)
-    count = SHARD_COUNT if mode == "run" else 1
+    count = SHARD_COUNT if mode in ("run", "native") else 1
     stop = threading.Event()
     test_timeout = duration(environ["RUI_UNIT_TEST_TIMEOUT"]) if environ.get("RUI_UNIT_TEST_TIMEOUT") else None
     with tempfile.TemporaryDirectory(prefix="rui-store-shards-") as directory:
@@ -255,21 +255,21 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             child["RUI_TEST_EXACT_INACTIVITY"] = "0"
             child.pop("RUI_UNIT_SHARD", None)
             child.pop("RUI_UNIT_EXCLUSIVE", None)
-            child["RUI_UNIT_MYSQL_NAMESPACE"] = f"s{os.getpid()}_{index}"
-            if mode == "native":
-                child["RUI_UNIT_MYSQL_NAMESPACE"] = f"n{os.getpid()}"
-            if mode == "run":
+            prefix = "s" if mode == "run" else "n"
+            child["RUI_UNIT_MYSQL_NAMESPACE"] = f"{prefix}{os.getpid()}_{index}"
+            if mode in ("run", "native"):
                 child["RUI_UNIT_SHARD"] = f"{index}/{count}"
             if record:
-                path = str(Path(directory) / f"record-{index}") if mode == "run" else record
-                if mode == "native":
-                    path = record + ".native"
+                # Store records join into the acceptance record. Native records
+                # are informational: a shard that never opens MySQL writes none.
+                path = str(Path(directory) / f"record-{index}") if mode == "run" else record + f".native-{index}"
                 Path(path).unlink(missing_ok=True)
                 child[live_engines.MYSQL_RECORD] = path
                 records.append(path)
-            jobs.append((child, f"Store shard {index + 1}/{count}" if mode == "run" else mode))
+            label = f"{'Store' if mode == 'run' else 'Native'} shard {index + 1}/{count}" if mode in ("run", "native") else mode
+            jobs.append((child, label))
         # Clear previous acceptance before any child starts.
-        if record and mode != "native":
+        if record and mode == "run":
             Path(record).unlink(missing_ok=True)
         results = []
         with cancellation(stop) as caught, live_engines.mysql_lease(environ, exclusive=mode != "native", timeout=timeout, stop=stop) as lock, ThreadPoolExecutor(max_workers=count) as pool:
@@ -281,7 +281,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
                     if lock is not None:
                         fcntl.flock(lock, fcntl.LOCK_SH)
                     released.set()
-            if mode == "run" and not exclusive_count:
+            if mode in ("run", "native") and not exclusive_count:
                 release()
             def first():
                 try:

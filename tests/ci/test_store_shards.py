@@ -456,10 +456,42 @@ class LauncherTest(unittest.TestCase):
         with patch("builtins.print"):
             self.assertEqual(shards.run(self.binary, [], 30, "native", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
         self.assertEqual(record.read_text(), "prepares=999\n")
-        self.assertEqual(Path(str(record) + ".native").read_text(), "prepares=1\n")
+        for index in range(shards.SHARD_COUNT):
+            self.assertEqual(Path(f"{record}.native-{index}").read_text(), "prepares=1\n")
         with patch("builtins.print"):
             self.assertEqual(shards.run(self.binary, [], 30, "aggregate", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
-        self.assertEqual(record.read_text(), "prepares=1\n")
+        self.assertEqual(record.read_text(), "prepares=999\n")
+
+    def test_native_launch_shards_every_index_with_its_own_namespace_and_no_exclusive_gate(self):
+        gate_dir = self.directory
+        events = self.directory / "native events"
+        self.script(
+            "import os\nfrom pathlib import Path\n"
+            "i,k = map(int, os.environ['RUI_UNIT_SHARD'].split('/'))\n"
+            f"directory = Path({str(gate_dir)!r})\n"
+            "assert 'RUI_UNIT_EXCLUSIVE' not in os.environ\n"
+            "(directory / ('native-ready-' + str(i))).touch()\n"
+            "with open(directory / ('native-gate-' + str(i))) as gate: gate.read()\n"
+            f"with open({str(events)!r}, 'a') as event: event.write(str(i) + ':' + os.environ['RUI_UNIT_MYSQL_NAMESPACE'] + ':' + str(k) + '\\n')\n"
+            "print('1/1 store.test.' + str(i) + '...OK', flush=True)\n", names="shard")
+        for index in range(shards.SHARD_COUNT):
+            os.mkfifo(self.directory / f"native-gate-{index}")
+        output = io.StringIO()
+        with self.release_gates(
+            lambda: all((self.directory / f"native-ready-{i}").exists() for i in range(shards.SHARD_COUNT)),
+            [self.directory / f"native-gate-{i}" for i in range(shards.SHARD_COUNT)],
+        ):
+            with redirect_stdout(output):
+                self.assertEqual(shards.run(self.binary, [], 60, "native", os.environ), 0)
+        entries = [line.split(":") for line in events.read_text().splitlines()]
+        self.assertEqual(sorted(int(i) for i, _, _ in entries), list(range(shards.SHARD_COUNT)))
+        self.assertTrue(all(count == str(shards.SHARD_COUNT) for _, _, count in entries))
+        namespaces = {namespace for _, namespace, _ in entries}
+        self.assertEqual(len(namespaces), shards.SHARD_COUNT)
+        self.assertTrue(all(name.startswith(f"n{os.getpid()}_") for name in namespaces))
+        for index in range(shards.SHARD_COUNT):
+            self.assertIn(f"Native shard {index + 1}/{shards.SHARD_COUNT}: 1 passed, 0 skipped", output.getvalue())
+        self.assertRegex(output.getvalue(), rf"native wall: [0-9.]+s; \d+ tests across {shards.SHARD_COUNT} processes")
 
     def test_measurement_writes_only_complete_passing_inventory(self):
         output = self.directory / "times.json"
@@ -510,7 +542,7 @@ class CompilerShardTest(unittest.TestCase):
             source = root / "store.zig"
             source.write_text("\n".join("test " + json.dumps(name, ensure_ascii=False) + " {}" for name in current))
             (root / "partition.zig").write_text((ROOT / "src/unit_test_partition.zig").read_text())
-            (root / "options.zig").write_text("pub const root: usize = 1; pub const sharded = true;")
+            (root / "options.zig").write_text("pub const root: usize = 1;")
             generated = unit_test_runner.generate(stock, transformed)
             runner = root / "runner.zig"
             binary = root / "tests"

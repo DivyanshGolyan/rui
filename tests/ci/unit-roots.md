@@ -48,7 +48,9 @@ The exclusive prelude delays every shard equally, so its durations do not count
 against shard zero's ordinary-work load; all four processes share the work after
 that prefix. Tests absent from the timing file use a stable hash shard and the median
 recorded duration as their weight; removed tests contribute no work. Metadata
-and test execution use the same selection. Without `RUI_UNIT_SHARD=i/K`, the
+and test execution use the same selection. The native root uses the same launcher with K=4 and the same hash placement
+(it has no timing file yet), so its four processes split the non-Store tests the same way.
+Without `RUI_UNIT_SHARD=i/K`, the
 binary exposes its complete root, preserving unsharded measurements and
 inventory comparisons. Explicit `-Dtest-filter` runs retain one process.
 
@@ -79,7 +81,9 @@ allocator uses server-side locks to prevent different processes from leasing
 the same conformance database. Each Store shard writes its own dialect record;
 the launcher merges their counters into `RUI_TEST_MYSQL_RECORD` after all shards
 pass, preserving `live_engine_step.py verify mysql` as the acceptance owner.
-The native process writes a separate record so it cannot replace Store evidence.
+Each native shard writes `RUI_TEST_MYSQL_RECORD.native-<i>`, which is informational
+only: a shard that never opens MySQL writes none, so the launcher does not merge native records
+into the acceptance record and cannot let them replace Store evidence.
 Filtered aggregate runs keep the original record path and a unique namespace.
 
 Compiler filters reduce sema/codegen, but Zig always includes anonymous tests

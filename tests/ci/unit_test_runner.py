@@ -33,7 +33,7 @@ fn unitTests() []const std.builtin.TestFn {
         selected[count] = test_fn;
         count += 1;
     }
-    if (@import("unit_test_options").sharded) {
+    {
         var environ = unit_environ.createMap(std.heap.page_allocator) catch @panic("OOM");
         defer environ.deinit();
         if (environ.get("RUI_UNIT_EXCLUSIVE")) |_| {

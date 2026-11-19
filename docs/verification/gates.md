@@ -150,7 +150,7 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 `check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`; on Linux it also runs `rsql-table`, and promotion adds both beside `check-full`.
 Required functional assertions stay required when their fixture changes.
 Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
-The Store unit root compiles once and runs as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); native and each Store process retain separate 1200-second deadlines.
+The native and Store unit roots each compile once and run as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); each process retains its own 1200-second deadline.
 Shard zero first runs the seven tests that change MySQL server-global settings, the two long admission-history fixtures and the exact session Handler-read comparisons under an exclusive socket lease, then releases the other shards. The history fixtures retain their 300-second test deadline and avoid competing MySQL clients during setup/replay. The Handler tests read the Store connection's session counters; their exclusive window also excludes peer DDL that could add internal dictionary reads through shared metadata caches. The existing obligation comparison keeps its warm-up and strict equality. Native and live MySQL process fixtures share the ordinary phase.
 [Native unit roots](../../tests/ci/unit-roots.md) owns timing-based assignment, MySQL isolation and record aggregation.
 Explicit `-Dtest-filter` runs retain one filtered aggregate process.
@@ -161,7 +161,7 @@ The driver waits for every peer before isolated cases and fails if any peer fail
 The unsplit serial gate retains its original case order and assertions.
 
 `zig build check-full` runs the native/Store unit group before its serial process integrations, after formatting and production builds.
-Within that group native and the four Store shard processes overlap, with the same per-process deadlines and MySQL isolation as `test` and `check`.
+Within that group the four native shard processes and the four Store shard processes overlap (eight processes), with the same per-process deadlines and MySQL isolation as `test` and `check`.
 Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.

@@ -180,7 +180,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         if (unit_runner != null) {
             const options = b.addOptions();
             options.addOption(usize, "root", @backingInt(partition));
-            options.addOption(bool, "sharded", partition == .store);
             compile.root_module.addOptions("unit_test_options", options);
             compile.root_module.addImport("unit_test_partition", b.createModule(.{
                 .root_source_file = b.path("src/unit_test_partition.zig"),
