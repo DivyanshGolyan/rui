@@ -168,10 +168,22 @@ def red_record(name, command):
     return {"name": name, "command": command}
 
 
+# Rui fixtures refuse root (tests/integration/host_process.py), and cloud machines push as root, so a
+# replayed fixture runs at HEAD as the non-root lane user .agents/as-fixture-user creates.
+FIXTURE_LANE = "prepush"
+
+
+def as_fixture_user(command, euid=None):
+    euid = os.geteuid() if euid is None else euid
+    if euid != 0 or command[:3] != ["zig", "build", "-j1"] or command[3] not in FIXTURES:
+        return command
+    return [str(ROOT / fixture_user.COMMAND), FIXTURE_LANE, "--ref", "HEAD", "--", *command]
+
+
 def local_red_checks(planned, mysql):
     for name, command in planned:
         if not isinstance(command, NeedsMySQL):
-            yield name, command
+            yield name, command if isinstance(command, Skipped) else as_fixture_user(command)
         elif mysql:
             yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
         else:

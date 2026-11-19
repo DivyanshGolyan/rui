@@ -386,6 +386,22 @@ class Lane:
             say(f"created {self.user} ({self.home})")
         return pwd.getpwnam(self.user).pw_gid
 
+    def seed_packages(self, caller_cache):
+        """Copy the caller's fetched Zig packages the lane lacks; packages are named by their hash."""
+        source = Path(caller_cache) / "p"
+        if not source.is_dir():
+            return 0
+        target = self.home / ".cache/zig/p"
+        self.run(["mkdir", "-p", str(target)])
+        missing = [entry for entry in sorted(source.iterdir()) if not (target / entry.name).exists()]
+        for entry in missing:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, target / entry.name, symlinks=True)
+            else:
+                shutil.copy2(entry, target / entry.name, follow_symlinks=False)
+            subprocess.run(["chown", "-R", f"{self.user}:{self.user}", str(target / entry.name)], check=True)
+        return len(missing)
+
     def ensure_checkout(self, source, sha):
         if not (self.checkout / ".git").is_dir():
             self.run(["git", "init", "--quiet", str(self.checkout)])
@@ -415,6 +431,10 @@ def run(lane, ref, keep, command):
     path = search_path(lane.venv / "bin", tools, caller_path)
     network = environment(lane.user, lane.home, path, placed.trust, os.environ)
     lane.ensure_checkout(placed.source, inputs.sha)
+    caller_cache = os.environ.get("ZIG_GLOBAL_CACHE_DIR") or str(Path.home() / ".cache/zig")
+    seeded = lane.seed_packages(caller_cache)
+    if seeded:
+        say(f"copied {seeded} Zig package(s) from {caller_cache}")
     say(f"{lane.user} at {inputs.sha[:12]} in {lane.checkout}")
     built = ensure_venv(lane.venv, placed.binaries[PYTHON], [lane.checkout / path for path in REQUIREMENTS],
                         lambda argv: as_lane(lane.user, network, argv, cwd=lane.home, check=True),

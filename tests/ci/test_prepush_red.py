@@ -118,6 +118,23 @@ AssertionError
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0][1], ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"])
 
+    def test_replayed_fixtures_run_as_the_lane_user_only_under_root(self):
+        fixture = ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]
+        unit = ["zig", "build", "-j1", "test-store", "-Dtest-filter=x", "--summary", "line"]
+        policy = ["env", "PYTHONPATH=x", sys.executable, "-B", "-m", "unittest"]
+        wrapped = [str(ROOT / ".agents/as-fixture-user"), "prepush", "--ref", "HEAD", "--", *fixture]
+        for euid, command, expected in ((0, fixture, wrapped), (1000, fixture, fixture), (0, unit, unit),
+                                        (1000, unit, unit), (0, policy, policy)):
+            with self.subTest(euid=euid, command=command[3]):
+                self.assertEqual(prepush.as_fixture_user(command, euid), expected)
+        skipped = prepush.Skipped("macOS")
+        mysql = prepush.NeedsMySQL(unit, True)
+        with patch.object(prepush.os, "geteuid", return_value=0):
+            checks = list(prepush.local_red_checks([("fixture", fixture), ("skip", skipped), ("store", mysql)], False))
+        self.assertEqual(checks[0], ("fixture", wrapped))
+        self.assertIs(checks[1][1], skipped)
+        self.assertEqual(checks[2][1][-len(unit):], unit)
+
     def test_compile_jobs_use_known_commands(self):
         for name, command in (("linux_build_unit", prepush.unit_compile()),
                               ("linux_build", [*build_artifact.compile_command(["request-wait-integration"], jobs=1), "--summary", "line"]),
