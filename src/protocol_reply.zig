@@ -421,6 +421,11 @@ pub const HostInfoProfile = enum {
         };
     }
 
+    pub fn fromWire(text: []const u8) ?HostInfoProfile {
+        for (std.enums.values(HostInfoProfile)) |profile| if (std.mem.eql(u8, profile.wire(), text)) return profile;
+        return null;
+    }
+
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
@@ -685,6 +690,12 @@ test "Host information accepts both wire-13 shapes and requires complete current
             try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", sample.profile));
         }
     }
+}
+
+test "upgrade Host information profiles map every wire back to their profile" {
+    for (std.enums.values(HostInfoProfile)) |profile| try std.testing.expectEqual(profile, HostInfoProfile.fromWire(profile.wire()).?);
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire("8"));
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire(""));
 }
 
 test "upgrade Host information profiles retain the entire strict shape" {
