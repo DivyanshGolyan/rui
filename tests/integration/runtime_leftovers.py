@@ -66,6 +66,31 @@ def remove(found):
                 pass
 
 
+def retire(store, directory=None):
+    """Remove the leftover sockets whose hint names `store`; return what was removed.
+
+    A fixture that kills its Host calls this once the Host is reaped, so the
+    socket and hint go before the Store is deleted. An accepting socket is a
+    live Host (or a successor on the same path) and stays.
+    """
+    directory = directory or runtime()
+    named = str(store)
+    found = []
+    try:
+        candidates = sorted(directory.glob("*.sock"))
+    except FileNotFoundError:
+        return found
+    for path in candidates:
+        try:
+            hinted = path.with_suffix(".store").read_text()
+        except (FileNotFoundError, UnicodeDecodeError):
+            continue
+        if hinted == named and not answers(path):
+            found.append((path, hinted))
+    remove(found)
+    return found
+
+
 def sweep(directory=None):
     """Remove every leftover; return what was removed."""
     found = leftovers(directory)

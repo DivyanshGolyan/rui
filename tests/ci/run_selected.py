@@ -63,7 +63,8 @@ def main():
         if leaked := runtime_leftovers.sweep():
             note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
                     f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
-                    "remove its socket and .store hint before deleting the Store (docs/verification/testing.md).")
+                    "dispose through stop_process or forced_crash_cleanup, which retire its socket and .store hint "
+                    "before the Store is deleted (docs/verification/testing.md).")
             print(f"::error::{note}", flush=True)
             summarize(note)
             returncode = returncode or 1

@@ -4,6 +4,7 @@ import sys
 
 import live_engines
 import network_variables
+import runtime_leftovers
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -1220,6 +1221,11 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException as error:
         errors.append(error)
+    try:
+        if (store := _disposed_store(process)) is not None:
+            runtime_leftovers.retire(store)
+    except BaseException as error:
+        errors.append(error)
     diagnostics = getattr(process, "rui_diagnostics", None)
     for close in (observations.close if observations else None, diagnostics.close if diagnostics else None,
                   process.stdout.close if process.stdout else None, process.stderr.close if process.stderr else None):
@@ -1245,6 +1251,17 @@ def stop_process(process, timeout=10, *, seal_observations=True):
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
+
+
+def _disposed_store(process):
+    """The Store a Host was started on: its ready field, else its --store argument, else None."""
+    store = getattr(process, "rui_ready_fields", {}).get("store")
+    if store is not None:
+        return store
+    args = [str(argument) for argument in process.args] if isinstance(process.args, (list, tuple)) else []
+    if "--store" in args and args.index("--store") + 1 < len(args):
+        return os.path.realpath(args[args.index("--store") + 1])
+    return None
 
 
 def _tail(buffer, chunk, limit):
