@@ -158,14 +158,14 @@ notice, SQLite includes this blessing:
 > May you find forgiveness for yourself and forgive others.
 > May you share freely, never taking more than you give.
 
-## nghttp2 1.70.0
+## nghttp2 1.71.0
 
 Rui links the pinned static nghttp2 library for its HTTP/2 client's framing;
 HTTP/3/QUIC is not built.
 
-- Source: `https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz`
-- Archive SHA-256: `e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2`
-- Zig package content hash: `N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb`
+- Source: `https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz`
+- Archive SHA-256: `c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116`
+- Zig package content hash: `N-V-__8AAIgi2gCNAFzaSP_Qwb8MVv4GhCI5tn9HjmJdBW5y`
 - License: MIT, reproduced in the source archive's `COPYING` file
 
 Copyright (c) 2012, 2014, 2015, 2016 Tatsuhiro Tsujikawa and nghttp2
@@ -174,12 +174,12 @@ charge, to use, copy, modify, merge, publish, distribute, sublicense and/or
 sell copies under the conditions in `COPYING`. The software is provided
 without warranty.
 
-## OpenSSL 3.6.3
+## OpenSSL 3.6.5
 
-Rui builds pinned static OpenSSL 3.6.3 as its HTTP/2 client's TLS implementation.
+Rui builds pinned static OpenSSL 3.6.5 as its HTTP/2 client's TLS implementation.
 
-- Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz`
-- Zig package content hash: `N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM`
+- Source: `https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz`
+- Zig package content hash: `N-V-__8AABKeEghjdSPkvVWHCc8hob18MH3oUBR-e5mVm9TJ`
 - License: Apache License 2.0, reproduced in the source archive's `LICENSE.txt`
 
 Copyright (c) 1998-2026 The OpenSSL Project Authors and copyright holders
