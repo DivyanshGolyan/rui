@@ -70,6 +70,7 @@ Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation v
 
 - Scoped help, syntax refusals and retired-name variants in `human_cli_integration.py:help_case`: CLI-1–CLI-2; the process witnesses remain.
 - Saved-defaults encoding and edit cases in `tests/integration/human_cli_integration.py:preference_edits`: CLI-22 and CLI-23; conflicting CLI option refusals and the on-disk configure witness remain.
+- Store entry cases `--store ""` and the HOME-default resume in `tests/integration/human_cli_integration.py:main`: CLI-25; the missing saved Store and no-TTY witnesses remain.
 
 - CLI grammar/help/refusal blocks in `src/cli_args.zig:306` and `src/caller_exit.zig`: CLI-1–CLI-4, CLI-7, CLI-13. Preserve unrelated feature ownership until migrated.
 - Session list cases in `src/protocol_reply.zig:2750`, `tests/integration/session_list_integration.py` and `tests/integration/session_list_facts_integration.py`: CLI-11–CLI-12.
