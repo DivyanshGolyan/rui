@@ -530,9 +530,14 @@ pub fn installed(f: Facts) bool {
     return publication == .ok and publication.ok.changed;
 }
 
+/// A run step failed for a reason other than the person's own cancel;
+/// a cancel alone changed nothing and needs no failure guidance (#1792).
+pub fn failedBeyondCancel(f: Facts) bool {
+    return if (failureCause(f)) |cause| cause != .cancelled else false;
+}
+
 pub fn guidance(f: Facts, cleanup_retained: bool, path_selected: bool) bool {
-    const has_failure = if (failureCause(f)) |cause| cause != .cancelled else false;
-    return has_failure or cleanup_retained or hostsOf(f).guidance or !path_selected;
+    return failedBeyondCancel(f) or cleanup_retained or hostsOf(f).guidance or !path_selected;
 }
 
 pub fn run(f: Facts, stopping: bool, finished: bool, phase: Phase) status.Run {

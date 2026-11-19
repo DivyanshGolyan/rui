@@ -239,7 +239,7 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
         try writer.writeAll("\n");
         try upgrade.writeResult(writer, result);
     }
-    if (self.result == null and std.meta.activeTag(self.ending()) == .cancelled) {
+    if (self.result == null and !upgrade_run.failedBeyondCancel(self.facts()) and std.meta.activeTag(self.ending()) == .cancelled) {
         try writer.writeAll("\nUpgrade cancelled; nothing changed.\n");
     } else if (self.failure) |err| {
         try writer.print("\nUpgrade {s} failed: {s}\n", .{ if (self.operation == .check) "check" else "installation", failureWords(err) });
@@ -604,6 +604,13 @@ test "#1792 Esc while preparing ends cancelled without failure guidance" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Upgrade cancelled; nothing changed.") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "failed") == null);
     try std.testing.expect(!job.hasGuidance());
+    // A failure that races the cancel is still reported, as its guidance says.
+    const raced: Self = .{ .started = true, .finished = true, .operation = .install, .failure = error.ReleaseChecksumMismatch, .cancelling = true };
+    writer = std.Io.Writer.fixed(&buffer);
+    try raced.writeReport(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Upgrade installation failed:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "nothing changed") == null);
+    try std.testing.expect(raced.hasGuidance());
 }
 
 test "the Upgrade ending uses every Host result not the selected Store supersession" {
