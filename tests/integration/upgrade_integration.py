@@ -328,7 +328,12 @@ def install_cases(root, binary, releases):
         gate.release.set()
         output = c.finish_upgrade(child)
         releases.latest_location = None
-        assert "Installed Rui" in output and "No running Hosts." in output, output
+        assert "Upgraded to Rui" in output and "No running Hosts." in output, output
+        # #1854: the check report, then what is happening, then the verdict.
+        check_end = output.index("The running client and bundled/custom application binaries are not replaced.")
+        installing = output.index(f"Installing Rui {releases.version}...")
+        verdict = output.index(f"Upgraded to Rui {releases.version}. Complete build: ")
+        assert check_end < installing < verdict, output
         assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
@@ -349,7 +354,7 @@ def install_cases(root, binary, releases):
         releases.status[releases.archive_path] = 503
         child = c.spawn_upgrade()
         output = c.finish_upgrade(child, success=False)
-        assert "Installed Rui" not in output, output
+        assert "Upgraded to Rui" not in output, output
         c.assert_unchanged()
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
 
@@ -616,7 +621,7 @@ def upgrade_journey(root, binary, releases):
                 gate.release.set()
                 output = a.finish_upgrade(child, success=False)
                 assert child.returncode == 6, (child.returncode, output)
-                assert "Installed Rui" in output and "[host_restart_failed]" in output, output
+                assert "Upgraded to Rui" in output and "[host_restart_failed]" in output, output
                 for previous in (previous_a, previous_b):
                     assert f"{previous['store']}: restarted on {releases.version}" in output, output
                 assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
@@ -1538,7 +1543,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])
             receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
-            assert b"Installed Rui" in receipt and b"restarted on " in receipt, receipt.decode()
+            assert b"Upgraded to Rui" in receipt and b"restarted on " in receipt, receipt.decode()
             assert b"curl fixture final" not in receipt, receipt.decode()
             assert os.fsencode(shadow) in receipt, "recovery lost the retained PATH guidance"
             assert screen.entries == screen.restorations == 1, "retained guidance relaunched the TUI"
@@ -1666,7 +1671,7 @@ def signal_after_publication(root, binary, releases, artifacts):
             assert installed.exists() and gate.exists()
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             receipt = exit_on_sigint(screen, process, "joined publication receipt and terminal exit after SIGINT")
-            assert b"Installed Rui. Complete build:" in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
+            assert b"Upgraded to Rui " in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
             assert b"Host restart could not finish (Cancelled)" in receipt, receipt.decode()
             assert b"Installation was not rolled back" in receipt, receipt.decode()
             assert os.fsencode(installed.parent.parent) in receipt, "receipt lost the published build identity"
