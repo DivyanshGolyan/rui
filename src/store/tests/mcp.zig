@@ -170,11 +170,11 @@ test "saved MCP call lines survive all work reads pending, running and completed
     }.run);
 }
 
-test "MCP calls run at once whatever their read-only hints, and hint changes keep frozen offers" {
+test "MCP calls of one reply run at once and settle in any order" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const records = comptime testingHostToolRecords(&.{
-                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
@@ -197,14 +197,14 @@ test "MCP calls run at once whatever their read-only hints, and hint changes kee
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
                 defer storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-                var configure = try completeConfiguration("read-only-order", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                var configure = try completeConfiguration("reply-order", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 configure.configuration.tools = try .of(&.{ "read_page", "write_page" });
                 configure.configuration.permission_mode.state = .value;
                 try configure.configuration.permission_mode.value.set("bypass");
                 const configured = try storage.configure(&configure, .{});
                 try std.testing.expect(configured == .accepted);
                 const session = configured.accepted.session;
-                try submitTestMessage(&storage, &tmp, "read-only-input", "read-only-message", session.slice(), "exercise read waves");
+                try submitTestMessage(&storage, &tmp, "reply-input", "reply-message", session.slice(), "exercise read waves");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 var calls: [4]TestingCall = undefined;
                 const ids = [_][]const u8{ "call-a", "call-b", "call-c", "call-d" };
@@ -216,33 +216,7 @@ test "MCP calls run at once whatever their read-only hints, and hint changes kee
                     .encoded_arguments = "{}",
                     .decoded_arguments = "{}",
                 };
-                try settleCallsForTesting(&storage, &tmp, model, "read-only-calls", calls[0..pattern.reads.len]);
-
-                var changed_records = records;
-                var changed_digests = digests;
-                for (&changed_records, &changed_digests) |*record, *digest| {
-                    if (record.owner == .mcp) record.read_only = !record.read_only;
-                    digest.* = tool_defs.recordDigest(record);
-                }
-                const changed: tool_defs.HostToolSet = .{ .records = &changed_records, .digests = &changed_digests };
-                try storage.saveHostToolSet(&changed);
-                try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='mcp'", .{}));
-                for ([_][]const u8{ "read_page", "write_page" }) |name| {
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=0", .{name}));
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND read_only=1", .{name}));
-                }
-                var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
-                defer saved.deinit(std.testing.allocator);
-                const saved_tool_set = saved.toolSet();
-                for (changed.records, changed.digests) |record, digest| {
-                    const index = saved_tool_set.find(record.name).?;
-                    try std.testing.expectEqual(record.read_only, saved_tool_set.records[index].read_only);
-                    try std.testing.expectEqualSlices(u8, &digest, &saved_tool_set.digests[index]);
-                }
-                const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
-                try storage.saveHostToolSet(&host_tool_set);
-                try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
-                try storage.saveHostToolSet(&changed);
+                try settleCallsForTesting(&storage, &tmp, model, "reply-calls", calls[0..pattern.reads.len]);
 
                 var ready: [4]action_domain.ReadyAction = undefined;
                 var bindings: [4]ActionAttemptBinding = undefined;

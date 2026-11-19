@@ -261,7 +261,6 @@ pub const Tool = struct {
     name: []const u8,
     description: ?[]const u8,
     input_schema: []const u8,
-    read_only: bool,
 };
 
 pub const LeftOut = union(enum) {
@@ -297,13 +296,7 @@ pub const Tools = struct {
             else => return malformed,
         } else null;
         if (headers.check(schema)) |invalid| return .{ .left_out = .{ .name = name, .reason = .{ .header = invalid } } };
-        var read_only = false;
-        if (document.member(item, "annotations")) |annotations| {
-            if (document.kind(annotations) == .object) {
-                if (document.member(annotations, "readOnlyHint")) |hint| read_only = document.kind(hint) == .true_value;
-            }
-        }
-        return .{ .tool = .{ .name = name.?, .description = description, .input_schema = schema, .read_only = read_only } };
+        return .{ .tool = .{ .name = name.?, .description = description, .input_schema = schema } };
     }
 };
 
@@ -404,10 +397,8 @@ test "a tools/list page lists its tools and leaves out invalid ones" {
     try std.testing.expectEqualStrings("get_weather", weather.name);
     try std.testing.expectEqualStrings("Get the weather", weather.description.?);
     try std.testing.expectEqualStrings("{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}", weather.input_schema);
-    try std.testing.expect(weather.read_only);
     const send = tools.next().?.tool;
     try std.testing.expectEqual(null, send.description);
-    try std.testing.expect(!send.read_only);
     const bad = tools.next().?.left_out;
     try std.testing.expectEqualStrings("bad_header", bad.name.?);
     try std.testing.expectEqual(LeftOut{ .header = .not_primitive }, bad.reason);
