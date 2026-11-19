@@ -496,10 +496,9 @@ class PrModeTest(unittest.TestCase):
         self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false)", ordinary)
         identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
         self.assertNotIn("use_llvm", identity)
-        self.assertEqual(build.count("product.setHostToolTarget("), 1)
-        self.assertIn("if (ci_mode) product.setHostToolTarget(b, target);", build)
-        bindings = build.split("fn addBindings(", 1)[1].split("\n}", 1)[0]
-        self.assertIn('else\n        b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast });', bindings)
+        self.assertEqual(build.count("b.graph.host = "), 1)
+        self.assertIn("if (ci_mode) b.graph.host = target;", build)
+        self.assertIn('const bindings: Translator = .init(b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast }), .{', build)
 
     def test_only_the_pr_upgrade_fixture_strips_its_debug_payload(self):
         build = build_files.source()

@@ -17,13 +17,15 @@ pub fn build(b: *std.Build) void {
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
-    // translate-c runs on the build host. CI builds it for the same baseline CPU as the products so its
-    // snapshot is reusable across runners; local builds keep the host's native CPU.
-    if (ci_mode) product.setHostToolTarget(b, target);
     if (pr_ci and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
         @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
+    // Host tools (generators, translate-c) run on the build host. CI builds them for the same baseline CPU as
+    // the products so their cache snapshots are reusable across runners; local builds keep the host's native
+    // CPU. The check above makes CI's target the native platform with the baseline CPU. Dependencies share
+    // graph.host, so this must come before any b.dependency call.
+    if (ci_mode) b.graph.host = target;
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
         .policy = "baseline",
         .arch = @tagName(target.result.cpu.arch),
