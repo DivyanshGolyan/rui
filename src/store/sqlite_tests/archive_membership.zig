@@ -100,20 +100,23 @@ test "format 86 live Session page reads session_tab and the archiving probe read
         if (std.mem.indexOf(u8, detail, "session_tab") != null) uses_tab = true;
     }
     try std.testing.expect(uses_tab);
-    const archiving = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.live_archiving_page.sql);
-    defer _ = c.sqlite3_finalize(archiving);
-    var probes_index = false;
-    var probes_turn_index = false;
-    var scans_session = false;
-    while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
-        const detail = std.mem.span(c.sqlite3_column_text(archiving, 3));
-        if (std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null) probes_index = true;
-        if (std.mem.indexOf(u8, detail, "turn_outcome_unpositioned") != null) probes_turn_index = true;
-        if (std.mem.indexOf(u8, detail, "SCAN s") != null) scans_session = true;
+    // Each archiving page probes its own candidate index and never scans session.
+    inline for (.{
+        .{ session_list_read.live_turn_page.sql, "turn_outcome_unpositioned" },
+        .{ session_list_read.live_action_page.sql, "action_operation_unaccepted" },
+    }) |page| {
+        const archiving = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ page[0]);
+        defer _ = c.sqlite3_finalize(archiving);
+        var probes_index = false;
+        var scans_session = false;
+        while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
+            const detail = std.mem.span(c.sqlite3_column_text(archiving, 3));
+            if (std.mem.indexOf(u8, detail, page[1]) != null) probes_index = true;
+            if (std.mem.indexOf(u8, detail, "SCAN s") != null) scans_session = true;
+        }
+        try std.testing.expect(probes_index);
+        try std.testing.expect(!scans_session);
     }
-    try std.testing.expect(probes_index);
-    try std.testing.expect(probes_turn_index);
-    try std.testing.expect(!scans_session);
 }
 
 // The archiving probe must find a Session whose archive is pending on an open turn alone, and one whose
@@ -145,20 +148,26 @@ test "format 86 archiving probe finds an open turn and an unpositioned turn with
         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,action_cutoff) VALUES" ++
         "('open-turn-arch','rhvzwc',3,NULL,0,1793781800,0,0),('pos-turn-arch','d8mv7p',1,NULL,0,1793781800,0,0);" ++
         "UPDATE session SET archive_seq=40 WHERE session_ref='rhvzwc';UPDATE session SET archive_seq=41 WHERE session_ref='d8mv7p';");
-    const archiving = try sqlite.prepare(raw, session_list_read.live_archiving_page.sql);
-    defer _ = c.sqlite3_finalize(archiving);
-    try sqlite.bindI64(archiving, 1, 0);
-    try sqlite.bindI64(archiving, 2, 1000);
+    // The turn page finds both: the open turn and the code-set unpositioned turn. The action page finds neither.
+    const turn_page = try sqlite.prepare(raw, session_list_read.live_turn_page.sql);
+    defer _ = c.sqlite3_finalize(turn_page);
+    try sqlite.bindI64(turn_page, 1, 0);
+    try sqlite.bindI64(turn_page, 2, 1000);
     var found_open = false;
     var found_unpositioned = false;
     var count: usize = 0;
-    while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
+    while (c.sqlite3_step(turn_page) == c.SQLITE_ROW) {
         count += 1;
-        const ref = std.mem.span(c.sqlite3_column_text(archiving, 1));
+        const ref = std.mem.span(c.sqlite3_column_text(turn_page, 1));
         if (std.mem.eql(u8, ref, "rhvzwc")) found_open = true;
         if (std.mem.eql(u8, ref, "d8mv7p")) found_unpositioned = true;
     }
     try std.testing.expect(found_open);
     try std.testing.expect(found_unpositioned);
     try std.testing.expectEqual(@as(usize, 2), count);
+    const action_page = try sqlite.prepare(raw, session_list_read.live_action_page.sql);
+    defer _ = c.sqlite3_finalize(action_page);
+    try sqlite.bindI64(action_page, 1, 0);
+    try sqlite.bindI64(action_page, 2, 1000);
+    try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(action_page));
 }

@@ -60,7 +60,8 @@ pub const list_failures = .{
     .{ list_ceiling, error.SessionReadFailed },
     .{ list_page, error.SessionReadFailed },
     .{ live_active_page, error.SessionReadFailed },
-    .{ live_archiving_page, error.SessionReadFailed },
+    .{ live_turn_page, error.SessionReadFailed },
+    .{ live_action_page, error.SessionReadFailed },
     .{ workspace_list_page, error.SessionReadFailed },
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
@@ -89,9 +90,16 @@ const list_page = rsql.Read(.{
     .cardinality = .each,
 });
 
-// The live tab is active Sessions (the column is NULL, one index range) plus archiving Sessions (the
-// few with an open turn or an unaccepted Action). Each statement is bounded by created_seq and LIMIT 9;
-// mergeLive merges them in Zig by created_seq and keeps the first page.
+// The live tab is active Sessions (the column is NULL, one index range) plus archiving Sessions. An archiving
+// Session is found by one candidate set, so each set is its own page statement: the candidate is the IN
+// list, which MySQL can seek. A single UNION in the IN list makes MySQL scan session instead. Each statement
+// is bounded by created_seq and LIMIT 9; mergeLive merges them in Zig by created_seq and keeps the first page.
+fn livePageSql(comptime candidate: []const u8) []const u8 {
+    return "SELECT s.created_seq,s.session_ref FROM session s WHERE s.session_ref IN (" ++ candidate ++ ") " ++
+        "AND s.archive_seq IS NOT NULL AND s.created_seq>?1 AND s.created_seq<=?2 AND (" ++ archive_membership.stateSql("s") ++ ")='archiving' " ++
+        "ORDER BY s.created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit});
+}
+
 pub const live_active_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session @index(session_tab) WHERE archive_seq IS NULL AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
     .Args = struct { after: u64, ceiling: u64 },
@@ -99,14 +107,21 @@ pub const live_active_page = rsql.Read(.{
     .cardinality = .each,
 });
 
-pub const live_archiving_page = rsql.Read(.{
-    .sql = "SELECT s.created_seq,s.session_ref FROM session s WHERE s.session_ref IN (" ++ archive_membership.archiving_candidates_sql ++ ") " ++
-        "AND s.archive_seq IS NOT NULL AND s.created_seq>?1 AND s.created_seq<=?2 AND (" ++ archive_membership.stateSql("s") ++ ")='archiving' " ++
-        "ORDER BY s.created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+pub const live_turn_source = livePageSql(archive_membership.turn_candidates_sql);
+pub const live_action_source = livePageSql(archive_membership.unaccepted_action_candidates_sql);
+
+pub const live_turn_page = rsql.Read(.{
+    .sql = live_turn_source,
     .Args = struct { after: u64, ceiling: u64 },
     .Row = ListPage.Row,
     .cardinality = .each,
-    .compound = true,
+});
+
+pub const live_action_page = rsql.Read(.{
+    .sql = live_action_source,
+    .Args = struct { after: u64, ceiling: u64 },
+    .Row = ListPage.Row,
+    .cardinality = .each,
 });
 
 const workspace_list_page = rsql.Read(.{
@@ -146,31 +161,40 @@ const LiveCandidates = struct {
 
 const LivePages = struct {
     active: LiveCandidates = .{},
-    archiving: LiveCandidates = .{},
+    turn: LiveCandidates = .{},
+    action: LiveCandidates = .{},
 };
 
-/// Merges the two live statements by created_seq and keeps the first page. Each statement holds its
-/// first list_limit rows, so the first page of the union is complete, and `more` is exact.
+/// Merges the three live statements by created_seq and keeps the first page. Each statement holds its
+/// first list_limit rows, so the first page of the union is complete. A Session can be in both archiving
+/// candidate sets; created_seq is unique per Session, so its two rows are adjacent and the second is dropped.
+/// `more` is exact: it is set only when a further distinct Session follows the page.
 fn mergeLive(live: *const LivePages) !ListPage {
     if (live.active.failure) |err| return err;
-    if (live.archiving.failure) |err| return err;
+    if (live.turn.failure) |err| return err;
+    if (live.action.failure) |err| return err;
+    const lists = [_]*const LiveCandidates{ &live.active, &live.turn, &live.action };
+    var cursor = [_]usize{ 0, 0, 0 };
     var page: ListPage = .{};
-    var a: usize = 0;
-    var b: usize = 0;
-    while (page.count < session_list.session_list_page_size and (a < live.active.count or b < live.archiving.count)) {
-        const take_active = b == live.archiving.count or (a < live.active.count and live.active.seqs[a] < live.archiving.seqs[b]);
-        if (take_active) {
-            page.refs[page.count] = live.active.refs[a];
-            page.last = live.active.seqs[a];
-            a += 1;
-        } else {
-            page.refs[page.count] = live.archiving.refs[b];
-            page.last = live.archiving.seqs[b];
-            b += 1;
+    while (true) {
+        var chosen: ?usize = null;
+        for (lists, 0..) |list, index| {
+            if (cursor[index] == list.count) continue;
+            if (chosen == null or list.seqs[cursor[index]] < lists[chosen.?].seqs[cursor[chosen.?]]) chosen = index;
         }
-        page.count += 1;
+        const index = chosen orelse break;
+        const seq = lists[index].seqs[cursor[index]];
+        if (!(page.count > 0 and seq == page.last)) {
+            if (page.count == session_list.session_list_page_size) {
+                page.more = true;
+                break;
+            }
+            page.refs[page.count] = lists[index].refs[cursor[index]];
+            page.last = seq;
+            page.count += 1;
+        }
+        cursor[index] += 1;
     }
-    page.more = a < live.active.count or b < live.archiving.count;
     return page;
 }
 
@@ -269,7 +293,8 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
         a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
     else if (live_tab) {
         a.readEach(live_active_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.active);
-        a.readEach(live_archiving_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.archiving);
+        a.readEach(live_turn_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.turn);
+        a.readEach(live_action_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.action);
     } else a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
     try store_access.runAs(a, error.SessionReadFailed);
     if (live_tab) page = try mergeLive(&live);

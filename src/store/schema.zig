@@ -2070,6 +2070,17 @@ pub fn partialIndex(comptime name: []const u8) ?Index {
     }
 }
 
+/// Whether the column `column` of table `table` admits NULL.
+pub fn columnNullable(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |found| if (std.mem.eql(u8, found.name, column)) return found.nullable;
+        }
+        @compileError("schema: no column " ++ table ++ "." ++ column);
+    }
+}
+
 /// The MySQL generated column that a `.leading` partial index is built on, as the DDL names it.
 pub fn leadingColumnName(comptime index: Index) []const u8 {
     return leadingColumn(index);

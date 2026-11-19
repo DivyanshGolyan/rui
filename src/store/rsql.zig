@@ -1430,7 +1430,7 @@ const Parser = struct {
             const index = p.next();
             try p.expectSymbol(")");
             if (alias.kind != .word or index.kind != .word) return p.refuseWith("rsql: @in_index takes an alias and an index name");
-            if (schema.partialIndex(index.text) == null) return p.refuseWith("rsql: @in_index names no partial index " ++ index.text);
+            if (inIndexRefusal(index.text)) |message| return p.refuseWith(message);
             return .other;
         }
         if (std.mem.eql(u8, marker_name, "session")) {
@@ -1976,7 +1976,8 @@ fn expressionMarker(comptime name: []const u8) ?ExpressionMarker {
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "after")) return renderAfterSqlite(arguments, text);
     if (std.mem.eql(u8, name, "in_index")) {
-        const index = comptime schema.partialIndex(arguments[1]) orelse @compileError("rsql: @in_index names no partial index: " ++ text);
+        if (comptime inIndexRefusal(arguments[1])) |message| @compileError(message ++ ": " ++ text);
+        const index = comptime schema.partialIndex(arguments[1]).?;
         return "(" ++ qualify(arguments[0], index.table, index.where.?) ++ ")";
     }
     const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
@@ -2161,6 +2162,17 @@ fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const 
     }
 }
 
+/// Why `@in_index(alias, name)` is refused, or null when it is legal. A partial index must exist, and its
+/// first column must be NOT NULL: the MySQL form tests that column, which equals the index predicate only then.
+fn inIndexRefusal(comptime name: []const u8) ?[]const u8 {
+    comptime {
+        const index = schema.partialIndex(name) orelse return "rsql: @in_index names no partial index " ++ name;
+        const first = columnName(index.columns[0]);
+        if (schema.columnNullable(index.table, first)) return "rsql: @in_index needs the first column " ++ first ++ " of " ++ name ++ " NOT NULL; a nullable first column makes its MySQL test differ from the index predicate";
+        return null;
+    }
+}
+
 /// The rows of the partial index `index` as MySQL states them for the row aliased `alias`: a seek on its
 /// `_lead` column when it has one, otherwise its key part (`.unique_when`), otherwise its predicate.
 fn inIndexMysql(comptime alias: []const u8, comptime index: schema.Index) []const u8 {
@@ -2272,7 +2284,9 @@ const MysqlRenderer = struct {
         const arguments = argumentRanges(r.tokens, at + 1, end);
         if (std.mem.eql(u8, name, "in_index")) {
             if (arguments.len != 2 or arguments[0][1] != arguments[0][0] + 1 or arguments[1][1] != arguments[1][0] + 1) return r.refuse("rsql: @in_index takes an alias and an index name");
-            const index = schema.partialIndex(r.tokens[arguments[1][0]].text) orelse return r.refuse("rsql: @in_index names no partial index " ++ r.tokens[arguments[1][0]].text);
+            const name = r.tokens[arguments[1][0]].text;
+            if (inIndexRefusal(name)) |message| return r.refuse(message);
+            const index = schema.partialIndex(name).?;
             r.emit(comptime inIndexMysql(r.tokens[arguments[0][0]].text, index));
             return end + 1;
         }
@@ -3895,6 +3909,11 @@ test "@in_index states a partial index's rows: its predicate on SQLite, its seek
     try std.testing.expectEqualStrings(
         "SELECT a.action_id FROM action_operation a WHERE (a.sender_handle IS NOT NULL)",
         comptime mysqlRendering("SELECT a.action_id FROM action_operation a WHERE @in_index(a, action_operation_sender_handle)").rendered.prepared(),
+    );
+    // session_obligation_parent is partial, but its first column parent_ref is nullable: refused.
+    try std.testing.expectEqualStrings(
+        "rsql: @in_index needs the first column parent_ref of session_obligation_parent NOT NULL; a nullable first column makes its MySQL test differ from the index predicate",
+        comptime statementError(.read, "SELECT s.session_ref FROM session s WHERE @in_index(s, session_obligation_parent)", struct { id: u64 }, struct { session_ref: u64 }).?,
     );
     try std.testing.expectEqualStrings(
         "rsql: @in_index names no partial index turn_session_latest",
