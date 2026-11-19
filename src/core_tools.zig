@@ -43,7 +43,7 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
 }
 
 pub const read_action_max_argument_bytes = 4096;
-pub const ReadAction = struct { action: u64, offset: u64 = 0 };
+pub const ReadAction = struct { action: u64, offset: u64 = 0, after: u64 = 0 };
 
 pub fn checkReadAction(arena: std.mem.Allocator, bytes: []const u8, out: *ReadAction) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > read_action_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
@@ -52,7 +52,7 @@ pub fn checkReadAction(arena: std.mem.Allocator, bytes: []const u8, out: *ReadAc
         else => return refused("the arguments must be one well-formed JSON object without duplicate fields"),
     };
     if (root != .object) return refused("the arguments must be one JSON object");
-    if (unknownField(root.object, &.{ "action", "offset" })) |name| return refusedField(arena, name, "is not a read_action field");
+    if (unknownField(root.object, &.{ "action", "offset", "after" })) |name| return refusedField(arena, name, "is not a read_action field");
     const action = root.object.get("action") orelse return refused("action is required");
     if (action != .string) return refused("action must be a positive decimal string");
     const id = canonicalActionNumber(action.string) orelse return refused("action must be a canonical decimal string at most 9223372036854775807");
@@ -63,7 +63,12 @@ pub fn checkReadAction(arena: std.mem.Allocator, bytes: []const u8, out: *ReadAc
         offset = canonicalActionNumber(cursor.string) orelse return refused("offset must be a canonical decimal string");
         if (offset > @import("content_string.zig").max_bytes) return refused("offset exceeds the Content byte bound");
     }
-    out.* = .{ .action = id, .offset = offset };
+    var after: u64 = 0;
+    if (root.object.get("after")) |cursor| {
+        if (cursor != .string) return refused("after must be a nonnegative decimal string");
+        after = canonicalActionNumber(cursor.string) orelse return refused("after must be a canonical decimal string at most 9223372036854775807");
+    }
+    out.* = .{ .action = id, .offset = offset, .after = after };
     return .accepted;
 }
 
@@ -258,18 +263,20 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     }
     if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
         return .{ .rejected = reason };
-    if (protocol.missingCreatingSetting(configuration, inherits_parent)) |name|
+    if (protocol.missingCreatingSetting(configuration)) |name|
         return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
     if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
         return refused("spec.workspace must be a Workspace path");
-    if (configuration.model.value.len == 0) return refused("spec.model must be a model name");
+    if (configuration.model.state == .value and configuration.model.value.len == 0) return refused("spec.model must be a model name");
     if (configuration.reasoning_effort.state == .value and std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
         return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
-    const tokens = std.fmt.parseInt(u64, configuration.compaction_trigger.value.slice(), 10) catch return refused("spec.compactAt must be a positive number of tokens");
-    if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
-    if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
+    if (configuration.compaction_trigger.state == .value) {
+        const tokens = std.fmt.parseInt(u64, configuration.compaction_trigger.value.slice(), 10) catch return refused("spec.compactAt must be a positive number of tokens");
+        if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
+    }
+    if (configuration.permission_mode.state == .value and !configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
         return refused("spec.permissionMode must be ask or bypass");
     if (configuration.label.state == .value and !protocol.validLabel(configuration.label.value.slice()))
         return refused("spec.label must be one nonblank line of UTF-8");
@@ -444,31 +451,118 @@ test "a start_agent task at its bound is accepted however it is escaped, and one
     }
 }
 
-test "core_tools start_agent requires every required spec field and accepts null effort" {
-    const fields = [_][]const u8{ "model", "effort", "compactAt", "tools", "permissionMode" };
-    const values = [_][]const u8{ "\"custom\"", "null", "18446744073709551615", "[]", "\"ask\"" };
-    for (0..fields.len + 1) |omitted| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-        var json: std.Io.Writer.Allocating = .init(allocator);
-        try json.writer.writeAll("{\"task\":\"read\",\"attached\":true,\"spec\":{");
-        var separator: []const u8 = "";
-        for (fields, values, 0..) |field, value, index| {
-            if (index == omitted) continue;
-            try json.writer.print("{s}\"{s}\":{s}", .{ separator, field, value });
-            separator = ",";
+test "core_tools sparse specs preserve every omitted explicit and defaulted Host setting" {
+    const fields = .{
+        .{ "effort", "reasoning_effort", "\"low\"", 3 },
+        .{ "compactAt", "compaction_trigger", "18446744073709551615", 3 },
+        .{ "tools", "tools", "[]", 2 },
+        .{ "loadedTools", "loaded_tools", "[]", 2 },
+        .{ "permissionMode", "permission_mode", "\"ask\"", 2 },
+    };
+    for (0..144) |combination| {
+        var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer memory.deinit();
+        const arena = memory.allocator();
+        var json: std.Io.Writer.Allocating = .init(arena);
+        try json.writer.writeByte('{');
+        const model_present = combination & 1 != 0;
+        if (model_present) try json.writer.writeAll("\"model\":\"custom\"");
+        var separator: []const u8 = if (model_present) "," else "";
+        var selector = combination / 2;
+        inline for (fields) |field| {
+            const state = selector % field[3];
+            selector /= field[3];
+            if (state != 0) {
+                try json.writer.print("{s}\"{s}\":{s}", .{ separator, field[0], if (state == 2) "null" else field[2] });
+                separator = ",";
+            }
         }
-        try json.writer.writeAll("}}");
-        const start = try allocator.create(StartAgent);
-        const result = try checkStartAgent(allocator, json.written(), start);
-        if (omitted < fields.len) {
-            try std.testing.expect(result == .rejected);
-            try std.testing.expect(std.mem.indexOf(u8, result.rejected, fields[omitted]) != null);
-        } else {
+        try json.writer.writeByte('}');
+        const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena, json.written(), .{})).object;
+        const configuration = try arena.create(wire_request.Configuration);
+        const direct_check = try parseAgentSpec(arena, spec, configuration);
+        if (model_present) {
+            try std.testing.expect(direct_check == .accepted);
+        } else try std.testing.expectEqualStrings("spec.model is required", direct_check.rejected);
+        const start = try arena.create(StartAgent);
+        const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{json.written()});
+        const presets = [_]Preset{.{ .name = "review", .spec = spec }};
+        for ([_]bool{ false, true }) |preset| {
+            const result = if (preset)
+                try checkStartAgentWithPresets(arena, "{\"task\":\"read\",\"attached\":true,\"preset\":\"review\"}", &presets, start)
+            else
+                try checkStartAgent(arena, arguments, start);
+            if (!model_present) {
+                try std.testing.expectEqualStrings("spec.model is required", result.rejected);
+                continue;
+            }
             try std.testing.expect(result == .accepted);
-            try std.testing.expectEqual(.explicit_null, start.configuration.reasoning_effort.state);
-            try std.testing.expectEqualStrings("18446744073709551615", start.configuration.compaction_trigger.value.slice());
+            selector = combination / 2;
+            const model_state: protocol.FieldState = if (model_present) .value else .omitted;
+            try std.testing.expectEqual(model_state, configuration.model.state);
+            try std.testing.expectEqual(model_state, start.configuration.model.state);
+            inline for (fields) |field| {
+                const state = selector % field[3];
+                selector /= field[3];
+                const expected: protocol.FieldState = switch (state) {
+                    0 => .omitted,
+                    1 => .value,
+                    2 => .explicit_null,
+                    else => unreachable,
+                };
+                const direct = &@field(configuration, field[1]);
+                const agent = &@field(start.configuration, field[1]);
+                try std.testing.expectEqual(expected, direct.state);
+                try std.testing.expectEqual(expected, agent.state);
+                if (expected == .value) {
+                    if (comptime std.mem.eql(u8, field[1], "tools") or std.mem.eql(u8, field[1], "loaded_tools")) {
+                        try std.testing.expectEqual(@as(u8, 0), direct.count);
+                        try std.testing.expectEqual(@as(u8, 0), agent.count);
+                    } else {
+                        const value = if (comptime std.mem.eql(u8, field[1], "reasoning_effort")) "low" else if (comptime std.mem.eql(u8, field[1], "permission_mode")) "ask" else field[2];
+                        try std.testing.expectEqualStrings(value, direct.value.slice());
+                        try std.testing.expectEqualStrings(value, agent.value.slice());
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "core_tools sparse specs leave Workspace completeness to Host and preserve inherited bindings" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const configuration = try arena.create(wire_request.Configuration);
+    const start = try arena.create(StartAgent);
+    const cases = [_]struct { spec: []const u8, direct: ?[]const u8 = null, agent: ?[]const u8 = null }{
+        .{ .spec = "{}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":null}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":\"\"}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":\"custom\"}" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"]}" },
+        .{ .spec = "{\"tools\":[\"bash\"]}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"],\"workspace\":\"/\"}", .agent = "spec.workspace" },
+        .{ .spec = "{\"model\":\"custom\",\"workspace\":\"\"}", .direct = "spec.workspace", .agent = "spec.workspace" },
+        .{ .spec = "{\"model\":\"custom\",\"provider\":\"openai\"}", .agent = "spec.provider" },
+        .{ .spec = "{\"model\":\"custom\",\"parent\":\"k7m2qx\"}", .direct = "spec.parent", .agent = "spec.parent" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":null}", .direct = "spec.tools", .agent = "spec.tools" },
+        .{ .spec = "{\"model\":\"custom\",\"loadedTools\":null}", .direct = "spec.loadedTools", .agent = "spec.loadedTools" },
+        .{ .spec = "{\"model\":\"custom\",\"permissionMode\":null}", .direct = "spec.permissionMode", .agent = "spec.permissionMode" },
+        .{ .spec = "{\"model\":\"custom\",\"compactAt\":0}", .direct = "spec.compactAt", .agent = "spec.compactAt" },
+        .{ .spec = "{\"model\":\"custom\",\"permissionMode\":\"never\"}", .direct = "spec.permissionMode", .agent = "spec.permissionMode" },
+        .{ .spec = "{\"model\":\"custom\",\"effort\":\"ultra\"}", .direct = "spec.effort", .agent = "spec.effort" },
+    };
+    for (cases) |case| {
+        const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena, case.spec, .{})).object;
+        const direct = try parseAgentSpec(arena, spec, configuration);
+        const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{case.spec});
+        const agent = try checkStartAgent(arena, arguments, start);
+        for ([_]StartAgentCheck{ direct, agent }, [_]?[]const u8{ case.direct, case.agent }) |result, field| {
+            if (field) |name| {
+                try std.testing.expect(result == .rejected);
+                try std.testing.expect(std.mem.startsWith(u8, result.rejected, name));
+            } else try std.testing.expect(result == .accepted);
         }
     }
 }
@@ -849,7 +943,10 @@ test "start_agent spec schema covers every noninherited Session setting" {
         if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider"))
             try std.testing.expect(properties.contains(entry.spec));
     }
-    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
+    const preferences = properties.get("preferences").?.object;
+    try std.testing.expect(preferences.get("properties").?.object.contains("reasoning_effort"));
+    try std.testing.expect(preferences.get("properties").?.object.contains("permission_mode"));
+    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 1, properties.count());
 }
 
 test "read_action accepts only own-Session bounded canonical decimal arguments" {
@@ -861,11 +958,18 @@ test "read_action accepts only own-Session bounded canonical decimal arguments" 
     try std.testing.expectEqual(ReadAction{ .action = 42 }, read);
     try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"9223372036854775807\",\"offset\":\"1073737728\"}", &read) == .accepted);
     try std.testing.expectEqual(ReadAction{ .action = std.math.maxInt(i64), .offset = @import("content_string.zig").max_bytes }, read);
+    try std.testing.expect(try checkReadAction(allocator, "{\"action\":\"1\",\"after\":\"16\"}", &read) == .accepted);
+    try std.testing.expectEqual(@as(u64, 16), read.after);
     for ([_][]const u8{
-        "not JSON",                             "null",                                         "[]",                                        "{}",                                    "{\"action\":0}",                                       "{\"action\":null}",
-        "{\"action\":\"0\"}",                   "{\"action\":\"01\"}",                          "{\"action\":\"\"}",                         "{\"action\":\"+1\"}",                   "{\"action\":\"-1\"}",                                  "{\"action\":\"1.0\"}",
-        "{\"action\":\" 1\"}",                  "{\"action\":\"1a\"}",                          "{\"action\":\"9223372036854775808\"}",      "{\"action\":\"18446744073709551616\"}", "{\"action\":\"1\",\"offset\":0}",                      "{\"action\":\"1\",\"offset\":\"00\"}",
-        "{\"action\":\"1\",\"offset\":\"-1\"}", "{\"action\":\"1\",\"offset\":\"1073737729\"}", "{\"action\":\"1\",\"session\":\"k7m2qx\"}", "{\"action\":\"1\",\"action\":\"2\"}",   "{\"action\":\"1\",\"offset\":\"0\",\"offset\":\"0\"}",
+        "{\"action\":\"1\",\"after\":\"01\"}",   "{\"action\":\"1\",\"after\":\"9223372036854775808\"}", "{\"action\":\"1\",\"after\":0}",
+        "not JSON",                              "null",                                                 "[]",
+        "{}",                                    "{\"action\":0}",                                       "{\"action\":null}",
+        "{\"action\":\"0\"}",                    "{\"action\":\"01\"}",                                  "{\"action\":\"\"}",
+        "{\"action\":\"+1\"}",                   "{\"action\":\"-1\"}",                                  "{\"action\":\"1.0\"}",
+        "{\"action\":\" 1\"}",                   "{\"action\":\"1a\"}",                                  "{\"action\":\"9223372036854775808\"}",
+        "{\"action\":\"18446744073709551616\"}", "{\"action\":\"1\",\"offset\":0}",                      "{\"action\":\"1\",\"offset\":\"00\"}",
+        "{\"action\":\"1\",\"offset\":\"-1\"}",  "{\"action\":\"1\",\"offset\":\"1073737729\"}",         "{\"action\":\"1\",\"session\":\"k7m2qx\"}",
+        "{\"action\":\"1\",\"action\":\"2\"}",   "{\"action\":\"1\",\"offset\":\"0\",\"offset\":\"0\"}",
     }) |arguments| try std.testing.expect(try checkReadAction(allocator, arguments, &read) == .rejected);
     const maximum = try allocator.alloc(u8, read_action_max_argument_bytes);
     @memset(maximum, ' ');

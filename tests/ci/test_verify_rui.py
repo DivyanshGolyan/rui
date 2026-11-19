@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import types
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,24 @@ from terminal_screen import Cell, Cursor, Frame
 def committed(text, columns=100, lines=20):
     rows = tuple(tuple(Cell(char, None, False) for char in row) for row in text.rstrip("\n").split("\n"))
     return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
+
+
+def sidebar_rows(label, layout):
+    layouts = {
+        "chat": ("─" * 40 + "┼" + "─" * 99, "│ gpt-6.1-sol · low"),
+        "settings": ("─" * 40 + "┤" + " " * 99, "│ Notifications"),
+        "ascii-chat": ("-" * 40 + "+" + "-" * 99, "| gpt-6.1-sol . low"),
+        "ascii-settings": ("-" * 40 + "+" + " " * 99, "| Notifications"),
+        "overview": ("─" * 46, ""),
+        "wide-overview": ("─" * 140, ""),
+        "ascii-overview": ("-" * 46, ""),
+        "ascii-wide-overview": ("-" * 140, ""),
+    }
+    rule, right = layouts[layout]
+    row = "     Settings  " + label
+    if right:
+        row = row.ljust(40) + right
+    return rule + "\n" + row
 
 
 class VerifyRuiTest(unittest.TestCase):
@@ -86,6 +105,55 @@ class VerifyRuiTest(unittest.TestCase):
                     expected += ["--test-retry-waits-ms", "50,100,150"]
                 self.assertEqual(captured["argv"], expected)
                 self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+
+    def test_image_consent_fixture_emits_one_typed_image_call_then_summary(self):
+        from host_process import wait_for
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            untrusted = root / "candidate/tests/integration"
+            untrusted.mkdir(parents=True)
+            (untrusted / "model_fixture.py").write_text('raise RuntimeError("candidate fixture loaded")\n')
+            (root / "run.json").write_text(json.dumps({
+                "id": "image-consent-test", "scratch": str(scratch),
+                "home": str(scratch / "home"), "store": str(scratch / "store"),
+                "project": str(scratch), "binary": "/unused/rui",
+                "source": str(root / "candidate"),
+            }))
+            with subprocess.Popen([sys.executable, str(SCRIPT), "_fixture", str(root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) as provider:
+                try:
+                    port = scratch / "fixture.port"
+                    wait_for(lambda: port.exists() or provider.poll() is not None,
+                             "image fixture port or child exit", timeout=60)
+                    self.assertTrue(port.exists(), "image fixture did not start")
+                    url = "http://127.0.0.1:" + port.read_text() + "/responses"
+                    user = {"role": "user", "content": "Review with an image consent check."}
+
+                    def request(items):
+                        body = json.dumps({"input": items}).encode()
+                        with urllib.request.urlopen(urllib.request.Request(url, body,
+                                {"Content-Type": "application/json"}), timeout=60) as reply:
+                            return [json.loads(line[6:]) for line in reply.read().decode().splitlines()
+                                    if line.startswith("data: {")]
+
+                    events = request([user])
+                    calls = [event["item"] for event in events
+                             if event.get("type") == "response.output_item.done"
+                             and event.get("item", {}).get("type") == "function_call"]
+                    self.assertEqual(len(calls), 1, events)
+                    self.assertEqual(calls[0]["name"], "read_image")
+                    self.assertEqual(json.loads(calls[0]["arguments"]), {"path": "design/checkout.png"})
+                    request([user, {"type": "function_call_output", "call_id": calls[0]["call_id"],
+                                    "output": "Image read denied."}])
+                    records = [json.loads(line) for line in (root / "evidence/provider.jsonl").read_text().splitlines()]
+                    self.assertEqual([row["kind"] for row in records if "kind" in row],
+                                     ["image-consent-call", "tool-summary"])
+                finally:
+                    provider.terminate()
+                    provider.communicate(timeout=60)
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
@@ -158,6 +226,7 @@ class VerifyRuiTest(unittest.TestCase):
                         patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
                         contextlib.redirect_stdout(io.StringIO()):
                     new(args)
+                    self.assertEqual(sys.path[0], str(SCRIPT.parents[4] / "tests/integration"))
                 self.assertEqual(sent_to, [] if no_sessions else ["fybw8c"])
                 self.assertEqual(len(started), 0 if no_sessions else 2)
                 saved = json.loads(next((root / "cache/runs").glob("*/run.json")).read_text())
@@ -172,6 +241,7 @@ class VerifyRuiTest(unittest.TestCase):
         listed = {"sessions": [{"reference": sid} for sid in normal.values()]}
         cases = [
             ("normal", {"sessions": normal, "no_sessions": False}, listed, 0, True),
+            ("tree build", {"sha": "tree-" + "a" * 64, "sessions": normal}, listed, 0, True),
             ("legacy normal", {"sessions": normal}, listed, 0, True),
             ("intentional empty", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 0, True),
             ("unmarked empty", {"sessions": {}}, {"sessions": []}, 0, False),
@@ -231,7 +301,7 @@ class VerifyRuiTest(unittest.TestCase):
                         return types.SimpleNamespace(returncode=0, stdout='{"instance":"host"}', stderr="")
                     run.rui_cmd = unittest.mock.Mock(side_effect=command)
                     replacements = {"Run": lambda _path: run, "sha256": lambda _path: "hash",
-                        "load_build": lambda _sha: {"files_sha256": {"rui": "hash"}},
+                        "load_build": lambda identifier: {"sha": identifier, "head": "sha", "files_sha256": {"rui": "hash"}},
                         "process_start": lambda _pid: ("start",), "accessibility": lambda: "unused",
                         "append_jsonl": lambda _path, report: reports.append(report)}
                     with patch.dict(doctor.__globals__, replacements), \
@@ -247,6 +317,24 @@ class VerifyRuiTest(unittest.TestCase):
                     self.assertEqual(reports[0]["verdict"], "PASS" if expected else "ISSUES")
                     self.assertEqual(sum(call.args[:2] == ("session", "list")
                                          for call in run.rui_cmd.call_args_list), 1)
+
+    def test_tap_resolves_recorded_build_in_run_cache(self):
+        tap = runpy.run_path(str(SCRIPT))["tap_main"]
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "cache"
+            for identifier in ("a" * 40, "tree-" + "b" * 64):
+                with self.subTest(identifier=identifier):
+                    build = cache / "builds" / identifier
+                    build.mkdir(parents=True)
+                    (build / "manifest.json").write_text(json.dumps({"screen_library": identifier}))
+                    run = types.SimpleNamespace(root=cache / "runs" / "run",
+                                                meta={"sha": identifier, "source": "/source"})
+                    def require_screen(record):
+                        self.assertEqual(record["screen_library"], identifier)
+                        raise RuntimeError("build resolved")
+                    with patch.dict(tap.__globals__, {"Run": lambda _path: run, "require_screen": require_screen}), \
+                            self.assertRaisesRegex(RuntimeError, "build resolved"):
+                        tap(types.SimpleNamespace(run="run"))
 
     def test_scratch_root_follows_host_platform(self):
         for platform, expected in (("darwin", "/private/tmp"), ("linux", "/tmp")):
@@ -324,9 +412,9 @@ class FramesTest(unittest.TestCase):
 
     def test_full_overview_rejects_blank_wide_chat_and_selects_drawn_row(self):
         is_overview = self.helper["is_full_overview"]
-        split = committed("+ New Session".ljust(40) + "│ chat\nSessions Archived\nSettings", columns=140)
+        split = committed("+ New chat".ljust(40) + "│ chat\nChats  Archived\nSettings", columns=140)
         self.assertFalse(is_overview(split))
-        full = committed("+ New Session".ljust(41) + " \nSessions Archived\n Root\nSettings", columns=140)
+        full = committed("+ New chat".ljust(41) + " \nChats  Archived\n Root\nSettings", columns=140)
         self.assertTrue(is_overview(full))
         captured = []
         capture = types.SimpleNamespace(style=lambda text: types.SimpleNamespace(bold=text == "Root"))
@@ -335,19 +423,19 @@ class FramesTest(unittest.TestCase):
         self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
         keys = self.helper["KEYS"]
         self.assertEqual(captured, [keys["Home"] + keys["S-Down"] * 2])
-        gap = committed("+ New Session\nSessions Archived\n\n Root\nSettings", columns=140)
+        gap = committed("+ New chat\nChats  Archived\n\n Root\nSettings", columns=140)
         terminal.frame = gap
         self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
         self.assertEqual(captured[-1], keys["Home"] + keys["S-Down"] * 2)
-        terminal.frame = committed("+ New Session\nSessions Archived\n↑ 1 needs you\n Root\nSettings", columns=140)
+        terminal.frame = committed("+ New chat\nChats  Archived\n↑ 1 needs you\n Root\nSettings", columns=140)
         with self.assertRaisesRegex(self.helper["FrameFailure"], "scrolled"):
             self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
 
     def test_full_overview_is_required_at_readiness_and_capture(self):
         state = {"name": "fold", "full_overview": True, "expect": ["Root"]}
-        full = committed("+ New Session".ljust(41) + " \nSessions  Archived\n Root\nSettings", columns=140)
+        full = committed("+ New chat".ljust(41) + " \nChats  Archived\n Root\nSettings", columns=140)
         for separator in ("│", "|"):
-            split = committed("+ New Session".ljust(40) + separator + " chat\nSessions  Archived\n Root\nSettings", columns=140)
+            split = committed("+ New chat".ljust(40) + separator + " chat\nChats  Archived\n Root\nSettings", columns=140)
             observed = []
             def wait(predicate, *_args, **_kwargs):
                 for frame in (split, full):
@@ -375,7 +463,7 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(narrow["expect"], ["Allow once", "Deny", "alt+i info"])
             self.assertIn("Opening", narrow["absent"])
             self.assertEqual(before["expect_viewport"], {})
-            split = committed("+ New Session".ljust(40) + "│ chat\nQuestion leaf\nAllow once\nSettings", columns=140)
+            split = committed("+ New chat".ljust(40) + "│ chat\nQuestion leaf\nAllow once\nSettings", columns=140)
             outcomes = []
             terminal = types.SimpleNamespace(frame=split, wait=lambda predicate, *_a, **_k:
                 outcomes.append(predicate(types.SimpleNamespace(frame=split, completed=split.text))))
@@ -510,6 +598,17 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual(resume.call_count, 2)
                 self.assertTrue(all(call.args[1] is False for call in resume.call_args_list))
 
+    def test_empty_composer_wait_with_clipped_split_rule(self):
+        for bar in ("│", "|"):
+            for draft in ("", " retained | draft"):
+                frame = committed("witness".ljust(40) + bar + " ›" + draft)._replace(cursor=Cursor(43, 0), visible=True)
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.append(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame))))
+                with self.subTest(bar=bar, draft=draft):
+                    self.helper["frame_wait"](None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [not draft])
+
     def test_empty_composer_wait_rejects_pre_enter_draft_and_accepts_feed_message(self):
         wait = self.helper["frame_wait"]
         samples = [committed("› witness"), committed("› witness\n›"), committed("› witness\n›")]
@@ -528,6 +627,30 @@ class FramesTest(unittest.TestCase):
             data["states"][0].update(steps=[step], expect=[])
             with self.assertRaisesRegex(ValueError, "empty_composer"):
                 self.helper["validate_scenario"](data)
+
+    def test_frame_glyph_owner_accepts_legacy_stitch_and_ascii_in_both_layouts(self):
+        from terminal_screen import DIVIDER_GLYPHS, RULE_GLYPHS
+        wait = self.helper["frame_wait"]
+        ready = self.helper["frame_chat_ready"]
+        for rule, divider in zip(RULE_GLYPHS, DIVIDER_GLYPHS):
+            for split in (False, True):
+                prefix = f"sidebar {divider} " if split else ""
+                prompt = ">" if divider == "|" else "›"
+                samples = [f"{prefix}{prompt} witness\n{prefix}{prompt}",
+                           f"{prefix}{prompt} witness\n{prefix}{prompt} draft"]
+                frames = [committed(text)._replace(cursor=Cursor(len(prefix) + len(prompt), 1), visible=True)
+                          for text in samples]
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.extend(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame)) for frame in frames))
+                with self.subTest(rule=rule, divider=divider, split=split):
+                    wait(None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [True, False])
+                    chat = "\n".join([prefix + "witness", prefix + rule * 12,
+                                       prefix + prompt + " What shall we work on?", prefix + rule * 12,
+                                       prefix + "model · low"])
+                    self.assertTrue(ready(chat, "witness", empty=True))
+                    self.assertFalse(ready(chat.replace("What shall we work on?", "draft"), empty=True))
 
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
@@ -1190,7 +1313,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -1203,12 +1326,12 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"]}
-        clean = " + New Session\n   Existing conversation  3h\n   Settings"
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"]}
+        clean = " + New chat\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
             for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
-                             ("9xt4vy", "now │"), ("emged6", "7m│ Model")):
+                             ("9xt4vy", "now ┆"), ("emged6", "7m┆ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -1235,14 +1358,34 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        for row in (" ○ 9xt4vy  now │", " ○ emged6  now│ Model", " ○ 000000  2m │chat text"):
+        for row in (" ○ 9xt4vy  now ┆", " ○ emged6  now┆ Model", " ○ 000000  2m ┆chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  now │", " ○ New Session  now │Model",
-                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+        for row in (" ○ New chat  now ┆", " ○ New chat  now ┆Model",
+                    " ○ Existing 9xt4vy  2m ┆chat", " ○ 9xt4vy extra  2m ┆chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
         self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
+
+    def test_raw_id_guard_recognizes_legacy_and_stitched_dividers_in_old_recipes(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        failure = self.helper["frame_row_failure"]
+        for recipe_glyph in DIVIDER_GLYPHS[:2]:
+            pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:" + recipe_glyph + r".*)?$"
+            state = {"name": "read-image-approval", "absent_regex": [pattern]}
+            for divider in DIVIDER_GLYPHS:
+                with self.subTest(recipe=recipe_glyph, frame=divider):
+                    self.assertIsNotNone(failure(state, f" ○ 9xt4vy  now {divider} chat"))
+                    self.assertIsNone(failure(state, f" ○ New chat  now {divider} chat"))
+
+    def test_read_image_raw_id_guard_uses_shared_divider_glyphs(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "read-image-approval")
+        for divider in DIVIDER_GLYPHS:
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, f" ○ 9xt4vy  2s {divider} chat"))
+                self.assertIsNone(self.helper["frame_row_failure"](state, f" ○ Named session  2s {divider} chat"))
 
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1258,21 +1401,21 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now │ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ 9xt4vy  now".ljust(20) + "│ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
-            typed_ready = steps.index({"wait": "Type a task"})
-            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
+            typed_ready = steps.index({"wait": "What shall we work on?"})
+            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New chat", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now │chat"))
+                {"name": name, "absent_sidebar_regex": state["absent_sidebar_regex"]}, " ○ New chat  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
-            self.assertIn("Type a task", state["absent"])
+            self.assertIn("What shall we work on?", state["absent"])
             self.assertIn("Existing conversation", state["expect"])
-            self.assertEqual(state["steps"][-1], {"gone": "Type a task"})
+            self.assertEqual(state["steps"][-1], {"gone": "What shall we work on?"})
         model = states["empty-chat-model-left"]["steps"]
         opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
         typed = model.index({"text": "ter"})
@@ -1292,13 +1435,13 @@ while True:
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         wide, narrow = states["wide-launch"], states["narrow-launch"]
-        self.assertIn({"wait": "+ New Session"}, wide["steps"])
-        self.assertIn({"wait": "Type a task", "min_columns": 100}, wide["steps"])
-        self.assertEqual(wide["expect"], ["Type a task"])
+        self.assertIn({"wait": "+ New chat"}, wide["steps"])
+        self.assertIn({"wait": "What shall we work on?", "min_columns": 100}, wide["steps"])
+        self.assertEqual(wide["expect"], ["What shall we work on?"])
         self.assertIn("enter open", wide["absent"])
         self.assertEqual(narrow["sizes"], [(46, 30)])
-        self.assertEqual(narrow["expect"], ["+ New Session", "Settings"])
-        self.assertIn("Type a task", narrow["absent"])
+        self.assertEqual(narrow["expect"], ["+ New chat", "Settings"])
+        self.assertIn("What shall we work on?", narrow["absent"])
         self.assertIn("enter open", narrow["absent"])
 
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
@@ -1307,10 +1450,10 @@ while True:
         self.assertEqual(state["open"], "overview")
         self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
         self.assertEqual(state["steps"], [
-            {"wait": "+ New Session"},
-            {"wait": "Type a task", "min_columns": 100},
+            {"wait": "+ New chat"},
+            {"wait": "What shall we work on?", "min_columns": 100},
             {"keys": ["Esc"]},
-            {"gone": "Type a task"},
+            {"gone": "What shall we work on?"},
             {"keys": ["End", "Enter"]},
             {"wait": "Rui"}, {"wait": "Notifications"},
         ])
@@ -1366,13 +1509,13 @@ while True:
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name, words in (("stopped", "■ Stopped"),
-                            ("chat-failed", "× Model reply unreadable · ctrl+r retries")):
+        for name, words in (("stopped", "▪ Stopped"),
+                            ("chat-failed", "× The model's reply didn't come through · ctrl+r retries")):
             with self.subTest(state=name):
                 self.assertEqual(states[name]["steps"], [{"wait": words}])
                 self.assertEqual(states[name]["expect"], [words])
         self.assertEqual(states["tools-running"]["expect"],
-                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+                         ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1430,7 +1573,8 @@ while True:
         self.assertIn("code · file", states["slash"]["absent"])
         escape = states["draft-chat-choice-escape"]
         self.assertNotIn("Draft lifecycle", escape["expect"])  # Sidebar is hidden at 46 columns.
-        self.assertIn("alt+i info", escape["expect"])
+        self.assertIn("gpt-6.1-sol", escape["expect"])
+        self.assertIn("alt+i info", escape["absent"])
         self.assertEqual(escape["steps"][-1], {"gone": "enter pick"})
         for suffix, theme, ink in (("", "night", "#a9b6ec"), ("-day", "day", "#1f2d6b")):
             with self.subTest(theme=theme):
@@ -1523,12 +1667,12 @@ while True:
         self.assertEqual(state["sizes"], [(140, 40)])
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
-            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
-            {"wait": "■ Stopped", "timeout": 60},
+            {"wait": "◝ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"wait": "▪ Stopped", "timeout": 60},
         ])
-        self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        self.assertEqual(state["expect"], ["▪ Stopped", "   Stopped"])
         self.assertTrue(state["first_frame"])
-        self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
+        self.assertEqual(state["expect_next"], {"▪ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
         self.assertNotEqual(narrow["open"], state["open"])
@@ -1536,7 +1680,7 @@ while True:
         self.assertEqual(narrow["cast"][0]["messages"], ["Ready."])
         self.assertEqual(narrow["steps"][0], {"send": {"to": narrow["open"], "text": "long bash", "wait": False}})
         self.assertEqual(narrow["steps"][1:], state["steps"][1:])
-        self.assertEqual(narrow["expect"], ["■ Stopped"])
+        self.assertEqual(narrow["expect"], ["▪ Stopped"])
         self.assertIn("ctrl+x stop", narrow["absent"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
@@ -1846,6 +1990,60 @@ while True:
             records = json.loads((root / "out/frames.json").read_text())
         return calls, records
 
+    def test_shot_settle_tracks_commits_and_caps_continuous_repaints(self):
+        terminal_type = self.helper["FrameTerminal"]
+        settle = terminal_type.settle_shot
+        commit = terminal_type._committed
+        for offsets, expected in (([], 300_000_000),
+                                  ([100_000_000, 250_000_000], 550_000_000),
+                                  (list(range(100_000_000, 5_100_000_000, 100_000_000)), 5_000_000_000)):
+            with self.subTest(offsets=len(offsets)), tempfile.TemporaryDirectory() as temp:
+                clock = [0]
+                pending = list(offsets)
+                frame = types.SimpleNamespace(cursor=(0, 0), visible=True, columns=80, lines=24)
+                capture = types.SimpleNamespace(frame=frame, generation=1)
+                terminal = types.SimpleNamespace(capture=capture, last_commit_ns=0, status=None,
+                    process=types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None)), log=Path(temp))
+                class Condition:
+                    def __enter__(self): return self
+                    def __exit__(self, *_args): pass
+                    def notify_all(self): pass
+                    def wait(self, seconds):
+                        end = clock[0] + round(seconds * 1_000_000_000)
+                        if pending and pending[0] <= end:
+                            clock[0] = pending.pop(0)
+                            capture.generation += 1
+                            commit(terminal, None, 0, 0)
+                        else:
+                            clock[0] = end
+                terminal.condition = Condition()
+                with patch.dict(settle.__globals__, {"now_ns": lambda: clock[0]}):
+                    selected = settle(terminal)
+                self.assertIs(selected, capture.frame)
+                self.assertEqual(clock[0], expected)
+                self.assertEqual(terminal.last_commit_ns, offsets[-1] if offsets else 0)
+                if offsets:
+                    events = [json.loads(line) for line in (terminal.log / "frames.jsonl").read_text().splitlines()]
+                    self.assertEqual([event["generation"] for event in events], list(range(2, len(offsets) + 2)))
+
+    def test_shot_settle_respects_exit_and_requires_a_committed_frame(self):
+        settle = self.helper["FrameTerminal"].settle_shot
+        condition = contextlib.nullcontext()
+        terminal = types.SimpleNamespace(condition=condition, status=0, last_commit_ns=None,
+            capture=types.SimpleNamespace(frame=None),
+            process=types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None)))
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "exited"):
+            settle(terminal)
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "no committed frame"):
+            settle(terminal, allow_exit=True)
+
+    def test_ordinary_first_frame_does_not_settle_after_transition(self):
+        scenario = {"sizes": ["100x30"], "states": [{"name": "first", "open": "overview",
+                    "steps": [], "first_frame": True, "expect": []}]}
+        calls, records = self.run_frames_scenario(scenario)
+        self.assertTrue(records[0]["ok"])
+        self.assertLess(calls.index(("steps",)), calls.index(("capture", (100, 30))))
+
     def test_initial_readiness_waits_for_opening_read_before_driving_steps(self):
         cases = [
             (["› Opening…", "›"], None, False, 2),
@@ -1867,19 +2065,19 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
-        listed = " + New Session\n   Settings"
-        self.assertNotIn("Type a task", listed)
+        listed = " + New chat\n   Settings"
+        self.assertNotIn("What shall we work on?", listed)
         def accepts_list(predicate, _description, **_kwargs):
             self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
                             "committed overview list must not require an editor")
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=accepts_list))
         cases = [
             ([listed], None, 1),
-            ([listed.replace("+ New Session", ""), listed], None, 2),
+            ([listed.replace("+ New chat", ""), listed], None, 2),
             ([listed.replace("Settings", ""), listed], None, 2),
             ([listed + " Opening…", listed], None, 2),
             ([listed, listed + " Ready"], "Ready", 2),
-            ([" › Type a task"], None, 1),
+            ([" › What shall we work on?"], None, 1),
             ([" › ChatGPT    API key"], None, 1),
         ]
         for screens, first_wait, count in cases:
@@ -1894,21 +2092,83 @@ while True:
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_accepts_before_and_after_wording(self):
+        def check(predicate, _description, **_kwargs):
+            for label in ("+ New Session", "+ New chat"):
+                with self.subTest(label=label):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=f" {label}\n Settings")))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=f" {label}")))
+            for title, close in (("Sign in to Rui", "[ Close ]"), ("Welcome to Rui", "Close")):
+                screen = f" {title}\n ChatGPT  subscription\n API key  service\n {close}\n"
+                with self.subTest(title=title):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=screen)))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=screen.replace(close, ""))))
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_readiness_wording_domain_uses_one_compatibility_owner(self):
+        owner = self.helper["frame_wording"]
+        contains = self.helper["frame_wording_contains"]
+        groups = [
+            ("What shall we work on?", "Type a task"),
+            ("+ New chat", "+ New Session"),
+            ("○ New chat", "○ New Session"),
+            ("Chats  Archived", "Sessions  Archived"),
+            ("Welcome to Rui", "Sign in to Rui"),
+            ("Sign in to begin.", "Choose an account."),
+            ("Close", "[ Close ]"),
+            ("No chats yet.", "No unarchived Sessions.", "No Sessions yet."),
+            ("No archived chats", "No archived Sessions"),
+            ("The model's reply didn't come through", "Model reply unreadable"),
+            ("That didn't work", "Something went wrong"),
+            ("Your chats keep working while you are away.", "Detached. Host work continues."),
+        ]
+        for group in groups:
+            for expected in group:
+                for displayed in group:
+                    with self.subTest(expected=expected, displayed=displayed):
+                        self.assertIn(displayed, owner(expected))
+                        self.assertTrue(contains(expected, f"prefix {displayed} suffix"))
+                        self.assertFalse(contains(expected, "unrelated text"))
+                        results = []
+                        def wait(predicate, _description, *_args, **_kwargs):
+                            results.append(bool(predicate(types.SimpleNamespace(completed=displayed))))
+                        terminal = types.SimpleNamespace(wait=wait)
+                        self.helper["frame_wait"](None, terminal, expected)
+                        self.helper["frame_wait"](None, terminal, expected, absent=True)
+                        self.assertEqual(results, [True, False])
+        self.assertEqual(owner("a user draft"), {"a user draft"})
+        self.assertFalse(contains("different user draft", "a user draft"))
+        for first, shown in (("+ New chat", "+ New Session"),
+                             ("What shall we work on?", "Type a task"),
+                             ("Welcome to Rui", "Sign in to Rui")):
+            def wait(predicate, _description, **_kwargs):
+                self.assertTrue(predicate(types.SimpleNamespace(completed=f" + New Session\n Settings\n {shown}")))
+            self.helper["frame_initial_ready"](types.SimpleNamespace(wait=wait), first)
+        for expected, displayed in (("No chats yet.", "No unarchived Sessions."),
+                                    ("What shall we work on?", "Type a task")):
+            state = {"name": "compat", "steps": [], "expect": [expected], "absent": []}
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertTrue(pred(types.SimpleNamespace(completed=displayed)))), state)
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_last": expected}, displayed))
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_next": {expected: expected}}, displayed + "\n" + displayed))
+            state["expect"], state["absent"] = [], [expected]
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertFalse(pred(types.SimpleNamespace(completed=displayed)))), state)
+
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
-            '                                  ────────────────────────────────────────────────────────────────────────\n'
-            '                                   Sign in to Rui\n'
-            '                                     Choose account  Credentials stay out of conversations.\n'
+            '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
+            '                                   Welcome to Rui\n'
+            '                                     Sign in to begin. Your sign-in never enters a chat.\n'
             '                                     ChatGPT         Use your subscription\n'
             '                                     API key         OpenAI or a custom Responses API\n'
             '                                     Close           Esc returns\n'
-            '                                     Navigation      Tab / Shift-Tab move. Enter chooses. Esc back.\n'
         )
-        cases = [("", False), ("Sign in to Rui", False), (modal, True),
+        cases = [("", False), ("Welcome to Rui", False), (modal, True),
                  (modal + "Opening…", False),
-                 (" + New Session\n   Settings", True), (" › Type a task", True)]
+                 (" + New chat\n   Settings", True), (" › What shall we work on?", True)]
         cases.extend((modal.replace(label, ""), False) for label in
-                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
+                     ("Welcome to Rui", "ChatGPT", "API key", "Close"))
 
         def check(predicate, _description, **_kwargs):
             for text, expected in cases:
@@ -1918,18 +2178,17 @@ while True:
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
 
     def test_initial_readiness_accepts_grouped_choices_buttons_and_wrapped_footer(self):
-        modal = ("  Sign in to Rui\n"
-                 "    Choose an account. Credentials stay out\n"
-                 "    of conversations.\n"
+        modal = ("  Welcome to Rui\n"
+                 "    Sign in to begin. Your sign-in never enters\n"
+                 "    a chat.\n"
                  "    ChatGPT         Use your subscription\n"
                  "    API key         OpenAI or a custom Responses API\n\n"
-                 "    [ Close ]\n\n"
-                 "    Tab / Shift-Tab move. Enter chooses.\n"
-                 "    Esc back.\n")
+                 "    Close\n\n"
+)
         cases = [(modal, True), (modal + "Opening…", False)]
         cases.extend((modal.replace(marker, ""), False) for marker in
-                     ("Sign in to Rui", "ChatGPT", "API key", "[ Close ]", "Tab / Shift-Tab"))
-        cases.append((modal.replace("[ Close ]", "[ Close"), False))
+                     ("Welcome to Rui", "ChatGPT", "API key", "Close"))
+        cases.append((modal.replace("Close", "Clos"), False))
 
         def check(predicate, _description, **_kwargs):
             for text, expected in cases:
@@ -2095,7 +2354,7 @@ while True:
                     self.assertIn("New Sessions", (out / record["files"]["txt"]).read_text())
 
     def test_background_expectations_validate_before_launch(self):
-        for value in ({"› Type a task": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
+        for value in ({"› What shall we work on?": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
             data = self.scenario()
             data["states"][0]["expect_background"] = value
             self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_background"], value)
@@ -2108,9 +2367,9 @@ while True:
                 self.helper["validate_scenario"](data)
 
     def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
-        marker = "› Type a task"
+        marker = "› What shall we work on?"
         for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
-            for width, prefix in ((140, "sidebar │ "), (46, " ")):
+            for width, prefix in ((140, "sidebar ┆ "), (46, " ")):
                 for bad in (None, 0, len(marker) - 1):
                     with self.subTest(color=color, width=width, bad=bad), tempfile.TemporaryDirectory() as temp:
                         cells = tuple(Cell(char, None, False, bg=color if index != bad else ground)
@@ -2134,6 +2393,22 @@ while True:
                         self.assertEqual(self.helper["frame_background_failure"](
                             {"expect_background": {"missing": "#" + color}}, frame),
                             "missing background specimen 'missing'")
+
+    def test_old_and_new_placeholder_capture_checks_real_background_cells(self):
+        for expected, displayed in (("› What shall we work on?", "› Type a task"),
+                                    ("› Type a task", "› What shall we work on?")):
+            for bad in (False, True):
+                with self.subTest(expected=expected, displayed=displayed, bad=bad), tempfile.TemporaryDirectory() as temp:
+                    cells = tuple(Cell(char, None, False, bg="000000" if bad and index == len(displayed) - 1 else "121933")
+                                  for index, char in enumerate(displayed))
+                    frame = Frame(46, 30, Cursor(2, 3), False, (cells,), "121933", "d4cebf", "d4cebf")
+                    state = {"name": "input", "steps": [], "expect": [expected],
+                             "expect_background": {expected: "#121933"}}
+                    result = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                        types.SimpleNamespace(frame=frame), Path(temp), state, (46, 30), None)
+                    self.assertEqual(result["ok"], not bad)
+                    if bad:
+                        self.assertIn("must have background", result["reason"])
 
     def test_style_expectations_validate_and_check_only_the_span_inside_its_row(self):
         for value in ([], [{"text": "/new", "bold": True}], [{"text": "new", "within": "› /new", "foreground": "#ABCDEF"}]):
@@ -2167,10 +2442,10 @@ while True:
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
-            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped", "■ Stopped"], [None, None]),
-            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+            ("stop-clean", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped", "▪ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped  Stopping…", "▪ Stopped  Stopping…"],
              ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("raw-archive-id", {"steps": [], "absent": ["{session:Archive audit}"]},
              ["Archived tz05sr", "Archived Archive audit"],
@@ -2216,14 +2491,14 @@ while True:
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
-        stale = "■ Stopped\n   Stopped\n   Stopping…\n"
+        stale = "▪ Stopped\n   Stopped\n   Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         terminal = types.SimpleNamespace(frame=committed(stale))
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
-            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped\n   Stopped")))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="▪ Stopped\n   Stopped")))
         terminal.wait = wait
         ready(terminal, {**state, "first_frame": False, "expect_next": {}})
         with tempfile.TemporaryDirectory() as temp:
@@ -2242,7 +2517,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "▪ Stop the slow job  now\n   Old completed answer\n▪ Another Session\n   Stopped\n▪ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
@@ -2250,20 +2525,55 @@ while True:
         states = {state["name"]: state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]}
         for name in ("chat-no-new-session", "chat-sidebar-rows"):
             state = states[name]
-            self.assertIn("+ New Session", state["absent"])
-            self.assertEqual(state["expect_last"], "alt+i info")
+            self.assertIn("+ New chat", state["absent"])
+            self.assertEqual(state["expect_last"], "gpt-6.1-sol")
+            self.assertIn("alt+i info", state["absent"])
         self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
         self.assertIn({"wait": "Schema migration"}, states["chat-no-new-session"]["steps"])
         self.assertEqual(states["chat-sidebar-rows"]["sizes"], [(140, 40)])
         for label in ("Schema migration", "Sidebar chat", "Batch job"):
             self.assertIn(label, states["chat-sidebar-rows"]["expect"])
         failure = self.helper["frame_row_failure"]
-        state = {"expect_last": "alt+i info"}
+        state = {"expect_last": "gpt-6.1-sol"}
         for height in (30, 40):
-            good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
+            good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
+            self.assertIsNotNone(failure(state, good + "   Settings  ┆\n"))
+
+    def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
+        states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+        for state in states:
+            with self.subTest(state=state["name"]):
+                self.assertNotIn("alt+i info", state["expect"])
+                self.assertNotEqual(state.get("expect_last"), "alt+i info")
+                for step in state["steps"]:
+                    if "wait" in step:
+                        self.assertNotIn("alt+i info", step["wait"])
+                        self.assertNotRegex(step["wait"], r"\d+% left")
+        effort = next(state for state in states if state["name"] == "chat-effort")
+        self.assertIn({"wait": "gpt-6.1-sol · low"}, effort["steps"])
+        fresh = next(state for state in states if state["name"] == "chat-footer-below-half")
+        self.assertEqual(fresh["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(fresh["open"], "Context budget witness")
+        self.assertEqual(fresh["cast"][0]["messages"], ["Check context budget"])
+        self.assertEqual(fresh["expect_last"], "gpt-6.1-sol")
+        for text in ("context left", "100% left", "alt+i info"):
+            self.assertIn(text, fresh["absent"])
+
+    def test_panels_chat_info_requires_numeric_context_at_both_sizes(self):
+        states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+        state = next(state for state in states if state["name"] == "panels-chat-info")
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertIn("Context", state["expect"])
+        self.assertNotIn("Context", state["absent"])
+        self.assertIn("unknown of", state["absent"])
+        for text in ("Allowed tools", "Copy last answer", "The retry draft is ready.", "› keep this retry draft"):
+            self.assertIn(text, state["expect"])
+        failure = self.helper["frame_row_failure"]
+        self.assertIsNone(failure(state, "Context         18 of 244,800"))
+        self.assertIsNotNone(failure(state, "Context         unknown of 244,800"))
+        self.assertIsNotNone(failure(state, "Model           gpt-6.1-sol"))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]
@@ -2547,247 +2857,229 @@ class EvidencePublicationTest(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, "invalid capture file"):
                     self.helper["publication_frames"](out)
 
-    def publish(self, out, pr="1549", ssh=False, **options):
-        """Exercise the real CLI boundary with a fake gh executable on PATH."""
-        fake = out.parent / "fake-gh"
-        fake.mkdir(exist_ok=True)
-        config = fake / "config.json"
-        log = fake / "commands.jsonl"
-        log.write_text("")
-        config.write_text(json.dumps({"body": "attribution\n\n## Summary\nsummary\n\n## Screens\npending\n\n## Evidence\nkeep evidence\n\n## Merge danger\nkeep danger\nfooter\n", **options}))
-        # Make origin deterministic on forks; reject any attempt to write through git.
-        git = fake / "git"
-        git.write_text("#!" + sys.executable + "\nimport sys\nassert sys.argv[-3:] == ['remote', 'get-url', 'origin']\nprint('https://github.com/DivyanshGolyan/rui.git')\n")
-        git.chmod(0o755)
-        executable = fake / "gh"
-        executable.write_text("#!" + sys.executable + "\n" + r'''import hashlib, json, os, re, sys
+    def publish_fixture(self, root, head=None, retry=False):
+        remote = root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        fake = root / "bin"
+        fake.mkdir()
+        log = root / "gh.log"
+        gh = fake / "gh"
+        gh.write_text("#!" + sys.executable + "\n" + """import json, os, sys
 from pathlib import Path
-from urllib.parse import quote
-config = Path(os.environ["FAKE_GH_CONFIG"])
-data = json.loads(config.read_text())
 args = sys.argv[1:]
-event = {"argv": args, "cwd": os.getcwd()}
-if args[:2] == ["pr", "edit"] and "--body-file" in args:
-    event["body"] = Path(args[args.index("--body-file") + 1]).read_text()
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(json.dumps(event) + "\n")
-if args == ["--version"]:
-    version = "2.89.0" if data.get("local_old") and not Path.cwd().name.startswith("verify-rui-attachments.") else data.get("version", "2.104.0")
-    print("gh version " + version)
-elif args == ["pr", "edit", "--help"]:
-    print("--attach file" if data.get("attach_help", True) else "--body-file file")
-elif args == ["auth", "token"]:
-    if data.get("no_token"):
-        sys.exit(1)
-    print(data.get("token", "ghp_fake_test_token"))
-elif args[0] == "api":
-    endpoint = args[1]
-    if "/pulls?" in endpoint:
-        print(json.dumps([{"number": 1549}] if not data.get("no_pr") else []))
-    elif "/pulls/" in endpoint:
-        print(json.dumps({"body": data["body"]}))
-    else:
-        print(json.dumps({"permissions": {"push": data.get("push", True)}}))
-elif args[:2] == ["pr", "edit"]:
-    body = event["body"]
-    files = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
-    if data.get("partial_failure"):
-        files = files[:1]
-    for attachment in files:
-        name, alt = attachment.rsplit("#", 1)
-        assert Path(name).is_file(), name
-        reference = "![" + alt + "](" + quote(name, safe="/@") + ")"
-        url = "https://github.com/user-attachments/assets/" + hashlib.sha256(name.encode()).hexdigest()
-        body = body.replace(reference, "![" + alt + "](" + url + ")")
-    if data.get("mangle"):
-        body = body.replace("![", "[")
-    if data.get("inline_code"):
-        body = re.sub(r"^(!\[[^\n]+)$", r"`\1`", body, flags=re.M)
-    data["body"] = body
-    config.write_text(json.dumps(data))
-    print("https://github.com/DivyanshGolyan/rui/pull/1549")
-    sys.exit(1 if data.get("partial_failure") else 0)
-else:
+with open(os.environ['PUBLISH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')
+if args[:1] == ['api'] and args[1] == 'repos/DivyanshGolyan/rui/pulls/1549':
+    print(json.dumps({'state': os.environ.get('PUBLISH_STATE', 'open'), 'head': {'sha': os.environ['PUBLISH_HEAD']}}))
+elif args[:4] != ['api', '--method', 'POST', 'repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches']:
     raise AssertionError(args)
-''')
-        executable.chmod(0o755)
-        if ssh:
-            transport = r'''import json, os, shlex, shutil, subprocess, sys, tempfile
+""")
+        gh.chmod(0o755)
+        env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
+               "PUBLISH_LOG": str(log), "PUBLISH_HEAD": head or self.head,
+               "RUI_SCREENS_REMOTE": str(remote), "GIT_ALLOW_PROTOCOL": "file",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_COUNT": "0"}
+        if retry:
+            # Advance the branch immediately before the first push, forcing a rejection.
+            real_git = shutil.which("git")
+            wrapper = fake / "git"
+            wrapper.write_text("#!" + sys.executable + "\n" + """import os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
-kind = Path(sys.argv[0]).name
-config = json.loads(Path(os.environ["FAKE_GH_CONFIG"]).read_text())
-event = {"transport": kind, "argv": args, "cwd": os.getcwd()}
-if kind == "scp":
-    source, target = args[-2:]
-    destination = target.split(":", 1)[1]
-    event["files"] = sorted(str(p.relative_to(Path(source))) for p in Path(source).rglob("*") if p.is_file())
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(json.dumps(event) + "\n")
-if kind == "scp":
-    if config.get("scp_failure"):
-        print("copy failed", file=sys.stderr)
-        sys.exit(1)
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-else:
-    command = shlex.split(args[-1])
-    if command[0] == "mktemp":
-        print(tempfile.mkdtemp(prefix="verify-rui-attachments."))
-    elif command[0] == "rm":
-        shutil.rmtree(command[-1])
-    elif command[0] == "python3":
-        sys.exit(subprocess.run([sys.executable, *command[1:]]).returncode)
-    else:
-        raise AssertionError(command)
-'''
-            for name in ("ssh", "scp"):
-                program = fake / name
-                program.write_text("#!" + sys.executable + "\n" + transport)
-                program.chmod(0o755)
-        command = [sys.executable, str(SCRIPT), "publish", str(out)]
-        if ssh:
-            command += ["--ssh", "test-box"]
-        if pr is not None:
-            command += ["--pr", pr]
-        result = subprocess.run(command, capture_output=True, text=True,
-            env={**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
-                 "FAKE_GH_CONFIG": str(config), "FAKE_GH_LOG": str(log)})
-        calls = [json.loads(line) for line in log.read_text().splitlines()]
-        for call in calls:
-            if call.get("transport") == "scp":
-                self.addCleanup(shutil.rmtree, call["argv"][-1].split(":", 1)[1], ignore_errors=True)
-        return result, calls, json.loads(config.read_text())["body"]
+marker = Path(os.environ['PUBLISH_MARKER'])
+if args and args[0] == 'push' and not marker.exists():
+    marker.touch()
+    subprocess.run([os.environ['REAL_GIT'], 'init', '-q', os.environ['RACE_REPO']], check=True)
+    def git(*args):
+        subprocess.run([os.environ['REAL_GIT'], '-C', os.environ['RACE_REPO'], *args], check=True, capture_output=True)
+    git('config', 'user.name', 'Race')
+    git('config', 'user.email', 'race@example.com')
+    Path(os.environ['RACE_REPO'], 'other').write_text('concurrent')
+    git('add', 'other')
+    git('commit', '-qm', 'concurrent')
+    git('push', os.environ['PUBLISH_REMOTE'], 'HEAD:refs/heads/pr-screens')
+os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
+""")
+            wrapper.chmod(0o755)
+            env.update(REAL_GIT=real_git, PUBLISH_MARKER=str(root / "raced"),
+                       RACE_REPO=str(root / "race"), PUBLISH_REMOTE=str(remote))
+        return remote, log, env
 
-    def test_native_publish_command_alt_text_placement_and_readback(self):
+    def publish_run(self, out, env, *args, script=SCRIPT):
+        return subprocess.run([sys.executable, str(script), "publish", str(out), "--pr", "1549", "--repo", "DivyanshGolyan/rui", *args],
+                              env=env, text=True, capture_output=True)
+
+    def _publish_refuses_closed_pr(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "captures with spaces"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            result, calls, body = self.publish(out)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            edits = [call for call in calls if "--body-file" in call["argv"]]
-            self.assertEqual(len(edits), 1)
-            args = edits[0]["argv"]
-            self.assertEqual(args[:5], ["pr", "edit", "1549", "-R", "DivyanshGolyan/rui"])
-            self.assertEqual(edits[0]["cwd"], str(out))
-            attachments = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
-            self.assertEqual(attachments, [f"{side}/changed@140x40.{ext}#changed 140x40 {side}" +
-                                          (" recording" if ext == "gif" else "")
-                                          for side in ("before", "after") for ext in ("png", "gif")])
-            self.assertIn("![changed 140x40 before](before/changed@140x40.png)", edits[0]["body"])
-            from pr_shape import screen_evidence
-            self.assertTrue(screen_evidence(body))
-            self.assertIn("#### 140x40\n\nBefore\n\n![", body)
-            self.assertIn("\n\nAfter\n\n![", body)
-            self.assertIn(self.head, body)
-            self.assertIn(self.base, body)
-            self.assertIn("Sizes: 140x40", body)
-            self.assertIn("Surface: plain PTY, L1 synthetic input", body)
-            self.assertNotIn("pending", body)
-            self.assertNotIn("same@", body)
-            self.assertTrue(body.startswith("attribution\n\n## Summary\nsummary"))
-            self.assertTrue(body.endswith("keep danger\nfooter\n"))
-            self.assertEqual(body.count("## Screens"), 1)
-            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
-            self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
-            self.assertIn("4 embedded Screens attachments verified by readback", result.stdout)
-
-    def test_native_publish_single_build_requires_explicit_pr(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            record = self.capture(out)
-            (out / "frames.json").write_text(json.dumps([record]))
-            result, calls, body = self.publish(out)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(any("/pulls?" in str(c["argv"]) for c in calls))
-            self.assertIn("Base: none (single build)", body)
-            self.assertIn("![overview 140x40 after](https://github.com/user-attachments/", body)
-            self.assertIn("2 embedded Screens attachments", result.stdout)
-            result, calls, _body = self.publish(out, pr=None)
+            remote, log, env = self.publish_fixture(root)
+            env["PUBLISH_STATE"] = "closed"
+            result = self.publish_run(out, env)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("required: --pr", result.stderr)
-            self.assertEqual(calls, [])
+            self.assertIn("PR that is not open", result.stderr)
+            self.assertEqual(subprocess.run(["git", "-C", str(remote), "show-ref"], capture_output=True, text=True).stdout, "")
 
-    def test_native_publish_refuses_missing_cli_capability_or_push_token(self):
-        cases = (({"version": "2.103.0"}, "gh 2.104.0+"),
-                 ({"attach_help": False}, "gh 2.104.0+"),
-                 ({"no_token": True}, "classic PAT or gh OAuth token"),
-                 ({"token": "github_pat_fine_grained"}, "classic PAT or gh OAuth token"),
-                 ({"push": False}, "push access"))
+    def _publish_selected_media_and_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            for options, reason in cases:
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(len(result.stderr.splitlines()), 1)
-                    self.assertIn(reason, result.stderr)
-                    self.assertFalse(any("--body-file" in c["argv"] for c in calls))
-                    self.assertEqual(result.stdout, "")
-                    self.assertNotIn("ghp_fake_test_token", result.stderr)
-
-    def test_native_publish_detects_filtered_readback_and_partial_upload(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            self.comparison(out)
-            for options, message in (({"mangle": True}, "missing embedded Screens attachments"),
-                                     ({"inline_code": True}, "missing embedded Screens attachments"),
-                                     ({"partial_failure": True}, "PR may be partially updated")):
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(message, result.stderr)
-                    self.assertEqual(result.stdout, "")
-                    self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
-                    self.assertIn("inspect", result.stderr)
-
-    def test_native_publish_batches_at_cli_limit_and_preserves_previous_uploads(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
-            records = [self.capture(out, name=f"state-{i}") for i in range(26)]
-            (out / "frames.json").write_text(json.dumps(records))
-            result, calls, body = self.publish(out, token="gho_fake_oauth_token")
+            pairs_file = out / "pairs.json"
+            pairs = json.loads(pairs_file.read_text())
+            pairs["pairs"][0]["after"]["files"]["html"] = "after/unpublished.html"
+            pairs_file.write_text(json.dumps(pairs))
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            edits = [c for c in calls if "--body-file" in c["argv"]]
-            self.assertEqual([c["argv"].count("--attach") for c in edits], [50, 2])
-            self.assertEqual(edits[1]["body"].count("https://github.com/user-attachments/"), 50)
-            self.assertEqual(body.count("https://github.com/user-attachments/"), 52)
-            self.assertIn("52 embedded Screens attachments", result.stdout)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            gen = calls[-1][-1].removeprefix("inputs[gen]=")
+            self.assertRegex(gen, r"^[0-9]{1,20}$")
+            prefix = f"pr-1549/{self.head}/{gen}"
+            def show(name):
+                return subprocess.check_output(["git", "--git-dir", str(remote), "show", f"pr-screens:{prefix}/{name}"], text=True)
+            files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+            self.assertIn(prefix + "/before/changed@140x40.png", files)
+            self.assertNotIn("same@", files)
+            shots = json.loads(show("shots.json"))
+            self.assertEqual([r["name"] for r in shots], ["changed"])
+            self.assertNotIn("html", shots[0]["files"])
+            self.assertNotIn("html", json.loads(show("diff.json"))["changed"][0]["after"]["files"])
+            self.assertEqual([r["name"] for r in json.loads(show("diff.json"))["changed"]], ["changed"])
+            self.assertEqual(json.loads(show("shots-meta.json")), {"head": self.head, "base": self.base})
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(calls[-1], ["api", "--method", "POST", "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches", "-f", "ref=main", "-f", "inputs[pr]=1549", "-f", f"inputs[head]={self.head}", "-f", f"inputs[gen]={gen}"])
+            self.assertIn("actions/workflows/screens-comment.yml", result.stdout)
 
-    def test_ssh_publisher_uses_same_worker_copies_only_selected_files_and_cleans(self):
+    def test_publish_immutable_generations_scr_2(self):
+        # SCR-2: each publication retains its own immutable generation.
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            (out / "secret.txt").write_text("must not copy")
-            result, calls, body = self.publish(out, ssh=True, local_old=True)
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            copies = [c for c in calls if c.get("transport") == "scp"]
-            self.assertEqual(len(copies), 1)
-            self.assertEqual(set(copies[0]["files"]), {"__verify_publish_helper__.py", "__publish_job__.json",
-                *(f"{side}/changed@140x40.{ext}" for side in ("before", "after") for ext in ("png", "gif"))})
-            edits = [c for c in calls if "--body-file" in c["argv"]]
-            self.assertEqual(len(edits), 1)
-            remote = Path(edits[0]["cwd"])
-            self.assertTrue(remote.name.startswith("verify-rui-attachments."))
-            self.assertFalse(remote.exists())
-            self.assertEqual(calls[-1]["transport"], "ssh")
-            self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", calls[-1]["argv"][-1])
-            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
-            self.assertTrue(body.startswith("attribution"))
-            self.assertTrue(body.endswith("keep danger\nfooter\n"))
+            first_gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            first_tree = subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"])
+            result = self.publish_run(out, env, "--all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(first_tree, subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"]))
+            dispatches = [json.loads(line) for line in log.read_text().splitlines() if "--method" in line]
+            gens = [call[-1].removeprefix("inputs[gen]=") for call in dispatches]
+            self.assertEqual(len(set(gens)), 2)
+            self.assertLess(int(gens[0]), int(gens[1]))
+            for gen, count in zip(gens, (0, 1)):
+                prefix = f"pr-screens:pr-1549/{self.head}/{gen}"
+                data = subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/diff.json"], text=True)
+                self.assertEqual(json.loads(data)["same_count"], count)
+                subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/after/changed@140x40.png"])
 
-    def test_ssh_publisher_cleans_after_copy_or_readback_failure(self):
+    def _publish_all_includes_unchanged_pairs(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "frames"
+            root = Path(directory)
+            out = root / "frames"
             self.comparison(out)
-            for options in ({"scp_failure": True}, {"mangle": True}, {"no_token": True}):
-                with self.subTest(options=options):
-                    result, calls, _body = self.publish(out, ssh=True, **options)
-                    self.assertNotEqual(result.returncode, 0)
-                    cleanup = calls[-1]
-                    self.assertEqual(cleanup.get("transport"), "ssh")
-                    self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", cleanup["argv"][-1])
-                    self.assertFalse(Path(cleanup["argv"][-1].split()[-1]).exists())
+            remote, log, env = self.publish_fixture(root)
+            result = self.publish_run(out, env, "--all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            name = f"pr-screens:pr-1549/{self.head}/{gen}/diff.json"
+            diff = json.loads(subprocess.check_output(["git", "--git-dir", str(remote), "show", name], text=True))
+            self.assertEqual(diff["same_count"], 1)
+            self.assertEqual([row["name"] for row in diff["same"]], ["same"])
+            self.assertEqual(diff["same"][0]["before"]["files"]["png"], "before/same@140x40.png")
+            self.assertEqual(diff["same"][0]["after"]["files"]["png"], "after/same@140x40.png")
+
+    def _publish_refuses_combined_media_over_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root)
+            for side in ("before", "after"):
+                with (out / side / "changed@140x40.png").open("wb") as f:
+                    f.truncate(11 * 1024 * 1024)
+            result = self.publish_run(out, env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exceeds 20 MB in total", result.stderr)
+            self.assertFalse(log.exists())
+            self.assertEqual(subprocess.check_output(["git", "--git-dir", str(remote), "branch", "--list"], text=True), "")
+
+    def test_publish_preserves_concurrent_publication_scr_8(self):
+        # SCR-8: a rejected push is retried without discarding the concurrent branch.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root, retry=True)
+            result = self.publish_run(out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+            self.assertIn("other", files)
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            self.assertIn(f"pr-1549/{self.head}/{gen}/diff.json", files)
+            self.assertTrue((root / "raced").exists())
+
+    def _publish_refuses_mismatched_head_or_oversize(self, cases):
+        for mismatch in cases:
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "frames"
+                self.comparison(out)
+                remote, log, env = self.publish_fixture(root, head=self.base if mismatch else self.head)
+                if not mismatch:
+                    with (out / "after/changed@140x40.png").open("wb") as f:
+                        f.truncate(20 * 1024 * 1024 + 1)
+                result = self.publish_run(out, env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not match" if mismatch else "exceeds 20 MB", result.stderr)
+                refs = subprocess.check_output(["git", "--git-dir", str(remote), "branch", "--list"], text=True)
+                self.assertEqual(refs, "")
+                if log.exists():
+                    self.assertNotIn("dispatches", log.read_text())
+
+    def test_publish_refuses_closed_or_stale_pr_scr_6(self):
+        # SCR-6: reject closed PRs and stale capture heads.
+        self._publish_refuses_closed_pr()
+        self._publish_refuses_mismatched_head_or_oversize((True,))
+
+    def test_publish_refuses_oversized_media_scr_10(self):
+        # SCR-10: reject both single and combined media over the limit.
+        self._publish_refuses_mismatched_head_or_oversize((False,))
+        self._publish_refuses_combined_media_over_limit()
+
+    def test_publish_selected_media_scr_7(self):
+        # SCR-7: publication includes selected media and dispatches its generation.
+        self._publish_selected_media_and_dispatch()
+        self._publish_all_includes_unchanged_pairs()
+
+    def test_publish_uses_explicit_fixture_with_any_origin_scr_9(self):
+        # SCR-9: explicit targets isolate publication from checkout origin discovery.
+        for origin in (None, "git@github.com:someone/rui.git", "https://github.com/fork/rui.git"):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = root / "checkout"
+                script = checkout / ".claude/skills/verify-rui/scripts/verify-rui"
+                script.parent.mkdir(parents=True)
+                shutil.copyfile(SCRIPT, script)
+                subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+                if origin:
+                    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", origin], check=True)
+                out = root / "frames"
+                self.comparison(out)
+                remote, log, env = self.publish_fixture(root)
+                result = self.publish_run(out, env, script=script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+                self.assertIn("diff.json", files)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
+                self.assertEqual(calls[1][3], "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches")
 
     def test_screens_parts_preserves_fenced_example_and_other_sections(self):
         body = "## Summary\n```md\n## Screens\nfake\n```\n\n## Screens\nold\n\n## Evidence\nproof\n"
@@ -2872,12 +3164,12 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertIn("Upgraded to {upgrade_version}", before["expect"])
                 self.assertNotIn("Upgraded to ", before["absent"])
                 self.assertNotIn("alt+i info", before["expect"])
-                after_only = "Upgrade witness alt+i info"
+                after_only = "› Upgrade witness\n gpt-6.1-sol · low"
                 self.assertFalse(all(text in after_only for text in before["expect"]))
             else:
                 before = state["comparison"]["before"]
-                self.assertTrue(before["expect_regex"])
-                self.assertNotEqual(before["expect_regex"], state["expect_regex"])
+                self.assertTrue(before["expect_sidebar_regex"])
+                self.assertNotEqual(before["expect_sidebar_regex"], state["expect_sidebar_regex"])
                 if state["upgrade"] == "failure":
                     self.assertIn("! Couldn't reach GitHub; nothing changed", before["expect"])
                 if state["upgrade"] == "updating":
@@ -2885,11 +3177,15 @@ class UpgradeFramesTest(unittest.TestCase):
 
     def test_failure_frames_wait_for_public_chat_readiness_without_open_hints(self):
         settle = self.helper["frame_failure_settled"]
-        reason = "Update failed: Couldn't reach GitHub"
+        reason = "Update failed"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
-            screens = [marker + "\nReading this Session… alt+i info", marker + "\nHost paused alt+i info",
-                       marker + ("\n" if before else "\nalt+i info")]
+            chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › What shall we work on?\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
+            screens = [marker + "\nReading this Session…\n" + chat,
+                       marker + "\nHost paused\n" + chat,
+                       marker + "\nSettings\n gpt-6.1-sol · low",
+                       marker + "\n" + chat.replace("What shall we work on?", "wrong chat draft"),
+                       marker + "\n" + chat]
             observed = []
             def wait(predicate, _description):
                 for index, plain in enumerate(screens):
@@ -2899,7 +3195,7 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.fail("settled failure conversation was not accepted")
             with self.subTest(before=before):
                 settle(types.SimpleNamespace(wait=wait), before)
-                self.assertEqual(observed, [0, 1, 2])
+                self.assertEqual(observed, [0, 1, 2, 3, 4])
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") == "failure"):
             self.assertNotIn("expect_last", state)
@@ -2908,10 +3204,12 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertIn("enter open", state["absent"])
             self.assertIn("enter open", state["comparison"]["before"]["absent"])
             self.assertIn(reason, state["expect"])
-            self.assertEqual(state["expect_next"], {"Settings": reason})
+            self.assertEqual(state["expect_next"], {})
+            self.assertIn("Update failed:", state["absent"])
             for size in state["sizes"]:
+                layout = "chat" if size[0] == 140 else "overview"
                 suffix = "│ actual chat" if size[0] == 140 else ""
-                rows = f"Settings{suffix}\n{reason}{suffix}\n"
+                rows = sidebar_rows(reason, layout) + "\n"
                 screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
@@ -2925,13 +3223,202 @@ class UpgradeFramesTest(unittest.TestCase):
                     self.assertEqual(observed, [0, 1, 2])
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason))
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nUpdate failed" + suffix))
-                    self.assertIsNone(self.helper["frame_row_failure"](state, f"Settings{suffix}\n7 MB {reason}{suffix}"))
+                    self.assertIsNone(self.helper["frame_row_failure"](state, rows))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, "7 MB  " + reason)))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, reason + ": Couldn't reach GitHub")))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.split("\n", 1)[1]))
+
+    def test_chat_readiness_requires_settled_composer_and_footer_in_chat_pane(self):
+        ready = self.helper["frame_chat_ready"]
+        for split in (False, True):
+            for prompt, rule in (("›", "┄"), (">", "-")):
+                for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
+                    with self.subTest(split=split, prompt=prompt, model=model):
+                        prefix = " Upgrade witness " + ("│" if rule == "─" else "|") if split else ""
+                        bottom = rule * (len(prefix) - 1) + ("┼" if rule == "─" else "+") + rule * 30 if split else " " + rule * 30
+                        lines = [prefix + " › Upgrade witness", prefix + " " + rule * 30,
+                                 prefix + " " + prompt + " retained draft", bottom,
+                                 prefix + f" {model} · low"]
+                        chat = "\n".join(lines)
+                        self.assertTrue(ready(chat))
+                        self.assertFalse(ready(chat, empty=True))
+                        self.assertTrue(ready(chat.replace("retained draft", "What shall we work on?"), empty=True))
+                        self.assertTrue(ready(chat, "Upgrade witness"))
+                        self.assertFalse(ready(chat, "Different witness"))
+                        for stale in ("Opening…", "Reading this Session…", "Host paused", "Notifications"):
+                            self.assertFalse(ready(chat + "\n" + stale))
+                        self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " low"])))
+                        self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " Update failed"])))
+                        self.assertFalse(ready("\n".join(lines[:-1] + [prefix + " "])))
+                        multiline = lines[:3] + [prefix + "   another line"] + lines[3:]
+                        self.assertTrue(ready("\n".join(multiline), "Upgrade witness"))
+                        self.assertFalse(ready("\n".join(multiline), empty=True))
+                        self.assertFalse(ready("\n".join(lines[:1] + [prefix + " " + rule * 30,
+                                                    prefix + " " + prompt + " Upgrade witness"] + lines[3:])
+                                               .replace("› Upgrade witness", "› Other chat"), "Upgrade witness"))
+                        self.assertFalse(ready("\n".join(lines[:2] + [prefix + " no composer"] + lines[3:])))
+                        if split:
+                            wrong = "\n".join(line.replace("› Upgrade witness", "› Another chat") for line in lines)
+                            self.assertTrue(ready(wrong))
+                            self.assertFalse(ready(wrong, "Upgrade witness"))
+        self.assertFalse(ready("Upgrade witness\nSettings\ngpt-6.1-sol · low"))
+        self.assertTrue(ready(" Upgrade witness │ details\n ──────\n › draft\n ──────\n model · low", "Upgrade witness"))
+        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n────┼──────\n    │ model · low", "Upgrade witness"))
+
+    def test_rendered_junctions_and_content_in_chat_readiness(self):
+        split = self.helper["frame_split_row"]
+        ready = self.helper["frame_chat_ready"]
+        settle = self.helper["frame_failure_settled"]
+        self.assertEqual(split("draft │ content | more + text"), ("", "", "draft │ content | more + text"))
+        for rule, junction, bar in (("─", "┼", "│"), ("-", "+", "|")):
+            boundary = rule * 12 + junction + rule * 20
+            self.assertEqual(split(boundary), (rule * 12, junction, rule * 20))
+            for draft in ("What shall we work on?", "Type a task", "retained │ draft | content + more"):
+                lines = [" witness".ljust(12) + bar + " witness │ content",
+                         "".ljust(12) + bar + " " + rule * 20, "".ljust(12) + bar + " › " + draft,
+                         boundary, "".ljust(12) + bar + " model · low"]
+                screen = "\n".join(lines)
+                with self.subTest(junction=junction, draft=draft):
+                    self.assertTrue(ready(screen, "witness"))
+                    self.assertEqual(ready(screen, empty=True), draft in ("What shall we work on?", "Type a task"))
+                    self.assertFalse(ready(screen, "missing witness"))
+                    for before in (False, True):
+                        marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                        accepted = []
+                        def wait(predicate, _description):
+                            accepted.append(predicate(types.SimpleNamespace(completed=marker + "\n" + screen)))
+                        settle(types.SimpleNamespace(wait=wait), before)
+                        self.assertEqual(accepted, [draft in ("What shall we work on?", "Type a task")])
+        self.assertTrue(ready("witness | content\n ───────\n › retained | draft\n ───────\n model · low", "witness"))
+
+    def test_sidebar_rule_junctions_and_legacy_vertical_endings(self):
+        split = self.helper["frame_split_row"]
+        failure = self.helper["frame_row_failure"]
+        for line, separator in (("─" * 20 + "┤ Notifications", "┤"),
+                                ("-" * 20 + "+ Notifications", "+"),
+                                ("─" * 20 + "│ status", "│"),
+                                ("-" * 20 + "| ", "|")):
+            left, found, pane = split(line)
+            with self.subTest(separator=separator):
+                self.assertEqual((left, found, pane), (line[:20], separator, line[21:]))
+                bar = "|" if separator in "+|" else "│"
+                screen = line[:20] + separator + pane + "\n" + " Settings 0.78.10000".ljust(20) + bar + " chat"
+                self.assertIsNone(failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"]}, screen))
+                result = failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"],
+                                  "expect_sidebar_rule": True}, screen)
+                self.assertEqual(result is None, separator in "┤+")
+
+    def test_before_upgrade_regex_accepts_ascii_sidebar_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        failure = self.helper["frame_row_failure"]
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
+            for divider in self.helper["DIVIDER_GLYPHS"]:
+                with self.subTest(state=state["name"], divider=divider):
+                    self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " What shall we work on?"))
+                    self.assertIsNotNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + divider + " 0.78.10000"))
+
+    def test_sidebar_absence_regex_rejects_ascii_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        pattern = next(pattern for state in scenario["states"] for pattern in state.get("absent_sidebar_regex", [])
+                       if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern)
+        for divider in self.helper["DIVIDER_GLYPHS"]:
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](
+                    {"name": "test", "absent_sidebar_regex": [pattern]}, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ abcdef  now".ljust(20) + divider + " chat"))
+
+    def test_upgrade_relaunch_waits_for_the_same_settled_chat_on_both_sides(self):
+        drive = self.helper["frame_drive_upgrade"]
+        marker = "Upgrade witness"
+        def chat(witness=marker, stale=""):
+            return (f" {witness}\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n › retained draft\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+                    f" gpt-6.1-sol · low{stale}")
+        for before in (False, True):
+            version = "0.78.10000"
+            notice = f"\nUpgraded to {version}" if before else ""
+            screens = [chat("Another chat") + notice, chat(stale="\nReading this Session…") + notice,
+                       chat() + ("" if before else "\nNotifications"), chat() + notice]
+            observed = []
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                selected = root / ".local/bin/rui"
+                process = types.SimpleNamespace(pid=42)
+                def wait(predicate, _description, **_kwargs):
+                    for index, plain in enumerate(screens):
+                        observed.append(index)
+                        if predicate(types.SimpleNamespace(completed=plain)):
+                            return
+                    self.fail("settled same-chat relaunch was not accepted")
+                terminal = types.SimpleNamespace(wait=wait, mouse=lambda _event: None, process=process)
+                run = types.SimpleNamespace(home=root, store=root / "store",
+                                            meta={"upgrade_previous_instance": "old"},
+                                            rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
+                state = {"upgrade": "chat", "open": marker, "comparison_side": "before" if before else "after"}
+                os_semantics = types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())
+                with self.subTest(before=before), patch.dict(sys.modules, {"os_semantics": os_semantics}), \
+                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                    drive(run, terminal, state, (None, None, version), steps=lambda *_a, **_k: None)
+                self.assertEqual(observed, [0, 1, 2, 3])
+
+    def test_upgrade_and_failure_predicates_cover_layouts_and_drafts(self):
+        drive = self.helper["frame_drive_upgrade"]
+        settle = self.helper["frame_failure_settled"]
+        for split in (False, True):
+            for rule, bar, junction in (("─", "│", "┼"), ("-", "|", "+")):
+                for draft in ("What shall we work on?", "Type a task", "retained draft"):
+                    prefix = " ".ljust(20) + bar if split else ""
+                    top = prefix + " " + rule * 20
+                    bottom = rule * 20 + junction + rule * 20 if split else " " + rule * 20
+                    screen = "\n".join([prefix + " Upgrade witness", top, prefix + " › " + draft,
+                                         bottom, prefix + " model · low"])
+                    for before in (False, True):
+                        with self.subTest(split=split, rule=rule, draft=draft, before=before), tempfile.TemporaryDirectory() as directory:
+                            marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                            results = []
+                            settle(types.SimpleNamespace(wait=lambda pred, _description: results.append(
+                                pred(types.SimpleNamespace(completed=marker + "\n" + screen)))), before)
+                            self.assertEqual(results, [draft in ("What shall we work on?", "Type a task")])
+                            root = Path(directory)
+                            selected = root / ".local/bin/rui"
+                            notice = "\nUpgraded to 0.78.10000" if before else ""
+                            terminal = types.SimpleNamespace(process=types.SimpleNamespace(pid=42),
+                                wait=lambda pred, _description, **_kw: results.append(pred(types.SimpleNamespace(completed=screen + notice))))
+                            run = types.SimpleNamespace(home=root, store=root / "store", meta={"upgrade_previous_instance": "old"},
+                                rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
+                            state = {"upgrade": "chat", "open": "Upgrade witness", "comparison_side": "before" if before else "after"}
+                            with patch.dict(sys.modules, {"os_semantics": types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())}), \
+                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                                drive(run, terminal, state, (None, None, "0.78.10000"), steps=lambda *_a, **_k: None)
+                            self.assertTrue(results[-1])
+
+    def test_upgrade_driving_accepts_old_and_new_empty_composers_on_both_sides(self):
+        drive = self.helper["frame_drive_upgrade"]
+        for side in ("before", "after"):
+            for placeholder in ("Type a task", "What shall we work on?"):
+                for upgrade in ("current", "available", "updating", "failure"):
+                    with self.subTest(side=side, placeholder=placeholder, upgrade=upgrade), tempfile.TemporaryDirectory() as directory:
+                        chat = ("! Couldn't reach GitHub; nothing changed\n"
+                                "couldn't reach GitHub\nUpdate failed\n · publishing\nUpdating…\n"
+                                f"  ┄┄┄┄┄┄┄┄┄\n  › {placeholder}\n  ┄┄┄┄┄┄┄┄┄\n model · low")
+                        seen = []
+                        def wait(predicate, description, *_args, **_kwargs):
+                            seen.append(description)
+                            self.assertTrue(predicate(types.SimpleNamespace(completed=chat)), description)
+                        terminal = types.SimpleNamespace(wait=wait)
+                        run = types.SimpleNamespace(home=Path(directory))
+                        releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/tag/v0.78.10000"])
+                        state = {"upgrade": upgrade, "comparison_side": side}
+                        gate = object() if upgrade == "updating" else None
+                        drive(run, terminal, state, (releases, gate, "0.78.10000"), steps=lambda *_a, **_kw: None)
+                        self.assertTrue(any("What shall we work on?" in name for name in seen))
+                        if upgrade == "failure":
+                            self.assertTrue(any("failed Upgrade" in name for name in seen))
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
         calls = []
         terminal = types.SimpleNamespace(frame=types.SimpleNamespace(columns=46, visible=False),
-                                         capture=types.SimpleNamespace(completed="Type a task"))
+                                         capture=types.SimpleNamespace(completed="What shall we work on?"))
         with patch.dict(reveal.__globals__, {"frame_steps": lambda _run, _terminal, steps: calls.extend(steps)}):
             reveal(None, terminal, {"upgrade": "updating"})
             self.assertEqual(calls, [{"keys": ["Esc"]}, {"wait": "Settings"}])
@@ -2940,7 +3427,7 @@ class UpgradeFramesTest(unittest.TestCase):
             terminal.capture.completed = "Settings"
             reveal(None, terminal, {"upgrade": "failure"})
             terminal.frame.columns = 140
-            terminal.capture.completed = "Type a task"
+            terminal.capture.completed = "What shall we work on?"
             reveal(None, terminal, {"upgrade": "available"})
             self.assertEqual(calls, [])
 
@@ -2967,20 +3454,37 @@ class UpgradeFramesTest(unittest.TestCase):
             reveal(None, terminal, {"upgrade": "chat"})
             self.assertEqual(events, [])
 
-    def test_split_sidebar_rows_bound_their_exact_version_before_chat_content(self):
+    def test_shared_sidebar_row_requires_divider_and_bounds_controls_before_chat_content(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         row_failure = self.helper["frame_row_failure"]
-        after = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["expect_regex"]]}
-        before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
-        for ending in ("", "│ Type a task 0.99.99999"):
-            self.assertIsNone(row_failure(after, " 7 MB     0.78.10000 " + ending))
-            self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " 7 MB 0x78x10000 " + ending))
-            self.assertIsNotNone(row_failure(before, " Settings 0x78x10000 " + ending))
-        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 │ 0.78.10000"))
-        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 │ 0.78.10000"))
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_sidebar_regex"]]
+            oracle = {"expect_sidebar_regex": patterns, "expect_sidebar_rule": True}
+            label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
+            for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                rendered = "Updating..." if layout.startswith("ascii") and label == "Updating…" else label
+                rows = sidebar_rows(rendered or "7 MB", layout)
+                rule, row = rows.split("\n")
+                with self.subTest(theme=state["theme"], kind=state["upgrade"], layout=layout):
+                    self.assertIn("{upgrade_version}", state["absent"])
+                    self.assertIsNone(row_failure(oracle, rows))
+                    if rendered:
+                        self.assertIsNotNone(row_failure(oracle, rows.replace(rendered, "7 MB  " + rendered, 1)))
+                    for wrong in (row, rule + "\n" + row.replace("Settings  ", "Settings\n"),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  rui "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  tools 120 MB "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  0.78.10000 ")):
+                        self.assertIsNotNone(row_failure(oracle, wrong))
+                    if label:
+                        self.assertIsNotNone(row_failure(oracle, rule + "\n Settings 7 MB │ " + label))
+                    if layout == "chat":
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("┼", "│", 1)))
+                    if state["upgrade"] == "available":
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("0.99.99999", "0x99x99999")))
+        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
+        before = {"expect_sidebar_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_sidebar_regex"]]}
+        self.assertIsNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + "│ What shall we work on?"))
+        self.assertIsNotNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + "│ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
         drive = self.helper["frame_drive_upgrade"]
@@ -2990,18 +3494,25 @@ class UpgradeFramesTest(unittest.TestCase):
             events.append(description)
         terminal = types.SimpleNamespace(wait=wait, mouse=lambda event: events.append(event["at"]))
         with tempfile.TemporaryDirectory() as directory, patch.dict(drive.__globals__, {
-                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker)}):
+                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker),
+                "frame_steps": lambda _run, _terminal, steps: events.append(steps)}):
             run = types.SimpleNamespace(home=Path(directory))
             drive(run, terminal, {"upgrade": "updating", "comparison_side": "after"}, (None, object(), "0.78.10000"))
-        self.assertEqual(events, ["Type a task", "0.78.10000", "0.78.10000", "published release held before Host activation"])
+        self.assertEqual(events, ["What shall we work on?",
+                                 [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                  {"keys": ["Down"] * 5 + ["Enter"]}],
+                                 " · publishing", [{"keys": ["Esc"]}, {"gone": "Notifications"}],
+                                 "published release held before Host activation"])
 
-    def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
+    def test_failure_row_oracle_rejects_expanded_reason_and_split_row(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "sidebar-failure")
         row_failure = self.helper["frame_row_failure"]
-        state = {"expect_regex": [r"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+0\.70\.10000\s*$"]}
-        self.assertIsNone(row_failure(state, "  38 MB       0.70.10000 "))
-        for row in ("rui 38 MB       0.70.10000", "38 MB tools 120 MB 0.70.10000", "38 MB 0x70x10000"):
+        self.assertIsNone(row_failure(state, "─" * 40 + "\n     Settings   Update failed"))
+        for row in ("Settings\n38 MB Update failed", "Settings 38 MB Update failed", "Settings Update failed: Couldn't reach GitHub",
+                    "Settings 38 MB │ Update failed"):
             with self.subTest(row=row):
-                self.assertIsNotNone(row_failure(state, row))
+                self.assertIsNotNone(row_failure(state, "─" * 40 + "\n" + row))
 
     def test_native_retry_journey_waits_for_archive_gate_before_release_and_settings(self):
         journey = self.helper["frame_upgrade_journey"]
@@ -3020,6 +3531,15 @@ class UpgradeFramesTest(unittest.TestCase):
                                             wait=lambda _predicate, description, **_kwargs: events.append(description))
             def capture(_run, _terminal, _out, specimen, _size, _reason):
                 events.append(specimen["name"])
+                if specimen["name"] == "retry-completed":
+                    self.assertEqual(specimen["expect"], ["Settings"])
+                    self.assertIn("0.70.10000", specimen["absent"])
+                    for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                        with self.subTest(retry_completed=layout):
+                            rows = sidebar_rows("7 MB", layout)
+                            self.assertIsNone(self.helper["frame_row_failure"](specimen, rows))
+                            self.assertIsNotNone(self.helper["frame_row_failure"](specimen, rows.replace("Settings  7 MB", "Settings  0.70.10000")))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](specimen, "Settings\n7 MB 0.70.10000"))
                 return {"ok": True}
             with patch.dict(journey.__globals__, {"frame_ready": lambda *_args: None, "frame_capture": capture,
                                                  "frame_steps": lambda *_args: events.append("Settings Version")}):
@@ -3066,6 +3586,141 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertEqual(events[1][:2], ("host", "pause"))
                 self.assertEqual(len(events), 2 if retirement == "unconfirmed" else 3)
 
+    def test_shots_upgrade_stages_cast_before_clean_restartable_host(self):
+        import upgrade_fixture
+        frame_run = self.helper["frame_upgrade_run"]
+        class Releases:
+            origin = "http://127.0.0.1:1"
+            def __init__(self, _actor, _version):
+                self.status = {}
+                self.requests = []
+            def close(self):
+                pass
+        for has_cast, refused in ((False, False), (True, False), (True, True)):
+            with self.subTest(has_cast=has_cast, refused=refused), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "evidence").mkdir()
+                (root / "home/.config/rui").mkdir(parents=True)
+                project = root / "home/code/rui"
+                project.mkdir(parents=True)
+                (root / "scratch").mkdir()
+                actor = root / "actor"
+                actor.write_bytes(b"actor")
+                meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
+                        "store": str(root / "store"), "binary": str(actor), "project": str(project),
+                        "sessions": {}, "frame_env": {"LD_PRELOAD": "/fixture.so"}}
+                (root / "run.json").write_text(json.dumps(meta))
+                run = self.helper["Run"](root)
+                events = []
+                run._shot_clock = types.SimpleNamespace(reset=lambda: events.append("reset"))
+                build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                    "binary": str(actor), "sha256": self.helper["sha256"](actor),
+                    "sha": "a" * 40, "tree": "tree"}}
+                cast = [{"label": "fixture"}] if has_cast else []
+                def launch(isolated, *, restartable, without_preload=False):
+                    events.append(("launch", without_preload))
+                    self.assertTrue(restartable)
+                    self.assertEqual(isolated.meta["frame_env"]["LD_PRELOAD"], "/fixture.so")
+                    return types.SimpleNamespace(stdout='{"instance":"clean"}')
+                def seed(_run, entries, *, ordered):
+                    self.assertEqual(entries, cast)
+                    self.assertTrue(ordered)
+                    events.append("seed")
+                def pause(_run):
+                    events.append("retire")
+                    if refused:
+                        raise self.helper["FrameFailure"]("retirement unconfirmed")
+                with patch.object(upgrade_fixture, "Releases", Releases), \
+                     patch("subprocess.check_output", return_value="rui 0.70.10000 (fixture)"), \
+                     patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                     patch.dict(frame_run.__wrapped__.__globals__, {"launch_host": launch, "seed_cast": seed,
+                                                                    "frame_pause_owned_host": pause}):
+                    expectation = self.assertRaises(self.helper["FrameFailure"]) if refused else contextlib.nullcontext()
+                    with expectation:
+                        with frame_run(run, {"name": "chat", "upgrade": "chat", "cast": cast}, build) as (isolated, _, _fixture):
+                            self.assertFalse(refused)
+                            self.assertEqual(isolated.meta["upgrade_previous_instance"], "clean")
+                            self.assertEqual(getattr(isolated, "_upgrade_seeded", False), has_cast)
+                expected = [("launch", False), "seed", "reset", "retire"] if has_cast else []
+                self.assertEqual(events, expected + ([] if refused else [("launch", True)]))
+
+    def test_upgrade_host_launch_removes_preload_only_from_host_environment(self):
+        launch = self.helper["launch_host"]
+        for clean in (False, True):
+            with self.subTest(clean=clean), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = {"LD_PRELOAD": "/fixture.so", "FAKETIME_TIMESTAMP_FILE": "/clock"}
+                run = types.SimpleNamespace(meta={"host_options": {"active_capacity": 2, "host_setenv": []},
+                                                  "fixture_url": "http://fixture"},
+                    rui=root / "rui", store=root / "store", project=root, evidence=root,
+                    env=lambda: env.copy(), own=lambda *_a, **_k: None,
+                    rui_cmd=lambda *_a, **_k: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+                seen = []
+                def spawn(_argv, **kwargs):
+                    seen.append(kwargs["env"])
+                    kwargs["stdout"].close()
+                    kwargs["stderr"].close()
+                    return types.SimpleNamespace(pid=123)
+                with patch("subprocess.Popen", side_effect=spawn):
+                    launch(run, restartable=True, without_preload=clean)
+                self.assertEqual("LD_PRELOAD" in seen[0], not clean)
+                self.assertEqual(seen[0]["FAKETIME_TIMESTAMP_FILE"], "/clock")
+                self.assertEqual(env["LD_PRELOAD"], "/fixture.so")
+
+    def test_upgrade_host_uses_a_populated_isolated_project(self):
+        import upgrade_fixture
+        frame_run = self.helper["frame_upgrade_run"]
+        class Releases:
+            origin = "http://127.0.0.1:1"
+            def __init__(self, _binary, _version):
+                self.status = {}
+                self.requests = []
+                self.closed = False
+            def close(self):
+                self.closed = True
+        for mode in ("current", "available", "updating", "failure", "chat"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "evidence").mkdir()
+                (root / "home/.config/rui").mkdir(parents=True)
+                project = root / "home/code/rui"
+                (project / "src").mkdir(parents=True)
+                (project / "README.md").write_text("parent readme\n")
+                (project / "src/example.txt").write_text("parent source\n")
+                (root / "scratch").mkdir()
+                actor = root / "actor"
+                actor.write_bytes(b"actor")
+                meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
+                        "store": str(root / "store"), "binary": str(actor), "project": str(project),
+                        "sessions": {"original": "abc123"}}
+                (root / "run.json").write_text(json.dumps(meta))
+                run = self.helper["Run"](root)
+                build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                    "binary": str(actor), "sha256": self.helper["sha256"](actor),
+                    "sha": "a" * 40, "tree": "tree"}}
+                launched = []
+                def launch(isolated, *, restartable):
+                    self.assertTrue(restartable)
+                    self.assertEqual(isolated.project, isolated.home / "code/rui")
+                    self.assertEqual(isolated.meta["project"], str(isolated.project))
+                    self.assertEqual((isolated.project / "README.md").read_text(), "parent readme\n")
+                    self.assertEqual((isolated.project / "src/example.txt").read_text(), "parent source\n")
+                    (isolated.project / "src/example.txt").write_text("isolated source\n")
+                    self.assertEqual((project / "src/example.txt").read_text(), "parent source\n")
+                    launched.append(isolated.project)
+                    return types.SimpleNamespace(stdout='{"instance":"fixture-host"}')
+                with patch.object(upgrade_fixture, "Releases", Releases), \
+                     patch("subprocess.check_output", return_value="rui 0.70.10000 (fixture)"), \
+                     patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                     patch.dict(frame_run.__wrapped__.__globals__, {"launch_host": launch}):
+                    with frame_run(run, {"name": mode, "upgrade": mode}, build) as (isolated, _state, fixture):
+                        self.assertEqual(launched, [isolated.home / "code/rui"])
+                        self.assertEqual(isolated.project, Path(isolated.meta["project"]))
+                        self.assertNotEqual(isolated.project, run.project)
+                        releases = fixture[0]
+                    self.assertTrue(releases.closed)
+                self.assertEqual(json.loads((root / "run.json").read_text()), meta)
+
     def test_upgrade_setup_failure_retires_server_and_preserves_primary(self):
         self.upgrade_cleanup_case(setup_failure=True)
 
@@ -3089,11 +3744,15 @@ class UpgradeFramesTest(unittest.TestCase):
             root = Path(directory)
             (root / "evidence").mkdir()
             (root / "home/.config/rui").mkdir(parents=True)
+            project = root / "home/code/rui"
+            (project / "src").mkdir(parents=True)
+            (project / "README.md").write_text("project fixture\n")
+            (project / "src/example.txt").write_text("source fixture\n")
             (root / "scratch").mkdir()
             actor = root / "actor"
             actor.write_bytes(b"actor")
             meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
-                    "store": str(root / "store"), "binary": str(actor), "project": str(root),
+                    "store": str(root / "store"), "binary": str(actor), "project": str(project),
                     "sessions": {"original": "abc123"}}
             (root / "run.json").write_text(json.dumps(meta))
             run = self.helper["Run"](root)
@@ -3101,6 +3760,12 @@ class UpgradeFramesTest(unittest.TestCase):
                 "binary": str(actor), "sha256": self.helper["sha256"](actor), "sha": "a" * 40, "tree": "tree"}}
             def launch(isolated, *, restartable=False):
                 self.assertTrue(restartable)
+                self.assertEqual(isolated.project, isolated.home / "code/rui")
+                self.assertEqual(Path(isolated.meta["project"]), isolated.project)
+                self.assertEqual((isolated.project / "README.md").read_text(), "project fixture\n")
+                self.assertEqual((isolated.project / "src/example.txt").read_text(), "source fixture\n")
+                (isolated.project / "src/example.txt").write_text("isolated change\n")
+                self.assertEqual((project / "src/example.txt").read_text(), "source fixture\n")
                 isolated.store.mkdir()
                 events.append("host started")
                 return types.SimpleNamespace(stdout='{"instance":"old-instance"}')

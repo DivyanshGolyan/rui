@@ -94,10 +94,10 @@ test "closed value columns accept exactly their values" {
     const not_efforts = [_][]const u8{ "'minimal'", "'Medium'", "''" };
     const Column = struct { update: []const u8, accepted: []const []const u8, rejected: []const []const u8 };
     const columns = [_]Column{
-        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5", "6", "7", "8" }, .rejected = &.{ "0", "9" } },
+        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5", "6", "7", "8", "9" }, .rejected = &.{ "0", "10" } },
         .{ .update = "UPDATE model_output_item SET item_kind=v.k,message_content_id=CASE WHEN v.k=2 THEN extras_content_id END FROM (SELECT {s} AS k) v", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
         .{
-            .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END," ++
+            .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END,source_kind=CASE WHEN v.k=1 THEN source_kind END," ++
                 "source_revision=CASE WHEN v.k=2 THEN 1 END,source_operation_id=CASE WHEN v.k=3 THEN (SELECT min(operation_id) FROM model_output_item) END," ++
                 "source_item_ordinal=CASE WHEN v.k=3 THEN 0 END FROM (SELECT {s} AS k) v WHERE entry_kind=1",
             .accepted = &.{ "1", "2", "3" },
@@ -288,8 +288,8 @@ test "a reference is checked when its row is written, not at commit" {
             var sql: [320]u8 = undefined;
             try sqlite.exec(database, try std.fmt.bufPrintSentinel(
                 &sql,
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) " ++
-                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1 FROM session WHERE session_ref='{s}'",
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at,source_kind) " ++
+                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1,1 FROM session WHERE session_ref='{s}'",
                 .{ command_key, session_ref },
                 0,
             ));

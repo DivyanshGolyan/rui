@@ -4,6 +4,7 @@ const parts = @import("../../input_parts.zig");
 const capture = @import("../../InputCapture.zig");
 const custody = @import("../../content_custody.zig");
 const content = @import("content.zig");
+const content_value = @import("../../content_value.zig");
 const core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 
@@ -115,12 +116,17 @@ pub const Saving = struct {
     }
 
     noinline fn writeManifest(self: *Saving, a: anytype) !void {
+        const sink = try a.contentSink(self.content_id, self.value.length);
+        defer sink.close();
+        try self.writeManifestTo(sink);
+    }
+
+    // Keep manifest encoding scratch out of the sink-opening call chain.
+    noinline fn writeManifestTo(self: *Saving, sink: anytype) !void {
         const loan = self.source.captured;
         var cursor = loan.cursor();
         var encoder: parts.Manifest.Encoder = .{};
         var entry: [parts.Manifest.max_entry_bytes]u8 = undefined;
-        const sink = try a.contentSink(self.content_id, self.value.length);
-        defer sink.close();
         var offset: u64 = 0;
         while (try cursor.next()) |selected| {
             const identity: parts.Identity = .{ .length = selected.range.length, .digest = selected.range.digest, .kind = selected.kind };
@@ -236,12 +242,19 @@ pub const Cursor = struct {
     ordinal: u32 = 0,
     certified: bool = false,
     finished: bool = false,
+    pending: enum { none, raw, rows } = .none,
+    identity: ?parts.Identity = null,
+    trailer: [parts.Manifest.trailer_bytes]u8 = undefined,
+    trailer_length: usize = 0,
+    raw_length: usize = 0,
+    weight: Weight = .{},
 
     pub fn init(self: *Cursor, value: content.Value) void {
         std.debug.assert(value.reference == .parts);
         self.value = value;
         self.reset();
         self.certified = false;
+        self.weight = .{};
     }
 
     fn reset(self: *Cursor) void {
@@ -254,87 +267,168 @@ pub const Cursor = struct {
         self.row_count = 0;
         self.ordinal = 0;
         self.finished = false;
+        self.pending = .none;
+        self.identity = null;
+        self.trailer_length = 0;
     }
+
+    /// `certified` marks the pass boundary: the whole manifest and index are
+    /// certified and the next step starts yielding parts. It is emitted once.
+    pub const Step = union(enum) { raw, rows, certified, part: Part, done };
+
+    pub const Weight = struct {
+        bytes: u64 = 0,
+        text_bytes: u64 = 0,
+        unknown_images: u64 = 0,
+        rule: ?@import("../../model_catalog.zig").ImageCostRule = null,
+        astra_tokens: u64 = 0,
+        astra_unknown: u64 = 0,
+        astra_impossible: u64 = 0,
+        gpt41_unknown: u64 = 0,
+        gpt41_tokens: u64 = 0,
+
+        pub fn take(self: *Weight, part: Part) void {
+            self.bytes +|= part.reference.length;
+            switch (part.kind) {
+                .text => self.text_bytes +|= part.reference.length,
+                .image => |image| {
+                    self.unknown_images +|= 1;
+                    if (self.rule) |rule| switch (rule) {
+                        .astra_auto => switch (@import("../../input_media.zig").astraAuto(image.media.width, image.media.height)) {
+                            .tokens => |tokens| self.astra_tokens +|= tokens,
+                            .impossible => self.astra_impossible +|= 1,
+                            .unknown => self.astra_unknown +|= 1,
+                        },
+                        .gpt41_auto => switch (@import("../../input_media.zig").gpt41Auto(image.media.width, image.media.height)) {
+                            .tokens => |tokens| self.gpt41_tokens +|= tokens,
+                            .impossible, .unknown => self.gpt41_unknown +|= 1,
+                        },
+                    };
+                },
+            }
+        }
+    };
 
     fn fill(self: *Cursor, a: anytype) !bool {
         if (self.position < self.length) return true;
         const reference = self.value.reference.parts;
-        if (self.offset == reference.length) return false;
-        const amount: usize = @intCast(@min(self.buffer.len, reference.length - self.offset));
-        try a.readRaw(self.value.content_id, self.offset, self.buffer[0..amount]);
-        if (!self.check.absorb(reference, self.offset, self.buffer[0..amount])) return error.CorruptStore;
-        self.offset += amount;
-        self.position = 0;
-        self.length = amount;
-        return true;
+        if (self.offset == reference.length) return error.CorruptStore;
+        self.raw_length = @intCast(@min(self.buffer.len, reference.length - self.offset));
+        try a.readRaw(self.value.content_id, self.offset, self.buffer[0..self.raw_length]);
+        self.pending = .raw;
+        return false;
     }
 
-    fn indexRow(self: *Cursor, a: anytype) !?part_rows.Row {
+    fn indexRow(self: *Cursor, a: anytype) ?part_rows.Row {
         if (self.row == self.row_count) {
             a.read(part_rows, .{ .content_id = self.value.content_id, .ordinal = self.ordinal }, &self.rows);
-            try access.runAs(a, error.CorruptStore);
-            self.row = 0;
-            self.row_count = self.rows.len;
-            if (self.row_count == 0) return null;
+            self.pending = .rows;
+            return null;
         }
         const result = self.rows.items[self.row];
         self.row += 1;
         return result;
     }
 
-    fn scanNext(self: *Cursor, a: anytype) !?Part {
-        if (self.finished) return null;
-        while (self.decoder.remaining > parts.Manifest.trailer_bytes) {
-            if (!try self.fill(a)) return error.CorruptStore;
-            if (try self.decoder.next(self.buffer[0..self.length], &self.position)) |identity| {
-                const row = (try self.indexRow(a)) orelse return error.CorruptStore;
+    /// One bounded read at a time. A queued raw read and a queued index read
+    /// are distinct effects; callers resume only after the effect completes.
+    pub fn step(self: *Cursor, a: anytype) anyerror!Cursor.Step {
+        switch (self.pending) {
+            .none => {},
+            .raw => {
+                const bytes = self.buffer[0..self.raw_length];
+                if (!self.check.absorb(self.value.reference.parts, self.offset, bytes)) return error.CorruptStore;
+                self.offset += self.raw_length;
+                self.position = 0;
+                self.length = self.raw_length;
+            },
+            .rows => {
+                self.row = 0;
+                self.row_count = self.rows.len;
+                if (self.identity != null and self.row_count == 0) return error.CorruptStore;
+                if (self.identity == null and self.row_count == 0) {
+                    self.pending = .none;
+                    self.finished = true;
+                    return self.finishPass();
+                }
+            },
+        }
+        self.pending = .none;
+        if (self.finished) return .done;
+        while (true) {
+            if (self.identity) |identity| {
+                const row = self.indexRow(a) orelse return .rows;
                 if (row.ordinal != self.ordinal or (row.private orelse return error.CorruptStore) or
                     (try parts.Form.decode(row.form orelse return error.CorruptStore)) != .bytes or
                     (row.byte_length orelse return error.CorruptStore) != identity.length or
                     !std.mem.eql(u8, &(row.digest orelse return error.CorruptStore), &identity.digest)) return error.CorruptStore;
-                const result: Part = .{ .ordinal = self.ordinal, .kind = identity.kind, .content_id = row.part_content_id.get(), .reference = .{ .length = identity.length, .digest = identity.digest } };
+                const part: Part = .{ .ordinal = self.ordinal, .kind = identity.kind, .content_id = row.part_content_id.get(), .reference = .{ .length = identity.length, .digest = identity.digest } };
                 self.ordinal += 1;
-                return result;
+                self.identity = null;
+                if (self.certified) return .{ .part = part };
+                self.weight.take(part);
+                continue;
             }
+            if (self.decoder.remaining > parts.Manifest.trailer_bytes) {
+                if (!try self.fill(a)) return .raw;
+                self.identity = try self.decoder.next(self.buffer[0..self.length], &self.position);
+                continue;
+            }
+            while (self.trailer_length < self.trailer.len) {
+                if (!try self.fill(a)) return .raw;
+                self.trailer[self.trailer_length] = self.buffer[self.position];
+                self.trailer_length += 1;
+                self.position += 1;
+            }
+            if (try self.decoder.finish(&self.trailer) != self.ordinal or !self.check.verified or
+                self.offset != self.value.reference.parts.length or self.position != self.length) return error.CorruptStore;
+            if (self.row < self.row_count) return error.CorruptStore;
+            _ = self.indexRow(a);
+            return .rows;
         }
-        var trailer: [parts.Manifest.trailer_bytes]u8 = undefined;
-        for (&trailer) |*byte| {
-            if (!try self.fill(a)) return error.CorruptStore;
-            byte.* = self.buffer[self.position];
-            self.position += 1;
-        }
-        if (try self.decoder.finish(&trailer) != self.ordinal or !self.check.verified or
-            self.offset != self.value.reference.parts.length or self.position != self.length) return error.CorruptStore;
-        if (try self.indexRow(a) != null) return error.CorruptStore;
-        self.finished = true;
-        return null;
+    }
+
+    fn finishPass(self: *Cursor) Cursor.Step {
+        if (self.certified) return .done;
+        self.reset();
+        self.certified = true;
+        return .certified;
     }
 
     pub fn next(self: *Cursor, a: anytype) !?Part {
-        if (!self.certified) {
-            while (try self.scanNext(a)) |_| {}
-            self.reset();
-            self.certified = true;
-        }
-        return self.scanNext(a);
+        while (true) switch (try self.step(a)) {
+            .raw, .certified => {}, // Access.readRaw already completed this effect.
+            .rows => try access.runAs(a, error.CorruptStore),
+            .part => |part| return part,
+            .done => return null,
+        };
     }
 };
 
-pub fn verify(a: anytype, value: content.Value) !void {
-    // Parts projections are rare. One mapped Cursor belongs to this call and
-    // releases its bounded workspace when verification ends.
-    const mapped = try @import("../../os/pages.zig").Mapped(Cursor).map();
-    defer mapped.unmap();
-    mapped.value.init(value);
-    while (try mapped.value.next(a)) |_| {}
+/// The single public projection of a stored value. Pure: no Store access.
+/// A parts value exists only under a Message or an Action Resolution, so a parts
+/// row with no owner is CorruptStore. Manifest certification belongs to the parts
+/// list read, as byte authentication belongs to the content read.
+pub fn publicValue(row: *const content.content_metadata.Row, owner: ?content_value.Owner) error{CorruptStore}!content_value.Value {
+    if (row.private) return error.CorruptStore;
+    const identity: content_value.Reference = .{ .length = row.byte_length, .digest = row.digest };
+    return switch (try parts.Form.decode(row.form)) {
+        .bytes => .{ .text = identity },
+        .parts => .{ .parts = .{ .identity = identity, .owner = owner orelse return error.CorruptStore } },
+    };
 }
 
-/// A byte-oriented projection verifies compound values before declining them.
-pub fn publicMetadata(a: anytype, content_id: u64, row: *const content.content_metadata.Row) !content.ContentMetadata {
-    if (row.private) return error.CorruptStore;
-    if (try parts.Form.decode(row.form) == .parts) {
-        try verify(a, try content.Value.of(content_id, row.form, row.byte_length, row.digest));
-        return error.InputPartsNotSupported;
-    }
-    return content.publicMetadata(row);
+test "INS-12 publicValue projects every form and owner without Store access" {
+    const digest: [32]u8 = @splat(7);
+    for ([_]bool{ false, true }) |private| for ([_]u8{ 0, 1, 2 }) |form| for ([_]?content_value.Owner{ null, .{ .message = 3 }, .{ .action = 4 } }) |owner| {
+        const row: content.content_metadata.Row = .{ .byte_length = 9, .digest = digest, .private = private, .form = form };
+        const projected = publicValue(&row, owner);
+        if (private or form > 1 or (form == 1 and owner == null)) {
+            try std.testing.expectError(error.CorruptStore, projected);
+            continue;
+        }
+        const value = try projected;
+        try std.testing.expectEqualDeep(content_value.Reference{ .length = 9, .digest = digest }, value.identity());
+        if (form == 0) try std.testing.expect(value == .text) else try std.testing.expectEqualDeep(owner.?, value.parts.owner);
+    };
 }

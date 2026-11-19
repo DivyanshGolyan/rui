@@ -46,8 +46,8 @@ test "Full Message projection work does not multiply Messages by stops" {
 
             for (1..message_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2})",
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position,source_kind) " ++
+                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2},1)",
                     .{ index, session.slice(), 1000 + index },
                     0,
                 );
@@ -531,5 +531,28 @@ test "Full history's step faults keep main's names, and its content and stop rea
         if (case[2]) {
             try std.testing.expectError(case[1], testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
         } else try std.testing.expectError(case[1], testingFullHistory(&storage, &tmp, session.slice(), null));
+    }
+}
+
+test "INS-12 Full capture rejects an invalid canonical form and fences" {
+    for ([_]i64{ 2, -1 }) |form| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "invalid-form-full-config");
+        try submitTestMessage(&storage, &tmp, "invalid-form-full-first", "invalid-form-full-first", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "invalid-form-full-message", "invalid-form-full-message", session.slice(), "pending");
+        // The stop keeps pending input out of Current pressure. Full still
+        // includes the damaged Message after the valid first Message.
+        var stop = try completeSessionStop("invalid-form-full-stop", session.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        try store_testing.sqlite_only.exec(&storage, "UPDATE content SET form=?1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='invalid-form-full-message')", .{form});
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current));
+        try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
+        try std.testing.expect(storage.isFenced());
     }
 }

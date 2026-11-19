@@ -41,7 +41,7 @@ Your application talks over a local socket to one shared Host that runs the Sess
 The Host shares networking and execution capacity and saves conversation state in SQLite or MySQL.
 Connect built-in tools or MCP servers, coordinate agents, and follow their activity through the client.
 For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
-See the [Host guide](docs/host.md) for capacity and lifecycle.
+See the [Host guide](docs/host.md) for [settings](docs/host.md#save-host-settings), capacity and lifecycle.
 
 ## Try it in your terminal
 
@@ -58,6 +58,20 @@ The installer checks SHA-256 and installs in `~/.local/bin`.
 If `~/.local/bin` is not on your `PATH`, it adds it to your shell profile; open a new terminal afterwards.
 Set `RUI_NO_MODIFY_PATH=1` to leave your profile alone and follow its `PATH` instructions instead.
 See [upgrade and activation](docs/host.md#upgrade-and-activation) before updating saved work.
+
+If an older Rui cannot download its update because DNS resolution stalls, it needs an initial installer download to receive the fix. This recovery path requires a published installer with IPv4 fallback for its archive download. Run this command as the same user who installed Rui. The installer preserves Stores, credentials and earlier builds, and attempts to restart all running Hosts belonging to that user on the selected version. Save or finish work before proceeding.
+
+```sh
+(
+  set -eu
+  installer=$(mktemp)
+  trap 'rm -f "$installer"' EXIT
+  curl --disable --ipv4 -fsSL --connect-timeout 10 --max-time 300 https://ruicode.com/install -o "$installer"
+  sh "$installer"
+)
+```
+
+This recovery command downloads the current installer over IPv4 without changing your curl configuration or system DNS. The installer verifies the archive's SHA-256 digest and version before publishing it.
 
 <a id="start-a-conversation"></a>
 

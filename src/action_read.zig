@@ -9,13 +9,14 @@ pub const Request = struct {
     session: Bounded(session_id.max_reference_bytes) = .{},
     action_id: u64 = 0,
     offset: u64 = 0,
+    after: u64 = 0,
 };
 
 pub const PendingState = enum { waiting_approval, queued, attempted };
 pub const Resolution = struct {
     position: u64,
     code: Bounded(outcome_code.max_bytes),
-    content: struct { length: u64, digest: [32]u8 },
+    content: @import("content_value.zig").Value,
 };
 pub const Window = struct {
     offset: u64,
@@ -24,8 +25,20 @@ pub const Window = struct {
     text: Bounded(window_bytes),
 };
 pub const Final = struct { resolution: Resolution, window: Window };
+pub const page_items = 16;
+pub const page_bytes = @import("action_value_limits.zig").max_value_bytes;
+pub const Value = struct { ordinal: u64, key: Bounded(128), start: usize, length: usize };
+pub const Values = struct {
+    items: [page_items]Value = undefined,
+    count: usize = 0,
+    bytes: [page_bytes]u8 = undefined,
+    length: usize = 0,
+    next: u64 = 0,
+    more: bool = false,
+};
 pub const Read = struct {
+    values: Values = .{},
     session: Bounded(session_id.max_reference_bytes),
     action_id: u64,
-    status: union(enum) { pending: PendingState, resolved: Final },
+    status: union(enum) { pending: PendingState, resolved: Final, resolved_parts: Resolution },
 };

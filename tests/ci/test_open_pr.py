@@ -11,14 +11,14 @@ from test_pr_shape import GOAL
 
 
 class OpenPrTest(unittest.TestCase):
-    def test_opens_ready_over_rest_by_default(self):
-        args = open_pr.create_args("o/r", "Title", "Description", "main", "fix-x")
+    def test_opens_ready_over_rest_when_requested(self):
+        args = open_pr.create_args("o/r", "Title", "Description", "main", "fix-x", draft=False)
         self.assertEqual(args[:4], ["api", "-X", "POST", "repos/o/r/pulls"])
         self.assertIn("draft=false", args)
         self.assertIn("head=fix-x", args)
         self.assertIn("body=Description", args)
 
-    def test_opens_draft_over_rest_when_requested(self):
+    def test_opens_draft_over_rest(self):
         args = open_pr.create_args("o/r", "Title", "Description", "main", "fix-x", draft=True)
         self.assertEqual(args[:4], ["api", "-X", "POST", "repos/o/r/pulls"])
         self.assertEqual(args[args.index("-F") + 1], "draft=true")
@@ -26,16 +26,17 @@ class OpenPrTest(unittest.TestCase):
         self.assertIn("head=fix-x", args)
         self.assertIn("body=Description", args)
 
-    def test_open_requests_codex_review_on_ready_and_draft_candidates(self):
+    def test_open_drafts_by_default_and_requests_codex_review_only_on_drafts(self):
         url = "https://github.com/example/rui/pull/9"
         for draft in (False, True):
-            for comment_error in (None, subprocess.CalledProcessError(1, ["gh", "api"], stderr="denied")):
+            for comment_error in ((None, subprocess.CalledProcessError(1, ["gh", "api"], stderr="denied"))
+                                  if draft else (None,)):
                 with self.subTest(draft=draft, comment_error=comment_error):
                     stdout, stderr = io.StringIO(), io.StringIO()
                     created = '{"number": 9, "html_url": "%s"}' % url
                     argv = ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]
-                    if draft:
-                        argv.append("--draft")
+                    if not draft:
+                        argv.append("--ready")
                     with patch("sys.argv", argv), \
                          patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
                          patch.object(open_pr, "origin_repo", return_value="example/rui"), \
@@ -50,8 +51,9 @@ class OpenPrTest(unittest.TestCase):
                         call(*open_pr.create_args("example/rui", "Title", GOAL + "Description",
                                                  "main", "fix-x", draft=draft))])
                     self.assertIn("draft=true" if draft else "draft=false", gh.call_args.args)
-                    self.assertEqual(github.call_args_list, [
-                        call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])])
+                    self.assertEqual(github.call_args_list, ([
+                        call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])]
+                        if draft else []))
                     self.assertIn(url, stdout.getvalue())
                     if comment_error:
                         self.assertEqual(result, 1)
@@ -62,11 +64,12 @@ class OpenPrTest(unittest.TestCase):
                         self.assertIn("clean Codex evidence", stdout.getvalue())
                         if draft:
                             self.assertIn("Opened draft and requested Codex review", stdout.getvalue())
+                            self.assertIn("comment `@codex review` after each push", stdout.getvalue())
                             self.assertIn("open_pr.py ready", stdout.getvalue())
                             self.assertNotIn("Opened ready", stdout.getvalue())
                             self.assertNotIn("Selected CI runs beside review", stdout.getvalue())
                         else:
-                            self.assertIn("Opened ready and requested Codex review", stdout.getvalue())
+                            self.assertIn("Opened ready; Codex reviews automatically", stdout.getvalue())
                             self.assertIn("Selected CI runs beside review", stdout.getvalue())
                             self.assertNotIn("Opened draft", stdout.getvalue())
 
@@ -94,6 +97,7 @@ class OpenPrTest(unittest.TestCase):
                      patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
                      patch.object(open_pr, "origin_repo", return_value="example/rui"), \
                      patch.object(open_pr, "branch_changes", return_value=(paths, removed)) as changes, \
+                     patch.object(open_pr, "screens_required", return_value=False), \
                      patch.object(open_pr, "overlaps", side_effect=change_body_after_validation) as overlaps, \
                      patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
                      patch.object(open_pr, "github") as github, \
@@ -104,14 +108,30 @@ class OpenPrTest(unittest.TestCase):
                 if accepted:
                     overlaps.assert_called_once_with(github, "example/rui", "fix-x", paths, removed)
                     gh.assert_called_once_with(*open_pr.create_args(
-                        "example/rui", "Title", body, "parent", "fix-x"))
+                        "example/rui", "Title", body, "parent", "fix-x", draft=True))
                     self.assertEqual(body_file.read_text(encoding="utf-8"), "Replaced after validation")
-                    github.assert_called_once()
+                    github.assert_called_once_with("POST", "repos/example/rui/issues/9/comments",
+                                                   [("body", "@codex review")])
                 else:
                     self.assertIn("nonempty fenced sketch", stderr.getvalue())
                     overlaps.assert_not_called()
                     gh.assert_not_called()
                     github.assert_not_called()
+
+    def test_ui_without_screens_opens_and_prints_reminder(self):
+        stdout = io.StringIO()
+        with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
+             patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
+             patch.object(open_pr, "origin_repo", return_value="example/rui"), \
+             patch.object(open_pr.Path, "read_text", return_value=GOAL + "## Shape"), \
+             patch.object(open_pr, "branch_changes", return_value=({"src/overview_view.zig"}, {})), \
+             patch.object(open_pr, "screens_required", return_value=True), \
+             patch.object(open_pr, "overlaps", return_value=[]), patch.object(open_pr, "report"), \
+             patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
+             patch.object(open_pr, "github"), redirect_stdout(stdout):
+            self.assertEqual(open_pr.main(), 0)
+        gh.assert_called_once()
+        self.assertIn("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.", stdout.getvalue())
 
     def test_open_reports_unreadable_body_without_github(self):
         for error in (FileNotFoundError("missing body"), PermissionError("unreadable body"),

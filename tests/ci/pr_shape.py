@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require source sketches and embedded screen evidence for terminal UI changes."""
+"""Check PR shape and screen evidence for terminal UI changes."""
 import argparse
 from functools import cache
 import io
@@ -9,8 +9,8 @@ import subprocess
 import sys
 import tarfile
 
-from conflict_alert import github
-from select_tests import Graph, STACK_FRAMES_GATE, changed_paths, tree_graph
+from conflict_alert import github, pages
+from screens_comment import MARKER
 
 
 def summary_sketch(body):
@@ -43,6 +43,8 @@ def ui_paths(graph):
 @cache
 def revision_ui_paths(revision):
     """Also classify removed UI files using the base tree, through the same graph owner."""
+    from select_tests import Graph, STACK_FRAMES_GATE
+
     archive = subprocess.check_output(["git", "archive", revision, "src", "tests/integration", STACK_FRAMES_GATE])
     with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
         sources = {entry.name: tree.extractfile(entry).read() for entry in tree if entry.isfile()}
@@ -113,38 +115,87 @@ def refusal(changed_paths, body, *, base=None) -> str | None:
         return ("PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section "
                 "(CODING_STANDARDS.md#shape-before-code). Add a ## Shape section to the PR body, "
                 "then re-run the failed jobs of this run; no push needed.")
+    return None
+
+
+def screens_required(changed_paths, *, base=None) -> bool:
+    from select_tests import tree_graph
+
     paths = set(changed_paths)
     if not any(path.startswith("src/") for path in paths) and ".claude/skills/verify-rui/scripts/frames.json" not in paths:
-        return None
+        return False
     ui = ui_paths(tree_graph())
     if base is not None and any(path.startswith("src/") for path in paths):
         ui |= revision_ui_paths(base)
-    if paths & (ui | {".claude/skills/verify-rui/scripts/frames.json"}) and not screen_evidence(body):
+    return bool(paths & (ui | {".claude/skills/verify-rui/scripts/frames.json"}))
+
+
+def screen_refusal(body) -> str | None:
+    if not screen_evidence(body):
         return ("UI PRs need a visible user-attachments image/video line or a line 'No screen change: <reason>'. "
-                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); attach before the next push or re-run failed jobs after updating the body.")
+                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); re-run the failed admission job after updating the body.")
     return None
+
+
+def live_body(env_body) -> str:
+    body = env_body
+    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    if repo and number:
+        try:
+            result = github("GET", f"repos/{repo}/pulls/{number}")
+            current = result["body"]
+            if current is not None and not isinstance(current, str):
+                raise ValueError("invalid PR body")
+            body = current or ""
+            print("Judging current PR body from GitHub.")
+        except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
+            print(f"Could not read current PR body from GitHub ({error}); judging event payload body.")
+    return body
+
+
+def sticky_screen_evidence() -> bool:
+    """Accept a bot screenshot comment only for the current PR head."""
+    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    if not repo or not number:
+        return False
+    try:
+        head = github("GET", f"repos/{repo}/pulls/{number}")["head"]["sha"]
+        if not isinstance(head, str) or not head:
+            return False
+        for comment in pages(github, f"repos/{repo}/issues/{number}/comments?"):
+            body = comment.get("body")
+            if (comment.get("user", {}).get("login") == "github-actions[bot]"
+                    and isinstance(body, str) and MARKER in body
+                    and re.search(r"^Head: `" + re.escape(head) + r"`[ \t]*$", body, re.M)
+                    and any(re.search(r"!\[[^\]\n]*\]\(https?://[^\s)]+\)", line)
+                            for line in visible_lines(body))):
+                return True
+    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError, AttributeError) as error:
+        print(f"Could not read screen comments from GitHub ({error}).")
+    return False
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", nargs="?", default=os.environ.get("BASE"))
+    parser.add_argument("--screens", action="store_true")
     args = parser.parse_args()
-    if not args.base:
-        parser.error("provide BASE as an argument or environment variable")
-    paths, base = changed_paths(args.base, "HEAD")
-    body = os.environ.get("PR_BODY", "")
-    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
-    if repo and number:
-        try:
-            result = github("GET", f"repos/{repo}/pulls/{number}")
-            live_body = result["body"]
-            if live_body is not None and not isinstance(live_body, str):
-                raise ValueError("invalid PR body")
-            body = live_body or ""
-            print("Judging current PR body from GitHub.")
-        except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
-            print(f"Could not read current PR body from GitHub ({error}); judging event payload body.")
-    reason = refusal(paths, body, base=base)
+    body = live_body(os.environ.get("PR_BODY", ""))
+    if args.screens:
+        reason = screen_refusal(body)
+        if reason and sticky_screen_evidence():
+            reason = None
+    else:
+        if not args.base:
+            parser.error("provide BASE as an argument or environment variable")
+        from select_tests import changed_paths
+
+        paths, base = changed_paths(args.base, "HEAD")
+        required = screens_required(paths, base=base)
+        if output := os.environ.get("GITHUB_OUTPUT"):
+            with open(output, "a", encoding="utf-8") as f:
+                print(f"screens_required={str(required).lower()}", file=f)
+        reason = refusal(paths, body, base=base)
     if reason:
         print(reason, file=sys.stderr)
         return 1

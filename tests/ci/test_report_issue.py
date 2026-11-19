@@ -136,6 +136,16 @@ class CauseTest(unittest.TestCase):
         with mock.patch.object(Path, "read_text", return_value=shell):
             self.assertEqual(report_issue.fixtures(), {"host-stop": "tests/integration/host_stop_integration.py"})
 
+    def test_checked_termination_preserves_failed_command_attribution(self):
+        for term in ("exited with code 42", "terminated with signal SIGTERM"):
+            for expected in ("", " (expected exited with code 0)"):
+                with self.subTest(term=term, expected=expected):
+                    log = logged(f"error: process {term}{expected}",
+                                 "failed command: sh -c 'exec \"$@\" >&2' rui-acceptance python3 "
+                                 "/w/tests/integration/host_stop_integration.py /tmp/rui")
+                    self.assertEqual(len(report_issue.COMMAND.findall(report_issue.untimed(log))), 1)
+                    self.assertTrue(report_issue.failure_causes(log, self.cases))
+
     def test_launcher_command_aliases_do_not_add_a_second_cause_to_a_zig_failure(self):
         for launcher in ("tests/ci/store_shards.py", "tests/integration/../ci/store_shards.py",
                          "tests/integration/./../ci/store_shards.py"):
@@ -492,9 +502,11 @@ class ReportTest(unittest.TestCase):
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
                            re.M)
         self.assertEqual(len(steps), 2)
-        promotion = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/promote.yml').read_text(),
-                               re.M)
-        self.assertEqual(promotion, ['Require every selected promotion tier'])
+        promotion = {name: re.findall(r'^      - name: (Require every selected .+)$',
+                                      Path(f'.github/workflows/{name}').read_text(), re.M)
+                     for name in ('qualification-tier.yml', 'promote.yml')}
+        self.assertEqual(promotion, {'qualification-tier.yml': ['Require every selected qualification tier'],
+                                     'promote.yml': []})
         gate = dict(id=3, name='mutations', conclusion='failure',
                     steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])
         self.assertFalse(report_issue.aggregate_only(gate))

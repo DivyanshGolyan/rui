@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Open a PR and request Codex review; ready by default, draft with --draft.
+"""Open a PR as a draft and request Codex review; mark it ready once Codex is clean.
 
-Merge still requires current-candidate admission and the Codex evidence in
-CODING_STANDARDS.md. `ready` converts drafts without another push.
+A draft runs only the plan job, so Codex rounds do not cancel full CI runs.
+`ready` starts the selected suite on the clean head without another push.
+`--ready` opens ready at once, only for the exceptions in docs/agents/landing.md
+(a fix for a red main, or a PR other open PRs wait on). Merge still requires
+current-candidate admission and the Codex evidence in CODING_STANDARDS.md.
 
-  open_pr.py open --title TITLE --body-file FILE [--base main] [--draft]
+  open_pr.py open --title TITLE --body-file FILE [--base main] [--ready]
   open_pr.py ready
 """
 import argparse
@@ -16,10 +19,10 @@ from urllib.parse import quote
 
 from conflict_alert import gh, github
 from pr_overlap import branch_changes, origin_repo, overlaps, report
-from pr_shape import refusal as shape_refusal
+from pr_shape import refusal as shape_refusal, screens_required
 
 
-def create_args(repo, title, body, base, branch, draft=False):
+def create_args(repo, title, body, base, branch, draft):
     return ["api", "-X", "POST", f"repos/{repo}/pulls", "-f", f"title={title}", "-f", f"head={branch}",
             "-f", f"base={base}", "-F", f"draft={str(draft).lower()}", "-f", f"body={body}"]
 
@@ -56,11 +59,12 @@ def git(*args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    opening = commands.add_parser("open", help="check overlap with open PRs, then open a PR (ready by default)")
+    opening = commands.add_parser("open", help="check overlap with open PRs, then open a draft PR and request Codex review")
     opening.add_argument("--title", required=True)
     opening.add_argument("--body-file", required=True)
     opening.add_argument("--base", default="main")
-    opening.add_argument("--draft", action="store_true", help="open as a draft and request Codex review")
+    opening.add_argument("--ready", action="store_true",
+                         help="open ready for review (red-main fixes and PRs others wait on only)")
     commands.add_parser("ready", help="mark this branch's draft ready to run its full selected suite")
     args = parser.parse_args()
     branch, head = git("branch", "--show-current"), git("rev-parse", "HEAD")
@@ -79,17 +83,20 @@ def main():
             if refusal := shape_refusal(paths, body):
                 print(refusal, file=sys.stderr)
                 return 1
+            needs_screens = screens_required(paths, base=f"origin/{args.base}")
             report(overlaps(github, repo, branch, paths, removed))
-            pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch, draft=args.draft)))
+            pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch, draft=not args.ready)))
             print(pr["html_url"])
-            github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
-            if args.draft:
+            if needs_screens:
+                print("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.")
+            if not args.ready:
+                github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
                 print("Opened draft and requested Codex review. "
                       "Run `open_pr.py ready` after Codex review is clean to start the full selected suite.")
             else:
-                print("Opened ready and requested Codex review. Selected CI runs beside review.")
+                print("Opened ready; Codex reviews automatically. Selected CI runs beside review.")
             print("Merge requires current-candidate admission and clean Codex evidence; "
-                  "request review again when a semantic change invalidates it.")
+                  "on a draft, comment `@codex review` after each push.")
             return 0
         owner = repo.split("/")[0]
         found = github("GET", f"repos/{repo}/pulls?state=open&head={quote(f'{owner}:{branch}', safe=':/')}")

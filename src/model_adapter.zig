@@ -321,6 +321,8 @@ test "provider interpretation retries clean close but not incomplete framing or 
 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.OrderedInputLimit => @import("failure_class.zig").ordered_input_limit,
+        error.ModelImageUnsupported => "model_image_input_unsupported",
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
@@ -366,12 +368,16 @@ pub const PreparationFaults = struct {
     codec_declines: ?codec_abi.ItemKind = null,
 };
 
+const max_ordered_request_bytes: u64 = 512_000_000;
+const max_replayed_images: u16 = 1500;
+
 const RequestWriter = struct {
     io: std.Io,
     file: std.Io.File,
     budget: ScratchBudget,
     offset: u64 = 0,
     charged: u64 = 0,
+    encoded_limit: ?u64 = null,
     fail_write: bool,
     pending: [preparation_byte_allowance]u8 = undefined,
     pending_length: usize = 0,
@@ -380,6 +386,7 @@ const RequestWriter = struct {
     pub fn write(self: *RequestWriter, bytes: []const u8) !void {
         const next_offset = std.math.add(u64, self.offset, bytes.len) catch
             return error.RequestLengthOverflow;
+        if (self.encoded_limit) |limit| if (next_offset > limit) return error.OrderedInputLimit;
         const next_charged = std.math.add(u64, self.charged, bytes.len) catch
             return error.RequestLengthOverflow;
         if (!self.budget.allocate(bytes.len)) return error.RequestScratchExhausted;
@@ -405,6 +412,7 @@ const RequestWriter = struct {
         std.debug.assert(count <= self.pending.len - self.pending_length);
         const next_offset = std.math.add(u64, self.offset, count) catch
             return error.RequestLengthOverflow;
+        if (self.encoded_limit) |limit| if (next_offset > limit) return error.OrderedInputLimit;
         const next_charged = std.math.add(u64, self.charged, count) catch
             return error.RequestLengthOverflow;
         if (!self.budget.allocate(count)) return error.RequestScratchExhausted;
@@ -497,6 +505,7 @@ const Handle = union(enum) {
     instructions,
     sender,
     action_final,
+    action_value,
 };
 
 const Segment = struct {
@@ -535,6 +544,8 @@ pub const Preparation = struct {
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
     source_action: [20]u8 = undefined,
     source_action_len: usize = 0,
+    source_ordinal: [20]u8 = undefined,
+    source_ordinal_len: usize = 0,
     tool: store.HistoricalTool = undefined,
     state: State,
 
@@ -548,6 +559,10 @@ pub const Preparation = struct {
         content: ?ContentPiece = null,
         emission: Emission = .none,
         history_position: u64 = 0,
+        replayed_images: u16 = 0,
+        image_capability: model_catalog.ImageCapability = .unknown,
+        input_prefix: enum { none, sender, action_final, action_value } = .none,
+        input_kind: enum { message, tool_result } = .message,
         declaration: ?store.Declaration = null,
         declaration_open: bool = false,
         after_declaration: Stage = .history,
@@ -601,7 +616,10 @@ pub const Preparation = struct {
         history_validation,
         instructions,
         history_start,
+        history_span,
         history,
+        input_open,
+        input_parts,
         output_parts,
         tool_results,
         covered_tool_results,
@@ -762,6 +780,13 @@ pub const Preparation = struct {
         switch (self.state.stage) {
             .settings => {
                 try self.page.settings(&self.settings);
+                self.state.image_capability = model_catalog.imageCapability(self.settings.model.slice());
+                if (self.page.compound_inputs) {
+                    // Rebuild every compound input so all selected images are
+                    // counted; planSpan still checks the durable prefix seal.
+                    self.state.memos = null;
+                    self.writer.encoded_limit = max_ordered_request_bytes;
+                }
                 if (self.settings.output_schema != null and !providers.acceptsOutputSchema(protocol.routeOf(self.state.routes, self.settings.provider)))
                     return error.UnsupportedOutputSchemaRoute;
                 const codec = self.settings.codec;
@@ -780,9 +805,13 @@ pub const Preparation = struct {
             .instructions => {
                 self.state.stage = .history_start;
                 self.handles[0] = .instructions;
-                return self.loadItemHeader(.instructions, 0b1);
+                return self.loadItemHeader(.{ .message = .instruction }, 0b1);
             },
             .history_start => {
+                self.state.stage = .history_span;
+                return self.loadItemHeader(.history_start, 0);
+            },
+            .history_span => {
                 const next = try self.startSpan();
                 self.state.stage = .history;
                 return next;
@@ -802,6 +831,27 @@ pub const Preparation = struct {
                 const covered = if (anchor) |position| entry.position < position else false;
                 switch (entry.kind) {
                     .user, .instruction, .skill => {
+                        if (entry.input) |input| {
+                            try self.page.openMessage(input);
+                            self.state.input_kind = .message;
+                            self.state.input_prefix = .none;
+                            if (entry.sender) |sender| {
+                                self.sender = sender;
+                                self.state.input_prefix = .sender;
+                            }
+                            if (entry.source_action) |action| {
+                                const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
+                                self.source_action_len = text.len;
+                                self.state.input_prefix = if (action.ordinal()) |ordinal| blk: {
+                                    const value = std.fmt.bufPrint(&self.source_ordinal, "{d}", .{ordinal}) catch unreachable;
+                                    self.source_ordinal_len = value.len;
+                                    break :blk .action_value;
+                                } else .action_final;
+                            }
+                            self.state.stage = .input_open;
+                            return .pending;
+                        }
+                        if (entry.kind == .user and entry.content == null) return error.CorruptStore;
                         var handles: u8 = 0;
                         if (entry.content) |content| {
                             self.handles[0] = .{ .content = content };
@@ -815,7 +865,11 @@ pub const Preparation = struct {
                         if (entry.source_action) |action| {
                             const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
                             self.source_action_len = text.len;
-                            self.handles[1] = .action_final;
+                            self.handles[1] = if (action.ordinal()) |ordinal| blk: {
+                                const value = std.fmt.bufPrint(&self.source_ordinal, "{d}", .{ordinal}) catch unreachable;
+                                self.source_ordinal_len = value.len;
+                                break :blk .action_value;
+                            } else .action_final;
                             handles |= 0b10;
                         }
                         return self.loadItemHeader(.{ .message = if (entry.kind == .instruction) .instruction else .user }, handles);
@@ -865,13 +919,56 @@ pub const Preparation = struct {
                 self.handles[0] = .{ .content = bag };
                 return self.loadItemHeader(.output_close, 0b1);
             },
+            .input_open => {
+                self.state.stage = .input_parts;
+                return self.loadItemHeader(.{ .image_message_open = .user }, 0);
+            },
+            .input_parts => {
+                switch (self.state.input_prefix) {
+                    .none => {},
+                    inline else => |prefix| {
+                        self.state.input_prefix = .none;
+                        self.handles[0] = switch (prefix) {
+                            .sender => .sender,
+                            .action_final => .action_final,
+                            .action_value => .action_value,
+                            .none => unreachable,
+                        };
+                        return self.loadItemHeader(.input_text, 0b1);
+                    },
+                }
+                const part = try self.page.nextMessagePart() orelse {
+                    self.state.stage = if (self.state.input_kind == .message) .history else .tool_results;
+                    return self.loadItemHeader(if (self.state.input_kind == .message) .image_message_close else .image_tool_close, 0);
+                };
+                self.handles[0] = .{ .content = part.content };
+                return switch (part.kind) {
+                    .text => self.loadItemHeader(.input_text, 0b1),
+                    .image => |image| image: {
+                        if (self.state.image_capability == .unsupported) return error.ModelImageUnsupported;
+                        if (model_catalog.imageCostRule(self.settings.provider, self.settings.model.slice()) == .astra_auto and
+                            @import("input_media.zig").astraAuto(image.media.width, image.media.height) == .impossible)
+                            return error.OrderedInputLimit;
+                        if (self.state.replayed_images == max_replayed_images) return error.OrderedInputLimit;
+                        self.state.replayed_images += 1;
+                        break :image self.loadItemHeader(.{ .input_image = contractValue(codec_abi.ImageMime, image.media.format) }, 0b1);
+                    },
+                };
+            },
             .tool_results => {
                 const result = try self.page.nextToolResult() orelse {
                     self.state.stage = .history;
                     return .pending;
                 };
                 self.handles[0] = .{ .content = result.call_id };
-                self.handles[1] = .{ .content = result.output };
+                if (result.input) |input| {
+                    try self.page.openMessage(input);
+                    self.state.input_kind = .tool_result;
+                    self.state.input_prefix = .none;
+                    self.state.stage = .input_parts;
+                    return self.loadItemHeader(.image_tool_open, 0b1);
+                }
+                self.handles[1] = .{ .content = result.output orelse return error.CorruptStore };
                 return self.loadItemHeader(.tool_result, 0b11);
             },
             .covered_tool_results => {
@@ -1163,6 +1260,14 @@ pub const Preparation = struct {
                 0 => .{ .source = .{ .bytes = "[Rui: background Action " } },
                 1 => .{ .source = .{ .bytes = self.source_action[0..self.source_action_len] } },
                 2 => .{ .source = .{ .bytes = " reached its final Resolution. The result follows.]\n" } },
+                else => null,
+            },
+            .action_value => switch (index) {
+                0 => .{ .source = .{ .bytes = "[Rui: background Action " } },
+                1 => .{ .source = .{ .bytes = self.source_action[0..self.source_action_len] } },
+                2 => .{ .source = .{ .bytes = " published value " } },
+                3 => .{ .source = .{ .bytes = self.source_ordinal[0..self.source_ordinal_len] } },
+                4 => .{ .source = .{ .bytes = ". The value follows.]\n" } },
                 else => null,
             },
             .sender => switch (index) {
@@ -1480,7 +1585,7 @@ test "real preparation consumes the configured allowance across multiple advance
     const expected = try requestGolden(
         workspace,
         session.slice(),
-        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" ++ text ++ "\"}]}," ++
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" ++ text ++ "\"}]}," ++
             declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
     );
     defer std.testing.allocator.free(expected);
@@ -1612,6 +1717,19 @@ const PreparationTestSetup = struct {
         return configured.accepted.session;
     }
 
+    fn configureImagePolicy(self: *PreparationTestSetup, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+        // Start with a model that has no reasoning effort, so later model
+        // switches exercise image policy rather than retained-effort admission.
+        var command = try store.testing.completeConfiguration(key, "", self.workspace, "gpt-4.1");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.loaded_tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.reasoning_effort.state = .explicit_null;
+        try command.configuration.compaction_trigger.value.set("10000");
+        const configured = try self.storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        return configured.accepted.session;
+    }
+
     fn submit(self: *PreparationTestSetup, file_name: []const u8, key: []const u8, session: []const u8, text: []const u8) !void {
         return self.submitFrom(file_name, key, session, null, null, text);
     }
@@ -1671,7 +1789,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
-    const content = parsed.value.object.get("input").?.array.items[0].object.get("content").?.array.items;
+    const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), content.len);
     const text = content[0].object.get("text").?.string;
     const end = std.mem.indexOfScalar(u8, text, '\n').?;
@@ -1778,10 +1896,28 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
     defer std.testing.allocator.free(encoded);
     const marker = "\"instructions\":\"";
-    const offset = std.mem.indexOf(u8, request, marker).? + marker.len;
-    return std.testing.allocator.print("{s}{s}{s}", .{
-        request[0..offset], encoded[1 .. encoded.len - 1], request[offset..],
+    const start = std.mem.indexOf(u8, request, marker).?;
+    const offset = start + marker.len;
+    const end = offset + std.mem.indexOf(u8, request[offset..], "\",\"input\":[").?;
+    return std.testing.allocator.print("{s}\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{s}{s}\"}}]}},{s}", .{
+        request[0..start], encoded[1 .. encoded.len - 1], request[offset..end], request[end + "\",\"input\":[".len ..],
     });
+}
+
+fn requestSystemPrompt(parsed: std.json.Value) []const u8 {
+    if (parsed.object.get("instructions")) |instructions| return instructions.string;
+    const first = parsed.object.get("input").?.array.items[0].object;
+    std.debug.assert(std.mem.eql(u8, first.get("role").?.string, "developer"));
+    return first.get("content").?.array.items[0].object.get("text").?.string;
+}
+
+fn requestHistory(parsed: std.json.Value) []std.json.Value {
+    const input = parsed.object.get("input").?.array.items;
+    return if (parsed.object.get("instructions") != null) input else input[1..];
+}
+
+fn firstUserHistoryOffset(request: []const u8) usize {
+    return std.mem.indexOf(u8, request, "{\"role\":\"user\",\"content\":[").?;
 }
 
 fn preparationTestStepBound(request_bytes: usize) usize {
@@ -2006,7 +2142,7 @@ const composed_replayed_call_a = "{\"type\":\"function_call\",\"name\":\"bash\",
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\",\"id\":\"order-item-b\",\"status\":\"completed\"}";
 
 const composed_expected =
-    "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+    "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
     declared_bash_json ++ "," ++
     composed_replayed ++ "," ++
@@ -2104,7 +2240,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     try std.testing.expectEqual(.accepted, observed.status);
     try std.testing.expectEqual(.queued, observed.kind.message.?.queue.?.state);
     var reader: store.ContentReader = undefined;
-    reader.open(try setup.storage.openContent(observed.kind.message.?.content));
+    reader.open(try setup.storage.openContent(observed.kind.message.?.content.text));
     defer reader.close();
     var actual: [text.len + 1]u8 = undefined;
     const count = try reader.read(0, &actual);
@@ -2122,7 +2258,7 @@ test "request preparation minimal golden is exact across schedules" {
     defer workspace_dir.close(std.testing.io);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
@@ -2160,7 +2296,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
-        const instructions = parsed.value.object.get("instructions").?.string;
+        const instructions = requestSystemPrompt(parsed.value);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
         const path_start = context_parts[0].len - 1;
         const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
@@ -2191,7 +2327,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}," ++ declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}," ++ declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -2274,7 +2410,7 @@ test "request preparation escapes instructions and user content" {
     const expected = try requestGolden(
         setup.workspace,
         session.slice(),
-        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"a\\\"b\\\\c\\n\\u0000\\u0001d\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u\\\"v\\\\w\\u0000\x7fé\"}]}," ++
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"a\\\"b\\\\c\\n\\u0000\\u0001d\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u\\\"v\\\\w\\u0000\x7fé\"}]}," ++
             declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
     );
     defer std.testing.allocator.free(expected);
@@ -2296,10 +2432,10 @@ test "request preparation escapes instructions and user content" {
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
     defer parsed.deinit();
-    const instructions = parsed.value.object.get("instructions").?.string;
+    const instructions = requestSystemPrompt(parsed.value);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3] ++ instructions_text));
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
     _ = (try setup.storage.admitNextModelAttempt(.{}));
@@ -2374,7 +2510,7 @@ test "request preparation frozen selection excludes later messages" {
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqual(@as(usize, 2), input.len);
     try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
@@ -2382,7 +2518,7 @@ test "request preparation frozen selection excludes later messages" {
 }
 
 test "request preparation keeps the starting effort at the top and changes it at its Operation" {
-    const Case = struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 };
+    const Case = struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8, reset: bool = false };
     const unlisted = comptime blk: {
         const efforts = std.enums.values(protocol.ReasoningEffort);
         var cases: [efforts.len]Case = undefined;
@@ -2393,7 +2529,8 @@ test "request preparation keeps the starting effort at the top and changes it at
         .{ .model = "gpt-6-luna", .expected = "medium" },
         .{ .model = "gpt-6-astra", .expected = "low" },
         .{ .model = "gpt-5.5", .override = "high", .expected = "high" },
-        .{ .model = "model-a", .expected = null },
+        .{ .model = "model-a", .expected = "low", .reset = true },
+        .{ .model = "kimi-k2.6", .expected = null },
     } ++ unlisted) |case| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -2411,7 +2548,7 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        if (case.override orelse case.expected) |effort| {
+        if (if (case.reset) null else case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
         } else command.configuration.reasoning_effort.state = .explicit_null;
@@ -2465,7 +2602,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             try std.testing.expectEqualStrings(case.model, request.get("model").?.string);
             try std.testing.expectEqualStrings("low", request.get("text").?.object.get("verbosity").?.string);
             try std.testing.expectEqual(true, request.get("parallel_tool_calls").?.bool);
-            try std.testing.expectEqualStrings("keep this exact input", request.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
+            try std.testing.expectEqualStrings("keep this exact input", requestHistory(parsed.value)[0].object.get("content").?.array.items[0].object.get("text").?.string);
             try std.testing.expectEqual(@as(usize, purpose), std.mem.count(u8, bytes, "compaction_trigger"));
             sealed.deinit(std.testing.io, preparation.writer.budget);
             owned = false;
@@ -2507,7 +2644,7 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     const result = try drainPreparation(&preparation, &setup.storage, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}," ++
         declared_bash_json ++ "],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}";
     const full_expected = try requestGolden(setup.workspace, session.slice(), expected);
     defer std.testing.allocator.free(full_expected);
@@ -2954,7 +3091,7 @@ test "model switch golden rebuilds visible history without old reasoning or comp
         defer std.testing.allocator.free(rebuilt.bytes);
         try std.testing.expectEqual(@as(usize, 0), rebuilt.copied);
         const golden =
-            "{\"model\":\"model-b\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+            "{\"model\":\"model-b\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[" ++
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
             declared_bash_json ++ "," ++ composed_replayed_call_a ++ "," ++ composed_replayed_call_b ++ "," ++
             "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
@@ -3194,7 +3331,7 @@ test "every replayed output item parses equal to the item the provider sent" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
-    const input = parsed.object.get("input").?.array.items;
+    const input = requestHistory(parsed);
     try std.testing.expectEqual(cases.len + 3, input.len);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
     for (cases, input[2 .. 2 + cases.len], 0..) |case, actual, index| {
@@ -3245,7 +3382,7 @@ test "request preparation replays reasoning continuation without its private rea
         const result = try drainPreparation(&preparation, &setup.storage, schedule[0], schedule[1], 32768);
         defer std.testing.allocator.free(result.bytes);
         const body = try std.mem.concat(std.testing.allocator, u8, &.{
-            "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
+            "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"low\"},\"instructions\":\"\",\"input\":[",
             "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]}," ++ declared_bash_json ++ ",",
             case.replayed,
             ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
@@ -3375,10 +3512,10 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expectEqual(after_anchor, try expectMemoRebuildEqual(&setup, next_binding, &memos, .{}));
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
-    const instructions = parsed.value.object.get("instructions").?.string;
+    const instructions = requestSystemPrompt(parsed.value);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3]));
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqual(@as(usize, 5), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("compaction", input[1].object.get("type").?.string);
@@ -3394,7 +3531,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
 fn inputTextsForTesting(request: []const u8, out: [][]const u8) ![]const []const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
     defer parsed.deinit();
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     std.debug.assert(input.len <= out.len);
     for (input, 0..) |item, index| {
         const label = if (item.object.get("content")) |content| content.array.items[0].object.get("text").?.string else item.object.get("type").?.string;
@@ -3702,7 +3839,7 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
+    if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("configuration_defaults.zig").startEffort(model_catalog.shipped, model) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
         try command.configuration.reasoning_effort.value.set(@tagName(effort));
     } else command.configuration.reasoning_effort.state = .explicit_null;
@@ -3799,7 +3936,7 @@ test "request N+1 begins with request N's history span" {
         const request = try prepareMemoForTesting(&setup, binding, &table, .{});
         defer std.testing.allocator.free(request.bytes);
         try std.testing.expectEqual(@as(usize, 0), request.copied);
-        const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
+        const start = firstUserHistoryOffset(request.bytes);
         const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
         const after = request.bytes[start + span.len ..];
         const between = after[0 .. std.mem.indexOf(u8, after, "],\"tools\":[") orelse return error.TestUnexpectedResult];
@@ -4017,6 +4154,8 @@ test "a refused effort change retries without the update and later Operations ke
         if (initial) |effort| try change.configuration.reasoning_effort.value.set(@tagName(effort));
 
         try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+        // Older stored sessions can still have no effective effort.
+        if (initial == null) try store.testing.setLegacyNullEffortForTesting(&setup.storage, session.slice());
         try setup.submit("refusal-message", "refusal-message", session.slice(), "continue after a refused change");
         const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
@@ -4248,7 +4387,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     var declarations: usize = 0;
-    for (parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
         const added = item.object.get("tools").?.array.items;
@@ -4298,7 +4437,7 @@ test "find_tools declares a found tool on the next request without losing the me
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, next.bytes, .{});
     defer parsed.deinit();
     var declarations: usize = 0;
-    for (parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
         const added = item.object.get("tools").?.array.items;
@@ -4333,7 +4472,7 @@ test "read_action uses the frozen configured offer and returns one provider tool
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), first.bytes, .{});
-    const declaration = request.object.get("input").?.array.items[1].object;
+    const declaration = requestHistory(request)[1].object;
     try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
     const definitions = declaration.get("tools").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), definitions.len);
@@ -4356,7 +4495,7 @@ test "read_action uses the frozen configured offer and returns one provider tool
     const successor = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
     try std.testing.expectEqual(@as(usize, 0), successor.object.get("tools").?.array.items.len);
     var outputs: usize = 0;
-    for (successor.object.get("input").?.array.items) |item| {
+    for (requestHistory(successor)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         try std.testing.expectEqualStrings("read-call", item.object.get("call_id").?.string);
@@ -4373,6 +4512,233 @@ test "read_action uses the frozen configured offer and returns one provider tool
     });
     try std.testing.expect(try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false }) == null);
     try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
+}
+
+test "core reader failures retain exact bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("reader-errors-codec");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("reader-errors-offer");
+    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("reader-errors-input", "reader-errors-input", session.slice(), "inspect");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    try settleItemsForTesting(&setup, binding, "reader-errors-calls", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+        "{\"type\":\"function_call\",\"id\":\"transcript-item\",\"call_id\":\"transcript-call\",\"name\":\"read_transcript\",\"arguments\":\"{\\\"offset\\\":1}\"}",
+        "{\"type\":\"function_call\",\"id\":\"stop-item\",\"call_id\":\"stop-call\",\"name\":\"stop_action\",\"arguments\":\"{}\"}",
+    });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (0..3) |_| {
+        const action = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
+        switch (action.tool) {
+            .read_action => try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .read_transcript => try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .stop_action => try @import("stop_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            else => return error.UnexpectedTool,
+        }
+    }
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
+    var seen: usize = 0;
+    for (requestHistory(request)) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        const call_id = item.object.get("call_id").?.string;
+        const expected = if (std.mem.eql(u8, call_id, "read-call"))
+            "Rui could not read the Action: action is required."
+        else if (std.mem.eql(u8, call_id, "transcript-call"))
+            "Rui could not read the transcript: offset is only accepted with full."
+        else if (std.mem.eql(u8, call_id, "stop-call"))
+            "Rui could not stop the Action: expected an object containing only action."
+        else
+            return error.UnexpectedCall;
+        try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "successful reader pages and final stop preserve bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try setup.configure("reader-pages-wire");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("reader-pages-tools");
+    configure.configuration.tools = try .of(&.{ "bash", "read_action", "read_transcript" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("reader-pages-input", "reader-pages-input", session.slice(), "run and read");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, first, "reader-pages-target", &.{
+        "{\"type\":\"function_call\",\"id\":\"target-item\",\"call_id\":\"target-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Held\\\"}\"}",
+    });
+    const target = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+    var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+    try background.key.set("reader-pages-background");
+    try std.testing.expect(setup.storage.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+    const effect = (try setup.storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+    const repeats = @import("action_read.zig").window_bytes / 3 + 3;
+    const text = "a" ++ @as([3 * repeats]u8, @bitCast(@as([repeats][3]u8, @splat("雪".*))));
+    _ = try setup.storage.settleActionAttempt(effect, .succeeded, text, .{});
+    const second = (try setup.storage.admitModelAttempt(.message, .{})).?.permit.binding;
+
+    const other = try setup.configure("reader-pages-other");
+    const long = try arena.alloc(u8, 16 * 1024 + 64);
+    @memset(long, 'x');
+    @memcpy(long[16383..][0..4], "😀");
+    try setup.submit("reader-pages-other-input", "reader-pages-other-input", other.slice(), long);
+    const page = try arena.create(protocol.ActivityFacts);
+    try setup.storage.activityPage(&.{ .session = other, .direction = .backward }, page);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    const position = page.items[0].position;
+    const args = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"4096\"}}", .{target}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), position }),
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
+    };
+    const names = [_][]const u8{ "read_action", "read_action", "read_transcript", "read_transcript", "stop_action" };
+    var calls: [args.len]store.TestingCall = undefined;
+    for (&calls, args, names, 0..) |*call, arguments, name, index| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+        const id = try std.fmt.allocPrint(arena, "page-{d}", .{index});
+        call.* = .{ .item_id = id, .name = name, .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
+    }
+    try store.settleCallsForTesting(&setup.storage, &setup.tmp, second, "reader-pages-calls", &calls);
+    var action_ids: [args.len]u64 = undefined;
+    for (args, names, 0..) |arguments, name, index| {
+        const action = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+        const actual_args = try arena.alloc(u8, @intCast(action.arguments.length));
+        try setup.storage.readCoreArguments(&action, actual_args);
+        try std.testing.expectEqualStrings(arguments, actual_args);
+        action_ids[index] = action.binding.action_id;
+        if (std.mem.eql(u8, name, "read_action")) {
+            try @import("read_action_tool.zig").run(&setup.storage, arena, &action, .{});
+        } else if (std.mem.eql(u8, name, "read_transcript")) {
+            try @import("read_transcript.zig").run(&setup.storage, arena, &action, .{});
+        } else {
+            try @import("stop_action_tool.zig").run(&setup.storage, arena, &action, .{});
+        }
+    }
+    var read: @import("action_read.zig").Read = undefined;
+    try setup.storage.readAction(&.{ .session = session, .action_id = target }, &read);
+    const final = read.status.resolved.resolution;
+    const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
+    const first_text = try std.json.Stringify.valueAlloc(arena, text[0..4096], .{});
+    const second_text = try std.json.Stringify.valueAlloc(arena, text[4096..], .{});
+    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}";
+    const expected_first = try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 0), @as(usize, 4096), "true", first_text });
+    const expected = [_][]const u8{
+        expected_first,
+        try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 4096), text.len, "false", second_text }),
+        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ position, long.len, long[0..16383], args[3] }),
+        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 16383 to {d} of {d}:\n{s}", .{ position, long.len, long.len, long[16383..] }),
+        expected_first,
+    };
+    const third = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, third, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    var seen: [args.len]bool = @splat(false);
+    for (requestHistory(parsed)) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        const id = item.object.get("call_id").?.string;
+        for (calls, 0..) |call, index| {
+            if (!std.mem.eql(u8, id, call.decoded_call_id)) continue;
+            try std.testing.expect(!seen[index]);
+            seen[index] = true;
+            const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{action_ids[index]});
+            const reference = try store.testingContentReference(&setup.storage, result_id);
+            const bytes = try arena.alloc(u8, @intCast(reference.length));
+            var reader: store.ContentReader = undefined;
+            reader.open(try setup.storage.openContent(reference));
+            defer reader.close();
+            try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+            try std.testing.expectEqualStrings(expected[index], bytes);
+            try std.testing.expectEqualStrings(expected[index], item.object.get("output").?.string);
+        }
+    }
+    for (seen) |found| try std.testing.expect(found);
+}
+
+test "late completion after stop preserves cancelled bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try setup.configure("stop-race-wire");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("stop-race-tools");
+    configure.configuration.tools = try .of(&.{ "bash", "read_action" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("stop-race-input", "stop-race-input", session.slice(), "run and stop");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, first, "stop-race-target", &.{
+        "{\"type\":\"function_call\",\"id\":\"target-item\",\"call_id\":\"target-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Held\\\"}\"}",
+    });
+    const target = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+    var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+    try background.key.set("stop-race-background");
+    try std.testing.expect(setup.storage.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+    const effect = (try setup.storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+    const second = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const args = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target});
+    const quoted = try std.json.Stringify.valueAlloc(arena, args, .{});
+    const calls = [_]store.TestingCall{.{ .item_id = "stop-item", .name = "stop_action", .encoded_call_id = "stop-call", .decoded_call_id = "stop-call", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = args }};
+    try store.settleCallsForTesting(&setup.storage, &setup.tmp, second, "stop-race-call", &calls);
+    const stop = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+    try std.testing.expect(stop.tool == .stop_action);
+    try @import("stop_action_tool.zig").run(&setup.storage, arena, &stop, .{});
+    try std.testing.expect((try setup.storage.actionSupersededByStop(effect)) != null);
+    _ = try setup.storage.settleActionAttempt(effect, .succeeded, "late result", .{});
+    const resumed = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+    try std.testing.expectEqual(stop.binding.action_id, resumed.binding.action_id);
+    try @import("stop_action_tool.zig").run(&setup.storage, arena, &resumed, .{});
+    var read: @import("action_read.zig").Read = undefined;
+    try setup.storage.readAction(&.{ .session = session, .action_id = target }, &read);
+    const final = read.status.resolved.resolution;
+    const text = "Action was stopped.";
+    const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
+    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
+    const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{stop.binding.action_id});
+    const reference = try store.testingContentReference(&setup.storage, result_id);
+    const bytes = try arena.alloc(u8, @intCast(reference.length));
+    var reader: store.ContentReader = undefined;
+    reader.open(try setup.storage.openContent(reference));
+    defer reader.close();
+    try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+    try std.testing.expectEqualStrings(expected, bytes);
+    const third = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, third, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    var count: usize = 0;
+    for (requestHistory(parsed)) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        if (!std.mem.eql(u8, item.object.get("call_id").?.string, "stop-call")) continue;
+        try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "a full rebuild must begin with the Session's prefix seal" {
@@ -4810,7 +5176,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     const prepared = try skill_owner.prepareMessage(arena, std.testing.allocator, std.testing.io, &setup.storage, &invoke, null);
     const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &prepared.captured.?, .{});
     try std.testing.expect(admitted_message == .accepted);
-    try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.length);
+    try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.text.length);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
     var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
@@ -4820,9 +5186,9 @@ test "skills native conversation is append-only across invoke reload replay and 
     const first = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
     defer std.testing.allocator.free(first.bytes);
     const first_parsed = try std.json.parseFromSlice(std.json.Value, arena, first.bytes, .{});
-    try std.testing.expect(std.mem.indexOf(u8, first_parsed.value.object.get("instructions").?.string, "initial-demo-desc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, requestSystemPrompt(first_parsed.value), "initial-demo-desc") == null);
     var users: std.ArrayList([]const u8) = .empty;
-    for (first_parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(first_parsed.value)) |item| {
         const role = item.object.get("role") orelse continue;
         if (std.mem.eql(u8, role.string, "user")) try users.append(arena, item.object.get("content").?.array.items[0].object.get("text").?.string);
     }
@@ -4852,7 +5218,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expectStringStartsWith(second.bytes, first.bytes[0..first_end]);
     const second_parsed = try std.json.parseFromSlice(std.json.Value, arena, second.bytes, .{});
     var exact_tool = false;
-    for (second_parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(second_parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (std.mem.eql(u8, kind.string, "function_call_output")) exact_tool = std.mem.eql(u8, item.object.get("output").?.string, current.invocation);
     }
@@ -4895,7 +5261,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
     const invoke_replay = setup.storage.submitMessageCapturedSkills(&invoke, null, null, null, .{});
     try std.testing.expect(invoke_replay == .accepted and invoke_replay.accepted.replayed);
-    try std.testing.expectEqualSlices(u8, &admitted_message.accepted.content.digest, &invoke_replay.accepted.content.digest);
+    try std.testing.expectEqualSlices(u8, &admitted_message.accepted.content.text.digest, &invoke_replay.accepted.content.text.digest);
     const report = try skillReportForTesting(&setup, session.slice());
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "\"turn\":null") != null);
@@ -5233,6 +5599,12 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
     try setup.init();
     defer setup.close();
     const session = try setup.configure("image-codec-config");
+    const effort = (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort;
+    const reasoning = if (effort) |value|
+        try std.fmt.allocPrint(std.testing.allocator, ",\"reasoning\":{{\"effort\":\"{s}\"}}", .{@tagName(value)})
+    else
+        try std.testing.allocator.dupe(u8, "");
+    defer std.testing.allocator.free(reasoning);
     try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -5241,16 +5613,45 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
         "{\"type\":\"function_call_output\",\"call_id\":\"shot\\\"\",\"output\":[" ++ image_test_part ++
         ",{\"type\":\"input_text\",\"text\":\"observed\"}]}," ++
         "{\"type\":\"function_call_output\",\"call_id\":\"text-only\",\"output\":\"still a string\"}]";
+    const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
+    defer std.testing.allocator.free(quoted_workspace);
+    const context = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}{s}{s}{s}", .{
+        context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1],
+        session.slice(),  context_parts[2],                                context_parts[3],
+    });
+    defer std.testing.allocator.free(context);
+    const encoded_context = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
+    defer std.testing.allocator.free(encoded_context);
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        const top = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+        const prefix = if (codec == .@"openai-responses/1")
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"instructions\":{s},\"input\":[", .{ top, reasoning, encoded_context })
+        else
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, reasoning, encoded_context });
+        defer std.testing.allocator.free(prefix);
+        const full_expected = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, expected[1..] });
+        defer std.testing.allocator.free(full_expected);
         for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
             var used: std.atomic.Value(u64) = .init(0);
             var preparation: Preparation = undefined;
-            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, expected.len);
+            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, full_expected.len);
             defer if (preparation.state.active) preparation.cancel();
             preparation.settings.codec = codec;
-            preparation.carry = codecs.initialCarry(codec, null);
+            preparation.carry = codecs.initialCarry(codec, effortOf(preparation.settings.starting_effort));
             preparation.encoder = codecs.resumeFrom(preparation.carry);
-            try preparation.writer.write("[");
+            _ = preparation.loadSettingsItem();
+            try preparation.encodeItem();
+            try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            preparation.state.stage = .instructions;
+            var bytes_left: usize = preparation_byte_allowance;
+            var items_left: usize = preparation_item_allowance;
+            for (0..2) |_| {
+                try std.testing.expect((try preparation.nextItem(&bytes_left, &items_left)) == .item);
+                try preparation.encodeItem();
+                try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            }
+            try std.testing.expect(preparation.state.stage == .history_span);
+            try std.testing.expectEqual(prefix.len, preparation.writer.offset);
             const Item = struct { item: codec_abi.Item, handles: []const Handle = &.{} };
             for ([_]Item{
                 .{ .item = .{ .image_message_open = .user } },
@@ -5273,10 +5674,11 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
             preparation.state.stage = .end;
             const request = try drainLivePreparation(&preparation, &setup.storage, allowance, 1, 64);
             defer request.deinit(std.testing.io, preparation.writer.budget);
-            var bytes: [expected.len]u8 = undefined;
-            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
-            try std.testing.expectEqualStrings(expected, &bytes);
-            try std.testing.expectEqual(@as(u64, expected.len), used.load(.monotonic));
+            const bytes = try std.testing.allocator.alloc(u8, full_expected.len);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes, 0));
+            try std.testing.expectEqualStrings(full_expected, bytes);
+            try std.testing.expectEqual(@as(u64, full_expected.len), used.load(.monotonic));
         }
     }
 }
@@ -5423,7 +5825,7 @@ test "request preparation streams exact built-in instructions across provider ro
         defer std.testing.allocator.free(quoted_workspace);
         const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], body, context_parts[3], baseline });
         defer std.testing.allocator.free(expected);
-        const instructions = parsed.value.object.get("instructions").?.string;
+        const instructions = requestSystemPrompt(parsed.value);
         try std.testing.expectEqualStrings(expected, instructions);
         if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
         try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
@@ -5455,9 +5857,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Scenario = enum { pages, tool_results, bounds };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "f8ee1d1f3cc1713b73030cc47695cefd58a1d6c142b8c4dbd4bf06bcd09a630d",
-            .tool_results = "947f4e1b9af86a718b1a479de7b0164ac10d96df90d6169ebd0dc01bb6eee1d0",
-            .bounds = "e5f899f1ae9d8f293479af1cb79f68fb6f63acefaa7a58fcd3cc7dcdd0d753bf",
+            .pages = "f7827100070720d422de63bbfa64fa2e7322ff73428bb605855755ebd276b035",
+            .tool_results = "e232738ad0194f4409caabeb56053e7a36ae18b17b995e880ef3b0c1df4f44f4",
+            .bounds = "909467844475aac9ba18d00713ec47619b28bf918b4f717db23c451643be34ff",
         });
     };
     const testing = store.testing;
@@ -5494,7 +5896,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
                         11 => past_bound,
                         else => try std.fmt.bufPrint(&result_buffer, "result {d}", .{index}),
                     };
-                    _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
+                    if (index == 3 or index == 11) {
+                        try testing.settleTestActionParts(&storage, &tmp, action, &.{.{ .bytes = result }});
+                    } else _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
                 }
             },
             .bounds => {
@@ -5541,4 +5945,891 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
             };
         }
     }
+}
+
+const OrderedTestPart = struct {
+    bytes: []const u8,
+    kind: @import("InputCapture.zig").Incoming = .text,
+};
+
+fn captureOrderedForTesting(setup: *PreparationTestSetup, parts: []const OrderedTestPart, used: *std.atomic.Value(u64), capture: *@import("InputCapture.zig")) !@import("InputCapture.zig").Loan {
+    const spool = try setup.tmp.dir.createFile(std.testing.io, "ordered-spool", .{ .read = true });
+    errdefer spool.close(std.testing.io);
+    const index = try setup.tmp.dir.createFile(std.testing.io, "ordered-index", .{ .read = true });
+    errdefer index.close(std.testing.io);
+    try setup.tmp.dir.deleteFile(std.testing.io, "ordered-spool");
+    try setup.tmp.dir.deleteFile(std.testing.io, "ordered-index");
+    capture.init(std.testing.io, spool, index, .{ .used = used, .limit = 4 * 1024 * 1024 });
+    errdefer if (capture.resources) |resources| resources.budget.release(resources.charged);
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    return capture.seal();
+}
+
+fn settleOrderedForTesting(setup: *PreparationTestSetup, binding: store.ActionAttemptBinding, parts: []const OrderedTestPart) !void {
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: @import("InputCapture.zig") = undefined;
+    const loan = try captureOrderedForTesting(setup, parts, &used, &capture);
+    defer capture.close();
+    _ = try setup.storage.settleActionAttemptParts(binding, .succeeded, loan, .{});
+}
+
+fn proposeOrderedActionsForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, calls: []const ComposedCall) !void {
+    try settleComposedForTesting(setup, binding, "ordered-action-calls", .reasoning, "{\"type\":\"reasoning\",\"id\":\"ordered-plan\",\"encrypted_content\":\"opaque\"}", calls);
+}
+
+fn submitOrderedForTesting(setup: *PreparationTestSetup, session: []const u8, key: []const u8, parts: []const OrderedTestPart, sender: ?[]const u8, handle: ?protocol.Bounded(32)) !void {
+    const custody = @import("content_custody.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: @import("InputCapture.zig") = undefined;
+    const loan = try captureOrderedForTesting(setup, parts, &used, &capture);
+    defer capture.close();
+    var command: custody.MessageCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session);
+    if (sender) |ref| {
+        command.sender = .{};
+        try command.sender.?.store.set(setup.root);
+        try command.sender.?.session.set(ref);
+    }
+    command.sender_handle = handle;
+    try std.testing.expect((try setup.storage.submitMessageParts(&command, loan, null, .{})) == .accepted);
+}
+
+fn expectOrderedPartsForTesting(actual: []const std.json.Value, expected: []const OrderedTestPart) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (actual, expected) |value, part| switch (part.kind) {
+        .text => {
+            try std.testing.expectEqualStrings("input_text", value.object.get("type").?.string);
+            try std.testing.expectEqualStrings(part.bytes, value.object.get("text").?.string);
+        },
+        .image => {
+            try std.testing.expectEqualStrings("input_image", value.object.get("type").?.string);
+            const url = value.object.get("image_url").?.string;
+            const prefix = if (std.mem.startsWith(u8, part.bytes, "\x89PNG")) "data:image/png;base64," else "data:image/jpeg;base64,";
+            try std.testing.expectStringStartsWith(url, prefix);
+            const encoded = url[prefix.len..];
+            const decoder = std.base64.standard.Decoder;
+            const decoded = try std.testing.allocator.alloc(u8, try decoder.calcSizeForSlice(encoded));
+            defer std.testing.allocator.free(decoded);
+            try decoder.decode(decoded, encoded);
+            try std.testing.expectEqualSlices(u8, part.bytes, decoded);
+            try std.testing.expectEqualStrings("auto", value.object.get("detail").?.string);
+        },
+    };
+}
+
+test "canonical ordered Message lowers original PNG JPEG and Text parts on every Responses codec" {
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    const progressive = @embedFile("testing/fixtures/input-progressive.jpg");
+    const mixed = [_]OrderedTestPart{
+        .{ .bytes = "before \"quoted\"\n雪\x00" },
+        .{ .bytes = png, .kind = .{ .image = .{} } },
+        .{ .bytes = "between" },
+        .{ .bytes = jpeg, .kind = .{ .image = .{} } },
+        .{ .bytes = "after" },
+    };
+    const image_only = [_]OrderedTestPart{.{ .bytes = progressive, .kind = .{ .image = .{} } }};
+    const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
+    for (std.enums.values(protocol.Codec)) |codec| {
+        for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("ordered-config");
+            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try submitOrderedForTesting(&setup, session.slice(), "ordered-message", parts, null, null);
+            const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // A later Message is outside this Operation's frozen view.
+            try setup.submit("ordered-later", "ordered-later", session.slice(), "outside frozen cutoff");
+            var entries: [1]history_memo.Table.Entry = @splat(.{});
+            var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+            defer memos.deinit(std.testing.io);
+            const result = try prepareMemoForTesting(&setup, binding, &memos, .{});
+            defer std.testing.allocator.free(result.bytes);
+            try std.testing.expectEqual(@as(usize, 0), result.copied);
+            try std.testing.expect(memos.held(session.slice()) == null);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+            defer parsed.deinit();
+            const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
+            try expectOrderedPartsForTesting(content, parts);
+            try std.testing.expect(std.mem.indexOf(u8, result.bytes, "outside frozen cutoff") == null);
+            try std.testing.expect(!setup.storage.isFenced());
+        }
+    }
+}
+
+test "canonical ordered Message peer prefix precedes its first image and Text parts" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const receiver = try setup.configure("ordered-receiver");
+    const peer = try setup.configure("ordered-peer");
+    try setup.submit("ordered-peer-seed", "ordered-peer-seed", peer.slice(), "send report");
+    const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleComposedForTesting(&setup, model, "ordered-peer-call", .reasoning, "{\"type\":\"reasoning\",\"id\":\"peer\",\"encrypted_content\":\"opaque\"}", &.{.{ .item_id = "peer-item", .call_id = "peer-call" }});
+    const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    var input: store.ActionExecutionInput = undefined;
+    try setup.storage.readActionExecutionInput(.bash, action, &input);
+    const parts = [_]OrderedTestPart{
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+        .{ .bytes = "peer payload" },
+    };
+    try submitOrderedForTesting(&setup, receiver.slice(), "ordered-peer-message", &parts, peer.slice(), input.sender_handle);
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const result = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(result.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+    defer parsed.deinit();
+    const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), content.len);
+    const prefix = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{ peer_parts[0], peer.slice(), peer_parts[1] });
+    defer std.testing.allocator.free(prefix);
+    try std.testing.expectEqualStrings(prefix, content[0].object.get("text").?.string);
+    try expectOrderedPartsForTesting(content[1..], &parts);
+}
+
+test "canonical ordered Message counts images across Messages at the inclusive request limit" {
+    for ([_]usize{ 1500, 1501 }) |count| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-limit");
+        const parts = try std.testing.allocator.alloc(OrderedTestPart, count - 750);
+        defer std.testing.allocator.free(parts);
+        @memset(parts, .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } });
+        try submitOrderedForTesting(&setup, session.slice(), "ordered-limit-first", parts[0..750], null, null);
+        try submitOrderedForTesting(&setup, session.slice(), "ordered-limit-second", parts, null, null);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (count == 1500) {
+            // The live Session now has 1501 images, but this request froze 1500.
+            try submitOrderedForTesting(&setup, session.slice(), "ordered-limit-after-cutoff", parts[0..1], null, null);
+        }
+        if (count == 1501) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+            try std.testing.expectEqualStrings("local_ordered_input_limit", preparationFailureCode(error.OrderedInputLimit));
+        } else {
+            const result = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(result.bytes);
+            try std.testing.expectEqual(@as(usize, 1500), std.mem.count(u8, result.bytes, "\"type\":\"input_image\""));
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+}
+
+test "canonical ordered Message writer limit includes all bytes before either write path charges" {
+    for ([_]bool{ false, true }) |commit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var used: std.atomic.Value(u64) = .init(0);
+        var writer: RequestWriter = .{
+            .io = std.testing.io,
+            .file = try tmp.dir.createFile(std.testing.io, "ordered-cap", .{ .read = true }),
+            .budget = .{ .used = &used, .limit = 100 },
+            .encoded_limit = 5,
+            .fail_write = false,
+        };
+        defer writer.deinit();
+        try writer.write("head");
+        if (commit) {
+            (try writer.reserve(1))[0] = 'x';
+            try writer.commit(1);
+            (try writer.reserve(1))[0] = 'y';
+            try std.testing.expectError(error.OrderedInputLimit, writer.commit(1));
+        } else {
+            try writer.write("x");
+            try std.testing.expectError(error.OrderedInputLimit, writer.write("y"));
+        }
+        try std.testing.expectEqual(@as(u64, 5), writer.offset);
+        try std.testing.expectEqual(@as(u64, 5), writer.charged);
+        try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
+        try writer.flush();
+        var bytes: [6]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 5), try writer.file.readPositionalAll(std.testing.io, &bytes, 0));
+        try std.testing.expectEqualStrings("headx", bytes[0..5]);
+    }
+}
+
+test "canonical ordered Message cancellation inside each image releases readers and scratch" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("ordered-cancel-config");
+    const parts = [_]OrderedTestPart{
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+        .{ .bytes = "between" },
+        .{ .bytes = @embedFile("testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{} } },
+    };
+    try submitOrderedForTesting(&setup, session.slice(), "ordered-cancel", &parts, null, null);
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const whole = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(whole.bytes);
+    for ([_][]const u8{ "data:image/png;base64,", "data:image/jpeg;base64," }) |marker| {
+        const start = std.mem.indexOf(u8, whole.bytes, marker).? + marker.len;
+        const length = std.mem.indexOfScalar(u8, whole.bytes[start..], '"').?;
+        for ([_]usize{ 1, 4, length / 2, length - 1 }) |offset| {
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var prep: Preparation = undefined;
+            prep.page.open(binding);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            defer if (prep.state.active) prep.cancel();
+            try stepPreparationToOffset(&prep, &setup.storage, start + offset, 1 << 16);
+            try prep.checkIntegrity(binding);
+            try std.testing.expectEqual(@as(usize, 1), prep.page.outstandingReaders());
+            try std.testing.expect(used.load(.acquire) > 0);
+            prep.cancel();
+            try std.testing.expect(!prep.page.isActive());
+            try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expect(retained == null);
+        }
+    }
+}
+
+test "canonical ordered Message bypasses an existing Text memo but retains prefix seal validation" {
+    var phase: []const u8 = "initialize";
+    errdefer std.debug.print("ordered memo phase {s}\n", .{phase});
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("ordered-memo-first", "ordered-memo-first", session.slice(), "single Text prefix");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    phase = "initial preparation";
+    const initial = try prepareMemoForTesting(&setup, first, &memos, .{});
+    defer std.testing.allocator.free(initial.bytes);
+    const old_memo = memos.held(session.slice()).?;
+    try std.testing.expect(old_memo.length > 0);
+    const original_seal = (try setup.storage.prefixSealForTesting(first)).?;
+    try std.testing.expectEqual(old_memo.length, original_seal.span_length);
+    const initial_start = firstUserHistoryOffset(initial.bytes);
+    const initial_span = initial.bytes[initial_start..][0..@intCast(original_seal.span_length)];
+    var initial_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(initial_span, &initial_digest, .{});
+    try std.testing.expectEqualSlices(u8, &initial_digest, &original_seal.digest);
+    const parts = [_]OrderedTestPart{
+        .{ .bytes = "compound suffix" },
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+    };
+    try submitOrderedForTesting(&setup, session.slice(), "ordered-memo-next", &parts, null, null);
+    // This Text-only Operation predates the queued compound Message. Its memo
+    // must remain usable even while that Message is visible in the live Session.
+    phase = "warm Text retry";
+    const warm = try prepareMemoForTesting(&setup, first, &memos, .{});
+    defer std.testing.allocator.free(warm.bytes);
+    try std.testing.expectEqual(old_memo.length, warm.copied);
+    try std.testing.expectEqualStrings(initial.bytes, warm.bytes);
+    try std.testing.expectEqual(original_seal, (try setup.storage.prefixSealForTesting(first)).?);
+    phase = "settle first answer";
+    try store.testing.settleItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+    phase = "admit successor";
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    phase = "successor rebuild";
+    const full = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(full.bytes);
+    const successor_start = firstUserHistoryOffset(full.bytes);
+    try std.testing.expect(full.bytes.len >= successor_start + initial_span.len);
+    try std.testing.expectEqualStrings(initial_span, full.bytes[successor_start..][0..initial_span.len]);
+    phase = "successor with memo";
+    const cached = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(cached.bytes);
+    try std.testing.expectEqualStrings(full.bytes, cached.bytes);
+    try std.testing.expectEqual(@as(usize, 0), cached.copied);
+    try std.testing.expect(old_memo.identical(&memos.held(session.slice()).?));
+    // Reopen the canonical Store with no memo to exercise cold reconstruction.
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+    phase = "close Store";
+    try setup.storage.close();
+    phase = "reopen Store";
+    try setup.storage.open(std.testing.io, database, setup.root);
+    phase = "cold reopened rebuild";
+    const reopened = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(reopened.bytes);
+    try std.testing.expectEqualStrings(full.bytes, reopened.bytes);
+    var flipped = (try setup.storage.prefixSealForTesting(binding)).?;
+    flipped.digest[0] ^= 1;
+    try setup.storage.setPrefixSealForTesting(binding, &flipped);
+    phase = "altered prefix seal";
+    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
+    try std.testing.expectEqual(flipped, (try setup.storage.prefixSealForTesting(binding)).?);
+    try std.testing.expect(!setup.storage.isFenced());
+}
+
+test "canonical ordered Message enforces the complete encoded request cap through preparation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("ordered-total-config");
+    const parts = [_]OrderedTestPart{
+        .{ .bytes = "text and its JSON framing count too" },
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+    };
+    try submitOrderedForTesting(&setup, session.slice(), "ordered-total", &parts, null, null);
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const whole = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(whole.bytes);
+    for ([_]bool{ false, true }) |exact| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        prep.page.open(binding);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        var steps: usize = 0;
+        while (prep.writer.encoded_limit == null) : (steps += 1) {
+            try std.testing.expect(steps < 64);
+            switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared, .read => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(@as(?u64, 512_000_000), prep.writer.encoded_limit);
+        prep.writer.encoded_limit = whole.bytes.len - @intFromBool(!exact);
+        if (exact) {
+            const request = try drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16);
+            try std.testing.expectEqual(@as(u64, whole.bytes.len), request.length);
+            request.deinit(std.testing.io, prep.writer.budget);
+        } else {
+            try std.testing.expectError(error.OrderedInputLimit, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+            prep.cancel();
+        }
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+}
+
+test "canonical ordered Message payload corruption fences after cancellation and Store reopen" {
+    for ([_][]const u8{
+        @embedFile("codecs/fixtures/image-input/pixel.png"),
+        @embedFile("testing/fixtures/input-baseline.jpg"),
+    }) |image| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-payload-config");
+        const parts = [_]OrderedTestPart{
+            .{ .bytes = "before image" },
+            .{ .bytes = image, .kind = .{ .image = .{} } },
+        };
+        try submitOrderedForTesting(&setup, session.slice(), "ordered-payload", &parts, null, null);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        prep.page.open(binding);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        var steps: usize = 0;
+        while (prep.state.emission != .base64) : (steps += 1) {
+            try std.testing.expect(steps < 1 << 16);
+            switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared, .read => return error.TestUnexpectedResult,
+            }
+        }
+        try prep.checkIntegrity(binding);
+        prep.cancel();
+        try std.testing.expect(prep.page.message_cursor == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+        try setup.storage.close();
+        try setup.storage.open(std.testing.io, database, setup.root);
+        try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
+            "(SELECT primary_content_id FROM core_command WHERE command_key='ordered-payload') AND ordinal=1");
+        prep.page.open(binding);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+        try std.testing.expect(setup.storage.isFenced());
+        prep.cancel();
+        try std.testing.expect(prep.page.message_cursor == null);
+        try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "canonical ordered Message rejects invalid forms behind warm and cold Text memos" {
+    const sqlite = store.testingSqlite;
+    for ([_]i64{ 2, -1 }) |form| for ([_]bool{ false, true }) |warm| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try configureMemoSessionForTesting(&setup);
+        try setup.submit("invalid-memo-first", "invalid-memo-first", session.slice(), "memo prefix");
+        try setup.submit("invalid-memo-second", "invalid-memo-second", session.slice(), "plain suffix");
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var entries: [1]history_memo.Table.Entry = @splat(.{});
+        var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+        defer memos.deinit(std.testing.io);
+        const initial = try prepareMemoForTesting(&setup, binding, &memos, .{});
+        defer std.testing.allocator.free(initial.bytes);
+        const replay = try prepareMemoForTesting(&setup, binding, &memos, .{});
+        defer std.testing.allocator.free(replay.bytes);
+        try std.testing.expect(replay.copied > 0);
+        try std.testing.expectEqualStrings(initial.bytes, replay.bytes);
+        try sqlite.exec(setup.storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        try store.testing.sqlite_only.exec(&setup.storage, "UPDATE content SET form=?1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='invalid-memo-first')", .{form});
+        try sqlite.exec(setup.storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        try std.testing.expectError(error.CorruptStore, prepareMemoForTesting(&setup, binding, if (warm) &memos else null, .{}));
+        try std.testing.expect(setup.storage.isFenced());
+    };
+}
+
+test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on every Responses codec" {
+    const mixed = [_]OrderedTestPart{
+        .{ .bytes = "before \"quoted\"\n雪\x00" },
+        .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+        .{ .bytes = "between" },
+        .{ .bytes = @embedFile("testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{} } },
+        .{ .bytes = "after" },
+    };
+    const image_only = [_]OrderedTestPart{.{ .bytes = @embedFile("testing/fixtures/input-progressive.jpg"), .kind = .{ .image = .{} } }};
+    const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
+    for (std.enums.values(protocol.Codec)) |codec| {
+        for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("ordered-actions");
+            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try setup.submit("ordered-action-seed", "ordered-action-seed", session.slice(), "observe");
+            const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try proposeOrderedActionsForTesting(&setup, model, &.{ .{ .item_id = "shot-item", .call_id = "shot\\\"" }, .{ .item_id = "text-item", .call_id = "text-call" } });
+            const first = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            const second = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            // Completion order differs from call order; one captured Text stays bytes.
+            try settleOrderedForTesting(&setup, second, &.{.{ .bytes = "plain \"text\"\n" }});
+            try settleOrderedForTesting(&setup, first, parts);
+            const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const result = try prepareMemoForTesting(&setup, binding, null, .{});
+            defer std.testing.allocator.free(result.bytes);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+            defer parsed.deinit();
+            var seen: usize = 0;
+            var messages: usize = 0;
+            for (requestHistory(parsed.value)) |item| {
+                const typ = item.object.get("type") orelse {
+                    messages += 1;
+                    continue;
+                };
+                if (!std.mem.eql(u8, typ.string, "function_call_output")) continue;
+                if (seen == 0) {
+                    try std.testing.expectEqualStrings("shot\"", item.object.get("call_id").?.string);
+                    try expectOrderedPartsForTesting(item.object.get("output").?.array.items, parts);
+                } else {
+                    try std.testing.expectEqualStrings("text-call", item.object.get("call_id").?.string);
+                    try std.testing.expectEqualStrings("plain \"text\"\n", item.object.get("output").?.string);
+                }
+                seen += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 2), seen);
+            try std.testing.expectEqual(@as(usize, 1), messages);
+            try std.testing.expect(std.mem.indexOf(u8, result.bytes, "{\"type\":\"function_call_output\",\"call_id\":\"text-call\",\"output\":\"plain \\\"text\\\"\\n\"}") != null);
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+            try setup.storage.close();
+            try setup.storage.open(std.testing.io, database, setup.root);
+            const reopened = try prepareMemoForTesting(&setup, binding, null, .{});
+            defer std.testing.allocator.free(reopened.bytes);
+            try std.testing.expectEqualStrings(result.bytes, reopened.bytes);
+        }
+    }
+}
+
+test "canonical ordered Action Resolution bypasses Text memos and caps the complete encoded request" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("ordered-action-memo");
+    try setup.submit("ordered-action-prefix", "ordered-action-prefix", session.slice(), "memo prefix");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const initial = try prepareMemoForTesting(&setup, first, &memos, .{});
+    defer std.testing.allocator.free(initial.bytes);
+    const original = memos.held(session.slice()).?;
+    try proposeOrderedActionsForTesting(&setup, first, &.{.{ .item_id = "memo-shot", .call_id = "memo-shot" }});
+    const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    try settleOrderedForTesting(&setup, action, &.{ .{ .bytes = "description" }, .{ .bytes = image_test_png, .kind = .{ .image = .{} } } });
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const whole = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(whole.bytes);
+    try std.testing.expectEqual(@as(usize, 0), whole.copied);
+    try std.testing.expect(original.identical(&memos.held(session.slice()).?));
+    const cold = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(cold.bytes);
+    try std.testing.expectEqualStrings(whole.bytes, cold.bytes);
+    for ([_]bool{ false, true }) |exact| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        prep.page.open(binding);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), &memos, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        var steps: usize = 0;
+        while (prep.writer.encoded_limit == null) : (steps += 1) {
+            try std.testing.expect(steps < 64);
+            switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared, .read => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(@as(?u64, 512_000_000), prep.writer.encoded_limit);
+        prep.writer.encoded_limit = whole.bytes.len - @intFromBool(!exact);
+        if (exact) {
+            const request = try drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16);
+            try std.testing.expectEqual(@as(u64, whole.bytes.len), request.length);
+            request.deinit(std.testing.io, prep.writer.budget);
+        } else {
+            try std.testing.expectError(error.OrderedInputLimit, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+            prep.cancel();
+        }
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+    var flipped = (try setup.storage.prefixSealForTesting(binding)).?;
+    flipped.digest[0] ^= 1;
+    try setup.storage.setPrefixSealForTesting(binding, &flipped);
+    try std.testing.expectError(error.EncodingDrift, prepareMemoForTesting(&setup, binding, &memos, .{}));
+}
+
+test "canonical ordered Action Resolution counts images with Message parts at the request limit" {
+    for ([_]usize{ 1500, 1501 }) |count| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-action-limit");
+        const parts = try std.testing.allocator.alloc(OrderedTestPart, count - 750);
+        defer std.testing.allocator.free(parts);
+        @memset(parts, .{ .bytes = image_test_png, .kind = .{ .image = .{} } });
+        try submitOrderedForTesting(&setup, session.slice(), "ordered-action-images", parts[0..750], null, null);
+        const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "limit-shot", .call_id = "limit-shot" }});
+        const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+        try settleOrderedForTesting(&setup, action, parts);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (count == 1501) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+        } else {
+            const result = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(result.bytes);
+            try std.testing.expectEqual(@as(usize, 1500), std.mem.count(u8, result.bytes, "\"type\":\"input_image\""));
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    }
+}
+
+test "canonical ordered Action Resolution cancellation releases readers and reopened corruption fences" {
+    for ([_][]const u8{ image_test_png, @embedFile("testing/fixtures/input-baseline.jpg") }) |image| {
+        inline for ([_]u32{ 0, 1 }) |ordinal| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configure("ordered-action-corrupt-config");
+            try setup.submit("ordered-action-corrupt", "ordered-action-corrupt-seed", session.slice(), "observe");
+            const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "corrupt-shot", .call_id = "corrupt-shot" }});
+            const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            try settleOrderedForTesting(&setup, action, &.{ .{ .bytes = "description" }, .{ .bytes = image, .kind = .{ .image = .{} } } });
+            const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var prep: Preparation = undefined;
+            prep.page.open(binding);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            defer if (prep.state.active) prep.cancel();
+            var steps: usize = 0;
+            while (prep.state.emission != .base64) : (steps += 1) {
+                try std.testing.expect(steps < 1 << 16);
+                switch (advanceTesting(&prep, &setup.storage, 1, 1)) {
+                    .pending => {},
+                    .failed => |err| return err,
+                    .prepared, .read => return error.TestUnexpectedResult,
+                }
+            }
+            try prep.checkIntegrity(binding);
+            prep.cancel();
+            try std.testing.expect(prep.page.message_cursor == null);
+            try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+            try setup.storage.close();
+            try setup.storage.open(std.testing.io, database, setup.root);
+            try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
+                "(SELECT resolution_content_id FROM action_operation) AND ordinal=" ++ std.fmt.comptimePrint("{d}", .{ordinal}));
+            prep.page.open(binding);
+            try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+            try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));
+            try std.testing.expect(setup.storage.isFenced());
+            prep.cancel();
+            try std.testing.expect(prep.page.message_cursor == null);
+            try std.testing.expectEqual(@as(usize, 0), prep.page.outstandingReaders());
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expect(retained == null);
+        }
+    }
+}
+
+test "canonical ordered Action Resolution background final prefixes the same parts as user input" {
+    for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("ordered-action-background");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try setup.submit("ordered-background-seed", "ordered-background-seed", session.slice(), "observe");
+        const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "background-shot", .call_id = "background-shot" }});
+        const selected = (try setup.storage.nextAction(.bash, .fromFree(2, true))).?;
+        const action = (try setup.storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        var promotion: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+        try promotion.key.set("ordered-promote");
+        try std.testing.expect(setup.storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+        const continuation = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store.testing.settleItemsForTesting(&setup.storage, &setup.tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"background-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+        const parts = [_]OrderedTestPart{ .{ .bytes = image_test_png, .kind = .{ .image = .{} } }, .{ .bytes = "final description" } };
+        try settleOrderedForTesting(&setup, action, &parts);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const result = try prepareMemoForTesting(&setup, binding, null, .{});
+        defer std.testing.allocator.free(result.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+        defer parsed.deinit();
+        const input = requestHistory(parsed.value);
+        const final = input[input.len - 1];
+        try std.testing.expectEqualStrings("user", final.object.get("role").?.string);
+        const content = final.object.get("content").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), content.len);
+        const prefix = try std.fmt.allocPrint(std.testing.allocator, "[Rui: background Action {d} reached its final Resolution. The result follows.]\n", .{selected.action_id});
+        defer std.testing.allocator.free(prefix);
+        try std.testing.expectEqualStrings(prefix, content[0].object.get("text").?.string);
+        try expectOrderedPartsForTesting(content[1..], &parts);
+        var results: usize = 0;
+        for (input) |item| if (item.object.get("type")) |kind| {
+            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+            try std.testing.expectEqualStrings("background-shot", item.object.get("call_id").?.string);
+            try std.testing.expect(item.object.get("output").? == .string);
+            results += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), results);
+    }
+}
+
+test "image model policy checks retained Message and Action inputs" {
+    const image = OrderedTestPart{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } };
+    const text = OrderedTestPart{ .bytes = "plain" };
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-4.1", "unlisted-image-policy-model" }) |model_name| {
+        for (0..3) |producer| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configureImagePolicy("image-policy-config");
+            var change: wire_request.ConfigureCommand = .{};
+            try change.key.set("image-policy-model");
+            change.session = session;
+            change.configuration.model.state = .value;
+            change.configuration.compaction_trigger.state = .value;
+            try change.configuration.compaction_trigger.value.set("10000");
+            try change.configuration.model.value.set(model_name);
+            try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+            try submitOrderedForTesting(&setup, session.slice(), "image-policy-message", if (producer == 1) &.{image} else &.{text}, null, null);
+            var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (producer == 2) {
+                try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "image-item", .call_id = "image-call" }});
+                const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                try settleOrderedForTesting(&setup, action, &.{image});
+                binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            // The same frozen recipe is checked on a fresh attempt and on retry.
+            for (0..2) |attempt| {
+                if (attempt != 0) {
+                    try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+                    try store.testing.exec(&setup.storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{binding.operation_id});
+                    var retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+                    binding = try retry.permit.consume();
+                }
+                if (std.mem.eql(u8, model_name, "gpt-3.5-turbo") and producer != 0) {
+                    try std.testing.expectError(error.ModelImageUnsupported, prepareMemoForTesting(&setup, binding, null, .{}));
+                    try std.testing.expectEqualStrings("model_image_input_unsupported", preparationFailureCode(error.ModelImageUnsupported));
+                } else {
+                    const result = try prepareMemoForTesting(&setup, binding, null, .{});
+                    defer std.testing.allocator.free(result.bytes);
+                    try std.testing.expectEqual(producer != 0, std.mem.indexOf(u8, result.bytes, "\"type\":\"input_image\"") != null);
+                }
+            }
+            try std.testing.expect(!setup.storage.isFenced());
+        }
+    }
+}
+
+test "image model policy rechecks retained inputs after model switch" {
+    const image = OrderedTestPart{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } };
+    const text = OrderedTestPart{ .bytes = "plain" };
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-4.1", "unlisted-image-policy-model" }) |model_name| {
+        for (0..3) |producer| {
+            var setup: PreparationTestSetup = undefined;
+            try setup.init();
+            defer setup.close();
+            const session = try setup.configureImagePolicy("image-switch-config");
+            try submitOrderedForTesting(&setup, session.slice(), "image-switch-first", if (producer == 1) &.{image} else &.{text}, null, null);
+            var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (producer == 2) {
+                try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "switch-item", .call_id = "switch-call" }});
+                const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+                try settleOrderedForTesting(&setup, action, &.{image});
+                binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"switch-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+            var change: wire_request.ConfigureCommand = .{};
+            try change.key.set("image-switch-model");
+            change.session = session;
+            change.configuration.model.state = .value;
+            change.configuration.compaction_trigger.state = .value;
+            try change.configuration.compaction_trigger.value.set("10000");
+            try change.configuration.model.value.set(model_name);
+            try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+            try setup.submit("image-switch-next", "image-switch-next", session.slice(), "continue");
+            binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (std.mem.eql(u8, model_name, "gpt-3.5-turbo") and producer != 0) {
+                try std.testing.expectError(error.ModelImageUnsupported, prepareMemoForTesting(&setup, binding, null, .{}));
+            } else {
+                const result = try prepareMemoForTesting(&setup, binding, null, .{});
+                defer std.testing.allocator.free(result.bytes);
+                try std.testing.expectEqual(producer != 0, std.mem.indexOf(u8, result.bytes, "\"type\":\"input_image\"") != null);
+            }
+        }
+    }
+}
+
+test "old text request retries unchanged across later image message and final action on every codec" {
+    const saved_mcp_json = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}";
+    for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("replay-wire-config");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try setup.submit("replay-wire-seed", "replay-wire-seed", session.slice(), "old text input");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, first, &.{ .{ .item_id = "legacy-item", .call_id = "legacy-call" }, .{ .item_id = "background-item", .call_id = "background-call" } });
+        const legacy_action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+        try settleOrderedForTesting(&setup, legacy_action, &.{.{ .bytes = saved_mcp_json }});
+        const selected = (try setup.storage.nextAction(.bash, .fromFree(2, true))).?;
+        const background_binding = (try setup.storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        var promotion: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+        try promotion.key.set("replay-wire-promote");
+        try std.testing.expect(setup.storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+        const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const before = try prepareMemoForTesting(&setup, original, null, .{});
+        defer std.testing.allocator.free(before.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before.bytes, .{});
+        defer parsed.deinit();
+        var saved_found = false;
+        for (requestHistory(parsed.value)) |item| {
+            const kind = item.object.get("type") orelse continue;
+            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+            if (!std.mem.eql(u8, item.object.get("call_id").?.string, "legacy-call")) continue;
+            try std.testing.expectEqualStrings(saved_mcp_json, item.object.get("output").?.string);
+            saved_found = true;
+        }
+        try std.testing.expect(saved_found);
+        try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+        try submitOrderedForTesting(&setup, session.slice(), "replay-wire-later", &.{.{ .bytes = image_test_png, .kind = .{ .image = .{} } }}, null, null);
+        try settleOrderedForTesting(&setup, background_binding, &.{ .{ .bytes = "late result" }, .{ .bytes = image_test_png, .kind = .{ .image = .{} } } });
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+        try setup.storage.close();
+        try setup.storage.open(std.testing.io, database, setup.root);
+        const retry = (try store.admitRetryForTesting(&setup.storage)).?.permit.binding;
+        try std.testing.expectEqual(original.operation_id, retry.operation_id);
+        const after = try prepareMemoForTesting(&setup, retry, null, .{});
+        defer std.testing.allocator.free(after.bytes);
+        try std.testing.expectEqualStrings(before.bytes, after.bytes);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "input_image") == null);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "late result") == null);
+    }
+}
+
+test "Astra image patch limit is enforced for Message and Action inputs on the OpenAI route" {
+    const fixtures = [_]struct { bytes: []const u8, impossible: bool }{
+        .{ .bytes = @embedFile("testing/fixtures/astra-4800x6400.png"), .impossible = false },
+        .{ .bytes = @embedFile("testing/fixtures/astra-4801x6400.png"), .impossible = true },
+    };
+    const routes = [_]struct { provider: []const u8, model: []const u8, guarded: bool }{
+        .{ .provider = "openai", .model = "gpt-6-astra", .guarded = true },
+        .{ .provider = "codex", .model = "gpt-6-astra", .guarded = false },
+        .{ .provider = "openai", .model = "gpt-4.1", .guarded = false },
+    };
+    for (routes) |route| for (fixtures) |fixture| for ([_]bool{ false, true }) |action_input| {
+        var stage: []const u8 = "setup";
+        errdefer std.debug.print("Astra guard fixture failed at {s}: provider={s}, model={s}, impossible={}, action={}\n", .{ stage, route.provider, route.model, fixture.impossible, action_input });
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        var create: wire_request.ConfigureCommand = .{};
+        try create.key.set("astra-boundary-config");
+        create.configuration.workspace.state = .value;
+        try create.configuration.workspace.value.set(setup.workspace);
+        create.configuration.provider.state = .value;
+        try create.configuration.provider.value.set(route.provider);
+        create.configuration.model.state = .value;
+        try create.configuration.model.value.set(route.model);
+        create.configuration.tools = try .of(&.{ "bash", "web_search" });
+        create.configuration.permission_mode.state = .value;
+        try create.configuration.permission_mode.value.set("bypass");
+        create.configuration.compaction_trigger.state = .value;
+        try create.configuration.compaction_trigger.value.set("115200");
+        if (std.mem.eql(u8, route.model, "gpt-6-astra")) {
+            create.configuration.reasoning_effort.state = .value;
+            try create.configuration.reasoning_effort.value.set("low");
+        } else create.configuration.reasoning_effort.state = .explicit_null;
+        stage = "configure";
+        const configured = try setup.storage.configure(&create, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        const image = OrderedTestPart{ .bytes = fixture.bytes, .kind = .{ .image = .{} } };
+        const text = OrderedTestPart{ .bytes = "inspect image" };
+        stage = "submit";
+        try submitOrderedForTesting(&setup, session.slice(), "astra-boundary-message", if (action_input) &.{text} else &.{image}, null, null);
+        stage = "initial admission";
+        var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (action_input) {
+            stage = "action setup";
+            try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "astra-item", .call_id = "astra-call" }});
+            const result_binding = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            try settleOrderedForTesting(&setup, result_binding, &.{image});
+            binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        }
+        stage = "prepare";
+        if (route.guarded and fixture.impossible) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+            try std.testing.expectEqualStrings("local_ordered_input_limit", preparationFailureCode(error.OrderedInputLimit));
+        } else {
+            const prepared = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(prepared.bytes);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prepared.bytes, "\"type\":\"input_image\""));
+            try std.testing.expect(std.mem.indexOf(u8, prepared.bytes, "data:image/png;base64,") != null);
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    };
 }

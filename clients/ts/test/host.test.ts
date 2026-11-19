@@ -30,9 +30,19 @@ function newStore(): string {
 	return join(realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-"))), "store");
 }
 
+// Rui.connect uses mkdtemp(tmpdir() + "/rui-"), whose suffix is six alphanumerics.
+const clientRuntimeName = /^rui-[A-Za-z0-9]{6}$/;
+
 function runtimeDirs(): Set<string> {
-	return new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("rui-")));
+	return new Set(readdirSync(tmpdir()).filter((name) => clientRuntimeName.test(name)));
 }
+
+test("runtime census recognizes the client directory shape only", () => {
+	for (const name of ["rui-Ab012z", "rui-000000", "rui-zzzzzz"]) assert.match(name, clientRuntimeName);
+	for (const name of ["rui-overview-clicks-open.abc123", "rui-ts-abcdef", "rui-12345", "rui-1234567", "rui-12345_"]) {
+		assert.doesNotMatch(name, clientRuntimeName);
+	}
+});
 
 async function hostInfo(rui: Rui) {
 	const body = JSON.stringify({ version: WIRE_VERSION, kind: "host_info", store: rui.hostInfo?.store });
@@ -55,7 +65,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), ["HOME", "PATH", "TMPDIR"].filter((name) => process.env[name] !== undefined).sort());
 		for (const file of ["environ", "cmdline"]) assert.ok(!readFileSync(`/proc/${pid}/${file}`, "utf8").includes(key), file);
 	}
-	const created = [...runtimeDirs()].filter((name) => !before.has(name) && !name.startsWith("rui-ts-"));
+	const created = [...runtimeDirs()].filter((name) => !before.has(name));
 	assert.equal(created.length, 1, String(created));
 
 	const exits: ExitEvent[] = [];
@@ -165,7 +175,7 @@ process.stdin.on("data", chunk => {
   if (bytes.length < 4 || bytes.length < 4 + bytes.readUInt32BE()) return;
   const document = JSON.parse(bytes.subarray(4, 4 + bytes.readUInt32BE()).toString());
   bytes.fill(0);
-  const runtime = fs.readdirSync(process.env.TMPDIR).find(name => name.startsWith("rui-"));
+  const runtime = fs.readdirSync(process.env.TMPDIR).find(name => /${clientRuntimeName.source}/.test(name));
   const runtimeDir = path.join(process.env.TMPDIR, runtime);
   fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({dir:document.interface.dir,runtimeDir,files:fs.readdirSync(runtimeDir)}));
   process.stdout.write(JSON.stringify({rui_start_error:{code:"settings_invalid",message:"interface.dir: invalid settings"}})+"\\n",()=>process.exit(1));
@@ -319,7 +329,7 @@ test("closing Rui rejects a parked follower and releases its watch without abort
 		return follower;
 	});
 	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
-		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
+		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
 	})));
 	const feed = rui.getSession("s").listActivity({ follow: true, signal: controller.signal });
 	let failure: unknown;
@@ -384,7 +394,7 @@ test("an exit listener that closes the client stops the restart", { skip }, asyn
 		await closed;
 		await new Promise((done) => setTimeout(done, 1_500));
 		assert.equal(rui.pid, undefined);
-		assert.deepEqual([...runtimeDirs()].filter((name) => !before.has(name) && !name.startsWith("rui-ts-")), []);
+		assert.deepEqual([...runtimeDirs()].filter((name) => !before.has(name)), []);
 		await assert.rejects(hostInfo(rui), RuiUnavailableError);
 	} finally {
 		clearInterval(alive);

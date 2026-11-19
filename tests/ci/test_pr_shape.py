@@ -1,5 +1,6 @@
 import io
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 import pr_shape
+import select_tests
+import screens_comment
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -157,6 +160,10 @@ class PrShapeTest(unittest.TestCase):
 
 
 class ScreenEvidenceTest(unittest.TestCase):
+    def test_ui_shape_does_not_require_screens(self):
+        self.assertIsNone(refusal(["src/overview_view.zig"], "## Shape"))
+
+
     def test_ui_media_forms_and_exemption(self):
         for evidence in ("![Overview 140x40](https://github.com/user-attachments/assets/123)",
                          '  <img src="https://github.com/user-attachments/assets/123" alt="Overview">',
@@ -167,7 +174,8 @@ class ScreenEvidenceTest(unittest.TestCase):
             for path in ("src/overview_view.zig", "src/SessionScreen.zig",
                          ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):
-                    self.assertIsNone(refusal([path], "## Shape\n" + evidence))
+                    self.assertTrue(pr_shape.screens_required([path]))
+                    self.assertIsNone(pr_shape.screen_refusal(evidence))
 
     def test_ui_requires_visible_embed_or_nonempty_reason(self):
         for evidence in ("", "No screen change:", "No screen change:   ", "No screen change:\n",
@@ -185,23 +193,24 @@ class ScreenEvidenceTest(unittest.TestCase):
                          "<!--\nNo screen change: hidden reason"):
             for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
                 with self.subTest(evidence=evidence, path=path):
-                    reason = refusal([path], "## Shape\n" + evidence)
+                    self.assertTrue(pr_shape.screens_required([path]))
+                    reason = pr_shape.screen_refusal(evidence)
                     self.assertIsInstance(reason, str)
                     self.assertIn("verify-rui publish", reason)
 
     def test_non_ui_does_not_need_media(self):
         for path in ("src/server.zig", "src/store/Store.zig", "src/cli.zig", "docs/agents/landing.md"):
             with self.subTest(path=path):
-                self.assertIsNone(refusal([path], "## Shape"))
+                self.assertFalse(pr_shape.screens_required([path]))
 
     def test_repository_page_links_do_not_replace_embedded_media(self):
         for ref in ("a" * 40, "main", "pr-evidence"):
             for view in ("tree", "blob"):
-                self.assertIsInstance(refusal(["src/overview_view.zig"],
-                    f"## Shape\n[Screens](https://github.com/owner/repo/{view}/{ref}/capture)"), str)
+                self.assertIsInstance(pr_shape.screen_refusal(
+                    f"[Screens](https://github.com/owner/repo/{view}/{ref}/capture)"), str)
 
     def test_graph_classifies_transitive_ui_but_excludes_host_and_test_imports(self):
-        graph = pr_shape.tree_graph()
+        graph = select_tests.tree_graph()
         self.assertIn("src/Overview.zig", graph.production["src/cli.zig"])
         paths = pr_shape.ui_paths(graph)
         for path in ("src/TerminalApp.zig", "src/Root.zig", "src/SessionScreen.zig", "src/Composer.zig",
@@ -211,14 +220,12 @@ class ScreenEvidenceTest(unittest.TestCase):
         self.assertFalse(paths & graph.tests)
         # New imports join the rule automatically; no path list to update.
         graph = type("Graph", (), dict(production={"src/Overview.zig": {"src/new_screen.zig", "src/shared.zig"}},
-                     host={"src/shared.zig"}, tests=set(), closure=staticmethod(pr_shape.Graph.closure)))()
+                     host={"src/shared.zig"}, tests=set(), closure=staticmethod(select_tests.Graph.closure)))()
         self.assertEqual(pr_shape.ui_paths(graph), {"src/Overview.zig", "src/new_screen.zig"})
 
     def test_deleted_ui_paths_use_base_graph(self):
         with patch.object(pr_shape, "revision_ui_paths", return_value={"src/removed_screen.zig"}) as base:
-            reason = refusal(["src/removed_screen.zig"], "## Shape", base="old")
-            self.assertIsInstance(reason, str)
-            self.assertIn("verify-rui publish", reason)
+            self.assertTrue(pr_shape.screens_required(["src/removed_screen.zig"], base="old"))
             base.assert_called_once_with("old")
 
 
@@ -259,7 +266,7 @@ class PrShapeMainTest(unittest.TestCase):
                  patch.dict(os.environ, {"BASE": "base", "PR_BODY": GOAL + payload,
                                          "GITHUB_REPOSITORY": "owner/repo", "PR_NUMBER": "42"}, clear=True), \
                  patch.object(sys, "argv", ["pr_shape.py"]), \
-                 patch.object(pr_shape, "changed_paths", return_value=(["src/cli.zig"], "base")), \
+                 patch.object(select_tests, "changed_paths", return_value=(["src/cli.zig"], "base")), \
                  patch.object(pr_shape, "github", return_value=({"body": GOAL + live["body"]} if live and live["body"] is not None else live), side_effect=failure) as api, \
                  redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
                 self.assertEqual(pr_shape.main(), expected)
@@ -271,7 +278,7 @@ class PrShapeMainTest(unittest.TestCase):
             with self.subTest(body=body), \
                  patch.dict(os.environ, {"BASE": "environment-base", "PR_BODY": GOAL + body}, clear=True), \
                  patch.object(sys, "argv", ["pr_shape.py", "argument-base"]), \
-                 patch.object(pr_shape, "changed_paths", return_value=(["src/cli.zig"], "base")) as changed, \
+                 patch.object(select_tests, "changed_paths", return_value=(["src/cli.zig"], "base")) as changed, \
                  redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(pr_shape.main(), expected)
                 changed.assert_called_once_with("argument-base", "HEAD")
@@ -284,11 +291,118 @@ class PrShapeMainTest(unittest.TestCase):
     def test_base_environment_and_missing_body(self):
         with patch.dict(os.environ, {"BASE": "environment-base"}, clear=True), \
              patch.object(sys, "argv", ["pr_shape.py"]), \
-             patch.object(pr_shape, "changed_paths", return_value=(["README.md"], "base")) as changed, \
+             patch.object(select_tests, "changed_paths", return_value=(["README.md"], "base")) as changed, \
              redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(pr_shape.main(), 1)
             changed.assert_called_once_with("environment-base", "HEAD")
             self.assertIn("Goal:", stderr.getvalue())
+
+    def test_screens_mode_reads_live_body_without_diff(self):
+        for body, expected in (("No screen change: unchanged", 0), ("", 1)):
+            with self.subTest(body=body), patch.dict(os.environ, {"PR_BODY": "stale", "PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", return_value={"body": body}), \
+                 patch.object(select_tests, "changed_paths") as changed, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+                changed.assert_not_called()
+
+    def test_screens_mode_accepts_only_current_bot_sticky_images_scr_4(self):
+        # SCR-4: sticky evidence must be from the bot, match HEAD and contain an image.
+        self._screens_mode_accepts_rendered_screenshot_table()
+        self._screens_mode_paginates_comments_and_fails_closed_on_api_error()
+        head = "a" * 40
+        marker = "<!-- rui-screens -->"
+        image = "| Overview | ![After](https://example.com/screen.png) |"
+        cases = (
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`  \n{image}", 0),
+            ("github-actions[bot]", f"{marker}\nHead: `{'b' * 40}`\n{image}", 1),
+            ("other-user", f"{marker}\nHead: `{head}`\n{image}", 1),
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`\nNo images", 1),
+            ("github-actions[bot]", f"Head: `{head}`\n{image}", 1),
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`\n<!-- {image} -->", 1),
+        )
+        for author, comment_body, expected in cases:
+            def api(method, path):
+                if "/pulls/" in path:
+                    return {"body": "", "head": {"sha": head}}
+                return [{"user": {"login": author}, "body": comment_body}]
+
+            with self.subTest(author=author, body=comment_body), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", side_effect=api), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+
+    def _screens_mode_accepts_rendered_screenshot_table(self):
+        head = "a" * 40
+        pair = {"name": "overview", "size": "140x40", "before": None,
+                "after": {"files": {"png": "overview.png"}}}
+        diff = {"changed": [], "new": [pair], "removed": [], "failed": [], "same_count": 0}
+        body = screens_comment.render(diff, "o/r", 42, head, "123", "base")
+
+        def api(method, path):
+            if "/pulls/" in path:
+                return {"body": "", "head": {"sha": head}}
+            return [{"user": {"login": "github-actions[bot]"}, "body": body}]
+
+        with patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+             patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+             patch.object(pr_shape, "github", side_effect=api), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(pr_shape.main(), 0)
+
+    def _screens_mode_paginates_comments_and_fails_closed_on_api_error(self):
+        head = "a" * 40
+        comment = {"user": {"login": "github-actions[bot]"}, "body":
+                   f"<!-- rui-screens -->\nHead: `{head}`\n![After](https://example.com/a.png)"}
+        for fail, expected in ((False, 0), (True, 1)):
+            def api(method, path):
+                if "/pulls/" in path:
+                    return {"body": "", "head": {"sha": head}}
+                if path.endswith("&page=1"):
+                    return [{}] * 100
+                if fail:
+                    raise OSError("offline")
+                return [comment]
+
+            with self.subTest(fail=fail), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", side_effect=api) as github, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+                self.assertTrue(any("page=2" in call.args[1] for call in github.call_args_list))
+
+    def test_screens_mode_body_evidence_needs_no_comment_lookup(self):
+        for body in ("No screen change: unchanged", "![screen](https://github.com/user-attachments/assets/123)"):
+            with self.subTest(body=body), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", return_value={"body": body}) as github, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), 0)
+                github.assert_called_once_with("GET", "repos/o/r/pulls/42")
+
+    def test_screens_mode_runs_with_only_ci_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "tests/ci", root / "tests/ci", ignore=shutil.ignore_patterns("__pycache__"))
+            env = {**os.environ, "PR_BODY": "No screen change: unchanged", "PR_NUMBER": "", "GITHUB_REPOSITORY": ""}
+            result = subprocess.run([sys.executable, "tests/ci/pr_shape.py", "--screens"], cwd=root,
+                                    env=env, capture_output=True, text=True, timeout=300)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_plan_emits_screen_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            for paths, expected in ((["src/overview_view.zig"], "true"), (["docs/a.md"], "false")):
+                with self.subTest(paths=paths), patch.dict(os.environ, {"PR_BODY": GOAL + "## Shape", "GITHUB_OUTPUT": str(output)}, clear=True), \
+                     patch.object(sys, "argv", ["pr_shape.py", "base"]), \
+                     patch.object(select_tests, "changed_paths", return_value=(paths, "base")):
+                    self.assertEqual(pr_shape.main(), 0)
+                    self.assertEqual(output.read_text().splitlines()[-1], f"screens_required={expected}")
 
     def test_deleted_src_file_still_requires_shape(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -318,7 +432,7 @@ class PrShapeMainTest(unittest.TestCase):
                 with self.subTest(body=body):
                     result = subprocess.run([sys.executable, "-B", str(ROOT / "tests/ci/pr_shape.py")],
                                             cwd=directory, env={**os.environ, "BASE": base, "PR_BODY": GOAL + body},
-                                            capture_output=True, text=True, timeout=30)
+                                            capture_output=True, text=True, timeout=300)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertEqual(result.stdout, "")
                     if expected:

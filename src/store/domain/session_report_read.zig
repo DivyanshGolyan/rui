@@ -50,13 +50,42 @@ pub fn Watched(comptime Visitor: type) type {
     };
 }
 
+pub const Pressure = struct {
+    read: ?*const model_admission_domain.PartsPressure.Read = null,
+    needed: ?model_admission_domain.PartsPressure.Coverage = null,
+    needed_boundary: u64 = std.math.maxInt(i64),
+    needed_rule: ?@import("../../model_catalog.zig").ImageCostRule = null,
+
+    fn advance(self: *Pressure, read: *model_admission_domain.CompactionRead, a: *ReadAccess) !void {
+        read.pressure = self.read;
+        read.advance(a) catch |err| {
+            if (err == error.PartsPressureRequired) {
+                self.needed = read.bytes_args;
+                self.needed_boundary = read.boundary;
+                self.needed_rule = @import("../../model_catalog.zig").imageCostRule(read.provider, read.model);
+            }
+            return err;
+        };
+    }
+};
+
 pub fn readSessionReport(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !void {
-    if (!try readHead(a, session_ref, profile, watched)) return;
+    var pressure: Pressure = .{};
+    return readSessionReportWithPressure(a, session_ref, profile, watched, &pressure);
+}
+
+pub fn readSessionReportWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype, pressure: *Pressure) !void {
+    if (!try readHeadWithPressure(a, session_ref, profile, watched, pressure)) return;
     if (profile == .full) try report_domain.readFull(a, session_ref, watched);
     try watched.call("tail", .{});
 }
 
 pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !bool {
+    var pressure: Pressure = .{};
+    return readHeadWithPressure(a, session_ref, profile, watched, &pressure);
+}
+
+fn readHeadWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype, pressure: *Pressure) !bool {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
     configuration_domain.readSaved(a, session_ref, &current, &found);
@@ -66,7 +95,7 @@ pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_v
         return false;
     }
     try configuration_domain.checkSaved(&current);
-    try readCurrent(a, session_ref, profile, &current, watched);
+    try readCurrent(a, session_ref, profile, &current, watched, pressure);
     return true;
 }
 
@@ -207,14 +236,13 @@ const rejected_calls = rsql.Read(.{
 const actionable_permissions = rsql.Read(.{
     .sql = "SELECT action.action_id,action.permission_revision FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-        "WHERE action.session_ref=?1 AND action.authorized=0 AND " ++ action_domain.eligibleSql("action", "operation", "active") ++ " ORDER BY action.action_id",
+        "WHERE action.session_ref=?1 AND " ++ action_domain.externalDecisionEligibleSql("action", "active") ++ " AND NOT " ++ action_domain.actionStoppedSql("action", "operation") ++ " ORDER BY action.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct { action_id: rsql.Positive, permission_revision: rsql.Positive },
     .cardinality = .each,
 });
 
 pub const current_failures = .{
-    .{ report_domain.full_compound_value, error.SessionReadFailed },
     .{ archive_state, error.SessionReadFailed },
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
@@ -231,7 +259,6 @@ fn runCurrent(a: *ReadAccess) !void {
 
 const CurrentFacts = struct {
     archive: archive_state.Result = null,
-    compound: report_domain.full_compound_value.Result = null,
     instructions: content_domain.content_metadata.Row = undefined,
     output_schema: content_domain.content_metadata.Row = undefined,
     counts: SessionCounts,
@@ -254,7 +281,7 @@ const ToolNames = struct {
 };
 
 const set_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names,CASE WHEN ?2=s.tool_set_id THEN NULL ELSE " ++ tool_set.namesSql("?2") ++ " END AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
     .Args = struct { set: u64, loaded: u64 },
     .Row = struct { names: ?Bounded(tool_set.max_names_bytes), loaded_names: ?Bounded(tool_set.max_names_bytes) },
     .cardinality = .optional,
@@ -262,7 +289,7 @@ const set_names = rsql.Read(.{
 
 const CurrentScratch = struct { facts: CurrentFacts, tools: ToolNames };
 
-noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype) !void {
+noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype, pressure: *Pressure) !void {
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
     const scratch = a.store.reportScratch(CurrentScratch);
     const facts = &scratch.facts;
@@ -278,7 +305,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     a.read(metadata, .{ .content_id = @intCast(instructions_id) }, &facts.instructions);
     if (current.output_schema_id) |content_id| a.read(metadata, .{ .content_id = @intCast(content_id) }, &facts.output_schema);
     a.read(archive_state, .{ .session = session_ref }, &facts.archive);
-    if (profile == .full) a.read(report_domain.full_compound_value, .{ .session = session_ref }, &facts.compound);
     facts.counts.queue(a);
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
@@ -287,8 +313,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
-    if (facts.compound) |compound| try report_domain.verifyFullCompound(a, compound);
-    try facts.compaction.advance();
+    try pressure.advance(&facts.compaction, a);
     try facts.work.advance();
 
     facts.counts.queuePending(a);
@@ -302,7 +327,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     while (true) {
         try runCurrent(a);
         if (work_more) try facts.work.advance();
-        if (compaction_more) try facts.compaction.advance();
+        if (compaction_more) try pressure.advance(&facts.compaction, a);
         work_more = facts.work.queue(a);
         compaction_more = facts.compaction.queue(a);
         if (!work_more and !compaction_more) break;
@@ -313,14 +338,14 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     if (!facts.tools_found.get()) return error.CorruptStore;
     const names = facts.tools;
     const tools = try report_domain.sortedToolNames(if (names.row.names) |*joined| joined.slice() else null, &names.tools);
-    const loaded_tools = try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
+    const loaded_tools = if ((current.loaded_tool_set_id orelse current.tool_set_id) == current.tool_set_id)
+        tools
+    else
+        try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);
-    const first_message = if (facts.first_row) |*found| report_domain.firstMessage(found, admission) catch |err| {
-        if (err == error.InputPartsNotSupported) try report_domain.verifyFirstMessage(a, found);
-        return err;
-    } else null;
+    const first_message = if (facts.first_row) |*found| try report_domain.firstMessage(found, admission) else null;
     const selected = if (facts.active.row) |*row| row else if (facts.queued.row) |*row| row else null;
     const values: session_report.Current = .{
         .reference = session_ref,
@@ -383,10 +408,6 @@ fn readList(
     const ran = runCurrent(a);
     if (rows.failure) |err| return err;
     try ran;
-    if (rows.unsupported) |value| {
-        try @import("content_parts.zig").verify(a, value);
-        return error.InputPartsNotSupported;
-    }
 }
 
 const ValuesError = error{CorruptStore};
@@ -396,22 +417,8 @@ fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type
     return struct {
         watched: Watcher,
         failure: ?(ValuesError || VisitError) = null,
-        unsupported: ?content_domain.Value = null,
 
         pub fn visit(read: *@This(), row: *const Row) bool {
-            if (comptime Row == resolved_actions.Row) {
-                if (row.result_private or row.result_form > 1) {
-                    read.failure = error.CorruptStore;
-                    return false;
-                }
-                if (row.result_form == 1) {
-                    read.unsupported = content_domain.Value.of(row.result_id.get(), row.result_form, row.result_length, row.result_digest) catch {
-                        read.failure = error.CorruptStore;
-                        return false;
-                    };
-                    return false;
-                }
-            }
             read.visitOne(row) catch |err| {
                 read.failure = err;
                 return false;
@@ -474,7 +481,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .call_ordinal = row.call_ordinal,
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
-            .result = .{ .length = row.result_length, .digest = row.result_digest },
+            .result = try @import("content_parts.zig").publicValue(&.{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, .{ .action = row.action_id.get() }),
             .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };

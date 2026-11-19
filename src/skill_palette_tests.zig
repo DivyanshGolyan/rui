@@ -34,16 +34,16 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
-    try std.testing.expectEqual(@as(u16, 3), surface.size.height);
+    try std.testing.expectEqual(@as(u16, 1), surface.size.height);
     var text: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("/review  Review a change", rowText(surface, 1, &text));
-    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(2, 1).style);
-    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .bold = true, .background = .selection }), surface.readCell(11, 1).style);
+    try std.testing.expectEqualStrings("/review  Review a change", rowText(surface, 0, &text));
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(0, 0).style);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .bold = true, .background = .selection }), surface.readCell(11, 0).style);
     _ = menu.frame(.{ .draft = .{ .bytes = "please /re this", .caret = "please /re".len, .revision = 2, .skills = &reads } });
     const wider = try palette.widget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 5), wider.size.height);
-    try std.testing.expectEqualStrings("/recap    Summarise", rowText(wider, 1, &text));
-    try std.testing.expectEqualStrings("/rewrite  Rewrite a file", rowText(wider, 3, &text));
+    try std.testing.expectEqual(@as(u16, 3), wider.size.height);
+    try std.testing.expectEqualStrings("/recap    Summarise", rowText(wider, 0, &text));
+    try std.testing.expectEqualStrings("/rewrite  Rewrite a file", rowText(wider, 2, &text));
 }
 
 test "the Palette bolds each row's match, in both its name and its description, day and night" {
@@ -67,23 +67,23 @@ test "the Palette bolds each row's match, in both its name and its description, 
             const surface = try palette.widget().draw(ctx);
             var text: [240]u8 = undefined;
             const column = shown.list.descriptionColumn();
-            try std.testing.expect(std.mem.startsWith(u8, rowText(surface, 1, &text), "/review-help"));
-            try std.testing.expect(std.mem.startsWith(u8, rowText(surface, 2, &text), "/triage"));
+            try std.testing.expect(std.mem.startsWith(u8, rowText(surface, 0, &text), "/review-help"));
+            try std.testing.expect(std.mem.startsWith(u8, rowText(surface, 1, &text), "/triage"));
             const selected_plain = widget_style.of(caps, .{ .background = .selection });
             const selected_strong = widget_style.of(caps, .{ .bold = true, .background = .selection });
-            const strong = widget_style.of(caps, .{ .bold = true, .background = .input_surface });
+            const strong = widget_style.of(caps, .{ .bold = true, .background = .ground });
             // `/review-help`: both occurrences of `help` bold, the rest plain.
             for (0.."/review-help".len) |col| {
-                const cell = surface.readCell(@intCast(col + 2), 1);
+                const cell = surface.readCell(@intCast(col + 2), 0);
                 try std.testing.expectEqual(col >= "/review-".len, cell.style.bold);
                 try std.testing.expectEqual(if (cell.style.bold) selected_strong else selected_plain, cell.style);
             }
-            for (0.."Help review".len) |col| try std.testing.expectEqual(if (col < 4) selected_strong else selected_plain, surface.readCell(@intCast(column + 2 + col), 1).style);
+            for (0.."Help review".len) |col| try std.testing.expectEqual(if (col < 4) selected_strong else selected_plain, surface.readCell(@intCast(column + 2 + col), 0).style);
             // `/triage`: the name plain, `help` in its description bold.
-            for (0.."/triage".len) |col| try std.testing.expect(!surface.readCell(@intCast(col + 2), 2).style.bold);
+            for (0.."/triage".len) |col| try std.testing.expect(!surface.readCell(@intCast(col + 2), 1).style.bold);
             const at = column + "Ask for ".len;
             for (0..column + "Ask for help sorting".len) |col| {
-                const cell = surface.readCell(@intCast(col + 2), 2);
+                const cell = surface.readCell(@intCast(col + 2), 1);
                 const inside = col >= at and col < at + "help".len;
                 try std.testing.expectEqual(inside, cell.style.bold);
                 if (inside) try std.testing.expectEqual(strong.fg, cell.style.fg);
@@ -139,21 +139,21 @@ test "the Palette maps description matches through normalization and clipping wi
                     const width: u16 = @intCast(column + case.room + 4);
                     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} };
                     const surface = try palette.widget().draw(ctx);
-                    try std.testing.expectEqual(@as(u16, 4), surface.size.height);
+                    try std.testing.expectEqual(@as(u16, 2), surface.size.height);
                     const mark_start = if (unicode) case.unicode_start else case.ascii_start;
                     const mark_len = if (unicode) case.unicode_bold else case.ascii_bold;
                     for (0..2) |row| {
-                        const background: view.Background = if (row == selected) .selection else .input_surface;
+                        const background: view.Background = if (row == selected) .selection else .ground;
                         const plain = widget_style.of(caps, .{ .background = background });
                         const strong = widget_style.of(caps, .{ .background = background, .bold = true });
-                        for (2..width - 2) |col| {
+                        for (0..width) |col| {
                             const inside = col >= column + 2 + mark_start and col < column + 2 + mark_start + mark_len;
-                            try std.testing.expectEqual(if (inside) strong else plain, surface.readCell(@intCast(col), @intCast(row + 1)).style);
+                            try std.testing.expectEqual(if (inside) strong else plain, surface.readCell(@intCast(col), @intCast(row)).style);
                         }
                         var text: std.Io.Writer.Allocating = .init(arena.allocator());
                         var col: usize = column + 2;
                         while (col < width - 2) {
-                            const cell = surface.readCell(@intCast(col), @intCast(row + 1));
+                            const cell = surface.readCell(@intCast(col), @intCast(row));
                             try text.writer.writeAll(if (cell.char.grapheme.len == 0) " " else cell.char.grapheme);
                             col += @max(1, cell.char.width);
                         }

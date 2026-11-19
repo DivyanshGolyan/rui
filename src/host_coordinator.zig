@@ -221,6 +221,9 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     inline for (std.enums.values(HostLifecycle.Limitation)) |limitation| {
         try expectRoundTrip(outcomeEvent(.{ .unsupported = limitation }));
     }
+    inline for (std.enums.values(HostLifecycle.TargetStep)) |step| {
+        try expectRoundTrip(outcomeEvent(.{ .target_unusable = step }));
+    }
     try expectRoundTrip(outcomeEvent(.{ .ready = .{ .pid = 123, .instance = @splat(42) } }));
     try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
     try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));

@@ -5,6 +5,7 @@ import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } fr
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import { RuiRequestError } from "../src/errors.ts";
+import type { HostSettings } from "../src/settings.ts";
 
 test("configuration preserves omitted, null and value states and normalizes tools", async () => {
 	const requests: components["schemas"]["ConfigureRequest"][] = [];
@@ -30,6 +31,14 @@ test("configuration preserves omitted, null and value states and normalizes tool
     assert.deepEqual(third.configuration, {});
 });
 
+test("the shared write key takes precedence over idempotencyKey", async () => {
+	const session = new Session({ async exchange(_path, build) {
+		assert.equal(JSON.parse(build("store")).key, "preferred");
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.update({}, { key: "preferred", idempotencyKey: "older" });
+});
+
 type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
 
 function report(work: CurrentReport["work"], parent: string | null = null): CurrentReport {
@@ -38,7 +47,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 		session: {
 			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
-			instructions: { bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
+			instructions: { type: "text", bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
 			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",
 			compaction_trigger_override: null, output_reservation_override: null,
 			reasoning_effort: "high", reasoning_effort_override: null,
@@ -51,12 +60,29 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 	};
 }
 
+type CommandObservation = Extract<components["schemas"]["ObserveCommandReply"], { observation: unknown }>["observation"];
+type PendingMessageWork = Extract<CommandObservation, { kind: "message"; work: unknown }>["work"];
+
+function messageWorkTypeContract(work: PendingMessageWork): void {
+	const { attention: _attention, ...withoutAttention } = work;
+	const { group: _group, ...withoutGroup } = work;
+	const { actions: _actions, ...withoutActions } = work;
+	// @ts-expect-error Message work always carries the Host's attention, even when null.
+	const missingAttention: PendingMessageWork = withoutAttention;
+	// @ts-expect-error Message work always carries the Host's group.
+	const missingGroup: PendingMessageWork = withoutGroup;
+	// @ts-expect-error Message work always carries the Host's valid actions.
+	const missingActions: PendingMessageWork = withoutActions;
+	void [missingAttention, missingGroup, missingActions];
+}
+void messageWorkTypeContract;
+
 const idleWork: CurrentReport["work"] = {
-	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, latest_outcome: null,
+	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
 };
 
 test("status requests the Current profile and maps reported facts and parent losslessly", async () => {
-	const latestOutcome = { code: "failed_saved", content: { bytes: "7", sha256: "a".repeat(64) } };
+	const latestOutcome = { code: "failed_saved", content: { type: "text", bytes: "7", sha256: "a".repeat(64) } } as const;
 	for (const archiveState of ["active", "archiving", "archived"] as const) for (const parent of [null, "p4rent"]) {
 		const link: Link = {
 			async exchange(path, build) {
@@ -68,10 +94,66 @@ test("status requests the Current profile and maps reported facts and parent los
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
-			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
+			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
+});
+
+async function servedCase0() {
+	const facts = { attention: { kind: "approval", turn: "7", step: "9" }, group: "needs_you", actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
+	const link: Link = { async exchange(path) {
+		return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? report({ ...idleWork, ...facts })
+			: { sessions: [{ reference: "abc123", label: null, state: "idle", archive_state: "active", parent: null, creator: null, work: { ...idleWork, ...facts } }], next: null }));
+	} };
+	const expected = { attention: facts.attention, group: facts.group, canStop: true, decide: null, interruptTarget: facts.actions.interrupt };
+	const status = await new Session(link, "abc123").status();
+	const [row] = await new Sessions(link).list();
+	for (const result of [status, row]) {
+		assert.ok(result);
+		for (const [key, value] of Object.entries(expected)) assert.deepEqual(result[key as keyof typeof expected], value);
+	}
+}
+
+async function servedCase1() {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const link: Link = { async exchange(path) { return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? { ...report(idleWork), work }
+			: { sessions: [{ reference: "abc123", work }], next: null })); } };
+		await assert.rejects(new Session(link, "abc123").status(), /missing served facts/);
+		await assert.rejects(new Sessions(link).list(), /missing served facts/);
+	}
+}
+
+test("status preserves configured and loaded tool intent from each Current report", async () => {
+	const configurations = [
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "none"] },
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "lookup", "none"] },
+		{ tools: ["bash", "find_tools"], loaded_tools: ["find_tools"] },
+		{ tools: ["bash"], loaded_tools: ["bash"] },
+		{ tools: [], loaded_tools: [] },
+	];
+	let reads = 0;
+	const session = new Session({
+		async exchange(path) {
+			assert.equal(path, "/v1/inspect-session");
+			const configuration = configurations[reads++];
+			assert.ok(configuration);
+			const current = report(idleWork);
+			Object.assign(current.session, configuration);
+			return Buffer.from(JSON.stringify(current));
+		},
+	}, "abc123");
+	for (const configuration of configurations) {
+		const status = await session.status();
+		const loadedTools: string[] = status.loadedTools;
+		assert.deepEqual(loadedTools, configuration.loaded_tools);
+		assert.deepEqual(status.tools, configuration.tools);
+	}
+	assert.equal(reads, configurations.length);
 });
 
 test("status reports a missing Session as a request error", async () => {
@@ -79,36 +161,85 @@ test("status reports a missing Session as a request error", async () => {
 	await assert.rejects(new Session(link, "absent").status(), (error: unknown) => error instanceof RuiRequestError && error.code === "session_not_found");
 });
 
-test("interrupt selects its exact target from status and ignores non-model work", async () => {
-	for (const state of ["idle", "approval", "bash", "working", "retrying", "pending"] as const) {
-		const paths: string[] = [];
-		const link: Link = {
-			async exchange(path, build) {
-				paths.push(path);
-				if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify(report({
-					...idleWork, state: { kind: state, since: "1" }, turn: "7", operation: "19",
-				})));
-				assert.equal(path, "/v1/control/model-interruption");
-				const body = JSON.parse(build("store"));
-				assert.deepEqual(body.target, { session: "session", turn: "7", operation: "19" });
-				assert.equal(body.kind, "model_interruption");
-				assert.equal(typeof body.key, "string");
-				return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
-			},
-		};
-		await new Session(link, "session").interrupt();
-		assert.deepEqual(paths, ["working", "retrying", "pending"].includes(state)
-			? ["/v1/inspect-session", "/v1/control/model-interruption"] : ["/v1/inspect-session"]);
+test("interrupt sends one keyed request naming the explicit target", async () => {
+	const requests: unknown[] = [];
+	const session = new Session({ async exchange(path, build) {
+		requests.push({ path, body: JSON.parse(build("store")) });
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.interrupt({ turn: "7", operation: "19" }, { key: "saved" });
+	assert.deepEqual(requests, [{ path: "/v1/control/model-interruption", body: {
+		version: WIRE_VERSION, kind: "model_interruption", store: "store", key: "saved",
+		target: { session: "session", turn: "7", operation: "19" },
+	} }]);
+});
+
+test("interrupt snapshots its explicit target before transport readiness", async () => {
+	let release!: () => void;
+	const ready = new Promise<void>((resolve) => { release = resolve; });
+	let request: components["schemas"]["ModelInterruptionRequest"] | undefined;
+	const session = new Session({ async exchange(_path, build) {
+		await ready;
+		request = JSON.parse(build("store"));
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	const target = { turn: "1", operation: "2" };
+	const pending = session.interrupt(target, { key: "saved" });
+	target.operation = "3";
+	release();
+	await pending;
+	assert.deepEqual(request?.target, { session: "session", turn: "1", operation: "2" });
+});
+
+test("interrupt also uses the established idempotencyKey option", async () => {
+	const keys: string[] = [];
+	const session = new Session({ async exchange(_path, build) {
+		keys.push(JSON.parse(build("store")).key);
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	const target = { turn: "1", operation: "2" };
+	await session.interrupt(target, { idempotencyKey: "same" });
+	await session.interrupt(target, { idempotencyKey: "same" });
+	assert.deepEqual(keys, ["same", "same"]);
+});
+
+test("interrupt uses the last status observation without another read", async () => {
+	const paths: string[] = [];
+	let target: { turn: string; operation: string } | null = { turn: "7", operation: "19" };
+	const session = new Session({ async exchange(path, build) {
+		paths.push(path);
+		if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify(report({ ...idleWork, actions: { ...idleWork.actions, interrupt: target } })));
+		const body = JSON.parse(build("store"));
+		assert.deepEqual(body.target, { session: "session", turn: "7", operation: "19" });
+		assert.equal(body.key, "repeat");
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.interrupt();
+	assert.deepEqual(paths, []);
+	const observed = (await session.status()).interruptTarget;
+	assert.deepEqual(observed, target);
+	assert.ok(observed);
+	observed.operation = "changed by caller";
+	await session.interrupt({ key: "repeat" });
+	assert.deepEqual(paths, ["/v1/inspect-session", "/v1/control/model-interruption"]);
+	target = null;
+	await session.status();
+	await session.interrupt();
+	assert.deepEqual(paths, ["/v1/inspect-session", "/v1/control/model-interruption", "/v1/inspect-session"]);
+});
+
+test("interrupt treats only resolved or mismatched targets as no effect", async () => {
+	for (const code of ["operation_resolved", "target_mismatch", "unknown_operation"]) {
+		const session = new Session({ async exchange() { return Buffer.from(JSON.stringify({ answer: { status: "rejected", code } })); } }, "session");
+		const result = session.interrupt({ turn: "1", operation: "2" });
+		if (code === "unknown_operation") await assert.rejects(result, (error: unknown) => error instanceof RuiRequestError && error.code === code);
+		else await result;
 	}
-	let calls = 0;
-	const link: Link = { exchange: async () => { calls++; return Buffer.from(JSON.stringify(report(idleWork))); } };
-	await new Session(link, "session").interrupt();
-	assert.equal(calls, 1);
 });
 
 
 test("creation sends explicit settings without Host client defaults", async () => {
-	const spec: SessionSpec = { model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" };
+	const spec = { workspace: "/caller", model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" } satisfies SessionSpec;
 	const link: Link = {
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
@@ -119,7 +250,7 @@ test("creation sends explicit settings without Host client defaults", async () =
 			assert.deepEqual(request.configuration.tools, []);
 			assert.deepEqual(request.configuration.permissionMode, "ask");
 			assert.deepEqual(request.configuration.provider, undefined);
-			assert.deepEqual(request.configuration.workspace, undefined);
+			assert.equal(request.configuration.workspace, "/caller");
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -145,14 +276,37 @@ test("model updates serialize without changing omitted settings", async () => {
 	assert.equal(calls, 1);
 });
 
+test("settings resets forward null to the Host without completing omitted settings", async () => {
+	const update: SessionUpdate = { effort: null, compactAt: null };
+	let calls = 0;
+	const link: Link = {
+		async exchange(path, build) {
+			calls++;
+			assert.equal(path, "/v1/configure");
+			const request = JSON.parse(build("store"));
+			assert.equal(request.session, "existing-session");
+			assert.equal(request.key, "reset-defaults");
+			assert.deepEqual(request.configuration, { effort: null, compactAt: null });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+		},
+	};
+	await new Session(link, "existing-session").update(update, { idempotencyKey: "reset-defaults" });
+	assert.equal(calls, 1);
+});
+
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
-	// @ts-expect-error creation must specify reasoning, even when explicitly null
 	const missingEffort: SessionSpec = withoutEffort;
-	// @ts-expect-error compaction is never nullable
+	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
+	// @ts-expect-error creation needs an explicit model
+	const missingModel: SessionSpec = {};
+	// @ts-expect-error presets must supply their model
+	const missingPresetModel: HostSettings = { presets: { review: {} } };
+	// @ts-expect-error an explicit null model cannot request the Host default
+	const nullModel: SessionSpec = { model: null };
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, nullCompaction, sparse];
+	void [missingEffort, minimal, missingModel, missingPresetModel, nullModel, nullCompaction, sparse];
 }
 void sessionTypeContract;
 
@@ -173,10 +327,25 @@ test("creation can name a preset without inventing missing fields", async () => 
 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
-	// @ts-expect-error neither a full spec nor a preset
+	void sessions.create({ preset: "review", workspace: "/caller" }, { idempotencyKey: "preset-workspace" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol" }, { idempotencyKey: "empty-settings" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", instructions: "Do this" }, { idempotencyKey: "partial" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol" }, { idempotencyKey: "child" });
+	void sessions.create({ parent: "p4rent", preset: "review" }, { idempotencyKey: "child-preset" });
+	// @ts-expect-error a root needs a model unless a preset supplies it
+	void sessions.create({ workspace: "/caller" }, { idempotencyKey: "missing-root-model" });
+	// @ts-expect-error a child needs a model unless a preset supplies it
+	void sessions.create({ parent: "p4rent" }, { idempotencyKey: "missing-child-model" });
+	// @ts-expect-error root creation always carries the caller's Workspace
 	void sessions.create({}, { idempotencyKey: "empty" });
-	// @ts-expect-error a partial spec needs a preset
-	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
+	// @ts-expect-error disabling Bash does not make the root Workspace optional
+	void sessions.create({ model: "gpt-6.1-sol", tools: [] }, { idempotencyKey: "no-tools" });
+	// @ts-expect-error a child inherits its Workspace
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
+	// @ts-expect-error a child inherits its provider
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", provider: "openai" }, { idempotencyKey: "child-provider" });
+	// @ts-expect-error an explicit null model is never valid
+	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null
 	void sessions.create({ preset: null }, { idempotencyKey: "null" });
 	// @ts-expect-error presets only seed creation
@@ -191,7 +360,7 @@ test("unknown tool refusals preserve MCP advisory detail through request errors"
 		const detail = code === "mcp_server_unavailable" ? message : "spec.tools: lookup is not a known tool";
 		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: detail } })) };
 		const session = new Session(link, "abc123");
-		const spec: SessionSpec = { model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" };
+		const spec = { workspace: "/caller", model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" } satisfies SessionSpec;
 		for (const request of [
 			() => new Sessions(link).create(spec, { idempotencyKey: "create" }),
 			() => session.update({ tools: ["lookup"] }),
@@ -219,17 +388,21 @@ test("create parent is a create-only relation in the shared wire spec", async ()
 
 
 test("Action reads preserve identity and byte cursor without mutation", async () => {
-	const requests: { path: string; body: unknown }[] = [];
+	// ARD-4
 	const action = "9007199254740993";
-	const link: Link = {
-		async exchange(path, build) {
-			requests.push({ path, body: JSON.parse(build("store")) });
-			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null }));
-		},
-	};
-	const session = new Session(link, "session");
-	await session.readAction(action, "16383");
-	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } }]);
+	for (const [offset, after, more] of [["0", "0", false], ["16383", "9007199254740995", true]] as const) {
+		const values = { items: [{ ordinal: "9007199254740996", key: "k", text: "雪" }], next: "9007199254740996", more };
+		const link: Link = {
+			async exchange(path, build) {
+				assert.equal(path, "/v1/read-action");
+				assert.deepEqual(JSON.parse(build("store")), { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset, after });
+				return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null, values }));
+			},
+		};
+		const session = new Session(link, "session");
+		const result = offset === "0" ? await session.readAction(action) : await session.readAction(action, offset, after);
+		assert.deepEqual(result.values, values);
+	}
 });
 
 
@@ -257,4 +430,48 @@ test("Action promotion reports capacity refusal and changed-key conflicts", asyn
 		await assert.rejects(new Session(link, "session").backgroundAction("1"), (error: unknown) =>
 			error instanceof RuiRequestError && error.type === status && error.code === code);
 	}
+});
+
+test("stop Action sends the selected Session, Action and recoverable request key", async () => {
+	const link: Link = {
+		async exchange(path, build) {
+			assert.equal(path, "/v1/control/action-stop");
+			assert.deepEqual(JSON.parse(build("store")), {
+				version: WIRE_VERSION, kind: "action_stop", store: "store",
+				key: "stop-request", session: "session", action: "42",
+			});
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: null } }));
+		},
+	};
+	assert.equal(await new Session(link, "session").stopAction("42", { idempotencyKey: "stop-request" }), null);
+});
+
+test("stop Action reports refusal and request key conflicts", async () => {
+	for (const [status, code] of [["rejected", "unknown_action"], ["rejected", "target_mismatch"], ["conflict", "idempotency_key_conflict"]]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status, code } })) };
+		await assert.rejects(new Session(link, "session").stopAction("1", { idempotencyKey: "stop-request" }), (error: unknown) =>
+			error instanceof RuiRequestError && error.type === status && error.code === code);
+	}
+});
+
+test("stop Action preserves the existing Resolution position", async () => {
+    const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
+    assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
+});
+
+async function servedCase2() {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const session = new Session({ async exchange() {
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "0", work }));
+		} }, "abc123");
+		await assert.rejects(session.listActivity().next(), /missing served facts/);
+	}
+}
+
+test("SUI-57 typescript_served_work", async () => {
+	await servedCase0();
+	await servedCase1();
+	await servedCase2();
 });

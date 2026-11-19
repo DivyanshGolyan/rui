@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from control_fixture import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse
+from control_fixture import command, configure, inspect_execution, message, observe, start_host as control_start_host, stop_session, successful_sse
 from host_process import wait_for
 from conversation_page_fixture import host_resources
 from conversation_page_fixture import idle_resources, provider_connections
@@ -28,6 +28,11 @@ SESSION = None
 TEXT = "é中🙂\n\\\"/" * 12000
 CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
+
+
+def start_host(store, endpoint):
+    # Exclude external catalog connections from this reader-FD census.
+    return control_start_host(store, endpoint, "--set", "models.catalogUrl=http://127.0.0.1:1/api.json")
 
 
 def caller(store, mode, *args, session=None, ok=True, timeout=10):
@@ -153,7 +158,7 @@ def main():
             for i, row in enumerate(calls):
                 for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
                     data = expected.encode()
-                    assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
+                    assert reference == {"type": "text", "bytes": str(len(data)), "sha256": digest(data).hex()}
             for row in (calls[0], approval):
                 detail = row["value"][kind(row)]
                 assert (detail["description"], detail["tool"], detail["server"]) == ("Exit with success", "bash", None), detail
@@ -260,10 +265,11 @@ def main():
             saved.close()
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
-                "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
-                "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "last_line": None, "revision": "1", "workspace": "/w"},
+                "queued": json.loads((pathlib.Path(__file__).resolve().parents[2] / "src/codecs/fixtures/activity/empty-queue.json").read_text()),
+                "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "attention": None, "group": "done",
+                    "actions": {"stop": False, "interrupt": None, "decide": None}, "last_line": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
-                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
+                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"type": "text", "bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
             for version in (None, "missing", "malformed"):
                 wire = copy.deepcopy(valid)
@@ -434,9 +440,8 @@ def performance_case(item_bytes):
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
         def capturing():
-            descriptors = pathlib.Path(f"/proc/{process.pid}/fd")
-            assert descriptors.exists(), "the live import observer is Linux-only"
-            for descriptor in descriptors.iterdir():
+            assert os_semantics.PROC_FS, "the live import observer is Linux-only"
+            for descriptor in os_semantics.descriptor_links(process.pid):
                 try:
                     if "/scratch/response-" in os.readlink(descriptor): return True
                 except FileNotFoundError:
@@ -451,7 +456,7 @@ def performance_case(item_bytes):
         assert calls[0]["value"]["call"]["fields"][2]["bytes"] == str(argument_bytes), first
         for reference, identity in zip(calls[0]["value"]["call"]["fields"][:2],
                 (b"bash", b"performance-call")):
-            assert reference == {"bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
+            assert reference == {"type": "text", "bytes": str(len(identity)), "sha256": digest(identity).hex()}, reference
         expected = first["page"]["call_activity"]
         assert expected["total"] == "1" and expected["entries"][0]["presentation"]["description"] == label, expected
         assert expected["entries"][0]["presentation"]["code"] == "pending_permission", expected

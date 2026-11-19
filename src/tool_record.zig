@@ -16,10 +16,11 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
 pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
-pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. This is polling, not a subscription.";
+pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. Published values are returned in pages; pass the returned values.next as after to continue. This is polling, not a subscription.";
 pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
     std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
+    ",\"after\":{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":19,\"description\":\"Return values after this ordinal; omitted means zero.\"}" ++
     "},\"required\":[\"action\"],\"additionalProperties\":false}";
 
 pub const stop_action_description = "Stop an Action in your own Session by its decimal Action ID. Returns its final Resolution once it has ended.";
@@ -52,7 +53,15 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"preset\":{\"type\":\"string\",\"description\":\"A connect-time preset; spec fields override it.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++ agent_spec_properties ++
     "},\"additionalProperties\":false}" ++
-    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"],\"properties\":{\"spec\":{\"required\":[" ++ agent_required_properties ++ "]}}},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+
+const agent_required_properties = blk: {
+    var required: []const u8 = "";
+    for (@import("session_settings.zig").entries) |entry| {
+        if (entry.create == .must_value) required = required ++ (if (required.len == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\"";
+    }
+    break :blk required;
+};
 
 const agent_spec_properties = blk: {
     var properties: []const u8 = "";
@@ -78,7 +87,7 @@ const agent_spec_properties = blk: {
         };
         properties = properties ++ (if (properties.len == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":{\"type\":" ++ json_type ++ extra ++ "}";
     }
-    break :blk properties;
+    break :blk properties ++ ",\"preferences\":{\"type\":\"object\",\"properties\":{\"reasoning_effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]},\"permission_mode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}},\"additionalProperties\":false}";
 };
 
 pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";
@@ -324,15 +333,40 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
+pub const read_image_record: Record = .{
+    .name = "read_image",
+    .owner = .rui,
+    .description = "Read a PNG or JPEG image from a regular file on the Host. Relative paths resolve in the Session Workspace; absolute paths may name other Host-local files. Returns a saved image observation. URLs and special files are not supported.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"path\"],\"additionalProperties\":false}",
+};
+
+/// Largest result excerpt allowance used by any supported runner.
+pub const max_result_excerpt_bytes: u32 = 20_000;
+
+pub const Profile = struct { excerpt_bytes: u32, retain: bool };
+
 pub const Runner = enum {
     bash,
+    read_image,
     core,
     mcp,
     provider,
 
+    /// The offer comes from the frozen tool set of the model operation.
+    pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
+        return switch (self) {
+            .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
+            .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
+            .read_image => .{ .excerpt_bytes = 0, .retain = false },
+            .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
+            .provider => unreachable,
+        };
+    }
+
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
             .provider => unreachable,
@@ -342,6 +376,7 @@ pub const Runner = enum {
     pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => "Stopped before this image read completed.",
             .mcp => result,
             .core, .provider => unreachable,
         };
@@ -350,6 +385,7 @@ pub const Runner = enum {
     pub fn indeterminateText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").indeterminate,
+            .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .core, .provider => unreachable,
         };
@@ -371,6 +407,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
     .read_action = .{ .record = &read_action_record, .runner = .core },
+    .read_image = .{ .record = &read_image_record, .runner = .read_image },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
@@ -407,15 +444,28 @@ const built_in_records = blk: {
 const built_in_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [built_in_records.len][32]u8 = undefined;
-    for (&built_in_records, &out) |*each, *digest| digest.* = recordDigest(each);
+    selectDigests(&built_in_records, &@import("tool_digests_generated.zig").entries, &out);
     break :blk out;
 };
 
-test "the built-in tool set is valid and finds each built-in by name" {
-    try std.testing.expect(built_in_tool_set.valid());
-    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
+/// Select a matching snapshot for each record, computing the digest when one is absent or stale.
+pub fn selectDigests(records: []const Record, snapshots: anytype, out: [][32]u8) void {
+    std.debug.assert(records.len == out.len);
+    for (records, out, 0..) |*each, *digest, index| {
+        if (index < snapshots.len and sameRecord(each, &snapshots[index].record)) {
+            digest.* = snapshots[index].digest;
+        } else {
+            digest.* = recordDigest(each);
+        }
+    }
+}
+
+// A snapshot serves only the exact record it was generated from. A changed record is hashed
+// normally, so an out-of-date snapshot cannot change a tool's persistent identity.
+fn sameRecord(a: *const Record, b: anytype) bool {
+    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.read_only == b.read_only and
+        std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
+        std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
 }
 
 comptime {
@@ -463,7 +513,48 @@ test "every built-in runner matches its table row" {
     }
 }
 
-test "tool record read-only identity preserves existing digests" {
+test "EXR-65 tool identities survive matching, stale and missing digest snapshots" {
+    const Snapshot = @import("tool_digests_generated.zig").Entry;
+    const base: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
+    const expected = recordDigest(&base);
+    const snapshot: Snapshot = .{ .record = .{ .name = base.name, .owner = .mcp, .server = base.server, .description = base.description, .input_schema = base.input_schema, .read_only = base.read_only }, .digest = expected };
+    const snapshots = [_]Snapshot{snapshot};
+    var selected: [2][32]u8 = undefined;
+    selectDigests(&.{base}, &snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+
+    var changes: [5]Record = .{ base, base, base, base, base };
+    changes[0].name = "fetch_other";
+    changes[1].description = "Fetch another page.";
+    changes[2].input_schema = "{}";
+    changes[3].server = "other";
+    changes[4].read_only = true;
+    for (changes) |changed| {
+        selectDigests(&.{changed}, &snapshots, selected[0..1]);
+        try std.testing.expectEqualSlices(u8, &recordDigest(&changed), &selected[0]);
+    }
+    var owner_base = base;
+    owner_base.owner = .rui;
+    owner_base.server = "";
+    var owner_snapshot = snapshot;
+    owner_snapshot.record.owner = .rui;
+    owner_snapshot.record.server = "";
+    owner_snapshot.digest = recordDigest(&owner_base);
+    var owner_changed = owner_base;
+    owner_changed.owner = .provider;
+    const owner_snapshots = [_]Snapshot{owner_snapshot};
+    selectDigests(&.{owner_changed}, &owner_snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&owner_changed), &selected[0]);
+    selectDigests(&.{base}, &@as([0]Snapshot, .{}), selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    selectDigests(&.{ base, changes[0] }, &snapshots, &selected);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&changes[0]), &selected[1]);
+
+    try std.testing.expect(built_in_tool_set.valid());
+    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
     const provider = recordDigest(&web_search_record);
     try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
@@ -502,5 +593,40 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
             if (mask & (@as(usize, 1) << @intCast(index)) == 0) try std.testing.expectEqualStrings(server, empty.next().?);
         }
         try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
+    }
+}
+
+test "start_agent schema requires a model unless a preset supplies one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), start_agent_schema, .{});
+    const alternatives = schema.object.get("anyOf").?.array.items;
+    const direct = alternatives[0].object;
+    const required = direct.get("properties").?.object.get("spec").?.object.get("required").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), required.len);
+    try std.testing.expectEqualStrings("model", required[0].string);
+    const preset = alternatives[1].object.get("required").?.array.items;
+    try std.testing.expectEqualStrings("preset", preset[0].string);
+}
+
+test "result profiles follow runner and frozen Bash offer" {
+    for ([_]bool{ false, true }) |offer| {
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 20_000, .retain = true }, Runner.bash.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = offer }, Runner.mcp.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.read_image.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.core.resultProfile(offer));
+    }
+}
+
+test "all result profiles fit the shared excerpt maximum" {
+    inline for (std.meta.tags(Runner)) |runner| {
+        switch (runner) {
+            .provider => {}, // Provider calls do not use the Result route.
+            .bash, .mcp, .read_image, .core => {
+                for ([_]bool{ false, true }) |offer| {
+                    try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
+                }
+            },
+        }
     }
 }

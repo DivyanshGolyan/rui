@@ -80,12 +80,13 @@ Core validates updates atomically.
 The adapter must establish continuation compatibility for the exact frozen Operation without changing Conversation membership.
 Revisions do not add provider capabilities.
 
-Defaults apply only when establishing a Session:
+The Host resolves omitted creation settings; an explicit default request for effort or compactAt also uses the Host rule on an existing Session:
 
 | Field | Initially omitted | Explicit value | Later omitted |
 | --- | --- | --- | --- |
+| Model | Required; omission rejects creation | Exact nonempty model ID | Preserve existing value |
 | Instructions | Empty text | `instructions: ""` selects empty text | Preserve existing value |
-| Tools | Bash only | `tools: []` offers no tools | Preserve existing value |
+| Tools | Product default tool catalog | `tools: []` offers no tools | Preserve existing value |
 | Permission Mode | `bypass` | `ask` or `bypass` | Preserve existing value |
 | Output Schema | Text answers | `outputSchema: null` clears the schema | Preserve existing value |
 | Label | No Label | `label: null` clears the Label | Preserve existing value |
@@ -119,20 +120,12 @@ Unsupported values reject the whole update.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
-The CLI and TUI choose a supported saved effort, otherwise `low` when supported, otherwise the model's lowest listed effort, otherwise explicit null; the Host never fills effort from the catalog.
-The catalog has no default effort.
-For an unlisted exact binding, the client uses its saved effort or product default, and Rui passes any explicit effort in its closed grammar through (D229).
-An explicit null effort tells Rui to omit `reasoning` and leave the provider's effective effort unspecified.
-This preserves exact-model syntax without guessing capabilities from model families.
-
-A listed model with effort levels takes one of those values; explicit `null` is accepted only for an unlisted model or a catalog entry with no effort levels.
-On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
-Configuration validates the effective requested-or-retained effort against the effective requested-or-current model, including null effort on a model revision.
-The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
-The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure` and initial `session start`; chat info’s Effort field submits the equivalent typed edit.
+The Host chooses `low` when supported, otherwise the model’s lowest listed effort, otherwise null. For an unlisted exact binding it uses the product effort choice; explicit effort values in the closed grammar pass through (D229). The CLI and TUI may send personal saved effort as a creation preference; the Host applies it only when effort is omitted and accepted for the selected model (including an unlisted model), otherwise it uses the model default. An explicit effort is validated as requested and never downgraded to a saved value or default.
+On an existing Session, omission preserves the saved effort; explicit null requests the Host default. Configuration validates the effective requested-or-retained effort against the effective model. The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so a reset that would clear an assigned value rejects atomically as `unsupported_reasoning_effort` (D165).
+`--reasoning-effort default` requests the Host default; `--reasoning-effort VALUE` selects a value for `session configure` and initial `session start`; chat info’s Effort field submits the equivalent typed edit.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
 For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
-Fresh explicit-null specs have no earlier concrete effort and remain unspecified.
+Fresh defaults and reset requests are resolved before admission.
 Each model Operation, including compaction and continuation, freezes the resolved effort, its immutable configured-choice source, its previous same-model admitted effective effort and nullable override, and whether its own pinned request actually emits an effort update at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
 Persisted values outside the closed grammar are corruption.
@@ -248,7 +241,7 @@ The fixture uses native public readers and actual provider inputs, not direct St
 Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
-It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
+It reuses `yamlLibrary`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
 The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
 
 Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.
@@ -271,6 +264,10 @@ Creation refusal tests cover both Configure and initial Message: a missing Works
 The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
 Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
 These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.
+
+#### Host settings defaults
+
+The functional-core domain matrix compares omitted, explicit and null settings with independently recorded base values across listed, unlisted and no-effort models, saved preferences and parent states. It covers unsupported saved-effort fallback, strict validation of explicit effort, and refusal of preferences on addressed updates. Store tests exercise defaulted child authority and keyed replay after parent or catalog changes; reset tests retain the no-effort clearing refusal. Cross-client integration checks CLI, TUI and TypeScript creation against SQLite and live MySQL. A reverting mutation must fail the relevant default assertion.
 
 #### Parent creation (D178)
 

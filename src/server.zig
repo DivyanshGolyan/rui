@@ -1,8 +1,8 @@
 const std = @import("std");
 const change_ring = @import("change_ring.zig");
 const activity_reply = @import("activity_reply.zig");
-const os = @import("os/os.zig");
-const socket_os = @import("os/socket.zig");
+const os = @import("os");
+const socket_os = os.socket;
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const HostStartupWait = @import("HostStartupWait.zig");
@@ -318,7 +318,8 @@ const Intake = struct {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
                 error.ControlCapacity => "control_capacity_exhausted",
                 error.DiscoveryCapacity => "discovery_capacity_exhausted",
-                error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
+                error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else if (self.route == .action_publish) "too_large" else "control_request_too_large",
+                error.ContentTooLarge => if (self.route == .action_publish) "too_large" else @errorName(err),
                 error.RequestIdentityExhausted => "request_identity_exhausted",
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
                 error.EnvironmentRequired => "environment_required",
@@ -395,6 +396,7 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
+                        .action_publish => protocol.shapeBytes(protocol.action_publish_request),
                         inline else => |route| if (comptime route.commandKind()) |kind|
                             if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
                         else
@@ -502,7 +504,7 @@ const Intake = struct {
             defer self.releaseRequest();
             const reply = try self.ensureReply();
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null, if (self.ingress) |ingress| ingress.parts_loan else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -888,7 +890,7 @@ pub noinline fn serve(
     const settings = prepared.get();
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
-    const served_value = providers.fromSettings(settings, tuning.fixtures);
+    const served_value = providers.fromSettings(settings);
     const served = &served_value;
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
@@ -960,15 +962,19 @@ pub noinline fn serve(
     defer if (mysql_url) |url| url.destroy();
     var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
     const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
-    const lease = try allocator.create(platform.StoreLease);
-    defer allocator.destroy(lease);
+    const serving = try createUnfilled(allocator, struct { lease: platform.StoreLease, storage: store_module.Store });
+    defer allocator.destroy(serving);
+    const lease = &serving.lease;
     if (mysql_url != null)
         try lease.acquireMysql(io, settings.interface.dir.slice(), socket_path)
     else
         lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
     if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
-    lease.paths.retainReachableDirectory(io, host_directory);
+    if (tuning.admitted_directory) |directory|
+        try lease.paths.host_directory.set(directory)
+    else
+        lease.paths.retainReachableDirectory(io, host_directory);
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();
@@ -984,16 +990,16 @@ pub noinline fn serve(
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
     var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
     defer tool_set_memory.deinit();
-    var storage: store_module.Store = undefined;
-    openStoreForHost(io, &storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    const storage = &serving.storage;
+    openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    return finishServing(&storage, failure, serveOpened(
+    return finishServing(storage, failure, serveOpened(
         io,
         allocator,
-        &storage,
+        storage,
         lease,
         active_capacity,
         limits,
@@ -1079,6 +1085,7 @@ fn serveOpened(
         .lease = lease,
         .store = storage,
         .hooks = hooks,
+        .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
         .limits = limits,
         .providers = served,
         .presets = settings.presets.specs,
@@ -1091,6 +1098,19 @@ fn serveOpened(
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
         .turns_paused = .init(settings.execution.paused.value),
+    };
+    const test_pause = @import("testing/pause.zig");
+    var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
+    defer pause_owner.deinit();
+    const pause_adapter = if (comptime test_pause.enabled) adapter: {
+        if (hooks.pause_fd) |fd| {
+            host.pause_owner = &pause_owner;
+            break :adapter try @import("testing/pause_socket.zig").Adapter.start(std.heap.c_allocator, io, &pause_owner, fd);
+        }
+        break :adapter null;
+    } else {};
+    defer if (comptime test_pause.enabled) {
+        if (pause_adapter) |adapter| adapter.stop();
     };
     storage.modelTimingSource().* = host.custody.timingSource();
     defer storage.modelTimingSource().* = .{};
@@ -1134,6 +1154,7 @@ fn serveOpened(
     host.intake_wake = intake.wake[1];
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
+    if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         if (listener_open) listener.deinit(io);
@@ -1144,6 +1165,7 @@ fn serveOpened(
         socket_owned = false;
         _ = host.advance(.draining);
         execution_thread.join();
+        if (comptime test_pause.enabled) pause_owner.close();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
@@ -1153,8 +1175,7 @@ fn serveOpened(
     if (diagnostics.*) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
-        writer.close();
-        diagnostics.* = null;
+        host.attachDiagnostics(writer);
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
@@ -1337,7 +1358,7 @@ noinline fn writeReadiness(
     retention_capacity: usize,
     provider_enabled: bool,
 ) !void {
-    var ready: protocol.ResponseBuffer = .{};
+    var ready: protocol.DiagnosticBuffer = .{};
     const instance_hex = std.fmt.bytesToHex(instance, .lower);
     try ready.appendFmt("ready instance={s} store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         &instance_hex,
@@ -1442,7 +1463,7 @@ const ControlTiming = struct {
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var publication = beginTestObservation(self.host, "control_timing", null);
         defer if (publication) |*value| value.finish();
-        var trace: protocol.ResponseBuffer = .{};
+        var trace: protocol.DiagnosticBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key.slice()) catch return;
         trace.append(",\"kind\":") catch return;
@@ -1474,6 +1495,8 @@ const Route = enum {
     model_interruption,
     permission_decision,
     action_background,
+    action_stop,
+    action_publish,
     observe,
     read_result,
     read_action,
@@ -1486,6 +1509,8 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
+    public_parts,
+    public_part_content,
     skill_suggestions,
     model_list,
     unsupported_control,
@@ -1531,11 +1556,12 @@ test "command route projection preserves control classification" {
             .model_interruption => .model_interruption,
             .permission_decision => .permission_decision,
             .action_background => .action_background,
+            .action_stop => .action_stop,
             else => null,
         };
         try std.testing.expectEqual(expected, comptime route.commandKind());
         const expected_control = switch (route) {
-            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => true,
+            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
             else => false,
         };
         try std.testing.expectEqual(expected_control, route.isControl());
@@ -1552,12 +1578,20 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.MessageReply {
+    return submitMessageInput(host, command, offer, null, receipt);
+}
+
+fn submitMessageInput(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer, loan: ?@import("InputCapture.zig").Loan, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home) catch |err| {
+    const skill_owner = @import("session_skills.zig");
+    const prepared = (if (loan) |parts|
+        skill_owner.prepareMessageParts(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, parts)
+    else
+        skill_owner.prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home)) catch |err| {
         if (host.store.isFenced()) return .infrastructure_failure;
         return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
     };
@@ -1570,9 +1604,9 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
             return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
         };
         defer inheritance.deinit(host.allocator);
-        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+        return submitMessageInputToStore(host.store, command, loan, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
     };
-    const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
+    const environments = host.environments orelse return submitMessageInputToStore(host.store, command, loan, null, initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1586,21 +1620,35 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
         }
     };
     var install: Install = .{ .environments = environments, .offer = offer };
-    return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+    return submitMessageInputToStore(host.store, command, loan, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
 }
 
-noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
-    const name = command.preset orelse return configureCapturedSkills(host, command, null);
+fn submitMessageInputToStore(
+    store: *store_module.Store,
+    command: *const wire_request.MessageCommand,
+    loan: ?@import("InputCapture.zig").Loan,
+    committed: ?store_module.Store.MessageCommitted,
+    initial: ?*const store_module.InitialSkills,
+    captured: ?*const store_module.CapturedMessageSkills,
+    receipt: ?*@import("creation_receipt.zig").Configuration,
+    faults: store_module.Faults,
+) store_module.MessageReply {
+    if (loan) |parts| return store.submitMessagePartsCapturedSkillsInto(command, parts, committed, initial, captured, receipt, faults) catch .infrastructure_failure;
+    return store.submitMessageCapturedSkillsInto(command, committed, initial, captured, receipt, faults);
+}
+
+noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.ConfigureReply {
+    const name = command.preset orelse return configureCapturedSkills(host, command, null, receipt);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -1615,11 +1663,26 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     };
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
     std.debug.assert(checked == .accepted);
-    inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
-        const override = &@field(command.configuration, field);
-        if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
+    overlayConfiguration(&resolved.configuration, &command.configuration);
+    return configureCapturedSkills(host, resolved, &decision, receipt);
+}
+
+fn overlayConfiguration(base: *wire_request.Configuration, override: *const wire_request.Configuration) void {
+    inline for (@import("session_settings.zig").spec_entries) |entry| {
+        const field = &@field(override, entry.field);
+        if (field.state != .omitted) @field(base, entry.field) = field.*;
     }
-    return configureCapturedSkills(host, resolved, &decision);
+    if (override.preferences) |preferences| base.preferences = preferences;
+}
+
+test "preset overlay retains or replaces the whole preferences object" {
+    var base: wire_request.Configuration = .{ .preferences = .{} };
+    base.preferences.?.reasoning_effort.state = .value;
+    try base.preferences.?.reasoning_effort.value.set("high");
+    overlayConfiguration(&base, &.{});
+    try std.testing.expectEqualStrings("high", base.preferences.?.reasoning_effort.value.slice());
+    overlayConfiguration(&base, &.{ .preferences = .{} });
+    try std.testing.expectEqual(protocol.FieldState.omitted, base.preferences.?.reasoning_effort.state);
 }
 
 fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.ConfigureReply {
@@ -1627,7 +1690,7 @@ fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.
     return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
 }
 
-noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision) error{OutOfMemory}!store_module.ConfigureReply {
+noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.ConfigureReply {
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const reload_capture: ?store_module.CapturedSkill = if (command.reload_skills and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
@@ -1643,7 +1706,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     else
         @import("child_environment.zig").Inheritance{ .environments = null };
     defer inheritance.deinit(host.allocator);
-    return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
+    return host.store.configureWithCreationCommittedInto(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), receipt, host.hooks.storeFaults(.command));
 }
 
 fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind)), faults: store_module.Faults) host_reply.MutationResult(kind) {
@@ -1654,6 +1717,7 @@ fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: 
         .model_interruption => host.store.interruptModel(command, faults),
         .permission_decision => host.store.decidePermission(command, faults),
         .action_background => host.store.backgroundAction(.{ .command = command }, faults),
+        .action_stop => host.store.requestActionStop(command, faults),
         .configure, .message => @compileError("control admission requires a control kind"),
     };
 }
@@ -1663,7 +1727,7 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
         .session_stop, .session_archive, .session_pin => command.session.slice(),
         .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
         .permission_decision => .{ .session = command.session, .action_id = command.action_id, .decision = command.decision },
-        .action_background => .{ .session = command.session, .action_id = command.action_id },
+        .action_background, .action_stop => .{ .session = command.session, .action_id = command.action_id },
         .configure, .message => @compileError("control subject requires a control kind"),
     };
 }
@@ -1673,7 +1737,7 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
 fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind)) !bool {
     if (result == .infrastructure_failure) fenceDispatch(host, command_spec.spec(kind).fence_message, error.CanonicalStoreFailure);
     if (header.drop == .after_commit and result != .infrastructure_failure) return false;
-    try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMutationReply(kind), .{ subject, result });
+    try fd.json(host_reply.httpStatus(result), @max(command_spec.spec(kind).Reply(protocol).max_bytes, protocol.max_control_error_response_bytes), host_reply.renderMutationReply(kind), .{ subject, result });
     return true;
 }
 
@@ -1699,7 +1763,7 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1742,23 +1806,42 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
+            // One bounded receipt per active creating exchange; ordinary exchanges
+            // are limited by Host intake capacity. It lives only through encoding.
+            const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+            defer if (receipt) |value| host.allocator.destroy(value);
+            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
         },
         .message => |*command| {
-            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
+            if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
+            const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+            defer if (receipt) |value| host.allocator.destroy(value);
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessageInput(host, command, client_environment.?, parts, receipt));
         },
-        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => |*command, tag| {
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
             var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
             const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
             try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
         },
-        .observe_command => |*command| {
-            var observation: store_module.Observed = undefined;
-            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| {
-                fenceDispatch(host, "command observation", err);
+        .action_publish => |*command| {
+            if (command.text.length > protocol.max_action_value_bytes) return respondStatic(fd, 409, .invocation_error, "too_large");
+            const bytes = try host.allocator.alloc(u8, @intCast(command.text.length));
+            defer host.allocator.free(bytes);
+            const count = try command.text.file.?.readPositionalAll(host.io, bytes, 0);
+            if (count != bytes.len) return error.UnexpectedEndOfFile;
+            const result = host.store.publishActionValue(command.handle.slice(), command.key.slice(), bytes) catch |err| {
+                fenceDispatch(host, "action value publication", err);
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
+            switch (result) {
+                .accepted => |receipt| try fd.json(200, comptime protocol.shapeBytes(protocol.action_publish_reply), renderActionValueReceipt, .{receipt}),
+                .refused => |reason| return respondStatic(fd, 409, .invocation_error, @tagName(reason)),
+            }
+        },
+        .observe_command => |*command| {
+            var observation: store_module.Observed = undefined;
+            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| return refuseRead(host, fd, "command observation", err);
             switch (observation) {
                 .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
                 .not_modified => |token| if (command.since) |since| {
@@ -1775,15 +1858,9 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 error.ResultNotFound => return respondStatic(fd, 409, .result_unavailable, "result_not_found"),
                 error.ResultNotReady => return respondStatic(fd, 409, .result_unavailable, "result_not_ready"),
                 error.ResultFailed => return respondStatic(fd, 409, .result_unavailable, "result_failed"),
-                else => {
-                    fenceDispatch(host, "result observation", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "result observation", err),
             };
-            const location = host.store.openContent(reference) catch |err| {
-                fenceDispatch(host, "result content read", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            };
+            const location = host.store.openContent(reference) catch |err| return refuseRead(host, fd, "result content read", err);
             try fd.setContent(location, 0, true, false);
         },
         .read_action => |*command| {
@@ -1792,10 +1869,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             host.store.readAction(command, value) catch |err| switch (err) {
                 error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
                 error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
-                else => {
-                    fenceDispatch(host, "Action status observation", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "Action status observation", err),
             };
             try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
         },
@@ -1823,11 +1897,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "session report scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
-                if (host.store.isFenced()) {
-                    fenceDispatch(host, "session inspection", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                }
-                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
+                return refuseRead(host, fd, "session inspection", err);
             };
             try fd.setReport(report);
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
@@ -1846,23 +1916,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "Session list scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
-                if (host.store.isFenced()) {
-                    fenceDispatch(host, "Session list", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                }
-                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
+                return refuseRead(host, fd, "Session list", err);
             };
             try fd.setReport(page);
         },
         .conversation_page => |*command| {
             const page = try createUnfilled(host.allocator, store_module.PublicConversationPage);
             defer host.allocator.destroy(page);
-            host.store.publicConversationPage(command, page) catch |err| switch (err) {
+            host.store.publicConversationPage(command, page, host.allocator) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "conversation page", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "conversation page", err),
             };
             try fd.json(200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
         },
@@ -1872,10 +1935,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.activityPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity page", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "activity page", err),
             };
             try fd.json(200, host_reply.activityPageBytes(page), host_reply.renderActivityPage, .{page});
         },
@@ -1884,20 +1944,32 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.searchActivity(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity search", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "activity search", err),
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
+        .public_parts => |*command| {
+            const report = capturePublicParts(host, fd, command, request_number) catch |err| switch (err) {
+                error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+                error.ReportScratchCleanupFailed => {
+                    fenceDispatch(host, "public parts scratch cleanup", err);
+                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+                },
+                else => return refuseRead(host, fd, "public parts", err),
+            };
+            try fd.setReport(report);
+        },
+        .public_part_content => |*command| {
+            const location = host.store.openPublicPart(command.session.slice(), command.owner, command.part, command.start) catch |err| switch (err) {
+                error.ContentNotFound, error.ContentIsText, error.RangeOutOfBounds => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+                else => return refuseRead(host, fd, "public part content", err),
+            };
+            try deliverPublicContent(host, fd, location, command.start, command.stream);
+        },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity content", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                error.ContentNotFound, error.ContentIsParts => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => return refuseRead(host, fd, "activity content", err),
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
@@ -1942,15 +2014,67 @@ fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("m
 }
 
 fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    const State = struct {
+        capture: store_module.SessionReportCapture,
+        reply: session_report_reply.Reply(store_module.SessionReportCapture),
+    };
+    const state = try createUnfilled(host.allocator, State);
+    defer host.allocator.destroy(state);
+    const capture = &state.capture;
+    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
-    const reply = try createUnfilled(host.allocator, session_report_reply.Reply(store_module.SessionReportCapture));
-    defer host.allocator.destroy(reply);
-    reply.capture = &capture;
-    reply.execution = executionFacts(host);
-    try host.store.readSessionReport(request.session.slice(), request.profile, reply);
+    state.reply.capture = capture;
+    state.reply.execution = executionFacts(host);
+    try host.store.readSessionReport(request.session.slice(), request.profile, &state.reply);
     return capture.seal();
+}
+
+test "Session report capture releases its heap state after sealing or scratch exhaustion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    var request: protocol.InspectSession = .{};
+    try request.session.set("k7m2qx");
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        host.allocator = failing.allocator();
+        defer host.allocator = std.testing.allocator;
+        try std.testing.expectError(error.OutOfMemory, captureSessionReport(&host, &request, 0));
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expect(!storage.isFenced());
+    }
+    {
+        var report = try captureSessionReport(&host, &request, 1);
+        defer report.deinit();
+        try std.testing.expect(report.length != 0);
+        try std.testing.expectEqual(report.length, host.scratch_used.load(.acquire));
+        var bytes: [1024]u8 = undefined;
+        const length = try report.read(0, &bytes);
+        try std.testing.expectEqual(report.length, length);
+        try std.testing.expect(std.mem.indexOf(u8, bytes[0..length], "session_not_found") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    retention.budget.limit = 1;
+    try std.testing.expectError(error.ReportScratchExhausted, captureSessionReport(&host, &request, 2));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+    retention.budget.limit = 9000;
+    host.hooks.failures.insert(.report_unlink);
+    try std.testing.expectError(error.ReportScratchCleanupFailed, captureSessionReport(&host, &request, 3));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
 }
 
 fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
@@ -1974,6 +2098,27 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
     return @ptrCast(@alignCast(bytes));
 }
 
+/// Certifies the owner's parts once, then captures the whole list into report
+/// scratch under the shared retention budget. A fault mid-walk discards the
+/// capture, so no partial list is ever delivered.
+fn capturePublicParts(host: *Host, reply: *Reply, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
+    const capture = &reply.parts_capture;
+    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    errdefer capture.deinit();
+    var reader = try store_module.PublicParts.Reader.init(command.session, command.owner);
+    defer reader.deinit();
+    var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = capture, .session = command.session.slice() };
+    while (true) switch (try host.store.readPublicParts(&reader)) {
+        .pending => {},
+        .certified => |value| try writer.head(value),
+        .part => |part| try writer.part(part),
+        .done => break,
+    };
+    try writer.finish();
+    return capture.seal();
+}
+
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
     var reply = Reply{ .io = host.io, .allocator = host.allocator };
     defer reply.deinit();
@@ -1985,11 +2130,8 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-        else => {
-            fenceDispatch(host, "conversation content", err);
-            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-        },
+        error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "conversation content", err),
     };
     return deliverPublicContent(host, fd, location, command.start, command.stream);
 }
@@ -2010,15 +2152,9 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
         host.store.actionArguments(command.session.slice(), command.action_id);
     const resolved = reference catch |err| switch (err) {
         error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
-        else => {
-            fenceDispatch(host, phase, err);
-            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-        },
+        else => return refuseRead(host, fd, phase, err),
     };
-    const location = host.store.openContent(resolved) catch |err| {
-        fenceDispatch(host, phase, err);
-        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-    };
+    const location = host.store.openContent(resolved) catch |err| return refuseRead(host, fd, phase, err);
     fd.setContent(location, 0, true, false) catch {};
 }
 
@@ -2052,6 +2188,8 @@ const HeaderReader = struct {
             .host_stop
         else if (std.mem.eql(u8, path, "/v1/control/host-pause"))
             .host_pause
+        else if (std.mem.eql(u8, path, "/v1/action-publish"))
+            .action_publish
         else if (std.mem.eql(u8, path, "/v1/observe-command"))
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
@@ -2076,6 +2214,10 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/public-parts"))
+            .public_parts
+        else if (std.mem.eql(u8, path, "/v1/public-part-content"))
+            .public_part_content
         else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
@@ -2153,13 +2295,24 @@ test "canonical failure classifier accepts every production mutation failure env
 test "initial Message reply binds its allocated Session and original input before exposing acceptance" {
     const protocol_reply = @import("protocol_reply.zig");
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
+    const configuration: @import("creation_receipt.zig").Configuration = .{
+        .provider = .codex,
+        .model = try .from("model-a"),
+        .reasoning_effort = null,
+        .workspace = try .from("/workspace"),
+        .tools = .{},
+        .loaded_tools = .{},
+        .permission_mode = .ask,
+        .compaction_trigger = null,
+    };
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .configuration = &configuration,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = content.length, .digest = content.digest, .creates_session = true } };
@@ -2175,10 +2328,25 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .configuration = &configuration,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
+}
+
+fn renderActionValueReceipt(out: protocol.JsonOut, receipt: anytype) !void {
+    try out.appendShape(protocol.action_publish_reply, .{ receipt.action_id, receipt.ordinal, receipt.admission_id, receipt.replayed });
+}
+
+/// The Store owns which read failures are fatal: it fences itself for those and returns the
+/// rest as ordinary refusals. Dispatch fences only after it.
+fn refuseRead(host: *Host, reply: *Reply, phase: []const u8, err: anyerror) void {
+    if (host.store.isFenced()) {
+        fenceDispatch(host, phase, err);
+        return respondStatic(reply, 500, .invocation_error, "canonical_store_failure");
+    }
+    respondStatic(reply, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
 }
 
 fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
@@ -2186,6 +2354,7 @@ fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []c
 }
 
 const Reply = struct {
+    parts_capture: store_module.SessionReportCapture = undefined,
     io: std.Io,
     allocator: std.mem.Allocator,
     header: [320]u8 = undefined,
@@ -2827,21 +2996,21 @@ test "message observation renders Host state binding live work and persistent re
     const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
     const bound = store_module.AttemptBinding{ .turn_id = 2, .operation_id = 3, .attempt_ordinal = 4 };
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .content = content,
+        .content = .{ .text = content },
         .queue = .{ .admission_id = 1, .state = .queued },
         .admitted_at = 11,
         .work = .{ .state = .{ .pending = .{ .since = 10 } } },
     } } };
     try observation.target.set("s");
     const message = &observation.kind.message.?;
-    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null}}}");
+    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.work = .{ .state = .{ .approval = .{ .since = 10 } }, .first_action = 7 };
-    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\"}}}");
+    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\",\"attention\":{\"kind\":\"approval\",\"turn\":\"0\",\"step\":\"7\"},\"group\":\"needs_you\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.queue.?.state = .{ .processing = bound };
     message.work = .{ .state = .{ .working = .{ .since = 10 } } };
     message.recovery.count = 1;
     message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
-    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null}" ++ recovery ++ "}}");
+    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}");
     message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
     try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -2953,6 +3122,10 @@ test "command observation full and both unchanged tiers render byte exactly with
 }
 
 test "Message observation work and recovery fit their exchange-owned response bound" {
+    try std.testing.expectEqual(
+        protocol.shapeBytes(protocol.command_observation_reply.work_base) + protocol.shapeBytes(protocol.SessionWork.extra_fields) + "}".len,
+        protocol.shapeBytes(protocol.command_observation_reply.work),
+    );
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -2961,10 +3134,13 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .content = .{ .length = max, .digest = @splat(0xff) },
+        .content = .{ .parts = .{
+            .identity = .{ .length = max, .digest = @splat(0xff) },
+            .owner = .{ .message = max },
+        } },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -3217,6 +3393,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
                 .action_background => "control/action-background",
+                .action_stop => "control/action-stop",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };
@@ -4218,6 +4395,80 @@ test "MCP socket capacity is reserved beside model and Bash descriptors" {
     try std.testing.expectEqual(before.inherited, requirement.inherited);
 }
 
+test "creation receipt survives dropped and failed reply allocation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store_identity.set(root);
+    try lease.paths.scratch.set(root);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    const request = try std.testing.allocator.create(wire_request.Request);
+    defer std.testing.allocator.destroy(request);
+    request.* = .{ .configure = try store_module.testingCompleteConfiguration("receipt-allocation", "", root, "model-a") };
+    try request.configure.store.set(root);
+    var header = Header{ .route = .configure, .content_length = 0 };
+    var receipt_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    host.allocator = receipt_failure.allocator();
+    var reply = Reply{ .io = std.testing.io, .allocator = std.testing.allocator };
+    try std.testing.expectError(error.OutOfMemory, prepareReply(&host, &reply, -1, header, 0, 0, request, null, null));
+    try std.testing.expect(!try storage.commandExists(request.configure.key.slice()));
+    try std.testing.expectEqual(receipt_failure.allocated_bytes, receipt_failure.freed_bytes);
+    var accounting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    host.allocator = accounting.allocator();
+    var output_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    reply.allocator = output_failure.allocator();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    try std.testing.expect(reply.body == .none);
+    try std.testing.expect(try storage.commandExists(request.configure.key.slice()));
+    try std.testing.expect(accounting.allocations > 0);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.allocator = std.testing.allocator;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    try std.testing.expect(reply.body == .json);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"configuration\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"replayed\":true") != null);
+    const Session = protocol.Bounded(protocol.max_session_bytes);
+    const readSession = struct {
+        fn call(body: []const u8) !Session {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+            defer parsed.deinit();
+            return Session.from(parsed.value.object.get("answer").?.object.get("session").?.string);
+        }
+    }.call;
+    const first_session = try readSession(reply.body.json);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    try std.testing.expectEqualStrings(first_session.slice(), (try readSession(reply.body.json)).slice());
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try request.configure.key.set("receipt-drop");
+    header.drop = .after_commit;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    try std.testing.expect(reply.body == .none);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    header.drop = .none;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    try std.testing.expect(reply.body == .json);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"configuration\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"replayed\":true") != null);
+    const dropped_session = try readSession(reply.body.json);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null, null);
+    defer reply.deinit();
+    try std.testing.expectEqualStrings(dropped_session.slice(), (try readSession(reply.body.json)).slice());
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+}
+
 test "presets seed configure before Store validation and idempotency" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4240,16 +4491,18 @@ test "presets seed configure before Store validation and idempotency" {
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
     try create.key.set("preset-create");
+    create.configuration.workspace.state = .value;
+    try create.configuration.workspace.value.set(root);
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
-    const reload_refused = try submitConfigure(&host, reload);
+    const reload_refused = try submitConfigure(&host, reload, null);
     try std.testing.expect(reload_refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, reload_refused.rejected.code);
-    try std.testing.expect((try submitConfigure(&host, reload)).rejected.replayed);
+    try std.testing.expect((try submitConfigure(&host, reload, null)).rejected.replayed);
     reload.reload_skills = false;
-    try std.testing.expect(try submitConfigure(&host, reload) == .conflict);
-    const first = try submitConfigure(&host, create);
+    try std.testing.expect(try submitConfigure(&host, reload, null) == .conflict);
+    const first = try submitConfigure(&host, create, null);
     try std.testing.expect(first == .accepted);
     try std.testing.expect(!first.accepted.replayed);
     const session = first.accepted.session;
@@ -4260,7 +4513,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema != null);
-    const replay = try submitConfigure(&host, create);
+    const replay = try submitConfigure(&host, create, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
     try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
@@ -4288,14 +4541,14 @@ test "presets seed configure before Store validation and idempotency" {
         .length = "Overridden instructions".len,
         .digest = protocol.contentDigest("Overridden instructions"),
     };
-    const overridden = try submitConfigure(&host, override);
+    const overridden = try submitConfigure(&host, override, null);
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
     try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
     try std.testing.expectEqualStrings(root, observed.workspace.slice());
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+    try std.testing.expectEqual(@import("configuration_defaults.zig").startEffort(@import("model_catalog.zig").shipped, "preset-override-model"), observed.reasoning_effort_override);
     try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
     try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{observed.tool_set_id}));
     try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name='start_agent'", .{observed.tool_set_id}));
@@ -4307,42 +4560,44 @@ test "presets seed configure before Store validation and idempotency" {
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
-    const same = try submitConfigure(&host, override);
+    const same = try submitConfigure(&host, override, null);
     try std.testing.expect(same == .accepted and same.accepted.replayed);
     try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
-    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create, null) == .conflict);
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
 
     const invalid = try arena.create(wire_request.ConfigureCommand);
     invalid.* = .{ .preset = create.preset };
     try invalid.key.set("preset-invalid-resolved");
-    invalid.configuration.compaction_trigger.state = .explicit_null;
-    const refused = try submitConfigure(&host, invalid);
+    invalid.configuration.workspace.state = .value;
+    try invalid.configuration.workspace.value.set(root);
+    invalid.configuration.compaction_trigger.state = .value;
+    try invalid.configuration.compaction_trigger.value.set("0");
+    const refused = try submitConfigure(&host, invalid, null);
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
-    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create, null) == .conflict);
     const missing = try arena.create(wire_request.ConfigureCommand);
     missing.* = .{ .preset = create.preset };
     try missing.key.set("preset-missing");
-    const unknown = try submitConfigure(&host, missing);
+    const unknown = try submitConfigure(&host, missing, null);
     try std.testing.expect(unknown == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
     host.presets = &presets;
-    const refused_again = try submitConfigure(&host, missing);
+    const refused_again = try submitConfigure(&host, missing, null);
     try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
     invalid.session = session;
     try invalid.key.set("preset-on-update");
-    const update = try submitConfigure(&host, invalid);
+    const update = try submitConfigure(&host, invalid, null);
     try std.testing.expect(update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
-    const update_replay = try submitConfigure(&host, invalid);
+    const update_replay = try submitConfigure(&host, invalid, null);
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }
-
 test "session archive renders accepted intent and completion for both archive and restore" {
     const protocol_reply = @import("protocol_reply.zig");
     var command: protocol.SessionArchiveCommand = .{};
@@ -4416,7 +4671,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
         var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        const result = submitMessage(&host, &command, &oom_offer);
+        const result = submitMessage(&host, &command, &oom_offer, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.launchAllowed());
         if (!failing.has_induced_failure) break;
@@ -4444,9 +4699,9 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expectEqual(@import("skill_suggestions.zig").capacity, preview.entries.len);
     try std.testing.expectEqual(entries.len, preview.total);
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    const accepted = try submitMessage(&host, &command, &retry_offer);
+    const accepted = try submitMessage(&host, &command, &retry_offer, null);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
-    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
+    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.text.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
     var reload: wire_request.ConfigureCommand = .{ .session = configured.accepted.session, .reload_skills = true };
     try reload.key.set("pressure-reload");
@@ -4454,7 +4709,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     while (true) : (fail_index += 1) {
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        const result = submitConfigure(&host, &reload);
+        const result = submitConfigure(&host, &reload, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.launchAllowed());
         if (!failing.has_induced_failure) {
@@ -4516,6 +4771,296 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
     }
     try std.testing.expect(fail_index > 0);
+}
+
+test "SH-51 a route that cannot serve a parts value refuses it as ordinary and leaves the Host serving" {
+    // A Session holds both parts producers: a compound Message and a read_image Resolution.
+    // Readers project them; every text-only route refuses a parts value and both parts routes
+    // refuse a text value as ordinary 409s. Only a Store that fenced itself fences dispatch.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try store_module.testingCompleteConfiguration("parts-config", "", try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    configure.configuration.tools = try .of(&.{"read_image"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "parts-task", "parts-task", session.slice(), "look");
+    const attempt = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const call: store_module.TestingCall = .{ .item_id = "parts-call", .name = "read_image", .encoded_call_id = "parts-call", .decoded_call_id = "parts-call", .encoded_arguments = "{\\\"path\\\":\\\"image.png\\\"}", .decoded_arguments = "{\"path\":\"image.png\"}" };
+    try store_module.settleCallsForTesting(&storage, &tmp, attempt, "parts-call", &.{call});
+    const selected = (try storage.nextAction(.read_image, .fromFree(1, false))).?;
+    const effect = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    try store_module.testing.settleTestActionParts(&storage, &tmp, effect, &.{.{ .bytes = png, .kind = .{ .image = .{} } }});
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleAnswerItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"parts-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+    try store_module.testing.submitTestMessagePartsWithSkills(&storage, &tmp, "parts-message", session.slice(), &.{
+        .{ .bytes = "before" }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "after" },
+    }, null);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    try std.testing.expect(!storage.isFenced());
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
+    // Each row expects a status and can require a substring in its response body.
+    const Read = struct { path: []const u8, body: []const u8, status: []const u8 = "200", has: ?[]const u8 = null };
+    const result_position = try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id});
+    const text_admission = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-task"});
+    const action_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"action\":\"{d}\"}}", .{selected.action_id});
+    const parts_admission = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-message"});
+    const admission_position = try store_module.testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE admission_id=?1", .{parts_admission});
+    const message_position = try store_module.testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE source_admission_id=?1", .{parts_admission});
+    const message_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"message\":\"{d}\"}}", .{parts_admission});
+    const reads = [_]Read{
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = message_owner },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = message_owner },
+        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .has = "\"type\":\"parts\"" },
+        .{ .path = "inspect-session", .body = try std.fmt.allocPrint(arena, head ++ "inspect_session\",\"store\":\"s\",\"session\":\"{s}\"}}", .{session.slice()}) },
+        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}), .has = "\"part\":\"2\"" },
+        .{ .path = "list-sessions", .body = try std.fmt.allocPrint(arena, head ++ "list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}}", .{}) },
+        .{ .path = "read-action-arguments", .body = try std.fmt.allocPrint(arena, head ++ "read_action_arguments\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "read-action-call-id", .body = try std.fmt.allocPrint(arena, head ++ "read_action_call_id\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .status = "409", .has = "result_not_ready" },
+        // Text-only routes on a parts Message and a parts Action Resolution.
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), admission_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\",\"stream\":true}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\",\"start\":\"0\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\",\"offset\":\"1\"}}", .{ session.slice(), selected.action_id }), .status = "400", .has = "invalid_cursor" },
+        // Both parts routes on a text value.
+        .{ .path = "public-parts", .body = try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
+        .{ .path = "public-part-content", .body = try std.fmt.allocPrint(arena, head ++ "public_part_content\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}},\"part\":\"0\",\"start\":\"0\"}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
+        // A completed text result still streams after the ordinary refusals.
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-task\"}}", .{}), .has = "Done." },
+    };
+    const Answer = struct { status: []const u8, body: []const u8 };
+    const exchangeRead = struct {
+        fn run(serving: *Host, allocator: std.mem.Allocator, read: Read) !Answer {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{ read.path, read.body.len }));
+            try writeAll(std.testing.io, sockets[1], read.body);
+            const exchange = try std.testing.allocator.create(Intake.Exchange);
+            exchange.* = .{ .owner = undefined, .host = serving, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(exchange.destroy());
+            try exchange.read();
+            try std.testing.expectEqual(.ready, exchange.state);
+            const reply = try exchange.ensureReply();
+            exchange.prepare() catch |err| exchange.fail(err);
+            return .{
+                .status = try allocator.dupe(u8, reply.header[0..reply.header_length]),
+                .body = try allocator.dupe(u8, switch (reply.body) {
+                    .json => |bytes| bytes,
+                    .content => content: {
+                        try reply.fill();
+                        break :content reply.window[0..reply.window_length];
+                    },
+                    else => "",
+                }),
+            };
+        }
+    }.run;
+
+    for (reads) |read| {
+        const answer = try exchangeRead(&host, arena, read);
+        const status = std.mem.startsWith(u8, answer.status, "HTTP/1.1 ") and std.mem.startsWith(u8, answer.status["HTTP/1.1 ".len..], read.status);
+        const carries = if (read.has) |member| std.mem.indexOf(u8, answer.body, member) != null else true;
+        if (!status or !carries or storage.isFenced() or !host.launchAllowed()) {
+            std.debug.print("{s}: expected {s} with {?s}, got {s}{s}\n", .{ read.path, read.status, read.has, answer.status, answer.body });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // A Store that fails its own read fences, and so does the Host.
+    try store_module.testingFailReadsOf(&storage, "action_operation");
+    const failed = try exchangeRead(&host, arena, reads[0]);
+    try std.testing.expect(std.mem.indexOf(u8, failed.body, "canonical_store_failure") != null);
+    try std.testing.expect(storage.isFenced() and !host.launchAllowed());
+}
+
+test "INS-11 public part content windows" {
+    // A Message holds a 5000-byte Text part and a named PNG part. The Host lists them,
+    // serves each part's exact bytes in windows and streams, and refuses everything else.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var own_configure = try store_module.testingCompleteConfiguration("parts-own", "", workspace, "model-a");
+    const own = (try storage.configure(&own_configure, .{})).accepted.session;
+    var foreign_configure = try store_module.testingCompleteConfiguration("parts-foreign", "", workspace, "model-a");
+    const foreign = (try storage.configure(&foreign_configure, .{})).accepted.session;
+    var text: [5000]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    var name: @import("input_parts.zig").Name = .{};
+    try name.set("cat \"雪\".png");
+    try store_module.testing.submitTestMessageParts(&storage, &tmp, "parts-mixed", own.slice(), &.{
+        .{ .bytes = &text }, .{ .bytes = png, .kind = .{ .image = .{ .assertion = .png, .name = name } } },
+    });
+    try store_module.testing.submitTestMessageParts(&storage, &tmp, "parts-text", own.slice(), &.{.{ .bytes = "only text" }});
+    const mixed = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-mixed"});
+    const only_text = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-text"});
+    const manifest = manifest: {
+        var reader = try store_module.PublicParts.Reader.init(own, .{ .message = mixed });
+        defer reader.deinit();
+        while (true) switch (try storage.readPublicParts(&reader)) {
+            .certified => |value| break :manifest value.identity,
+            .done => return error.TestUnexpectedResult,
+            .pending, .part => {},
+        };
+    };
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+
+    const Answer = struct { header: []const u8, body: []const u8 };
+    const exchange = struct {
+        fn run(serving: *Host, allocator: std.mem.Allocator, path: []const u8, body: []const u8) !Answer {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{ path, body.len }));
+            try writeAll(std.testing.io, sockets[1], body);
+            const intake = try std.testing.allocator.create(Intake.Exchange);
+            intake.* = .{ .owner = undefined, .host = serving, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(intake.destroy());
+            try intake.read();
+            try std.testing.expectEqual(.ready, intake.state);
+            const reply = try intake.ensureReply();
+            intake.prepare() catch |err| intake.fail(err);
+            // Every answer here fits the socket buffer, so delivery completes without a reader.
+            try reply.deliver(sockets[0]);
+            var received: std.ArrayList(u8) = .empty;
+            var chunk: [4096]u8 = undefined;
+            while (true) {
+                const count = std.c.recv(sockets[1], &chunk, chunk.len, std.c.MSG.DONTWAIT);
+                if (count <= 0) break;
+                try received.appendSlice(allocator, chunk[0..@intCast(count)]);
+            }
+            const split = (std.mem.indexOf(u8, received.items, "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+            return .{ .header = received.items[0..split], .body = received.items[split..] };
+        }
+    }.run;
+    const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
+
+    // The list: the manifest and every part, certified, in one report.
+    const list = try exchange(&host, arena, "public-parts", try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ own.slice(), mixed }));
+    try std.testing.expect(std.mem.startsWith(u8, list.header, "HTTP/1.1 200 "));
+    const expected_list = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"{s}\",\"value\":{{\"type\":\"parts\",\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}},\"parts\":[" ++
+        "{{\"ordinal\":\"0\",\"type\":\"text\",\"bytes\":\"5000\",\"sha256\":\"{s}\"}}," ++
+        "{{\"ordinal\":\"1\",\"type\":\"image\",\"mime\":\"image/png\",\"width\":\"1\",\"height\":\"1\",\"name\":\"cat \\\"雪\\\".png\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}]}}", .{
+        own.slice(),                                               manifest.length, std.fmt.bytesToHex(manifest.digest, .lower),             mixed,
+        std.fmt.bytesToHex(protocol.contentDigest(&text), .lower), png.len,         std.fmt.bytesToHex(protocol.contentDigest(png), .lower),
+    });
+    try std.testing.expectEqualStrings(expected_list, list.body);
+
+    const Read = struct { session: []const u8, owner: []const u8, part: u32, start: u64, stream: bool = false, bytes: ?[]const u8 = null, next: u64 = 0, refusal: []const u8 = "" };
+    const message = try std.fmt.allocPrint(arena, "{{\"message\":\"{d}\"}}", .{mixed});
+    const text_message = try std.fmt.allocPrint(arena, "{{\"message\":\"{d}\"}}", .{only_text});
+    const reads = [_]Read{
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 0, .bytes = text[0..4096], .next = 4096 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 100, .bytes = text[100..4196], .next = 4196 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 4096, .bytes = text[4096..], .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 0, .stream = true, .bytes = &text, .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 5000, .bytes = "", .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 5001, .refusal = "RangeOutOfBounds" },
+        .{ .session = own.slice(), .owner = message, .part = 1, .start = 0, .bytes = png, .next = png.len },
+        .{ .session = own.slice(), .owner = message, .part = 1, .start = 0, .stream = true, .bytes = png, .next = png.len },
+        .{ .session = own.slice(), .owner = message, .part = 2, .start = 0, .refusal = "ContentNotFound" },
+        .{ .session = own.slice(), .owner = text_message, .part = 0, .start = 0, .refusal = "ContentIsText" },
+        .{ .session = foreign.slice(), .owner = message, .part = 0, .start = 0, .refusal = "ContentNotFound" },
+        .{ .session = own.slice(), .owner = "{\"action\":\"1\"}", .part = 0, .start = 0, .refusal = "ContentNotFound" },
+    };
+    for (reads) |read| {
+        const answer = try exchange(&host, arena, "public-part-content", try std.fmt.allocPrint(arena, head ++ "public_part_content\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{s},\"part\":\"{d}\",\"start\":\"{d}\"{s}}}", .{ read.session, read.owner, read.part, read.start, if (read.stream) ",\"stream\":true" else "" }));
+        if (read.bytes) |bytes| {
+            const total: u64 = if (read.part == 0) text.len else png.len;
+            const headers = try std.fmt.allocPrint(arena, "Content-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ bytes.len, total, read.next });
+            try std.testing.expect(std.mem.startsWith(u8, answer.header, "HTTP/1.1 200 "));
+            try std.testing.expect(std.mem.indexOf(u8, answer.header, headers) != null);
+            try std.testing.expectEqualSlices(u8, bytes, answer.body);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, answer.header, "HTTP/1.1 409 "));
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"parts_unavailable\",\"code\":\"{s}\"}}", .{read.refusal}), answer.body);
+        }
+    }
+    // The list refuses the same owners the part read does.
+    for ([_][2][]const u8{ .{ own.slice(), text_message }, .{ foreign.slice(), message } }, [_][]const u8{ "ContentIsText", "ContentNotFound" }) |pair, code| {
+        const answer = try exchange(&host, arena, "public-parts", try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{s}}}", .{ pair[0], pair[1] }));
+        try std.testing.expect(std.mem.indexOf(u8, answer.body, code) != null and std.mem.startsWith(u8, answer.header, "HTTP/1.1 409 "));
+    }
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+}
+
+test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try HostDiagnostics.open(io, tmp.dir, HostDiagnostics.default_cap_bytes);
+    defer writer.close();
+
+    var unattached = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    fenceDispatch(&unattached, "before readiness", error.Unattached);
+    try std.testing.expect(unattached.stopping());
+
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    writer.record("ready", "serving");
+    host.attachDiagnostics(&writer);
+    server_host.retainDispatchFence(&host, "retained cleanup", error.Retained);
+    server_host.retainDispatchFence(&host, "retained again", error.RetainedAgain);
+    fenceDispatch(&host, "Action status observation", error.InputPartsNotSupported);
+    fenceDispatch(&host, "second fence", error.Later);
+    try std.testing.expect(host.stopping());
+
+    var buffer: [4096]u8 = undefined;
+    const bytes = try tmp.dir.readFile(io, "diagnostics/host-1.jsonl", &buffer);
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, bytes, "\n"), '\n');
+    const expected = [_][]const u8{
+        "\"classification\":\"startup\",\"phase\":\"ready\",\"detail\":\"serving\"}",
+        "\"classification\":\"fenced\",\"phase\":\"retained cleanup\",\"detail\":\"Retained\"}",
+        "\"classification\":\"stopping\",\"phase\":\"Action status observation\",\"detail\":\"InputPartsNotSupported\"}",
+    };
+    for (expected) |suffix| try std.testing.expect(std.mem.endsWith(u8, lines.next() orelse "", suffix));
+    try std.testing.expectEqual(null, lines.next());
 }
 
 test "Host startup reports MCP tool collision and excess tools as owned failures" {
@@ -4629,7 +5174,8 @@ test "configure parent inherits the Host environment only after a fresh creation
     var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
     var create = try store_module.testing.completeConfiguration("env-parent", "", root, "model-a");
     create.configuration.tools = try .of(&.{"bash"});
-    const parent = (try storage.configure(&create, .{})).accepted.session;
+    const parent_reply = try storage.configure(&create, .{});
+    const parent = parent_reply.accepted.session;
     var offer = try SessionEnvironments.Offer.init(allocator, 4);
     defer offer.deinit(allocator);
     @memcpy(offer.room(), "A=1\x00");
@@ -4643,7 +5189,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.configuration.permission_mode.value.set("ask");
     child.configuration.parent.state = .value;
     try child.configuration.parent.value.set(parent.slice());
-    const result = try submitConfigure(&host, &child);
+    const result = try submitConfigure(&host, &child, null);
     try std.testing.expect(result == .accepted);
     const session = result.accepted.session;
     const copied = (try environments.copy(session.slice(), allocator)).?;
@@ -4654,7 +5200,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     defer newer.deinit(allocator);
     @memcpy(newer.room(), "B=2\x00");
     environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
-    const replay = try submitConfigure(&host, &child);
+    const replay = try submitConfigure(&host, &child, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     const retained = (try environments.copy(session.slice(), allocator)).?;
     defer allocator.free(retained);
@@ -4662,7 +5208,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.key.set("env-child-refused");
     child.configuration.provider.state = .value;
     try child.configuration.provider.value.set("codex");
-    const refusal = try submitConfigure(&host, &child);
+    const refusal = try submitConfigure(&host, &child, null);
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
     try std.testing.expectEqual(count, environments.len);
@@ -4790,6 +5336,7 @@ const MutationWitness = struct {
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = .{ 0xc8, 0x84, 0x92, 0x9e, 0xdd, 0xc9, 0x45, 0x02, 0xb8, 0x37, 0x7e, 0x33, 0x3d, 0xcd, 0x72, 0x80, 0x64, 0xdc, 0xb2, 0xc4, 0x57, 0xe1, 0x0c, 0x4a, 0x3c, 0xc9, 0x82, 0xde, 0xde, 0xfd, 0xcb, 0xcd } };
     const Hash = std.crypto.hash.sha2.Sha256;
+    const frozen_wire_version = "20";
 
     fn named() protocol.Bounded(protocol.max_session_bytes) {
         var value: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -4801,7 +5348,7 @@ const MutationWitness = struct {
         return switch (kind) {
             .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
             .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
-            .action_background => .{ .session = named(), .action_id = 7 },
+            .action_background, .action_stop => .{ .session = named(), .action_id = 7 },
             else => session,
         };
     }
@@ -4816,19 +5363,38 @@ const MutationWitness = struct {
             .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = if (wrong) 12 else 11 } },
             .permission_decision => .{ .permission_decision = .{ .action = 7, .decision = if (wrong) .allow_once else .deny } },
             .action_background => .{ .action_background = if (wrong) 8 else 7 },
+            .action_stop => .{ .action_stop = if (wrong) 8 else 7 },
         };
     }
 
     fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[2].? {
         return .{ .accepted = switch (kind) {
             .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
-            .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
+            .message => .{ .replayed = false, .admission_id = 17, .content = .{ .text = content }, .session = named() },
             .session_stop => .{ .replayed = false, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending },
             .session_archive => .{ .replayed = false, .archived = true, .completion = .pending },
             .session_pin => .{ .replayed = false, .pinned = false },
             .model_interruption, .permission_decision => .{ .replayed = false },
             .action_background => .{ .replayed = false, .action_id = 7, .selection = .{ .kind = .background, .position = 29 } },
+            .action_stop => .{ .replayed = false, .action_id = 7, .resolution = 29 },
         } };
+    }
+
+    fn requireFields(comptime T: type, comptime expected: []const []const u8) void {
+        const actual_fields = @typeInfo(T).@"struct".field_names;
+        if (actual_fields.len != expected.len) @compileError("Mutation witness field inventory changed: " ++ @typeName(T));
+        for (actual_fields, expected) |field, name| {
+            if (!std.mem.eql(u8, field, name)) @compileError("Mutation witness field inventory changed: " ++ @typeName(T));
+        }
+    }
+
+    // The frozen producer-byte oracle was captured at the released wire version. Verify the
+    // actual version first, then retain those captured bytes in the digest.
+    fn hashResponse(hash: *Hash, body: []const u8) !void {
+        const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
+        try std.testing.expect(std.mem.startsWith(u8, body, current));
+        hash.update("{\"version\":\"" ++ frozen_wire_version ++ "\",");
+        hash.update(body[current.len..]);
     }
 
     fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
@@ -4838,14 +5404,60 @@ const MutationWitness = struct {
             hash.update(&.{@intFromBool(answer.replayed)});
             switch (answer.result) {
                 .accepted => |value| {
-                    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+                    // Preserve the frozen pre-receipt projection for existing
+                    // replies. Hash receipt slices explicitly: Bounded backing
+                    // arrays contain unused bytes and are not stable witnesses.
+                    const OldConfigure = union(enum) { configure: struct { revision: u64, created: bool, skills: ?@import("mutation_answer.zig").SkillsReloadStatus } };
+                    const OldMessage = union(enum) { message: struct { admission: u64 } };
+                    const bytes = switch (value) {
+                        .configure => |item| blk: {
+                            comptime requireFields(@TypeOf(item), &.{ "revision", "created", "skills", "configuration" });
+                            break :blk try std.json.Stringify.valueAlloc(std.testing.allocator, OldConfigure{ .configure = .{ .revision = item.revision, .created = item.created, .skills = item.skills } }, .{});
+                        },
+                        .message => |item| blk: {
+                            comptime requireFields(@TypeOf(item), &.{ "admission", "configuration" });
+                            break :blk try std.json.Stringify.valueAlloc(std.testing.allocator, OldMessage{ .message = .{ .admission = item.admission } }, .{});
+                        },
+                        else => try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{}),
+                    };
                     defer std.testing.allocator.free(bytes);
                     hash.update(bytes);
+                    const configuration = switch (value) {
+                        .configure => |item| item.configuration,
+                        .message => |item| item.configuration,
+                        else => null,
+                    };
+                    if (configuration) |item| {
+                        comptime requireFields(@TypeOf(item), &.{ "provider", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
+                        const receipt = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
+                            .provider = item.provider,
+                            .model = item.model.slice(),
+                            .reasoning_effort = item.reasoning_effort,
+                            .workspace = item.workspace.slice(),
+                            .tools = item.tools.slice(),
+                            .loaded_tools = item.loaded_tools.slice(),
+                            .permission_mode = item.permission_mode,
+                            .compaction_trigger = item.compaction_trigger,
+                        }, .{});
+                        defer std.testing.allocator.free(receipt);
+                        hash.update(receipt);
+                    }
                 },
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            // The frozen witness hashes the original text receipt fields.
+            const receipt: ?@import("mutation_answer.zig").ContentReference = if (answer.input) |value| switch (value) {
+                .accepted => |accepted_input| blk: {
+                    try std.testing.expect(accepted_input == .text);
+                    break :blk .{ .bytes = accepted_input.text.length, .digest = accepted_input.text.digest };
+                },
+                .rejected => |rejected_input| blk: {
+                    try std.testing.expectEqual(.text, rejected_input.form);
+                    break :blk rejected_input.content;
+                },
+            } else null;
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, receipt, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
@@ -4904,8 +5516,16 @@ const MutationWitness = struct {
 };
 
 test "mutation decoder preserves base bytes and the entire command domain" {
+    // Only the version is normalized; an incorrect actual version is refused.
+    var version_probe = MutationWitness.Hash.init(.{});
+    try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
+    try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    var frozen_probe = MutationWitness.Hash.init(.{});
+    frozen_probe.update("{\"version\":\"" ++ MutationWitness.frozen_wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        if (comptime kind == .action_stop) continue;
         covered |= @as(u16, 1) << @backingInt(kind);
         const render = host_reply.renderMutationReply(kind);
         const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
@@ -4930,7 +5550,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
                     .conflict => 409,
                     .infrastructure_failure => 500,
                 };
-                hash.update(response.slice());
+                try MutationWitness.hashResponse(&hash, response.slice());
                 hash.update("\x00");
                 for ([_]bool{ false, true }) |wrong_session| {
                     for ([_]bool{ false, true }) |wrong_target| {
@@ -4951,11 +5571,12 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             .session_archive => alternate.accepted.archived = false,
             .session_pin => alternate.accepted.pinned = true,
             .action_background => alternate.accepted.selection.kind = .final,
+            .action_stop => alternate.accepted.resolution = null,
             else => {},
         }
         var response: protocol.ResponseBuffer = .{};
         try response.render(render, .{ MutationWitness.subject(kind), alternate });
-        hash.update(response.slice());
+        try MutationWitness.hashResponse(&hash, response.slice());
         var binding = MutationWitness.target(kind, false);
         if (kind == .session_archive) binding.session_archive.archived = false;
         if (kind == .session_pin) binding.session_pin.pinned = true;
@@ -4966,12 +5587,46 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             if (kind == .message) binding.message.creates_session = true;
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
-            hash.update(response.slice());
+            try std.testing.expectError(error.InvalidResponse, MutationWitness.reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", binding).answer);
+            try MutationWitness.hashResponse(&hash, response.slice());
+            try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
+            // Creation now requires a resolved receipt. Keep the legacy missing
+            // receipt probe above and witness a valid creation independently.
+            var configuration: @import("creation_receipt.zig").Configuration = .{
+                .provider = .openai,
+                .model = .{},
+                .reasoning_effort = .low,
+                .workspace = .{},
+                .tools = .{},
+                .loaded_tools = .{},
+                .permission_mode = .ask,
+                .compaction_trigger = 115200,
+            };
+            try configuration.model.set("gpt-6.1-sol");
+            try configuration.workspace.set("/workspace");
+            try configuration.tools.set("bash");
+            try configuration.loaded_tools.set("bash");
+            initial.accepted.configuration = &configuration;
+            response = .{};
+            try response.render(render, .{ @as([]const u8, ""), initial });
+            const config_json = ",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
+            const expected_creation = if (kind == .configure)
+                "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"13\",\"created\":true" ++ config_json ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}"
+            else
+                "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"17\"" ++ config_json ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"9\",\"sha256\":\"c884929eddc94502b8377e333dcd728064dcb2c457e10c4a3cc982dedefdcbcd\"},\"queue\":{\"status\":\"queued\",\"admission\":\"17\"},\"execution\":{\"status\":\"queued\"}}";
+            try std.testing.expectEqualStrings(expected_creation, response.slice());
+            const creation = try MutationWitness.reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", binding).answer;
+            const resolved = if (kind == .configure) creation.result.accepted.configure.configuration.? else creation.result.accepted.message.configuration.?;
+            try std.testing.expectEqualStrings("gpt-6.1-sol", resolved.model.slice());
+            try std.testing.expectEqualStrings("/workspace", resolved.workspace.slice());
+            try std.testing.expectEqual(protocol.ReasoningEffort.low, resolved.reasoning_effort.?);
+            try MutationWitness.hashResponse(&hash, response.slice());
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
-            .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
-            .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
+            .action_stop => continue,
+            .configure => "23826d5d66fc13cb4c75e15593c84b4591a1baf8ddb99a9cbfabf291b3cec12e",
+            .message => "ef22fa6a7b2086a1cf11913f2670da5c11cc713f84727ca1abbdf9f3d4a4f46f",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
             .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
             .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
@@ -5020,10 +5675,10 @@ test "every accepted control publishes exactly one hint before reply handling" {
             std.testing.allocator.rawFree(memory, alignment, ret_addr);
         }
     };
-    var covered: u16 = 0;
+    var covered: std.EnumSet(command_spec.CommandKind) = .empty;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime !command_spec.spec(kind).is_control) continue;
-        covered |= @as(u16, 1) << @backingInt(kind);
+        covered.insert(kind);
         const Result = host_reply.MutationResult(kind);
         const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
         for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
@@ -5079,7 +5734,11 @@ test "every accepted control publishes exactly one hint before reply handling" {
             }
         }
     }
-    try std.testing.expectEqual(@as(u16, 0xfc), covered);
+    const expected: std.EnumSet(command_spec.CommandKind) = .initMany(&.{
+        .session_stop, .session_archive,   .model_interruption, .permission_decision,
+        .session_pin,  .action_background, .action_stop,
+    });
+    try std.testing.expectEqual(expected, covered);
 }
 
 // Each symbol below is captured by the old decoders at 5472ccf5, independently
@@ -5221,7 +5880,18 @@ const ReplyDomainWitness = struct {
         return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
     }
 
-    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool) !void {
+    fn legacyWork(body: []const u8) !bool {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const observed = parsed.value.object.get("observation") orelse return false;
+        if (observed != .object) return false;
+        const work = observed.object.get("work") orelse return false;
+        if (work != .object) return false;
+        return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
+    }
+
+    noinline fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
         const line = lines.next() orelse return error.MissingDomainBaseline;
         const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
         try std.testing.expectEqualStrings(label, line[0..split]);
@@ -5232,8 +5902,16 @@ const ReplyDomainWitness = struct {
             const edit = if (index == 0) 0 else (index - 1) % 3;
             // Slice 3 intentionally closes the old session_pin rejection/conflict
             // hole: a present pinned value is accepted-only, even for its owner.
+            // An old successful or binding-mismatch Message work reply now needs
+            // the three required Host-derived members before it can be decoded.
+            const missing_work = if (legacy_work) |missing| missing[index] else false;
+            // Adding an input receipt to a rejected Message observation now invalidates the reply.
+            const rejected_message_input = std.mem.eql(u8, label, "observation/message/rejected") and edit == 0 and
+                field != null and field.?.path.len == 2 and std.mem.eql(u8, field.?.path[0], "observation") and
+                std.mem.eql(u8, field.?.path[1], "input");
+            if (rejected_message_input) try std.testing.expectEqual(@as(u8, 'r'), base);
             const want: u8 = if (tighten_pinned and field != null and edit == 0 and
-                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else base;
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (rejected_message_input or (missing_work and (base == 'a' or base == 'b'))) 'o' else base;
             if (want != got) {
                 std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
                     label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
@@ -5251,10 +5929,50 @@ const ReplyDomainWitness = struct {
         }
     }
 
+    // Keep the runtime edit sweeps out of the per-command inline expansions.
+    noinline fn checkMutation(
+        lines: *std.mem.SplitIterator(u8, .scalar),
+        body: []const u8,
+        status: u16,
+        binding: reply.MutationTarget,
+        command_name: []const u8,
+        result_name: []const u8,
+        replayed: bool,
+        tighten_pinned: bool,
+    ) !void {
+        var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
+        actual[0] = mutation(body, status, binding);
+        for (MutationWitness.fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, binding);
+            }
+        }
+        var label_buffer: [128]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ command_name, result_name, @intFromBool(replayed) });
+        try check(lines, label, &actual, &MutationWitness.fields, tighten_pinned, null);
+    }
+
+    noinline fn collectObservationEdits(body: []const u8, fields: []const Field, actual: []u8, legacy: []bool) !void {
+        actual[0] = observation(body);
+        legacy[0] = try legacyWork(body);
+        for (fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const edited = try editField(&parsed, field, edit);
+                actual[1 + index * 3 + edit] = observation(edited);
+                legacy[1 + index * 3 + edit] = try legacyWork(edited);
+            }
+        }
+    }
+
     fn run() !void {
         @setEvalBranchQuota(20_000);
         var lines = std.mem.splitScalar(u8, fixture, '\n');
         inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+            if (comptime kind == .action_stop) continue;
             const render = host_reply.renderMutationReply(kind);
             const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
             const rejected: Result = if (kind == .message)
@@ -5276,18 +5994,16 @@ const ReplyDomainWitness = struct {
                         .conflict => 409,
                         .infrastructure_failure => 500,
                     };
-                    var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
-                    actual[0] = mutation(response.slice(), status, MutationWitness.target(kind, false));
-                    for (MutationWitness.fields, 0..) |field, index| {
-                        for (0..3) |edit| {
-                            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.slice(), .{});
-                            defer parsed.deinit();
-                            actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, MutationWitness.target(kind, false));
-                        }
-                    }
-                    var label_buffer: [128]u8 = undefined;
-                    const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
-                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict));
+                    try checkMutation(
+                        &lines,
+                        response.slice(),
+                        status,
+                        MutationWitness.target(kind, false),
+                        @tagName(kind),
+                        @tagName(result),
+                        replayed,
+                        kind == .session_pin and (result == .rejected or result == .conflict),
+                    );
                 }
             }
             inline for (.{ false, true }) |accepted| {
@@ -5300,24 +6016,19 @@ const ReplyDomainWitness = struct {
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}",
                     .action_background => ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}",
+                    .action_stop => ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"",
                 } else switch (kind) {
                     .message => ",\"state\":\"rejected\"",
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}",
-                    .action_background => ",\"action_target\":{\"action\":\"29\"}",
+                    .action_background, .action_stop => ",\"action_target\":{\"action\":\"29\"}",
                     else => "",
                 };
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
                 var actual: [1 + observation_fields.len * 3]u8 = undefined;
-                actual[0] = observation(body);
-                for (observation_fields, 0..) |field, index| {
-                    for (0..3) |edit| {
-                        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                        defer parsed.deinit();
-                        actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
-                    }
-                }
-                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false);
+                var legacy: [actual.len]bool = undefined;
+                try collectObservationEdits(body, &observation_fields, &actual, &legacy);
+                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false, &legacy);
             }
         }
         for (message_edges) |edge| {
@@ -5325,17 +6036,11 @@ const ReplyDomainWitness = struct {
             const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, edge.fields, "}}" });
             defer std.testing.allocator.free(body);
             var actual: [1 + message_fields.len * 3]u8 = undefined;
-            actual[0] = observation(body);
-            for (message_fields, 0..) |field, index| {
-                for (0..3) |edit| {
-                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                    defer parsed.deinit();
-                    actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
-                }
-            }
+            var legacy: [actual.len]bool = undefined;
+            try collectObservationEdits(body, &message_fields, &actual, &legacy);
             const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
             defer std.testing.allocator.free(label);
-            try check(&lines, label, &actual, &message_fields, false);
+            try check(&lines, label, &actual, &message_fields, false, &legacy);
         }
         try std.testing.expectEqualStrings("", lines.rest());
     }
@@ -5343,4 +6048,185 @@ const ReplyDomainWitness = struct {
 
 test "reply decoder frozen field domain from 5472ccf5" {
     try ReplyDomainWitness.run();
+}
+
+test "reply decoder requires the served work fields and closed enums" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"},\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
+    try std.testing.expectEqual(@as(u8, 'a'), ReplyDomainWitness.observation(body));
+    const edits = [_]struct { before: []const u8, after: []const u8 }{
+        .{ .before = "\"attention\":null,", .after = "" },
+        .{ .before = "\"group\":\"queued\",", .after = "" },
+        .{ .before = ",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}", .after = "" },
+        .{ .before = "\"group\":\"queued\"", .after = "\"group\":\"invented\"" },
+        .{ .before = "\"attention\":null", .after = "\"attention\":{\"kind\":\"invented\",\"turn\":\"1\",\"step\":\"2\"}" },
+        .{ .before = "\"stop\":false,", .after = "" },
+        .{ .before = "\"interrupt\":null,", .after = "" },
+        .{ .before = ",\"decide\":null", .after = "" },
+    };
+    for (edits) |edit| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, body, edit.before, edit.after);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expect(ReplyDomainWitness.observation(changed) != 'a');
+    }
+}
+
+test "Action stop mutation and observation preserve the selected Resolution" {
+    const command_reply = @import("command_reply.zig");
+    const reply = @import("protocol_reply.zig");
+    const subject = MutationWitness.subject(.action_stop);
+    for ([_]?u64{ null, 29, 9007199254740993 }) |position| {
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderMutationReply(.action_stop), .{ subject, @as(host_reply.MutationResult(.action_stop), .{ .accepted = .{ .replayed = true, .action_id = 7, .resolution = position } }) });
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expectEqual(position, (try decoded.answer).result.accepted.action_stop);
+        try std.testing.expect((try decoded.answer).replayed);
+        const foreign = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 8 });
+        try std.testing.expectError(error.RequestBindingMismatch, foreign.answer);
+        const another_session = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "p9q8rs", .{ .action_stop = 7 });
+        try std.testing.expectError(error.RequestBindingMismatch, another_session.answer);
+        var observed = command_reply.CommandObservation{ .status = .accepted, .target = subject.session, .kind = .{ .action_stop = .{ .action_id = 7, .resolution = position } } };
+        response = .{};
+        try response.render(host_reply.renderFullCommandObservation, .{ "stop", &observed, @as(?[]const u8, null) });
+        const parsed = try reply.CommandObservation.parse(.{ .status = 200, .body = response.slice() }, "stop");
+        try std.testing.expectEqual(position, parsed.resolution_position);
+        try std.testing.expectEqual(@as(u64, 7), parsed.action_target.?);
+    }
+    for ([_][]const u8{ "0", "-1", "1.0", "nullx" }) |invalid| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"action_stop_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"action\":\"7\",\"resolution_position\":{s}}}}}", .{ protocol.wire_version, invalid });
+        defer std.testing.allocator.free(body);
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = body }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expect(std.meta.isError(decoded.answer));
+    }
+}
+
+test "SH-61 Host submits a sealed ordered input through Message admission" {
+    const Capture = @import("InputCapture.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("parts-host-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store_identity.set(root);
+    try lease.paths.scratch.set(root);
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var used: std.atomic.Value(u64) = .init(0);
+    const spool = try tmp.dir.createFile(std.testing.io, "parts-spool", .{ .read = true });
+    const index = try tmp.dir.createFile(std.testing.io, "parts-index", .{ .read = true });
+    var capture: Capture = undefined;
+    capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+    defer capture.close();
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    for ([_][]const u8{ "before", jpeg, "after" }, 0..) |bytes, ordinal| {
+        try capture.begin(if (ordinal == 1) .{ .image = .{ .assertion = .jpeg } } else .text, bytes.len);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            var allowance = bytes.len - offset;
+            offset += try capture.append(bytes[offset..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const loan = try capture.seal();
+    var command: wire_request.MessageCommand = .{ .session = configured.accepted.session };
+    try command.key.set("parts-host-message");
+    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    const result = try submitMessageInput(&host, &command, &offer, loan, null);
+    try std.testing.expect(result == .accepted);
+    const content = result.accepted.content;
+    try std.testing.expect(content == .parts);
+    try std.testing.expectEqualSlices(u8, &loan.digest, &content.parts.identity.digest);
+    try std.testing.expectEqualDeep(@import("content_value.zig").Owner{ .message = result.accepted.admission_id }, content.parts.owner);
+    var observed: store_module.Observed = undefined;
+    try storage.observeCommand(command.key.slice(), null, &observed);
+    try std.testing.expectEqualDeep(content, observed.full.observation.kind.message.?.content);
+}
+
+test "SH-65 Host wire admits image bytes in order and preserves refusal identity" {
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
+    const other_jpeg = @embedFile("testing/fixtures/input-progressive.jpg");
+    var other_encoded: [std.base64.standard.Encoder.calcSize(other_jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&other_encoded, other_jpeg);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("wire-parts-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    const Exercise = struct {
+        fn run(owner: *Host, body: []const u8, expected: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 991, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try ingress.feed(body);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+            var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+            defer offer.deinit(std.testing.allocator);
+            var reply: Reply = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+            defer reply.deinit();
+            try prepareReply(owner, &reply, -1, .{ .route = .message, .content_length = body.len }, 991, 0, request, &offer, ingress.parts_loan);
+            try std.testing.expect(reply.body == .json);
+            try std.testing.expect(std.mem.indexOf(u8, reply.body.json, expected) != null);
+        }
+        fn refuseInvalid(owner: *Host, body: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 992, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try std.testing.expectError(error.InvalidBase64, ingress.feed(body));
+            try std.testing.expect(ingress.parts_loan == null);
+            try std.testing.expect(!try owner.store.commandExists("wire-invalid"));
+        }
+    };
+    const Template = struct {
+        fn body(allocator: std.mem.Allocator, key: []const u8, session: []const u8, image: []const u8, text: []const u8, reversed: bool) ![]const u8 {
+            const parts = if (reversed)
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}},{{\"type\":\"text\",\"text\":\"{s}\"}}", .{ image, text })
+            else
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}}", .{ text, image });
+            defer allocator.free(parts);
+            return std.fmt.allocPrint(allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"parts\":[{s}]}}", .{ key, session, parts });
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try Exercise.refuseInvalid(&host, try Template.body(a, "wire-invalid", configured.accepted.session.slice(), "!!!!", "before", false));
+    const good = try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", false);
+    try Exercise.run(&host, good, "\"status\":\"accepted\"");
+    try Exercise.run(&host, good, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "changed", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &other_encoded, "before", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", true), "idempotency_key_conflict");
+    const refused = try Template.body(a, "wire-refused", "000000", &encoded, "before", false);
+    try Exercise.run(&host, refused, "\"status\":\"rejected\"");
+    try Exercise.run(&host, refused, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-refused", "000000", &encoded, "changed", false), "idempotency_key_conflict");
+    for ([_][]const u8{ "wire-parts", "wire-refused" }) |key| {
+        const id = try store_module.testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1", .{key});
+        for ([_][]const u8{ "before", jpeg }, 0..) |bytes, ordinal| {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM content_part p JOIN content c ON c.content_id=p.part_content_id WHERE p.content_id=?1 AND p.ordinal=?2 AND c.byte_length=?3 AND c.digest=?4", .{ id, ordinal, bytes.len, store_module.testing.Blob{ .bytes = &protocol.contentDigest(bytes) } }));
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
 }

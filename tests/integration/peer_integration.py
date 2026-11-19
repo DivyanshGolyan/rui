@@ -15,7 +15,7 @@ import time
 import model_fixture as fixture
 from session_list_fixture import session_values
 import host_process
-from product_defaults import start_effort
+from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from host_process import TestHTTPServer, assert_caller_error, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
@@ -25,7 +25,7 @@ REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substi
 
 
 def address_of(request):
-    session = fixture.instructions_session(request["instructions"])
+    session = fixture.instructions_session(fixture.request_system_prompt(request))
     assert SESSION_ID.fullmatch(session), session
     return session
 
@@ -171,7 +171,7 @@ class PeerHandler(fixture.http.server.BaseHTTPRequestHandler):
 
 def run(installed, *args, home, expect=0, input=None):
     completed = subprocess.run([str(installed), *map(str, args)], text=True, capture_output=True, timeout=15,
-                               env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, input=input)
+                               env={"PATH": os.environ["PATH"], "HOME": str(home)}, input=input)
     assert completed.returncode == expect, (args, completed)
     return json.loads(completed.stdout)
 
@@ -186,7 +186,7 @@ def allocated(response):
 def session_link_journey(installed, store, home, session_a):
     from human_cli_fixture import current_screen, keyed_frame, overview_title, read_terminal
     from terminal_process import terminal_process
-    env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+    env = {"PATH": os.environ["PATH"], "HOME": str(home)}
 
     def showing(label):
         return lambda frame, x, y: f"\n ‹ {label} · " in frame
@@ -231,19 +231,19 @@ def main(report_source):
                         '{"session":"x","store":"/bad\\u0000path"}'):
             refused = subprocess.run([str(installed), "session", "send", "--to", address,
                 "--record", str(refused_record), "--key", "invalid"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=10)
+                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 2 and b"six lowercase Crockford" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         for old_flag in ("--session", "--session-hex"):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=10)
+                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 2, refused
             assert_caller_error(refused.stderr, f"rui session send: {old_flag}: ", "option_unknown")
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
-            env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, required_fields={"execution": "unavailable"})
+            env={"PATH": os.environ["PATH"], "HOME": str(home)}, required_fields={"execution": "unavailable"})
         foreign_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", home=home))
         external_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
@@ -257,7 +257,7 @@ def main(report_source):
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
                 "--provider", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=15)
+                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=15)
             assert rejected.returncode == 2 and all(part in rejected.stderr for part in diagnostic), rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
             assert run(installed, "session", "list", "--store", foreign_store, "--all", home=home) == foreign_listing
@@ -272,7 +272,7 @@ def main(report_source):
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
-        host_env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", **SECRETS}
+        host_env = {"PATH": os.environ["PATH"], "HOME": str(home), **SECRETS}
         host, _ = start_ready_process(
             [installed, "host", "serve", "--store", store,
                 "--set", 'execution.activeCapacity=2',
@@ -287,7 +287,7 @@ def main(report_source):
         endpoint.a = session_a
         run(installed, "defaults", "configure", "--store", store, home=home)
         ask = subprocess.run([str(installed), "session", "send", "--to", session_a], input="Ask peer/b for 6*7.",
-                             text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
+                             text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
         run(installed, "defaults", "configure", "--store", unrelated_store, home=home)
@@ -343,7 +343,7 @@ def main(report_source):
 
         a_requests = [request for request in endpoint.requests if address_of(request) == session_a]
         assert all(address_of(request) == session_a for request in a_requests)
-        assert a_requests[0]["instructions"] == model_instructions(workspace, session_a)
+        assert fixture.request_system_prompt(a_requests[0]) == model_instructions(workspace, session_a)
         b_first = next(request for request in endpoint.requests if address_of(request) == session_b)
         assert address_of(b_first) == session_b
         assert sender_of(b_first) == session_a
@@ -414,7 +414,7 @@ def main(report_source):
         assert {row["message"] for row in b_after["recent_messages"]} == b_messages, b_after
         for key in (receipt["context"]["key"], *self_sends):
             local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
-                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
+                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
             assert local.returncode == 0 and local.stdout == "plain reply stays local", local
         a_after = run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)
         assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
@@ -432,14 +432,14 @@ def main(report_source):
         assert B_LABEL not in json.dumps(b_requests), b_requests
         if report_source == "stdin":
             session_link_journey(installed, store, home, session_a)
-        assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
+        assert all(fixture.request_system_prompt(request) == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         (state / "leak-home").mkdir()
         controls = []
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
             controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store"), "--set", "providers={}"],
-                executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home"), "RUI_TEST_MODELS_DEV_URL": ""},
+                executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             observed = wait_for(lambda: os_semantics.processes_executing(installed), "the census sees the renamed copy",
                                 timeout=10, ready=lambda observed: controls[1].pid in observed)
@@ -495,7 +495,7 @@ class CohortModel(TestHTTPServer):
 
     def respond(self, request):
         session = address_of(request)
-        assert request["instructions"] == model_instructions(self.workspace, session), request
+        assert fixture.request_system_prompt(request) == model_instructions(self.workspace, session), request
         if session != self.parent:
             assert sender_of(request) == self.parent, request
             assert last_user_text(request) == f"Report to parent ID {self.parent}", request
@@ -542,7 +542,7 @@ def stdin_start_contract():
         home = state / "home"
         home.mkdir()
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
 
         def invoke(*args, input=b"", extra=None, **kwargs):
             return subprocess.run([str(fixture.RUI), *map(str, args)],
@@ -558,7 +558,7 @@ def stdin_start_contract():
 
         failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store_unavailable", status=6)
         host = fixture.start_host(store, None)
-        for args in (("send", "--to", "k7m2qx", "--text", "input"),
+        for args in (("send", "--to", "k7m2qx", "--texts", "input"),
                      ("send", "--to", "k7m2qx", "literal"),
                      ("configure", "--instructions", "input"),
                      ("start", "--instructions", "-")):
@@ -651,7 +651,7 @@ def stdin_start_contract():
             "--reasoning-effort", "high")
         assert defaults_reply.returncode == 0, defaults_reply
         for arguments, model, effort, source in (
-            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "model_default"),
+            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "flag"),
@@ -665,13 +665,23 @@ def stdin_start_contract():
             assert list(start_receipt) == ["context", "configuration", "answer", "input", "queue"], start_receipt
             assert start_receipt["configuration"] == {"provider": "codex", "model": model,
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
+            tools = DEFAULTS.tools.split(",")
+            loaded = DEFAULTS.loaded_tools.split(",")
+            if not (os_semantics.PROC_FS or os_semantics.DARWIN):
+                tools.remove("read_image")
+                loaded.remove("read_image")
+            creation = {"provider": "codex", "model": model, "reasoning_effort": effort,
+                        "workspace": str(state.resolve()), "tools": tools, "loaded_tools": loaded,
+                        "permission_mode": DEFAULTS.permission_mode,
+                        "compaction_trigger": str(compaction_trigger("codex", model))}
+            assert start_receipt["answer"]["configuration"] == creation, start_receipt
             observed = fixture.command("session", "inspect", "--store", store, "--session", new_session)["session"]
             assert observed["model"] == model and observed["reasoning_effort"] == effort, observed
             handle = start_receipt["context"]["key"]
             assert f"request: {handle} (wait: rui request wait {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
             replay = json.loads(invoke("request", "recover", handle).stdout)
             assert replay["context"] == start_receipt["context"] and "configuration" not in replay, replay
-            assert replay["answer"]["replayed"] is True, replay
+            assert replay["answer"]["replayed"] is True and replay["answer"]["configuration"] == creation, replay
             assert fixture.command("session", "stop", "--store", store, "--session", new_session)["answer"]["status"] == "accepted"
         print("stdin/start: exact NUL/UTF-8/newline bytes, lost admission, four concurrent original replays, one allocated Session, "
               "queued-not-completed receipt, effective configuration and effort sources, cancellation/reopen, stdin-only grammar "
@@ -697,7 +707,7 @@ def concurrent_peers():
         installed = state / "bin" / "rui"
         installed.parent.mkdir()
         shutil.copy2(fixture.RUI, installed)
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
         endpoint = CohortModel(workspace)
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         host, _ = start_ready_process([installed, "host", "serve", "--store", store,

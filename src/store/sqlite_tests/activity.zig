@@ -37,8 +37,8 @@ test "activity revalidation takes the same steps however long a Session's histor
         try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop; DELETE FROM turn", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
-                "SELECT value,'h1st0r',printf('history-%d',value),1,3*value,value,1 FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
+                "SELECT value,'h1st0r',printf('history-%d',value),1,3*value,value,1,1 FROM sequence; " ++
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_position,outcome_at) " ++
                 "SELECT value,'h1st0r',value,value,value,'cancelled',3*value+1,1 FROM sequence; " ++
@@ -124,7 +124,7 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectEqual(@as(usize, 1), queued.count);
             const item = queued.items[0];
             try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.text.digest);
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try sqlite.exec(storage.sqliteDatabase(), fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
@@ -158,8 +158,8 @@ test "the queued Messages cost the queue, not the history after a page's end" {
         try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
-                "SELECT value,'qu3u3d',printf('queued-%d',value),1,2*value,1 FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_kind) " ++
+                "SELECT value,'qu3u3d',printf('queued-%d',value),1,2*value,1,1 FROM sequence; " ++
                 "INSERT INTO session_stop(command_key,session_ref,admission_cutoff,position,stopped_at) VALUES('stop','qu3u3d',{0}-1,2*{0}+1,1)",
             .{history},
             0,
@@ -246,8 +246,8 @@ test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
-                "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1 FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
+                "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1,1 FROM history; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref='{1s}'),0 FROM history; " ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
@@ -307,8 +307,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,'{2s}',value,2 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice(), peer.slice() },
             0,
@@ -381,8 +381,8 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
-                "SELECT 1000+value,'{1s}',printf('waiting-%d',value),content,position,1 FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('waiting-%d',value),content,position,1,1 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice() },
             0,
@@ -561,8 +561,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_action_id) " ++
-                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,1000+value FROM history; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_action_id,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('received-%d',value),content,position,1,1000+value,3 FROM history; " ++
                 "UPDATE session SET next_position=next_position+{0} WHERE session_ref='{1s}'; DROP TABLE history",
             .{ history, session.slice() },
             0,
@@ -578,4 +578,40 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         try std.testing.expect(page.count == 1 and page.items[0].value == .admission and !page.more);
     }
     try std.testing.expectEqual(steps[0], steps[1]);
+}
+
+test "hidden value admissions and user entries do not increase Activity page work" {
+    var costs: [2][2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs) |history, *directions| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "hidden-work");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE hidden_history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+2*value-2 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('hidden-%d',value),content,position,1,1,4 FROM hidden_history; " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,content_id,recorded_at) " ++
+                "SELECT '{1s}',value,position+1,1,1,1000+value,4,content,1 FROM hidden_history; " ++
+                "UPDATE session SET next_position=next_position+2*{0} WHERE session_ref='{1s}'; DROP TABLE hidden_history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }, directions) |direction, *cost| {
+            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .received, .user }), .limit = 1 };
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 0), page.count);
+            cost.* = try activityPageSteps(&storage, request);
+        }
+    }
+    try std.testing.expectEqual(costs[0][0], costs[1][0]);
+    try std.testing.expectEqual(costs[0][1], costs[1][1]);
 }

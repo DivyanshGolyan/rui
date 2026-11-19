@@ -1,7 +1,9 @@
+import difflib
 import json
 import pathlib
 import re
 import shlex
+import threading
 
 import model_fixture as fixture
 from host_process import wait_for
@@ -47,7 +49,7 @@ def finished(report):
 
 
 def row_of(frame, label):
-    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" . {re.escape(label)}( |$)", line)]
+    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf"   . {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
@@ -64,7 +66,7 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    return "+ New Session" in frame and "Settings" in frame and "enter open" not in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    return "+ New chat" in frame and "Settings" in frame and "enter open" not in frame and "What shall we work on?" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -149,11 +151,11 @@ def flat_list():
             listed = screen.wait(lambda frame: all(f"   {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == " + New Session" and lines[1] == "  Sessions  Archived" and re.fullmatch(r"   (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[2]), listed
-            assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
+            assert any(re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", line) for line in lines), listed
+            assert not any(re.fullmatch(r"   \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            screen.click(4, 1)
-            screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
+            screen.click(4, line_of(listed, lambda line: "+ New chat" in line, "New chat"))
+            screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[0]
@@ -167,19 +169,19 @@ def flat_list():
 def empty_list():
     for columns in (46, 140):
         with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=columns, rows=30) as screen:
-            frame = screen.wait(lambda frame: "+ New Session" in frame and "No unarchived Sessions." in frame,
+            frame = screen.wait(lambda frame: "+ New chat" in frame and "No chats yet." in frame,
                                 "listed empty view")
-            assert "Type a task" not in frame, frame
+            assert "What shall we work on?" not in frame, frame
             known = {row["reference"] for row in json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]}
             assert len(known) == (1 if columns >= 100 else 0), known
             abandoned = set(known)
             for gesture in ("click", "Enter"):
                 before = set((w.home / ".config/rui/requests").glob("*.json"))
                 if gesture == "click":
-                    screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
+                    screen.click(4, line_of(frame, lambda line: "+ New chat" in line, "New Session"))
                 else:
                     screen.keys(b"\x1b[H\r")
-                chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
+                chat = screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
                 sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
                 current = {row["reference"] for row in sessions}
                 created, = current - known
@@ -243,18 +245,30 @@ def narrow_launch_resize():
         screen.resize(140, 30)
         frame = screen.wait(lambda frame: is_overview(frame) and any(len(line) >= 140 for line in frame.split("\n")),
                             "widening retains the full overview")
-        assert "Type a task" not in frame, frame
+        assert "What shall we work on?" not in frame, frame
         rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
         assert not rows, rows
     print("narrow launch: widening leaves the overview open", flush=True)
+
+
+def settled_inspection(w, session):
+    return wait_for(lambda: w.inspect(session), "finished Session and retired Host resources", timeout=60,
+                    ready=lambda report: finished(report) and report["execution"]["custody_occupied"] == "0"
+                    and report["execution"]["scratch_used_bytes"] == "0")
+
+
+def assert_inspection_unchanged(before, after):
+    assert after == before, "\n" + "".join(difflib.unified_diff(
+        json.dumps(before, indent=2, sort_keys=True).splitlines(keepends=True),
+        json.dumps(after, indent=2, sort_keys=True).splitlines(keepends=True),
+        fromfile="before", tofile="after"))
 
 
 def new_chat_aliases():
     with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
         old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
         w.run("session", "send", "--store", w.store, "--to", old, input="old task")
-        wait_for_host(w, [old], finished, "the old chat has canonical history")
-        before = w.inspect(old)
+        before = settled_inspection(w, old)
         with w.overview(columns=WIDTH, rows=30) as screen:
             for alias in ("/new", "/clear"):
                 listed = screen.contains("Old unchanged")
@@ -262,11 +276,11 @@ def new_chat_aliases():
                 screen.wait(conversation_of("Old unchanged"), "open the old chat")
                 screen.keys(alias + " foo\r")
                 screen.contains("! Usage:")
-                assert w.inspect(old) == before
+                assert_inspection_unchanged(before, settled_inspection(w, old))
                 screen.keys(alias + "\r")
-                screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
+                screen.wait(lambda frame: not is_overview(frame) and "What shall we work on?" in frame
                             and "Old unchanged" not in frame, "alias opens a new empty chat")
-                assert w.inspect(old) == before
+                assert_inspection_unchanged(before, settled_inspection(w, old))
                 listed = back_to_overview(screen, "Old unchanged")
                 assert "Old unchanged" in listed
         rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
@@ -278,10 +292,50 @@ def new_chat_aliases():
     print("overview aliases: no Message and old Current unchanged", flush=True)
 
 
+def inspection_waits_for_host_retirement():
+    release = threading.Event()
+    observed = threading.Event()
+    responses = {"old task": answer("old", "Old answer retained"),
+                 "held task": (answer("held", "Held answer"), release)}
+    with world("inspect-retirement", responses) as w:
+        try:
+            old = w.session("--label", "Old unchanged")
+            w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+            before = settled_inspection(w, old)
+            held = w.session("--label", "Held work")
+            w.run("session", "send", "--store", w.store, "--to", held, input="held task")
+            busy = wait_for(lambda: w.inspect(old), "unrelated Host custody", timeout=60,
+                            ready=lambda report: report["execution"]["custody_occupied"] != "0")
+            assert busy != before
+            assert {**busy, "execution": before["execution"]} == before
+
+            class Observer:
+                def inspect(self, session):
+                    report = w.inspect(session)
+                    if report["execution"]["custody_occupied"] != "0":
+                        observed.set()
+                    return report
+
+            def release_after_observation():
+                if observed.wait(30):
+                    release.set()
+
+            thread = threading.Thread(target=release_after_observation, daemon=True)
+            thread.start()
+            after = settled_inspection(Observer(), old)
+            thread.join(timeout=30)
+            assert observed.is_set() and not thread.is_alive()
+            assert_inspection_unchanged(before, after)
+        finally:
+            release.set()
+    print("overview inspect: finished Session reports wait for unrelated Host custody to retire", flush=True)
+
+
 def cases():
     opening_and_views()
     flat_list()
     empty_list()
     wide_launch_reuses_empty()
     narrow_launch_resize()
+    inspection_waits_for_host_retirement()
     new_chat_aliases()

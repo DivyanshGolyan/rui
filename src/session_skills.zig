@@ -87,24 +87,35 @@ pub const PreparedMessage = struct {
 pub const Text = union(enum) {
     field: *const wire_request.ContentField,
     bytes: []const u8,
+    parts: @import("InputCapture.zig").Loan,
     stored: struct { store: *storage.Store, reference: storage.ContentReference },
 };
 
 pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const wire_request.MessageCommand, home: ?[]const u8) !*PreparedMessage {
+    return prepareMessageInput(allocator, scratch_allocator, io, store, command, home, .{ .field = &command.text });
+}
+
+pub fn prepareMessageParts(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const wire_request.MessageCommand, home: ?[]const u8, loan: @import("InputCapture.zig").Loan) !*PreparedMessage {
+    return prepareMessageInput(allocator, scratch_allocator, io, store, command, home, .{ .parts = loan });
+}
+
+fn prepareMessageInput(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, command: *const wire_request.MessageCommand, home: ?[]const u8, text: Text) !*PreparedMessage {
     const prepared = try allocator.create(PreparedMessage);
     prepared.* = .{};
     if (command.configuration == null) {
         var any: AnyReference = .{};
-        try eachReference(allocator, io, .{ .field = &command.text }, &any);
+        try eachReference(allocator, io, text, &any);
         if (!any.found) return prepared;
     }
     if (command.configuration) |*configuration| {
-        var inherited: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        if (try creationReplay(store, command.key.slice(), configuration, &inherited)) return prepared;
-        prepared.* = try prepareCreation(allocator, scratch_allocator, io, creationWorkspace(configuration, &inherited), home, .{ .field = &command.text });
+        // The workspace buffer is 4 KiB: it lives in the request arena, not this frame.
+        const inherited = try allocator.create(protocol.Bounded(protocol.max_workspace_bytes));
+        inherited.* = .{ .len = 0 };
+        if (try creationReplay(store, command.key.slice(), configuration, inherited)) return prepared;
+        prepared.* = try prepareCreation(allocator, scratch_allocator, io, creationWorkspace(configuration, inherited), home, text);
     } else {
         if (try store.commandExists(command.key.slice())) return prepared;
-        prepared.captured = try bindTo(allocator, io, store, command.session.slice(), .{ .field = &command.text });
+        prepared.captured = try bindTo(allocator, io, store, command.session.slice(), text);
     }
     return prepared;
 }
@@ -202,6 +213,25 @@ fn eachReference(allocator: std.mem.Allocator, io: std.Io, text: Text, visitor: 
                 if (count != size) return error.ContentLengthMismatch;
                 for (buffer[0..count]) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
                 offset += count;
+            }
+        },
+        .parts => |loan| {
+            var cursor = loan.cursor();
+            const buffer = try allocator.alloc(u8, protocol.content_window_bytes);
+            defer allocator.free(buffer);
+            while (try cursor.next()) |part| {
+                if (part.kind != .text) continue;
+                scanner = .{};
+                var offset: u64 = 0;
+                while (offset < part.range.length) {
+                    const size: usize = @intCast(@min(buffer.len, part.range.length - offset));
+                    const count = try part.range.file.readPositionalAll(io, buffer[0..size], part.range.offset + offset);
+                    if (count != size) return error.ContentLengthMismatch;
+                    for (buffer[0..count]) |byte| if (scanner.feed(byte)) |name| if (!try visitor.visit(name)) return;
+                    offset += count;
+                }
+                if (scanner.finish()) |name| if (!try visitor.visit(name)) return;
+                scanner = .{};
             }
         },
         .stored => |stored| {
@@ -672,4 +702,44 @@ test "skills invocation capture retains only final max-body bytes in the request
         std.debug.print("invocation held captures: live_exchanges=4 backing_peak={d} backing_live={d}\n", .{ backing.peak, backing.live });
     }
     try std.testing.expectEqual(@as(usize, 0), backing.live);
+}
+
+test "CM-42 skill references are read from ordered text parts only" {
+    const InputCapture = @import("InputCapture.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spool = try tmp.dir.createFile(std.testing.io, "spool", .{ .read = true });
+    const index = try tmp.dir.createFile(std.testing.io, "index", .{ .read = true });
+    var used: std.atomic.Value(u64) = .init(0);
+    var input_capture: InputCapture = undefined;
+    input_capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+    defer input_capture.close();
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    const entries = [_]struct { bytes: []const u8, kind: InputCapture.Incoming }{
+        .{ .bytes = "read /alpha", .kind = .text },
+        .{ .bytes = jpeg, .kind = .{ .image = .{ .assertion = .jpeg } } },
+        .{ .bytes = "/beta and /alpha", .kind = .text },
+    };
+    for (entries) |entry| {
+        try input_capture.begin(entry.kind, entry.bytes.len);
+        var offset: usize = 0;
+        while (offset < entry.bytes.len) {
+            var allowance = entry.bytes.len - offset;
+            offset += try input_capture.append(entry.bytes[offset..], &allowance, false);
+        }
+        try input_capture.end();
+    }
+    const loan = try input_capture.seal();
+    const Visitor = struct {
+        output: std.Io.Writer,
+        fn visit(self: *@This(), name: []const u8) !bool {
+            try self.output.writeAll(name);
+            try self.output.writeByte(' ');
+            return true;
+        }
+    };
+    var bytes: [100]u8 = undefined;
+    var visitor: Visitor = .{ .output = .fixed(&bytes) };
+    try eachReference(std.testing.allocator, std.testing.io, .{ .parts = loan }, &visitor);
+    try std.testing.expectEqualStrings("alpha beta alpha ", visitor.output.buffered());
 }

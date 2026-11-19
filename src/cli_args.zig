@@ -36,6 +36,8 @@ pub const Command = enum {
     session_unpin,
     session_interrupt_model,
     session_read_conversation,
+    session_list_parts,
+    session_read_part,
     session_resume,
     request_inspect,
     request_wait,
@@ -45,10 +47,14 @@ pub const Command = enum {
     action_inspect,
     action_read,
     action_background,
+    action_stop,
+    action_publish,
     action_allow,
     action_deny,
     action_read_call_id,
     action_read_arguments,
+    action_list_parts,
+    action_read_part,
     host_start,
     host_pause,
     host_status,
@@ -72,9 +78,9 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
-            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings, .mutation = true },
+            .session_start => .{ .resource = .session, .name = "start", .description = "Compose the first Message from stdin and ordered --text, --text-file and --image operands, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help ++ message_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings ++ message_operands, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults or a named preset; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ preset ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Compose a Message from stdin and ordered --text, --text-file and --image operands and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. An empty composition sends nothing.", .details = message_help, .options = destination ++ capture ++ &[_]Option{value("to", "ID")} ++ message_operands, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ .code = .all_excludes_session, .a = "all", .b = "session" }, .{ .code = .all_excludes_record, .a = "all", .b = "record" }, .{ .code = .all_excludes_key, .a = "all", .b = "key" }, .{ .code = .all_excludes_key, .a = "all", .b = "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
@@ -84,6 +90,8 @@ pub const Command = enum {
             .session_unpin => .{ .resource = .session, .name = "unpin", .description = "Unpin a Session without changing its work. An already unpinned Session is unchanged.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
+            .session_list_parts => .{ .resource = .session, .name = "list-parts", .description = "List the certified parts of a Message's parts value as JSON.", .options = destination ++ session ++ &[_]Option{admission}, .requires = need_session ++ &[_][]const []const u8{&.{"admission"}} },
+            .session_read_part => .{ .resource = .session, .name = "read-part", .description = "Stream the exact bytes of one Text or Image part of a Message.", .options = destination ++ session ++ &[_]Option{ admission, part }, .requires = need_session ++ &[_][]const []const u8{ &.{"admission"}, &.{"part"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_wait => .{ .resource = .request, .name = "wait", .description = "Wait for the original request to end or need permission. Prints the latest request inspect JSON, never an answer or token. Polls without holding capture or Host resources and never starts, resumes or retargets work. --timeout-seconds defaults to 300 (1..86400). Exits 0 when ended or waiting for permission, 5 on timeout or signal while pending, 4 if absent: rui request recover HANDLE.", .options = destination ++ key ++ &[_]Option{numeric("timeout-seconds", "N", 1, @import("request_wait.zig").max_timeout_seconds, .count_malformed)}, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
@@ -91,16 +99,20 @@ pub const Command = enum {
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream the originally bound saved answer, skill refusal or reload acknowledgement, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_publish => .{ .resource = .action, .name = "publish", .description = "Publish exact UTF-8 stdin as a value from the running Action using its sender handle.", .options = &.{value("key", "KEY")}, .requires = &.{&.{"key"}} },
+            .action_stop => .{ .resource = .action, .name = "stop", .description = "Stop one owned Action. Preserve its existing Resolution if ended; read completion with action read. Reuse the captured request handle to recover a lost reply.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_background => .{ .resource = .action, .name = "background", .description = "Release the original tool call with an immutable receipt and let this same Action continue under its Session. Read completion with action read; no automatic final input or model wake is delivered.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
-            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed)}, .requires = need_action },
+            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action and published values; --offset continues final bytes and --after continues value ordinals. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{ numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed), numeric("after", "ORDINAL", 0, std.math.maxInt(i64), .count_malformed) }, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_list_parts => .{ .resource = .action, .name = "list-parts", .description = "List the certified parts of an Action Resolution's parts value as JSON.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_read_part => .{ .resource = .action, .name = "read-part", .description = "Stream the exact bytes of one Text or Image part of an Action Resolution.", .options = destination ++ session ++ action ++ &[_]Option{part}, .requires = need_action ++ &[_][]const []const u8{&.{"part"}} },
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
-            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check") }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
+            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
@@ -162,6 +174,17 @@ const compaction_help = label_help ++ parent_help ++ preset_help ++ reasoning_he
     \\
 ++ model_capability.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
 
+const message_help =
+    \\--text TEXT, --text-file FILE and --image FILE may be repeated in Message order. Images are local PNG or JPEG files.
+    \\--text-file - selects stdin once. Without explicit text, nonterminal stdin precedes images when nonempty.
+    \\With explicit text, nonempty stdin must be selected with --text-file -; with no operands stdin supplies the Message.
+    \\
+;
+const message_operands = &[_]Option{
+    .{ .name = "image", .argument = "FILE", .repeated = true, .ordered = true },
+    .{ .name = "text", .argument = "TEXT", .repeated = true, .ordered = true },
+    .{ .name = "text-file", .argument = "FILE", .repeated = true, .ordered = true },
+};
 const destination = serve_grammar.destination;
 const session = &[_]Option{value("session", "ID")};
 const parent = &[_]Option{value("parent", "ID")};
@@ -172,6 +195,9 @@ const binding = settingOptions(.binding, false);
 const plan_fixture = &[_]Option{hiddenValue("test-chatgpt-fixture-endpoint")};
 const notifications = choice("notifications", cli_value.Notification);
 const action = &[_]Option{value("action", "ID")};
+/// A parts owner's Message admission and one zero-based part of its value.
+const admission = numeric("admission", "ID", 1, std.math.maxInt(i64), .id_malformed);
+const part = numeric("part", "N", 0, @import("input_parts.zig").max_parts - 1, .count_malformed);
 const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 const saved_identity = &[_]PositionalConflict{
@@ -180,13 +206,7 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key" },
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
-const tool_choices = blk: {
-    var text: []const u8 = "";
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool), 0..) |tool, i| {
-        text = text ++ (if (i == 0) "" else ",") ++ @tagName(tool);
-    }
-    break :blk text ++ "|none";
-};
+const tool_choices = product_defaults.tools ++ "|none";
 const settings = settingOptions(.settings, false);
 const start_settings = settingOptions(.settings, true);
 
@@ -317,9 +337,9 @@ test "option name set covers every grammar and rejects unknown names" {
     try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
-test "grammar rejects ambiguous invocations before any effect" {
+test "CLI-2 invalid_input_is_local" {
     try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
-    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, false);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
     for ([_][]const u8{ "--session", "--session-hex" }) |old|
@@ -347,6 +367,32 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--set", "example=value" }, false);
+    const Selector = struct { command: Command, id: []const u8, id_flag: []const u8, part: bool };
+    for ([_]Selector{
+        .{ .command = .session_list_parts, .id = "admission", .id_flag = "--admission", .part = false },
+        .{ .command = .session_read_part, .id = "admission", .id_flag = "--admission", .part = true },
+        .{ .command = .action_list_parts, .id = "action", .id_flag = "--action", .part = false },
+        .{ .command = .action_read_part, .id = "action", .id_flag = "--action", .part = true },
+    }) |selector| {
+        if (std.mem.eql(u8, selector.id, "admission")) try checkNumericRange(.{ .command = selector.command, .name = selector.id, .code = .id_malformed, .low = "1", .high = "9223372036854775807" });
+        var storage: [1024]u8 = undefined;
+        const selected = [_][]const u8{ "--session", "k7m2qx", selector.id_flag, "7" };
+        try std.testing.expectEqualStrings(selector.id, (try expectMissing(selector.command, &.{ "--session", "k7m2qx" })).?);
+        if (!selector.part) {
+            const parsed = try testParse(selector.command.definition(), &selected, &storage);
+            try std.testing.expect(parsed.missing() == null);
+            try std.testing.expectEqual(@as(u64, 7), try std.fmt.parseInt(u64, parsed.getNamed(selector.id).?, 10));
+            try expectValidation(selector.command, &(selected ++ .{ "--part", "2" }), error.UnknownArgument);
+            continue;
+        }
+        try checkNumericRange(.{ .command = selector.command, .name = "part", .code = .count_malformed, .low = "0", .high = "1499" });
+        const parsed = try testParse(selector.command.definition(), &(selected ++ .{ "--part", "2" }), &storage);
+        try std.testing.expect(parsed.missing() == null);
+        try std.testing.expectEqual(@as(u64, 7), try std.fmt.parseInt(u64, parsed.getNamed(selector.id).?, 10));
+        try std.testing.expectEqual(@as(?u64, 2), try parsed.number(u64, "part"));
+        try std.testing.expectEqualStrings("part", (try expectMissing(selector.command, &selected)).?);
+        try expectValidation(selector.command, &(selected ++ .{ "--part", "2", "--part", "3" }), error.DuplicateArgument);
+    }
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -571,7 +617,7 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
-        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" } },
+        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
     };
@@ -596,9 +642,24 @@ test "typed choices share enum names with help and refuse unknown values" {
     }
 }
 
+test "Action read accepts a bounded value ordinal cursor" {
+    // ARD-6
+    for ([_][]const u8{ "0", "1", "9223372036854775807" }) |valid| {
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(Command.action_read.definition(), &.{ "--after", valid }, &storage);
+        try std.testing.expectEqualStrings(valid, parsed.get("after").?);
+    }
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "9223372036854775808", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(.action_read, &.{ "--after", invalid }, .count_malformed, "after");
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "9223372036854775807") != null);
+    }
+}
+const NumericCase = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
+
 test "numeric options reject malformed decimals and state their accepted range" {
-    const Case = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
-    const cases = [_]Case{
+    const cases = [_]NumericCase{
         .{ .command = .action_read, .name = "offset", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{@import("content_string.zig").max_bytes}) },
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
@@ -610,25 +671,27 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
     };
-    for (cases) |case| {
-        var spelling: [64]u8 = undefined;
-        const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
-        for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
-            const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
-            try std.testing.expectEqualStrings(invalid, refusal.value.?);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
-        }
-        if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
-        const upper = try std.fmt.parseInt(u64, case.high, 10);
-        if (upper < std.math.maxInt(u64)) {
-            var beyond: [32]u8 = undefined;
-            _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
-        }
-        for ([_][]const u8{ case.low, case.high }) |valid| {
-            var storage: [1024]u8 = undefined;
-            _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
-        }
+    for (cases) |case| try checkNumericRange(case);
+}
+
+fn checkNumericRange(case: NumericCase) !void {
+    var spelling: [64]u8 = undefined;
+    const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
+    }
+    if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
+    const upper = try std.fmt.parseInt(u64, case.high, 10);
+    if (upper < std.math.maxInt(u64)) {
+        var beyond: [32]u8 = undefined;
+        _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
+    }
+    for ([_][]const u8{ case.low, case.high }) |valid| {
+        var storage: [1024]u8 = undefined;
+        _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
     }
 }
 
@@ -704,7 +767,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }
@@ -756,7 +819,7 @@ test "tool help lists every built-in including skill in name order" {
         var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer help.deinit();
         try command.definition().help(&help.writer);
-        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search|none") != null);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools " ++ product_defaults.tools ++ "|none") != null);
     }
 }
 
@@ -870,4 +933,30 @@ test "preset is a Configure option and Start refuses it" {
     try expectValidation(.session_configure, &.{ "--preset", "x", "--preset", "x" }, error.DuplicateArgument);
     try expectValidation(.session_start, &.{ "--preset", "x" }, error.UnknownArgument);
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--preset", "x" }, false);
+}
+
+test "action publish requires its key without a capture record" {
+    try expectValidation(.action_publish, &.{ "--key", "first" }, false);
+    try std.testing.expectEqualStrings("key", (try expectMissing(.action_publish, &.{})).?);
+    try expectValidation(.action_publish, &.{ "--key", "first", "payload" }, error.InvalidArguments);
+}
+
+test "CLI-20 preserve interleaving for start and send" {
+    for ([_]Command{ .session_start, .session_send }) |command| {
+        const argv = &[_][]const u8{ "--text", "first", "--image", "a.png", "--text-file", "-", "--image", "b.jpg", "--text", "last" };
+        var storage: [1024]u8 = undefined;
+        const definition = command.definition();
+        const parsed = try testParse(definition, argv, &storage);
+        var iterator = parsed.ordered();
+        const names = [_][]const u8{ "text", "image", "text-file", "image", "text" };
+        const values = [_][]const u8{ "first", "a.png", "-", "b.jpg", "last" };
+        for (names, values) |name, expected| {
+            const operand = iterator.next().?;
+            try std.testing.expectEqualStrings(name, operand.name);
+            try std.testing.expectEqualStrings(expected, operand.value);
+        }
+        try std.testing.expect(iterator.next() == null);
+        try std.testing.expectError(error.UnknownArgument, testParse(definition, &.{ "--image", "a", "--bogus" }, &storage));
+        try std.testing.expectError(error.MissingArgumentValue, testParse(definition, &.{"--image"}, &storage));
+    }
 }

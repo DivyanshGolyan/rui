@@ -1,10 +1,10 @@
 # Overview and session list
 
-Overview lists saved chats under **Sessions**, with **+ New Session**, **Archived** and **Settings** always within reach. At wide launch the list sits beside a focused empty chat; at narrow launch the full overview opens. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
+Overview lists saved chats under **Chats**, with **+ New chat**, **Archived** and **Settings** always within reach. At wide launch the list sits beside a focused empty chat; at narrow launch the full overview opens. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
 
 ## Sub-features
 
-- Up/Down select rows. Home selects **+ New Session**; End selects **Settings**. Enter opens the selection. Left collapses a selected Session's descendants and Right expands them.
+- Up/Down select rows. Home selects **+ New chat**; End selects **Settings**. Enter opens the selection. Left collapses a selected Session's descendants and Right expands them.
 - Creator Sessions contain their attached and detached descendants. Left and Right fold and expand locally; hidden questions appear in the collapsed badge. Pointer presence or a list key holds ordering briefly while marks update and new siblings append; release highlights moved rows. Edge pills and Alt-? reach questions outside the viewport.
 - Long lists show **↑**, **↓** and **more**. Long names fit within their row.
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.

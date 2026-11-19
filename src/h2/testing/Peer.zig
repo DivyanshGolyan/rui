@@ -1,9 +1,9 @@
 const std = @import("std");
 const test_poll = @import("test_poll");
-const builtin = @import("builtin");
 const c = @import("h2_c");
 const openssl = @import("tls_client").c;
 const tls = @import("../tls.zig");
+const socket_os = @import("os").socket;
 const Peer = @This();
 
 allocator: std.mem.Allocator,
@@ -88,7 +88,7 @@ pub fn start(allocator: std.mem.Allocator, options: Options) !*Peer {
     address.addr = std.mem.nativeToBig(u32, 0x7f00_0001);
     if (@hasField(std.c.sockaddr.in, "len")) address.len = @sizeOf(std.c.sockaddr.in);
     if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-    if (std.c.listen(fd, 16) != 0) return error.ListenFailed;
+    if (!socket_os.listen(fd, 16)) return error.ListenFailed;
     var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
     if (std.c.getsockname(fd, @ptrCast(&address), &length) != 0) return error.BindFailed;
 
@@ -273,10 +273,7 @@ pub fn pump(self: *Peer) !void {
             continue;
         }
         try nonblocking(fd);
-        if (builtin.os.tag.isDarwin()) {
-            const one: c_int = 1;
-            _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int));
-        }
+        _ = socket_os.suppressSigpipe(fd);
         const connection = try self.allocator.create(Connection);
         connection.* = .{ .peer = self, .socket = fd, .session = null, .closed = false, .received_any = false, .ssl = null };
         if (self.ssl_ctx) |ctx| {
@@ -336,19 +333,9 @@ pub fn awaitDelivery(self: *Peer) !void {
 }
 
 pub fn awaitSocketDelivery(socket: std.posix.fd_t) !void {
-    // SIOCOUTQ and Darwin's SO_NWRITE: bytes sent but not yet acknowledged.
-    const siocoutq = 0x5411;
-    const so_nwrite = 0x1024;
     const Socket = struct {
         fn delivered(fd: std.posix.fd_t) !bool {
-            var unacknowledged: c_int = 0;
-            var size: std.c.socklen_t = @sizeOf(c_int);
-            const status = if (builtin.os.tag.isDarwin())
-                std.c.getsockopt(fd, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&unacknowledged), &size)
-            else
-                std.c.ioctl(fd, siocoutq, &unacknowledged);
-            if (status != 0) return error.Unexpected;
-            return unacknowledged == 0;
+            return (socket_os.unacknowledgedBytes(fd) orelse return error.Unexpected) == 0;
         }
     };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(3)), socket, Socket.delivered);
@@ -374,7 +361,7 @@ fn sendSome(connection: *Connection, bytes: []const u8) Transfer {
         .want_read, .want_write => .again,
         .closed => .closed,
     };
-    const sent = std.c.send(connection.socket, bytes.ptr, bytes.len, tls.send_flags);
+    const sent = std.c.send(connection.socket, bytes.ptr, bytes.len, socket_os.send_flags);
     if (sent >= 0) return .{ .bytes = @intCast(sent) };
     if (std.posix.errno(sent) == .AGAIN) return .again;
     return .closed;

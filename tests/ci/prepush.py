@@ -7,7 +7,7 @@ File tools and tests read the working tree; unstaged and untracked-only edits
 do not select checks. GitHub CI owns review-phase acceptance.
 
 Default and --quick run the same cheap feedback. --full is an opt-in diagnostic
-that adds development builds, cross-compilation, all-unit compilation, stack
+that adds the CI policy suite, development builds, cross-compilation, all-unit compilation, stack
 frames and reachable live MySQL checks. UID-global Upgrade stays hosted.
 Generation runs only for the emitter's input closure or generated wire inputs.
 The hook reuses a passing receipt for the same tree and merge base.
@@ -41,7 +41,7 @@ import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
+from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 SOURCE_POLICY = (
+    (ACCEPTANCE_INPUTS, (("native_acceptance_test.py", "*"),)),
     (CLIENT_LOCALITY_INPUTS, (("test_client_locality.py", "*"),)),
     ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
      (("test_verify_rui_map.py", "*"),)),
@@ -60,7 +61,7 @@ SOURCE_POLICY = (
     (("src/*.zig", "tests/*.zig"), (("test_import_architecture.py", "*"),)),
     (("src/*.zig",), (("test_provider_locality.py", "*"), ("test_wire_version.py", "*"))),
     (("src/*.zig", "tests/*.zig", "tests/integration/*.py", "tests/ci/test_*.py", "tests/ci/*_test.py"),
-     (("test_harness_contracts.py", "SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist"),)),
+     (("test_flake_sources.py", "SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist"),)),
     (PLATFORM_SCANNED, (("test_platform_boundary.py", "*"),)),
     (("tests/integration/*.py", "tests/integration/*.sh", "tests/qualification/*.go"),
      (("test_wire_version.py", "*"), ("test_store_schema_fixtures.py", "*"))),
@@ -82,9 +83,8 @@ SOURCE_POLICY = (
 )
 
 
-def policy_tests(paths, *, broad=False):
+def policy_tests(paths):
     focused = {}
-    shared = False
     for path in paths:
         if path.endswith(".md"):
             continue
@@ -93,15 +93,11 @@ def policy_tests(paths, *, broad=False):
             test = name if name.startswith("test_") else f"test_{name}"
             if (ROOT / "tests/ci" / test).is_file():
                 focused.setdefault(test, set()).add("*")
-            else:
-                shared = True
-        elif path.startswith(("tests/ci/", ".github/", ".claude/")) or path in ("build.zig", "build.zig.zon", ".agents/setup") or path.startswith("build/"):
-            shared = True
     for patterns, tests in SOURCE_POLICY:
         if any(matches(path, patterns) for path in paths):
             for module, test in tests:
                 focused.setdefault(module, set()).add(test)
-    return None if broad and shared else focused
+    return focused
 
 
 GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts")
@@ -186,6 +182,9 @@ def local_red_checks(planned, mysql):
 
 
 def unit_target(targets, cause, graph, registry=None):
+    # Logic cores are directly imported by the logic root, even when another binary reported them.
+    if any(path in graph.cores for path in cause.paths):
+        return "test-logic-only"
     registry = build_files.unit_roots() if registry is None else registry
     selected = set(targets)
     candidates = [root for root in registry if selected.intersection(root["owners"])]
@@ -204,6 +203,12 @@ def unit_target(targets, cause, graph, registry=None):
     return next(iter(mapped)) if len(mapped) == 1 else None
 
 
+# check.yml's single ready-PR job and its compile and execution steps.
+PR_JOB = "linux pr"
+PR_COMPILE_STEP = "Compile only the binaries the selected targets need"
+PR_RUN_STEP = "Run selected targets on SQLite, stopping at the first failure"
+
+
 def red_command(job, cause, available, *, compile_targets=(), graph=None):
     name = job["name"]
     zig = ["zig", "build", "-j1"]
@@ -215,13 +220,22 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
         return Skipped("Upgrade requires an exclusive ordinary hosted runner UID")
     if name == "linux_build_unit":
         return unit_compile()
+    if name == PR_JOB:
+        # The single PR job logs its compile targets, then (when compile passes) its execution
+        # targets; compile_targets holds those of the phase that failed.
+        failed = {step["name"] for step in job.get("steps", ()) if step.get("conclusion") in ("failure", "cancelled")}
+        if PR_COMPILE_STEP in failed:
+            name = "linux_build"
+        elif PR_RUN_STEP not in failed:
+            compile_targets = ()
     if name == "linux_build":
         if not compile_targets or not set(compile_targets) <= available:
             return Skipped("producer's selected compile targets are unavailable in this checkout")
         return [*build_artifact.compile_command(compile_targets, jobs=1), "--summary", "line"]
-    if name == "linux_codegen":
-        return STACK_FRAMES
-    selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
+    if name == PR_JOB:
+        selected = tuple((target, "all") for target in compile_targets)
+    else:
+        selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
     targets = [target for target, _ in selected]
     if cause.zig_test:
         graph = graph or tree_graph()
@@ -368,7 +382,8 @@ def remote_red(repository, ref, head, revision, available):
         causes = report_issue.failure_causes(log, report_issue.fixtures(ROOT / "tests/integration/check.sh"),
                                              keep_unexplained=True) if log is not None else []
         causes = causes or [report_issue.Cause(f"{job['name']}: cause unexplained")]
-        targets = report_issue.compile_targets(log) if log is not None and job["name"] == "linux_build" else ()
+        targets = (report_issue.compile_targets(log)
+                   if log is not None and job["name"] in ("linux_build", PR_JOB) else ())
         for cause in causes:
             command = red_command(job, cause, available, compile_targets=targets) if log is not None else Skipped("job log unavailable")
             item = (f"last CI red: {cause.signature}", command)
@@ -395,6 +410,11 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", *zig]
     if any(inventory_path(path) for path in paths):
         yield "caller errors", [sys.executable, "-B", "tests/ci/caller_errors.py"]
+    if any(path.endswith(".zig")
+           or (path.startswith("tests/") and path.endswith(".py"))
+           or (path.startswith("clients/ts/test/") and path.endswith(".test.ts"))
+           or path == "tests/ci/flake_sources.json" for path in paths):
+        yield "flake sources", [sys.executable, "-B", "tests/ci/flake_sources.py"]
     if any(matches(path, CLIENT_LOCALITY_INPUTS) for path in paths):
         yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
     if "src/store/schema.zig" in paths:
@@ -408,13 +428,14 @@ def checks(paths, available, base, mode="default", mysql=False):
                                     "-Dtest-filter=functional cores stay within the core boundary"]
     if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
-    policy = policy_tests(paths, broad=mode == "full")
     pythonpath = os.pathsep.join(filter(None, (str(ROOT / "tests/integration"), os.environ.get("PYTHONPATH"))))
     unittest = ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
-    if policy is None:
-        yield "tests/ci", unittest
+    if mode == "full":
+        skips = select(paths, "development", available)["policy_skips"]
+        yield "tests/ci (CI policy suite)", ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B",
+                                             "tests/ci/policy_suite.py", "--skips", json.dumps(skips)]
     else:
-        for module, filters in sorted(policy.items()):
+        for module, filters in sorted(policy_tests(paths).items()):
             command = [*unittest, "-p", module]
             if "*" not in filters:
                 for test in sorted(filters):
@@ -548,7 +569,7 @@ def fix_whitespace(base):
 
 
 def regenerate():
-    if subprocess.run(["zig", "build", "openapi", "--summary", "none"], cwd=ROOT).returncode:
+    if subprocess.run(["zig", "build", "-j1", "openapi", "--summary", "none"], cwd=ROOT).returncode:
         return 1
     if (ROOT / "clients/ts/node_modules").is_dir():
         if subprocess.run(["npm", "--prefix", "clients/ts", "run", "--silent", "generate"], cwd=ROOT).returncode:
@@ -593,7 +614,7 @@ def main():
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--quick", action="store_true", help="alias for default cheap feedback, used by installed hooks")
-    modes.add_argument("--full", action="store_true", help="also compile the unit binaries unfiltered, run stack-frames "
+    modes.add_argument("--full", action="store_true", help="also run the CI policy suite, compile the unit binaries unfiltered, run stack-frames "
                        "and, with a reachable local MySQL, the selected targets that read it")
     parser.add_argument("--install-hook", action="store_true", help="install the git pre-push hook that runs --quick")
     parser.add_argument("--fix-whitespace", metavar="BASE", help=argparse.SUPPRESS)

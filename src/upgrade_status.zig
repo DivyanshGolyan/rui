@@ -9,7 +9,26 @@ pub const Version = struct {
     pub fn format(self: Version, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("0.{d}.{d}", .{ self.schema, self.patch });
     }
+
+    /// The one release ordering: schema first, then patch.
+    pub fn order(a: Version, b: Version) std.math.Order {
+        const schema = std.math.order(a.schema, b.schema);
+        return if (schema == .eq) std.math.order(a.patch, b.patch) else schema;
+    }
 };
+
+test "releases order by schema first, then patch" {
+    const v = struct {
+        fn of(schema: u32, patch: u32) Version {
+            return .{ .schema = schema, .patch = patch };
+        }
+    }.of;
+    try std.testing.expectEqual(std.math.Order.lt, v(9, 5).order(v(10, 0)));
+    try std.testing.expectEqual(std.math.Order.gt, v(10, 0).order(v(9, 99)));
+    try std.testing.expectEqual(std.math.Order.lt, v(9, 1).order(v(9, 2)));
+    try std.testing.expectEqual(std.math.Order.gt, v(9, 2).order(v(9, 1)));
+    try std.testing.expectEqual(std.math.Order.eq, v(9, 2).order(v(9, 2)));
+}
 
 pub const Host = union(enum) { none, running: usize };
 

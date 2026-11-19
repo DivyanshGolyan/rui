@@ -9,12 +9,13 @@ Load guidance for the task at hand, combining applicable routes:
 
 - **Product scope or behavior:** read [README.md](README.md), then use the [Architecture index](ARCHITECTURE.md) to load the affected subsystem contract.
 - **Terminal screens:** for any change to how a screen looks or reads, read [Design principles](DESIGN.md), then the [Session UI](docs/contracts/session-ui.md) contract.
-- **Engineering:** for implementation, design, debugging, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
+- **Engineering:** for implementation, design, debugging, bug fixes, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
 - **Review:** read [Review](CODING_STANDARDS.md#review), including when implementing findings.
   Reviews are read-only unless fixes are requested.
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
 - **Documentation, terminology or decisions:** read [Contract maintenance](CODING_STANDARDS.md#contract-maintenance) and the documentation checks in [Evidence](CODING_STANDARDS.md#evidence).
 - **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and use the [Verification index](VERIFICATION.md#contract-index) to load the affected subsystem's required evidence.
+- **Writing or changing tests, or any change to production logic:** read [Test requirements](docs/verification/testing.md); a production change moves its owners' tests onto them ([Migration](docs/verification/testing.md#migration)).
 - **Test selection or CI changes:** read [Canonical gates](docs/verification/gates.md#canonical-gates).
 - **Red CI:** use [rui-ci-triage](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md).
@@ -29,7 +30,7 @@ Make reversible choices inside the accepted contract yourself.
 For unresolved behavior, architecture, scope or access, finish independent authorized work, then present bounded options with a recommendation and consequences.
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
-Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a ready PR, commenting `@codex review`, resolving review threads your fixes answered, marking an older draft ready to overlap CI and review, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
+Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking a draft ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
 Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
 Honor narrower user limits and one-way-door approvals.
 

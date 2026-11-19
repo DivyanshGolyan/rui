@@ -130,9 +130,10 @@ pub const Units = struct {
     runs: Runs,
     run_renderer_allocation: *std.Build.Step.Run,
     signal_stack_probe: *std.Build.Step.Run,
+    run_os_tests: *std.Build.Step.Run,
 };
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, pr_ci: bool) Units {
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -163,7 +164,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         const compile = b.addTest(.{
             .name = definition.name,
             .max_rss = darwin.unitMaxRss(test_filters.len, target),
-            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+            // Zig 0.17.1's x86-64 backend crashes (SIGSEGV) on the Store root of a collect build,
+            // so that one compile takes the default backend; rsql_table.py reads only its exports.
+            .use_llvm = if (target.result.cpu.arch == .x86_64 and !(identity == .store and product.rsqlCollect(b))) false else null,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(definition.source),
                 .target = target,
@@ -191,6 +194,19 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     runs.set(.native_pair, native.final);
     if (test_filters.len != 0) runs.set(native_group.filtered, native.final);
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
+    // Compile the same owner with the product option off as a separate root.
+    const pause_product = b.addTest(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        .name = "pause-product-compile-out",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/pause.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+        .filters = &.{"pause PAU-1 owner is zero sized when disabled"},
+    });
+    product.configurePauses(b, pause_product, false);
+    test_step.dependOn(&ci.run(pause_product).step);
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = root(.deadline).name,
@@ -220,6 +236,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .filters = test_filters,
         .test_runner = filtered_runner,
     });
+    product.configurePauses(b, logic_tests, false);
     product.configureTerminalEditor(b, logic_tests);
     logic_tests.root_module.addImport("url", product.addUrl(b));
     const run_logic_tests = ci.run(logic_tests);
@@ -281,17 +298,33 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     test_step.dependOn(&run_renderer_allocation.step);
     native_step.dependOn(&run_renderer_allocation.step);
 
+    const signal_stack_probe_root = b.createModule(.{
+        .root_source_file = b.path("src/signal_stack_probe.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    _ = product.useOs(b, signal_stack_probe_root);
     const signal_stack_probe = ci.run(b.addExecutable(.{
+        // The handler's stack behaviour depends on codegen, so outside the PR tier the probe is
+        // built with LLVM like the shipped binaries.
+        .use_llvm = if (pr_ci) false else null,
         .name = "rui-signal-stack-probe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/signal_stack_probe.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
+        .root_module = signal_stack_probe_root,
     }));
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
     native_step.dependOn(&signal_stack_probe.step);
+
+    // The platform owner is a module of its own, so no other root runs its
+    // tests. They take milliseconds, so they run whole under any filter.
+    const run_os_tests = ci.run(b.addTest(.{
+        .name = "unit-os",
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        .root_module = product.addOsRoot(b, target),
+    }));
+    run_os_tests.has_side_effects = true;
+    test_step.dependOn(&run_os_tests.step);
+    native_step.dependOn(&run_os_tests.step);
 
     for ([_]struct { []const u8, *std.Build.Step }{
         .{ root(.native).target, native_step },
@@ -302,7 +335,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .{ root(.logic).target, logic_only_step },
         .{ root(.parser_llvm).target, parser_fuzz_step },
     }) |entry| attach(entry[0], .all, entry[1], &runs, .runs);
-    return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe };
+    return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe, .run_os_tests = run_os_tests };
 }
 
 fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {

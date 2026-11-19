@@ -23,6 +23,7 @@ import release
 
 TEMPLATE = (ROOT / "release/install.sh").read_text()
 PUBLISH = (ROOT / "release/publish.sh").read_text()
+POLICY = release.download_policy((ROOT / "src/download_policy.zig").read_text())
 PLATFORM = os_semantics.native_release_target()
 
 
@@ -124,15 +125,23 @@ class ReleaseInstallerTest(NativeInstallerCase):
         self.tools.mkdir()
         self.served = self.root / "served"
         self.served.mkdir()
-        (self.tools / "curl").write_text(f'''#!/bin/sh
-for argument; do
-    case $argument in
-        https://github.com/DivyanshGolyan/rui/releases/download/*) url=$argument ;;
-    esac
-    if [ "$previous" = -o ]; then output=$argument; fi
-    previous=$argument
-done
-cp "{self.served}/${{url##*/download/}}" "$output"
+        (self.tools / "curl").write_text(f'''#!/usr/bin/env python3
+import json, os, pathlib, shutil, sys
+args = sys.argv[1:]
+log = pathlib.Path(os.environ.get("TEST_CURL_LOG", "{self.root}/curl.log"))
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append(args)
+log.write_text(json.dumps(calls))
+codes = json.loads(os.environ.get("TEST_CURL_CODES", "[]"))
+code = codes[len(calls) - 1] if len(calls) <= len(codes) else 0
+if "--write-out" in args:
+    print(os.environ.get("TEST_CURL_TIME", "0.000"), end="")
+if code:
+    pathlib.Path(args[args.index("-o") + 1]).write_bytes(b"partial archive")
+    sys.exit(code)
+url = next(arg for arg in args if arg.startswith("https://"))
+source = os.environ["TEST_INSTALLER"] if url == "https://ruicode.com/install" else "{self.served}/" + url.split("/download/", 1)[1]
+shutil.copyfile(source, args[args.index("-o") + 1])
 ''')
         (self.tools / "curl").chmod(0o755)
         self.environment = {**os.environ, "HOME": str(self.home), "SHELL": "/bin/zsh", "ZDOTDIR": "", "GITHUB_PATH": "",
@@ -159,7 +168,7 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         digests = {name: "0" * 64 for name in release.PLATFORMS}
         digests[PLATFORM] = digest or self.archive(version)
         script = self.root / f"install-{version}.sh"
-        script.write_text(release.installer(TEMPLATE, version, digests, PUBLISH))
+        script.write_text(release.installer(TEMPLATE, version, digests, PUBLISH, POLICY))
         return subprocess.run(["sh", str(script), *args], cwd=self.root, env={**self.environment, **environment},
                               capture_output=True, text=True, timeout=30)
 
@@ -502,6 +511,105 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(escaped.exists())
         self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "0.40.0\n")
+
+    def test_SH_44_release_download_retry_policy(self):
+        for code, elapsed, remaining in ((6, "12.250", "287"), (28, "12.250", "287"), (28, "289.999", "10")):
+            with self.subTest(code=code, elapsed=elapsed):
+                self.start_over()
+                log = self.root / "curl.log"
+                log.unlink(missing_ok=True)
+                result = self.install("0.40.0", TEST_CURL_CODES=json.dumps([code, 0]), TEST_CURL_TIME=elapsed)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = json.loads(log.read_text())
+                self.assertEqual(len(calls), 2)
+                self.assertNotIn("--ipv4", calls[0])
+                self.assertIn("--ipv4", calls[1])
+                for call in calls:
+                    self.assertEqual(call[0], "--disable")
+                    self.assertEqual(call[call.index("--retry") + 1], "0")
+                self.assertEqual(calls[1][calls[1].index("--max-time") + 1], remaining)
+                self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "0.40.0\n")
+
+        cases = [(6, 6, "0.0", 2), (28, 28, "0.0", 2), (6, 22, "0.0", 2),
+                 (6, 60, "0.0", 2), (22, 0, "0.0", 1),
+                 (60, 0, "0.0", 1), (28, 0, "290.000", 1), (6, 0, "invalid", 1)]
+        for first, second, elapsed, attempts in cases:
+            with self.subTest(first=first, second=second, elapsed=elapsed):
+                self.start_over()
+                log = self.root / "curl.log"
+                log.unlink(missing_ok=True)
+                restart = self.root / "restart.log"
+                restart.unlink(missing_ok=True)
+                (self.bin / "rui").write_text("previous rui")
+                result = self.install("0.40.0", TEST_CURL_CODES=json.dumps([first, second]),
+                                      TEST_CURL_TIME=elapsed, TEST_RESTART_LOG=str(restart))
+                self.assertEqual(result.returncode, second if attempts == 2 else first)
+                self.assertEqual(len(json.loads(log.read_text())), attempts)
+                self.assertEqual((self.bin / "rui").read_text(), "previous rui")
+                self.assertFalse(restart.exists())
+                self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
+
+        for kind in ("digest", "version"):
+            with self.subTest(invalid=kind):
+                self.start_over()
+                log = self.root / "curl.log"
+                log.unlink(missing_ok=True)
+                restart = self.root / "restart.log"
+                restart.unlink(missing_ok=True)
+                candidate = "0.40.1" if kind == "version" else "0.40.0"
+                digest = self.archive(candidate, reported="0.40.0") if kind == "version" else "f" * 64
+                result = self.install(candidate, digest, TEST_CURL_CODES="[6, 0]", TEST_RESTART_LOG=str(restart))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("not Rui" if kind == "version" else "does not match", result.stderr)
+                self.assertEqual(len(json.loads(log.read_text())), 2)
+                self.assertFalse((self.bin / "rui").exists())
+                self.assertFalse(restart.exists())
+                self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
+
+    def test_SH_100_documented_recovery_bootstraps_verified_installer(self):
+        readme = (ROOT / "README.md").read_text()
+        recovery = readme.split("If an older Rui cannot download its update", 1)[1].split("```sh\n", 1)[1].split("\n```", 1)[0]
+        log = self.root / "curl.log"
+        for version in ("0.40.0", "0.40.1"):
+            with self.subTest(version=version):
+                self.start_over()
+                log.unlink(missing_ok=True)
+                old = self.install("0.39.0")
+                self.assertEqual(old.returncode, 0, old.stderr)
+                old_binary = (self.bin / "rui").resolve(strict=True)
+                self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), "0.39.0\n")
+                log.unlink()
+                digests = {name: "0" * 64 for name in release.PLATFORMS}
+                digests[PLATFORM] = self.archive(version)
+                installer = self.root / "served-installer.sh"
+                installer.write_text(release.installer(TEMPLATE, version, digests, PUBLISH, POLICY))
+                env = {**self.environment, "TEST_INSTALLER": str(installer), "TEST_CURL_CODES": "[0, 6, 0]",
+                       "TMPDIR": str(self.root)}
+                result = subprocess.run(["sh", "-c", recovery], cwd=self.root, env=env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = json.loads(log.read_text())
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[0][0], "--disable")
+                self.assertIn("--ipv4", calls[0])
+                self.assertIn("https://ruicode.com/install", calls[0])
+                self.assertNotIn("--ipv4", calls[1])
+                self.assertIn("--ipv4", calls[2])
+                self.assertEqual(subprocess.check_output([self.bin / "rui"], text=True), version + "\n")
+                self.assertNotEqual((self.bin / "rui").resolve(), old_binary)
+                self.assertEqual(subprocess.check_output([old_binary], text=True), "0.39.0\n")
+                self.assertFalse(Path(calls[0][calls[0].index("-o") + 1]).exists())
+        self.start_over()
+        log.unlink(missing_ok=True)
+        env = {**self.environment, "TEST_CURL_CODES": "[28]", "TMPDIR": str(self.root)}
+        result = subprocess.run(["sh", "-c", recovery], cwd=self.root, env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 28)
+        calls = json.loads(log.read_text())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(Path(calls[0][calls[0].index("-o") + 1]).exists())
+        self.assertFalse((self.bin / "rui").exists())
+        self.assertFalse((self.home / ".local/lib/rui").exists())
 
     def test_rejected_download_preserves_installed_commands(self):
         (self.bin / "rui").write_text("previous rui")

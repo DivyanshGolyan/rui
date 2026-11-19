@@ -3,13 +3,16 @@ const client = @import("client.zig");
 const release = @import("release_candidate.zig");
 const Installation = @import("Installation.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
+const host_activation = @import("host_activation.zig");
 const restart_all = @import("host_restart_all.zig");
 const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
 const process = @import("upgrade_process.zig");
 const installation_path = @import("installation_path.zig");
+const caller_error = @import("caller_error.zig");
+const upgrade_run = @import("upgrade_run.zig");
 
-pub const Phase = enum(u8) { checking, preparing, publishing, stopping, awaiting_retirement, starting, verifying, finished };
+pub const Phase = upgrade_run.Phase;
 pub const Progress = struct {
     context: *anyopaque,
     report: *const fn (*anyopaque, Phase) void,
@@ -75,6 +78,16 @@ pub const Check = struct {
     running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
+    /// What this check observed, as `upgrade_run` reads it.
+    pub fn facts(self: *const Check, mode: upgrade_run.Mode) upgrade_run.Facts {
+        return .{
+            .mode = mode,
+            .selection = .{ .ok = selectionOf(self.selected) },
+            .release = .{ .ok = versionOf(self.candidate.version) },
+            .census = .{ .ok = self.hosts.entries.len },
+        };
+    }
+
     pub fn deinit(self: *Check, allocator: std.mem.Allocator) void {
         self.candidate.deinit(allocator);
         self.selected.deinit(allocator);
@@ -95,12 +108,63 @@ pub const Result = struct {
         return self.hosts.selectedOutcome(self.store);
     }
 
+    /// What the finished install of `checked` read, as `upgrade_run` reads it.
+    /// A batch that failed after publication is a failed restart batch,
+    /// whichever step failed.
+    pub fn facts(self: *const Result, checked: *const Check) upgrade_run.Facts {
+        var value = checked.facts(.install);
+        value.resumed = true;
+        if (!upgrade_run.holdsRelease(value)) value.prepared = .{ .ok = {} };
+        self.addFacts(&value);
+        value.pinned = .{ .ok = {} };
+        return value;
+    }
+
+    /// Add the receipt and restart batch to facts already held by the caller.
+    pub fn addFacts(self: *const Result, value: *upgrade_run.Facts) void {
+        value.published = .{ .ok = publishedOf(self.installation) };
+        value.hosts = .{ .ok = self.hosts.summary(self.store) };
+    }
+
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         self.installation.deinit(allocator);
         self.hosts.deinit(allocator);
         allocator.free(self.store);
     }
 };
+
+fn selectionOf(selected: Installation.Selection) upgrade_run.Selection {
+    return switch (selected) {
+        .absent => .absent,
+        .ineligible => .ineligible,
+        .source => .source,
+        .unknown_managed => .unknown_managed,
+        .released => |value| .{ .released = versionOf(value.version) },
+    };
+}
+
+pub fn versionOf(version: release.Version) upgrade_run.Version {
+    return .{ .schema = version.schema, .patch = version.patch };
+}
+
+fn publishedOf(installation: Installation.InstallationOutcome) upgrade_run.Published {
+    return .{ .changed = installation == .installed, .selected = versionOf(installation.receipt().selected_version.?) };
+}
+
+/// The class `upgrade_run` records for an effect's error.
+pub fn causeOf(err: anyerror) upgrade_run.Cause {
+    if (err == error.Cancelled) return .cancelled;
+    return causeOfCode(caller_error.of(err));
+}
+
+fn causeOfCode(code: caller_error.Code) upgrade_run.Cause {
+    return switch (code) {
+        .upgrade_download_failed => .download,
+        .upgrade_release_invalid => .release,
+        .upgrade_preparation_failed => .preparation,
+        else => .other,
+    };
+}
 
 pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
     try process.check(cancellation);
@@ -125,16 +189,40 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
 pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download, discovered: *?release.ReleaseCandidate) !Check {
     try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
-    errdefer selected.deinit(allocator);
-    try process.check(cancellation);
-    var candidate = if (discovered.*) |candidate| take: {
-        discovered.* = null;
-        break :take candidate;
-    } else try fetchRelease(init, allocator, cancellation, diagnostic);
-    errdefer candidate.deinit(allocator);
-    var hosts = try restart_all.discover(init, allocator, home, cancellation);
-    errdefer hosts.deinit(allocator);
+    // The mode is read only once a caller continues past the check.
+    var facts: upgrade_run.Facts = .{ .mode = .check, .adopted = discovered.* != null };
+    var selected: ?Installation.Selection = null;
+    errdefer if (selected) |*value| value.deinit(allocator);
+    var candidate: ?release.ReleaseCandidate = null;
+    errdefer if (candidate) |*value| value.deinit(allocator);
+    var hosts: ?restart_all.Batch = null;
+    errdefer if (hosts) |*value| value.deinit(allocator);
+    // Each effect polls the cancellation token where it did before this loop;
+    // an error ends the check, so it is returned rather than recorded.
+    while (true) switch (upgrade_run.next(facts)) {
+        .inspect_selection => {
+            selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
+            facts.selection = .{ .ok = selectionOf(selected.?) };
+        },
+        .release => |source| {
+            try process.check(cancellation);
+            candidate = switch (source) {
+                .adopt => take: {
+                    const value = discovered.*.?;
+                    discovered.* = null;
+                    break :take value;
+                },
+                .discover => try fetchRelease(init, allocator, cancellation, diagnostic),
+            };
+            facts.release = .{ .ok = versionOf(candidate.?.version) };
+        },
+        .census => {
+            hosts = try restart_all.discover(init, allocator, home, cancellation);
+            facts.census = .{ .ok = hosts.?.entries.len };
+        },
+        .checked => break,
+        .prepare, .publish, .pin_target, .restart_hosts, .end => unreachable,
+    };
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
@@ -143,15 +231,15 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
     const path_observation = installation_path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "") catch installation_path.Observation{ .state = .unavailable };
-    return .{ .candidate = candidate, .selected = selected, .hosts = hosts, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
+    return .{ .candidate = candidate.?, .selected = selected.?, .hosts = hosts.?, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
 }
 
 pub fn canInstall(checked: *const Check) bool {
-    return checked.selected == .released;
+    return upgrade_run.installable(checked.facts(.install));
 }
 
 pub fn holdsRelease(checked: *const Check) bool {
-    return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
+    return upgrade_run.holdsRelease(checked.facts(.install));
 }
 
 const ActivationProgress = struct {
@@ -170,41 +258,83 @@ const ActivationProgress = struct {
 
 pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *Download) !Result {
     try process.check(cancellation);
-    if (!canInstall(checked)) return error.UpgradeIneligible;
+    var facts = checked.facts(.install);
+    facts.resumed = true;
+    if (upgrade_run.next(facts) == .end) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
     errdefer allocator.free(store);
-    var installation: Installation.InstallationOutcome = undefined;
-    const selected = checked.selected.released;
-    if (holdsRelease(checked)) {
-        Progress.send(progress, .publishing);
-        try process.check(cancellation);
-        installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
-    } else {
-        Progress.send(progress, .preparing);
-        var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation), diagnostic);
-        defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
-        Progress.send(progress, .publishing);
-        try process.check(cancellation);
-        installation = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation, cleanup.reporter(.publication));
-    }
-    errdefer installation.deinit(allocator);
+    var prepared: ?Installation.PreparedBuild = null;
+    // A run that ends before publishing still disposes what it prepared.
+    defer if (prepared) |*build| build.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
+    var installation: ?Installation.InstallationOutcome = null;
+    errdefer if (installation) |*value| value.deinit(allocator);
+    var target: ?restart_all.Target = null;
+    defer if (target) |value| value.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
-    const receipt = installation.receipt();
-    var hosts: restart_all.Batch = hosts: {
-        waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
-        var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
-        defer target.deinit(allocator);
-        if (target.version.order(receipt.selected_version.?) != .eq) break :hosts .{ .failure = error.ReleaseExecutableVersionMismatch };
-        break :hosts @import("host_coordinator.zig").restart(init, allocator, .{
-            .home = checked.home,
-            .target = &target,
-            .cancellation = cancellation,
-            .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
-        }) catch |err| .{ .failure = err };
+    var hosts: restart_all.Batch = .{};
+    // Errors before publication end the run and are returned; errors after
+    // it are recorded beside the kept receipt as a failed restart batch.
+    while (true) switch (upgrade_run.next(facts)) {
+        .prepare => {
+            Progress.send(progress, .preparing);
+            prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation), diagnostic);
+            facts.prepared = .{ .ok = {} };
+        },
+        .publish => |source| {
+            Progress.send(progress, .publishing);
+            try process.check(cancellation);
+            installation = switch (source) {
+                .selected => try Installation.publishExistingWithReporter(allocator, init.io, checked.home, checked.selected.released.build, .released_upgrade, cancellation, cleanup.reporter(.publication)),
+                .prepared => published: {
+                    const value = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared.?, .released_upgrade, cancellation, cleanup.reporter(.publication));
+                    prepared.?.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
+                    prepared = null;
+                    break :published value;
+                },
+            };
+            facts.published = .{ .ok = publishedOf(installation.?) };
+        },
+        .pin_target => {
+            const receipt = installation.?.receipt();
+            pinTarget(init, allocator, checked.home, receipt, cancellation, &target) catch |err| {
+                hosts = .{ .failure = err };
+                facts = upgrade_run.failing(facts, causeOf(err));
+                continue;
+            };
+            facts.pinned = .{ .ok = {} };
+        },
+        .restart_hosts => {
+            defer {
+                target.?.deinit(allocator);
+                target = null;
+            }
+            hosts = @import("host_coordinator.zig").restart(init, allocator, .{
+                .home = checked.home,
+                .target = &target.?,
+                .cancellation = cancellation,
+                .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
+            }) catch |err| {
+                hosts = .{ .failure = err };
+                facts = upgrade_run.failing(facts, causeOf(err));
+                continue;
+            };
+            facts.hosts = .{ .ok = hosts.summary(store) };
+        },
+        .end => break,
+        .inspect_selection, .release, .census, .checked => unreachable,
     };
-    hosts.version = receipt.selected_version;
+    hosts.version = installation.?.receipt().selected_version;
     Progress.send(progress, .finished);
-    return .{ .installation = installation, .hosts = hosts, .store = store };
+    return .{ .installation = installation.?, .hosts = hosts, .store = store };
+}
+
+/// The published build, re-read once the after-publication test gate opens,
+/// must have the receipt's version.
+fn pinTarget(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, receipt: Installation.Receipt, cancellation: ?*client.Cancellation, target: *?restart_all.Target) !void {
+    try waitAfterPublication(init, cancellation);
+    const pinned = try restart_all.Target.init(init, allocator, home, receipt.selected_after, cancellation);
+    target.* = pinned;
+    if (pinned.version.order(receipt.selected_version.?) != .eq) return error.ReleaseExecutableVersionMismatch;
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
@@ -212,10 +342,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 }
 
 pub fn compatible(result: *const Result) bool {
-    return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-        else => true,
-    };
+    return host_activation.clientSafe(result.selectedActivation());
 }
 
 fn field(writer: *std.Io.Writer, value: []const u8) !void {
@@ -250,12 +377,30 @@ pub fn hasGuidance(result: *const Result) bool {
     return result.hosts.hasGuidance();
 }
 
+/// The line between the check report and the result, so a download never
+/// leaves the check's closing notes standing as the run's answer (#1854).
+pub fn writeInstalling(writer: *std.Io.Writer, checked: *const Check) !void {
+    var facts = checked.facts(.install);
+    facts.resumed = true;
+    if (upgrade_run.holdsRelease(facts)) {
+        const selected = facts.selection.?.ok.released;
+        return writer.print("Rui 0.{d}.{d} is already selected; publishing it again and checking running Hosts...\n", .{ selected.schema, selected.patch });
+    }
+    try writer.print("Installing Rui 0.{d}.{d}...\n", .{ checked.candidate.version.schema, checked.candidate.version.patch });
+}
+
+/// The first line is the verdict: upgraded or unchanged, before any Host detail.
 pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
-    try writer.writeAll(switch (result.installation) {
-        .installed => "Installed Rui. Complete build: ",
-        .unchanged => "Installation unchanged. Selected complete build: ",
-    });
     const receipt = result.installation.receipt();
+    try writer.writeAll(switch (result.installation) {
+        .installed => "Upgraded to Rui",
+        .unchanged => "Installation unchanged at Rui",
+    });
+    if (receipt.selected_version) |version| try writer.print(" 0.{d}.{d}", .{ version.schema, version.patch });
+    try writer.writeAll(switch (result.installation) {
+        .installed => ". Complete build: ",
+        .unchanged => ". Selected complete build: ",
+    });
     try field(writer, receipt.selected_after);
     if (!std.mem.eql(u8, receipt.operation_build, receipt.selected_after)) {
         try writer.writeAll("\nThis operation prepared/published: ");
@@ -298,7 +443,9 @@ test "upgrade owns cleanup facts by phase after native borrowed paths are reclai
     }
 }
 
-test "upgrade restart results cover every activation for selected and other Stores" {
+// SH-69 owns which outcomes guide and which keep the client safe; this checks only
+// that the upgrade report routes the selected Store's outcome and renders the Host lines.
+test "upgrade result report embeds the Host lines and its rollback note follows guidance" {
     const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
     const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
     inline for (info.field_names, info.field_types) |name, Payload| {
@@ -311,16 +458,6 @@ test "upgrade restart results cover every activation for selected and other Stor
                     .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } },
                     .store = "/selected-store",
                 };
-                const guided = switch (activation) {
-                    .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
-                };
-                const safe = !selected or switch (activation) {
-                    .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-                    else => true,
-                };
-                try std.testing.expectEqual(safe, compatible(&result));
-                try std.testing.expectEqual(guided, hasGuidance(&result));
                 try std.testing.expectEqualDeep(if (selected) activation else HostLifecycle.ActivationOutcome.not_needed, result.selectedActivation());
                 var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer output.deinit();
@@ -329,42 +466,36 @@ test "upgrade restart results cover every activation for selected and other Stor
                 defer shared.deinit();
                 try result.hosts.write(&shared.writer);
                 try std.testing.expect(std.mem.indexOf(u8, output.written(), shared.written()) != null);
-                try std.testing.expectEqual(guided, std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
+                try std.testing.expectEqual(hasGuidance(&result), std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
             }
         }
     }
 }
 
-test "upgrade restart results retain unknown failures and other Store guidance without borrowing compatibility" {
-    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
-    var entries = [_]restart_all.Entry{
-        .{ .socket = "/other.sock", .store = "/other", .state = .{ .outcome = .{ .client_incompatible = 123 } } },
-        .{ .socket = "/selected.sock", .store = "/store", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } } } },
-    };
-    var result: Result = .{ .installation = .{ .installed = receipt }, .store = "/store", .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } } };
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(!hasGuidance(&result));
-    try std.testing.expectEqual(@as(usize, 2), result.hosts.totals().restarted);
-    entries[0].state = .{ .outcome = .{ .failed = .starting } };
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    try std.testing.expectEqual(@as(usize, 1), result.hosts.totals().failed);
-    entries[0].store = null;
-    entries[0].state = .{ .failed = .{ .stage = .discovery, .cause = "ConnectionRefused" } };
-    try std.testing.expect(compatible(&result));
-    result.hosts.entries = entries[0..1];
-    try std.testing.expect(!compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    result.hosts = .{ .failure = error.AccessDenied };
-    try std.testing.expect(!compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    result.hosts = .{};
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(!hasGuidance(&result));
-    var bytes: [128]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try result.hosts.write(&out);
-    try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
+test "#1854 a non-interactive install says it is installing, then opens its result with the verdict" {
+    const candidate: release.ReleaseCandidate = .{ .version = .{ .schema = 83, .patch = 0 }, .tag = "v0.83.0", .archive_name = "fixture", .archive_url = "fixture", .checksum_url = "fixture", .sha256 = @splat(0) };
+    for ([_]struct { selected: release.Version, says: []const u8 }{
+        .{ .selected = .{ .schema = 82, .patch = 0 }, .says = "Installing Rui 0.83.0...\n" },
+        .{ .selected = .{ .schema = 83, .patch = 0 }, .says = "Rui 0.83.0 is already selected; publishing it again and checking running Hosts...\n" },
+        .{ .selected = .{ .schema = 84, .patch = 1 }, .says = "Rui 0.84.1 is already selected; publishing it again and checking running Hosts...\n" },
+    }) |case| {
+        const checked: Check = .{ .candidate = candidate, .selected = .{ .released = .{ .build = "/selected", .version = case.selected } }, .home = "/home", .store = "/store", .running_executable = "/rui" };
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try writeInstalling(&output.writer, &checked);
+        try std.testing.expectEqualStrings(case.says, output.written());
+    }
+    const receipt: Installation.Receipt = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 83, .patch = 0 } };
+    for ([_]struct { installation: Installation.InstallationOutcome, first: []const u8 }{
+        .{ .installation = .{ .installed = receipt }, .first = "Upgraded to Rui 0.83.0. Complete build: /b\n" },
+        .{ .installation = .{ .unchanged = receipt }, .first = "Installation unchanged at Rui 0.83.0. Selected complete build: /b\n" },
+    }) |case| {
+        const result: Result = .{ .installation = case.installation, .store = "/store" };
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try writeResult(&output.writer, &result);
+        try std.testing.expect(std.mem.startsWith(u8, output.written(), case.first));
+    }
 }
 
 test "adopted candidate stays owned until fresh check preconditions permit consumption" {
@@ -414,5 +545,65 @@ test "upgrade selected activation routes by Host directory not SQLite data or My
         const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
         try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
         try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
+}
+
+test "SH-76 Upgrade fact conversions preserve every classified error and receipt" {
+    // Every error classified as an Upgrade download, release, or preparation
+    // failure by caller_error, plus cancellation and the catch-all class.
+    const cases = [_]struct { anyerror, upgrade_run.Cause }{
+        .{ error.Cancelled, .cancelled },
+        .{ error.ReleaseDownloadFailed, .download },
+        .{ error.InvalidReleaseVersion, .release },
+        .{ error.InvalidReleaseChecksum, .release },
+        .{ error.DuplicateReleaseChecksum, .release },
+        .{ error.MissingReleaseChecksum, .release },
+        .{ error.InvalidReleaseEndpoint, .release },
+        .{ error.UnsupportedReleasePlatform, .release },
+        .{ error.InvalidManagedBuild, .preparation },
+        .{ error.InvalidReleaseExecutable, .preparation },
+        .{ error.ReleaseArchiveTooLarge, .preparation },
+        .{ error.ReleaseChecksumMismatch, .preparation },
+        .{ error.ReleaseExecutableVersionMismatch, .preparation },
+        .{ error.UnsafeReleaseArchive, .preparation },
+        .{ error.UpgradeChildFailed, .preparation },
+        .{ error.UpgradeIneligible, .other },
+        .{ error.HostRestartFailed, .other },
+        .{ error.OutOfMemory, .other },
+        .{ error.AccessDenied, .other },
+        .{ error.UnclassifiedUpgradeTestFailure, .other },
+    };
+    for (cases) |row| try std.testing.expectEqual(row[1], causeOf(row[0]));
+    // `anyerror` is open-ended; after cancellation every possible classifier
+    // result belongs to this finite domain, including all non-Upgrade codes.
+    for (std.enums.values(caller_error.Code)) |code| {
+        const expected: upgrade_run.Cause = switch (code) {
+            .upgrade_download_failed => .download,
+            .upgrade_release_invalid => .release,
+            .upgrade_preparation_failed => .preparation,
+            else => .other,
+        };
+        try std.testing.expectEqual(expected, causeOfCode(code));
+    }
+
+    const receipt: Installation.Receipt = .{ .operation_build = "/operation", .selected_after = "/selected", .selected_version = .{ .schema = 61, .patch = 7 } };
+    const check_value: Check = .{
+        .candidate = .{ .version = .{ .schema = 60, .patch = 1 }, .tag = "", .archive_name = "", .archive_url = "", .checksum_url = "", .sha256 = @splat(0) },
+        .selected = .{ .released = .{ .build = "/old", .version = .{ .schema = 59, .patch = 2 } } },
+        .home = "/home",
+        .store = "/store",
+        .running_executable = "/rui",
+    };
+    for ([_]bool{ false, true }) |changed| {
+        const result: Result = .{ .installation = if (changed) .{ .installed = receipt } else .{ .unchanged = receipt }, .store = "/store" };
+        const expected: upgrade_run.Published = .{ .changed = changed, .selected = .{ .schema = 61, .patch = 7 } };
+        try std.testing.expectEqualDeep(expected, publishedOf(result.installation));
+        const full = result.facts(&check_value);
+        var partial: upgrade_run.Facts = .{ .mode = .install };
+        result.addFacts(&partial);
+        try std.testing.expectEqualDeep(expected, full.published.?.ok);
+        try std.testing.expectEqualDeep(expected, partial.published.?.ok);
+        try std.testing.expectEqualDeep(full.hosts.?.ok, partial.hosts.?.ok);
+        try std.testing.expectEqualDeep(upgrade_run.Version{ .schema = 60, .patch = 1 }, check_value.facts(.install).release.?.ok);
     }
 }

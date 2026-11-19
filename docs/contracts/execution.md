@@ -49,7 +49,7 @@ Keeping rejected calls outside Action preserves the invariant that every Action 
 No Step/group entity is required.
 Actions run and settle independently, including within one Workspace.
 
-`action read --session ID --action ID [--offset BYTES]` reads an existing Action's permission, queue, attempted or resolved state without waiting, granting permission or consuming output. A resolved Action returns its sole saved Resolution and one bounded UTF-8 output window; the returned byte cursor continues that immutable output. The Session must own the Action. `action inspect` continues to read the exact proposal for permission review.
+`action read --session ID --action ID [--offset BYTES] [--after ORDINAL]` reads an existing Action's permission, queue, attempted or resolved state without waiting, granting permission or consuming output. A resolved Action returns its sole saved Resolution and one bounded UTF-8 output window; the returned byte cursor continues that immutable output. The response also returns up to 16 published values, bounded to 16 KiB of value text in total. Pass `values.next` as `--after` to continue when `values.more` is true. Reading does not change delivery state. The Session must own the Action. `action inspect` continues to read the exact proposal for permission review.
 
 `action background --session ID --action ID --key KEY` promotes that Session's existing Action to background execution.
 The accepted command selects one immutable receipt for the original Tool Call; its exact replay keeps that receipt after the Action resolves.
@@ -63,6 +63,10 @@ Promotion keeps an attempted Action's existing custody credit and never needs a 
 When background Actions hold every credit, new foreground work waits for one as usual. Deadlines bound that starvation; no Action waits on its own continuation to finish.
 A repeated matching command preserves the original selection; an existing background or final selection takes precedence over a later stop. A fresh stop refusal leaves the original call and executor unchanged.
 
+A cooperating Bash Action can publish an exact UTF-8 value with `rui action publish --key KEY`, reading the value from standard input. The Host derives the Action and Session from its live sender handle. Values are limited to 16 KiB, and each Action can have at most 32 admitted values waiting for a Turn. The Host stores values in publication order. A foreground value is stored without delivery; later promotion does not deliver it. A background value and its sourced Session input commit in one transaction, and model history identifies the Action and value ordinal. A publication does not finish the Action or change its final Resolution.
+
+The publication key and payload identify a replay for the same handle. An exact replay returns the original receipt even after the handle is retired; a different payload conflicts. A new publication from a stopped or resolved Action is refused. Accepted values remain saved after stop. Ordinary Bash standard output and standard error are not publications.
+
 A promoted Action’s final Resolution atomically admits one sourced Session input through the same admission owner as person and peer Messages.
 The input identifies its source Action and references the sole Resolution’s content; it never copies the payload.
 Resolution commitment and input admission share one transaction, so restart and replay cannot admit it twice.
@@ -70,7 +74,15 @@ The existing Resolution reader validates the reference when model history render
 Eligible final input joins the running Turn at its next input boundary without changing an in-flight model request, and starts a Turn when the Session is idle.
 A Session stop suppresses final input from its selected Actions, retaining readable terminal evidence; archive uses that same stop selection.
 `stop_action` selects one Action owned by the calling Session. The Host stops a running Action through its existing runner, records one cancelled Resolution, and retains its credit until cleanup. A saved per-Action stop also suppresses the Action's final Session input after Host restart. A stop requested after Resolution returns the existing Resolution.
-Native users can also read the sole terminal Resolution through `action read`.
+`rui action stop --session ID --action ACTION` and TypeScript `Session.stopAction(action, { idempotencyKey })` use that same stop owner.
+The native command source is either a model `stop_action` attempt or a client request, recorded atomically with its saved command answer.
+The CLI captures the request before transmission and recovers it through `rui request recover HANDLE` or the explicit record.
+Matching keys and inputs return the original answer; changed inputs conflict.
+An accepted reply includes nullable `resolution_position`, the existing Resolution position if the Action had already ended when selected.
+The TypeScript method returns that position or `null` for a pending stop.
+Selection acknowledges durable intent; it does not assert runner cleanup.
+Unknown Actions and Actions from another Session are refused.
+Native users read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
@@ -97,10 +109,10 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 #### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `skill` and `web_search`; the Host never supplies a tools list (D104).
+It holds `bash` and `read_image`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `read_image`, `skill` and `web_search`; a model known not to accept images omits `read_image` from the default set. The Host never supplies a tools list (D104). Existing Sessions retain their saved sets.
 Explicit tool selections retain their own loaded-tool behavior.
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_image`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools` when omitted from an explicit spec, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools. If that intersection is a strict subset without `find_tools`, all resulting allowed tools become loaded. Explicit `loaded_tools` still uses the same membership and reachability checks.
@@ -113,8 +125,9 @@ It loads at most eight matches in name order, in one call-keyed command and one 
 A no-match call writes no revision.
 A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
 Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
-`read_action(action, offset?)` accepts canonical decimal strings and reads only the caller's Session, using the same sole Resolution and bounded UTF-8 byte cursor as native `action read`.
-Pending calls report their approval, queued or attempted state; settled calls return the immutable final identity and up to 4096 bytes, with `next` and `more` for continued reads.
+`read_image(path)` reads a regular local file relative to the frozen Workspace or by absolute Host-local path after exact Action authorization. Linux pins the path and verifies the pinned object before opening it for input. On macOS, the Host stats the path before a nonblocking open and verifies the opened handle is regular before reading; a device substituted between the stat and open could be opened but is never read. It snapshots and validates PNG or JPEG bytes in charged custody and settles the original Action with an image observation; failures settle explicitly, and replay uses the saved Resolution without reopening the path. It uses the shared Action lifecycle for stopping and backgrounding.
+`read_action(action, offset?, after?)` accepts canonical decimal strings and reads only the caller's Session. It returns the same final output window and published value page as native `action read`. The byte offset and value ordinal are independent cursors.
+Pending calls report their approval, queued or attempted state; settled text results return the immutable final identity and up to 4096 bytes, with `next` and `more` for continued reads. A compound result returns, to the model tool and the native read alike, the parts content value with the Action as owner and no text window, without walking the manifest; a nonzero offset is an invalid cursor. Its parts are read through the owner ([Typed parts](inspection.md#typed-message-and-action-resolution-parts)).
 Reading neither consumes nor stops an Action and does not subscribe to completion. The Operation's frozen offer controls availability; invalid arguments, foreign Actions and invalid cursors resolve the tool call failed when it runs.
 `stop_action(action)` accepts a canonical decimal Action ID from the caller's Session. The Operation offers it exactly when it offers `read_action`. The call waits for the target's Resolution and returns its reference. A foreign or invalid target fails the call.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
@@ -273,7 +286,7 @@ The Responses `/1`, `/2` and `/3` input domains extend additively with image-bea
 PNG and JPEG Image parts name raw Content; the codec supplies data-URL MIME framing and `detail:auto`, and the shell reads verified bounded windows through a pinned standard-base64 cursor.
 Source reads and emitted bytes consume the existing preparation allowance; request scratch, cancellation and sealing keep their existing owners.
 An image-bearing tool result uses an actual `function_call_output.output` array under its original `call_id`, never a synthetic user Message.
-Text-only results remain strings, saved MCP JSON stays opaque text, and every old handler, escape, Carry and route dialect keeps its original bytes.
+Text-only results remain strings, and every old handler, escape, Carry and route dialect keeps its original bytes. MCP image results and the raw-prefix exception follow the [MCP result contract](model-io.md#operations-and-frozen-requests).
 Only the open resumes and the close ends the new history element; partial image state never enters Carry.
 These codec and raw-byte transforms do not themselves admit or persist typed images, validate media containers, or qualify provider image support.
 The codec's encoder state is a small value of the codec's own type that the shell stores, and it holds the codec's carry.
@@ -583,6 +596,7 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
+| Per-Action client stop, saved replay, ownership refusal, existing Resolution and suppressed final input | `client Action stop`, `stop_action`, `background_action_integration.py --stop-only`, TypeScript request tests | SQLite owner and native Host cases; MySQL owner cases run with the configured engine. Mutations must break target, replay, final Resolution and stop-wins assertions. |
 | Settlement scenarios in the composed gates | `check`, `check-full` | A fixture marker detects duplicate execution; Store facts remain recovery authority |
 | Background final delivery: delivered and resolved at most once across Host death, stop wins (including an attached parent's owed stop), promotion keeps its credit, a call waiting for a credit runs once deadlines end the holders | `python3 tests/formal/check.py`: TLC checks `tests/formal/background_delivery/BackgroundDelivery.tla`; each guard's mutation must break a named rule. The `verify-background-delivery` skill maps model steps to code | Bounded: one Session, two Actions, one credit, one Host death. #1550 as drafted breaks stop wins through an unsettled owed stop (expected violation until fixed) |
 | Owner invariants at stable checkpoints | `'custody sequences'`, `'slots agree with custody'` | Stable checkpoints only |

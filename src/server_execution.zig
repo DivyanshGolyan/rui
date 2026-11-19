@@ -1,5 +1,8 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
+const tool_settle = @import("tool_settle.zig");
+const tool_record = @import("tool_record.zig");
+const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
@@ -62,13 +65,29 @@ const traceOperationControl = server_host.traceOperationControl;
 const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
-const testTransition = server_host.testTransition;
+const test_pause = @import("testing/pause.zig");
 const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecoveryHeld = server_host.retryRecoveryHeld;
 const retryRecovered = server_host.retryRecovered;
 const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
+
+fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{
+            .operation = binding.parent_operation_id,
+            .action = binding.action_id,
+            .attempt = @import("attempt.zig").action_attempt_ordinal,
+        }) catch {};
+    };
+}
+
+fn reachModel(host: *Host, point: test_pause.Point, binding: store_module.AttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal }) catch {};
+    };
+}
 
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
@@ -139,11 +158,61 @@ const ModelRefreshingSlot = struct {
     cancelled: bool = false,
 };
 
+const PendingFailure = struct {
+    floor: store_module.HistoryFloorPreparation,
+    code: protocol.Bounded(96),
+    diagnostic: protocol.Bounded(512),
+    report: output_decode.Report,
+    request_id: protocol.Bounded(256),
+    kind: std.meta.Tag(store_module.ModelFailure),
+
+    fn init(self: *PendingFailure, operation: u64, failure: store_module.ModelFailure) void {
+        self.code = .{};
+        self.diagnostic = .{};
+        self.report = .{};
+        self.request_id = .{};
+        self.kind = failure;
+        self.code.set(failure.code()) catch unreachable;
+        self.report.set(failure.report()) catch unreachable;
+        if (failure.diagnostic()) |detail| self.diagnostic.set(detail) catch unreachable;
+        switch (failure) {
+            .uncorrelated => {},
+            .correlated => |record| self.request_id = record.request_id,
+            .rejected => |record| self.request_id = record.request_id,
+        }
+        self.floor.init(operation);
+    }
+
+    fn value(self: *const PendingFailure) store_module.ModelFailure {
+        return switch (self.kind) {
+            .uncorrelated => .{ .uncorrelated = self.code.slice() },
+            .correlated => .{ .correlated = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report.slice() } },
+            .rejected => .{ .rejected = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report.slice(), .diagnostic = self.diagnostic.slice() } },
+        };
+    }
+};
+
+const ModelFailurePreparingSlot = struct {
+    owner: AttemptOwner,
+    response: provider.SealedResponse,
+
+    fn deinit(self: *ModelFailurePreparingSlot) void {
+        self.response.state(PendingFailure).floor.deinit();
+        self.response.deinit();
+    }
+};
+
+comptime {
+    if (@sizeOf(ModelFailurePreparingSlot) > @sizeOf(ProviderSlot) or @alignOf(ModelFailurePreparingSlot) > @alignOf(ProviderSlot))
+        @compileError("pending overflow failure exceeds an existing provider slot");
+}
+
 pub const ExecutionSlot = union(enum) {
     free,
     model_preparing: ModelPreparingSlot,
     model_authenticating: ModelAuthenticatingSlot,
     model_refreshing: ModelRefreshingSlot,
+    model_failure_preparing: ModelFailurePreparingSlot,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -156,7 +225,7 @@ const SlotCustody = enum { free, attached, detached };
 fn slotCustody(slot: *const ExecutionSlot) SlotCustody {
     return switch (slot.*) {
         .free => .free,
-        .model_preparing, .model_authenticating, .model_refreshing, .provider, .bash_preparing => .attached,
+        .model_preparing, .model_authenticating, .model_refreshing, .model_failure_preparing, .provider, .bash_preparing => .attached,
         .bash => |*active| switch (active.delivery) {
             .open => .attached,
             .closed => .detached,
@@ -171,6 +240,7 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
         .model_preparing => |*active| active.token,
         .model_authenticating => |*active| active.owner.token,
         .model_refreshing => |*active| active.owner.token,
+        .model_failure_preparing => |*active| active.owner.token,
         .provider => |*active| active.owner.token,
         .bash_preparing => |*active| active.token,
         .bash => |*active| active.token,
@@ -185,6 +255,7 @@ fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
         .model_preparing => |*active| .{ .model = active.binding },
         .model_authenticating => |*active| .{ .model = active.owner.binding },
         .model_refreshing => |*active| .{ .model = active.owner.binding },
+        .model_failure_preparing => |*active| .{ .model = active.owner.binding },
         .provider => |*active| .{ .model = active.owner.binding },
         .bash_preparing => |*active| .{ .action = active.binding },
         .bash => |*active| .{ .action = active.binding },
@@ -310,7 +381,7 @@ fn checkSharedPreparation(
     }
 }
 
-const AdmissionProgress = enum { no_work, retry_later, admitted };
+const AdmissionProgress = enum { no_work, retry_later, progress, admitted };
 
 const LifecycleMeasurement = struct {
     last_service_at: ?std.Io.Clock.Timestamp = null,
@@ -323,20 +394,78 @@ const lifecycle_trace_interval_ms = 100;
 
 const Workspace = struct {
     model_preparation: model_adapter.Preparation,
+    model_admission: store_module.ModelAdmissionPreparation,
     bash_window: [bash.copy_window_bytes]u8,
     auth_worker: AuthWorker,
     bash_input: store_module.ActionExecutionInput,
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
-    bash_outcome: bash.Outcome,
     event_data: output_decode.EventData,
     interpret: output_decode.Interpret,
+    failure_after: usize,
     interpretation: output_decode.Interpretation,
     provider_failure: output_decode.ProviderFailure,
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
     listings: std.EnumArray(provider.ListingKind, ListingWork),
+    image_calls: server_read_image.Calls,
+    turn_state: execution_turn.State,
 };
+
+// Shape of the removed in-workspace Bash outcome, used only to preserve and
+// check the original workspace allocation ceiling.
+const OriginalBashOutcome = struct {
+    code: store_module.ActionResolutionCode,
+    content: [bash.excerpt_bytes + 4096]u8,
+    content_len: usize,
+    tail: [bash.excerpt_bytes + 14]u8,
+};
+
+const WorkspaceBeforeBashResult = blk: {
+    const fields = std.meta.fieldNames(Workspace);
+    var names: [fields.len + 1][:0]const u8 = undefined;
+    var types: [names.len]type = undefined;
+    for (fields, 0..) |name, i| {
+        names[i] = name;
+        types[i] = @FieldType(Workspace, name);
+    }
+    names[fields.len] = "original_bash_outcome";
+    types[fields.len] = OriginalBashOutcome;
+    break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
+};
+
+// Keep admission and dispatch state within the original mapped workspace pages.
+// Exclude every added owner so its state cannot silently raise the baseline.
+const WorkspaceBeforeAdmissionAndDispatch = blk: {
+    const fields = std.meta.fieldNames(Workspace);
+    var names: [fields.len - 2][:0]const u8 = undefined;
+    var types: [names.len]type = undefined;
+    var next: usize = 0;
+    for (fields) |name| {
+        if (std.mem.eql(u8, name, "model_admission") or
+            std.mem.eql(u8, name, "image_calls") or
+            std.mem.eql(u8, name, "turn_state")) continue;
+        names[next] = name;
+        types[next] = @FieldType(Workspace, name);
+        next += 1;
+    }
+    // The original baseline included Bash's in-workspace outcome. Its
+    // replacement is heap-owned; keep the original page ceiling while the
+    // actual workspace becomes smaller.
+    names[next] = "original_bash_outcome";
+    types[next] = OriginalBashOutcome;
+    break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
+};
+
+comptime {
+    const page = std.heap.page_size_min;
+    if (@sizeOf(Workspace) >= @sizeOf(WorkspaceBeforeBashResult))
+        @compileError("Bash result migration must reduce workspace allocation");
+    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmissionAndDispatch), page))
+        @compileError(std.fmt.comptimePrint("admission and dispatch state must fit existing workspace pages: {d} -> {d} bytes", .{
+            @sizeOf(WorkspaceBeforeAdmissionAndDispatch), @sizeOf(Workspace),
+        }));
+}
 
 const ListingWork = struct {
     fetch: provider.ListingFetch,
@@ -365,6 +494,9 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
+    workspace.failure_after = 0;
+    workspace.model_admission.init();
+    defer workspace.model_admission.deinit();
     const auth_worker: ?*AuthWorker = if (host.providers.anySignIn()) worker: {
         workspace.auth_worker = .{ .io = host.io };
         break :worker &workspace.auth_worker;
@@ -429,8 +561,8 @@ pub fn executionMain(host: *Host) void {
             continue;
         });
     }
-    const catalog_url = host.hooks.models_dev_url orelse "https://models.dev/api.json";
-    listing_urls.set(.catalog, if (catalog_url.len == 0) null else catalog_url);
+    const catalog_url = host.catalog_url orelse "https://models.dev/api.json";
+    listing_urls.set(.catalog, catalog_url);
     for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
     var reactor_storage: provider.Reactor = undefined;
     const reactor: ?*provider.Reactor = reactor: {
@@ -455,7 +587,7 @@ pub fn executionMain(host: *Host) void {
             .budget = budget,
             .listing_urls = listing_urls,
         }) catch |err| {
-            if (!host.providers.any() and catalog_url.len != 0) {
+            if (!host.providers.any()) {
                 listingFailed(host, .catalog, err);
                 break :reactor null;
             }
@@ -487,10 +619,12 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    workspace.image_calls = .{};
+    defer workspace.image_calls.shutdown(host);
     defer shutdownExecution(host, slots, workspace);
     defer mcp_calls.shutdown(host);
 
-    var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
+    workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
     while (!host.executionEnding()) {
@@ -501,10 +635,11 @@ pub fn executionMain(host: *Host) void {
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
+            .images = &workspace.image_calls,
             .fenced = false,
         };
         host.dispatch_wake.reset();
-        switch (execution_turn.run(&turn_state, &native)) {
+        switch (execution_turn.run(&workspace.turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
@@ -537,6 +672,9 @@ pub fn executionMain(host: *Host) void {
     traceLifecycleService(host, measurement.maximum_gap_ns);
 }
 
+// executionMain runs every NativeTurn step through execution_turn.run. Steps
+// that never lead to a completion stay out of line, so their locals do not
+// widen the frame under serviceOneCompletion, the engine's deepest chain.
 const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -544,6 +682,7 @@ const NativeTurn = struct {
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
+    images: ?*server_read_image.Calls = null,
     fenced: bool,
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
@@ -588,6 +727,15 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn publishRetryCrossings(self: *NativeTurn, from: u64, now_ms: u64) error{Fence}!execution_turn.DeadlineRead {
+        const read = self.host.store.publishRetryCrossings(from, now_ms) catch |err| {
+            fenceDispatch(self.host, "retry deadline read", err);
+            self.fenced = true;
+            return error.Fence;
+        };
+        return .{ .generation = read.generation, .next = read.next };
+    }
+
     pub fn controlGeneration(self: *const NativeTurn) u64 {
         return self.host.store.controlGeneration();
     }
@@ -596,20 +744,21 @@ const NativeTurn = struct {
         return self.host.slot_changes;
     }
 
-    pub fn reconcileControls(self: *NativeTurn) void {
+    pub noinline fn reconcileControls(self: *NativeTurn) void {
+        self.workspace.model_admission.deinit();
         cancelSupersededTransfers(
             self.host,
             self.slots,
-            &self.workspace.model_preparation,
+            self.workspace,
         );
         stopSupersededBash(self.host, self.slots, &self.workspace.bash_preparation);
     }
 
-    pub fn advanceBashPreparation(self: *NativeTurn) bool {
+    pub noinline fn advanceBashPreparation(self: *NativeTurn) bool {
         return callAdvanceBashPreparation(self.host, self.slots, self.workspace);
     }
 
-    pub fn advanceLiveBash(self: *NativeTurn) bool {
+    pub noinline fn advanceLiveBash(self: *NativeTurn) bool {
         const observed = std.Io.Clock.Timestamp.now(self.host.io, .awake);
         const generation = self.host.store.commitGeneration();
         var cursor: usize = 0;
@@ -633,10 +782,11 @@ const NativeTurn = struct {
             }
         }
         const mcp_progress = self.mcp.service(self.host);
-        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress;
+        const image_progress = if (self.images) |images| images.service(self.host) else false;
+        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
     }
 
-    pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
+    pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
         return callAdvanceRetainedCleanup(self.host, self.slots, observed, retry_at);
     }
 
@@ -678,15 +828,15 @@ const NativeTurn = struct {
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
-        return slotsHaveBash(self.slots) or self.mcp.any();
+        return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
     }
 
-    pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp };
+    pub noinline fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
-            .maximum_exclusions = self.slots.len + server_mcp.capacity,
+            .maximum_exclusions = self.host.custody.records.len,
         };
         return self.host.store.recoverOneUncertainAction(active_actions) catch |err| {
             fenceDispatch(self.host, "uncertain Action recovery", err);
@@ -695,7 +845,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
+    pub noinline fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
         if (retryRecoveryHeld(self.host)) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
@@ -720,19 +870,21 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.host, self.mcp);
+        return runNextCoreAction(self.host, self.mcp, self.images);
     }
 
-    pub fn admitBash(self: *NativeTurn) execution_turn.Admission {
+    pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
         const slot = self.firstFreeSlot() orelse return .no_work;
         return switch (admitBashAttempt(self.host, slot, self.workspace)) {
             .admitted => .admitted,
             .no_work => .no_work,
             .retry_later => .retry_later,
+            .progress => .progress,
         };
     }
 
-    pub fn admitRetry(self: *NativeTurn) execution_turn.Admission {
+    pub noinline fn admitRetry(self: *NativeTurn) execution_turn.Admission {
+        if (self.workspace.model_admission.pending()) return .no_work;
         const slot = self.firstFreeSlot() orelse return .no_work;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
@@ -756,16 +908,17 @@ const NativeTurn = struct {
             .admitted => .admitted,
             .no_work => .no_work,
             .retry_later => .retry_later,
+            .progress => .progress,
         };
     }
 
-    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
+    pub noinline fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
         const found = self.host.store.dispatchWork(paused, capacity) catch |err| {
             fenceDispatch(self.host, "dispatch work read", err);
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -788,17 +941,66 @@ const NativeTurn = struct {
         return self.admitModel(.tool_continuation);
     }
 
-    fn admitModel(self: *NativeTurn, kind: store_module.ModelAdmissionKind) execution_turn.Admission {
+    pub fn pendingModelAdmission(self: *const NativeTurn) ?execution_turn.PendingModelAdmission {
+        const preparation = &self.workspace.model_admission;
+        if (!preparation.pending()) return null;
+        return switch (preparation.kind.?) {
+            .message, .open_turn_message => .message,
+            .tool_continuation => .tool_continuation,
+        };
+    }
+
+    pub noinline fn advanceModelAdmission(self: *NativeTurn) bool {
+        const preparation = &self.workspace.model_admission;
+        if (!preparation.pending()) return false;
+        if (!self.host.launchAllowed() or
+            (preparation.kind == .message and self.turnsPaused()))
+        {
+            preparation.deinit();
+            return true;
+        }
+        if (preparation.pendingReady()) return false;
+        const progress = self.host.store.admitModelAttemptStep(
+            preparation.kind.?,
+            self.host.hooks.storeFaults(.attempt_admission),
+            null,
+            preparation,
+        ) catch |err| {
+            preparation.deinit();
+            fenceDispatch(self.host, "Attempt admission preflight", err);
+            self.fenced = true;
+            return true;
+        };
+        switch (progress) {
+            .progress => {},
+            .done => |admitted| std.debug.assert(admitted == null),
+        }
+        return true;
+    }
+
+    noinline fn admitModel(self: *NativeTurn, requested: store_module.ModelAdmissionKind) execution_turn.Admission {
+        const pending = &self.workspace.model_admission;
+        if (self.pendingModelAdmission()) |kind| {
+            const requested_kind: execution_turn.PendingModelAdmission = if (requested == .tool_continuation) .tool_continuation else .message;
+            if (kind != requested_kind) return .no_work;
+            if (pending.kind == .message and self.turnsPaused()) {
+                pending.deinit();
+                return .progress;
+            }
+            if (!pending.pendingReady()) return .progress;
+        }
         const slot = self.firstFreeSlot() orelse return .no_work;
         return switch (admitNewAttempt(
             self.host,
             slot,
-            kind,
+            pending.kind orelse requested,
             &self.workspace.model_preparation,
+            pending,
         )) {
             .admitted => .admitted,
             .no_work => .no_work,
             .retry_later => .retry_later,
+            .progress => .progress,
         };
     }
 
@@ -829,7 +1031,8 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
+    pub noinline fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
+        const pending_progress = advancePendingFailure(self.host, self.slots, self.workspace);
         return callAdvanceModelPreparation(
             self.host,
             self.reactor,
@@ -838,7 +1041,7 @@ const NativeTurn = struct {
             &self.workspace.listings,
             byte_allowance,
             item_allowance,
-        );
+        ) or pending_progress;
     }
 };
 
@@ -1018,7 +1221,7 @@ test "a completed Transfer finds its own slot and nothing else" {
 fn cancelSupersededTransfers(
     host: *Host,
     slots: []ExecutionSlot,
-    preparation: *model_adapter.Preparation,
+    workspace: *Workspace,
 ) void {
     for (slots) |*slot| switch (slot.*) {
         .model_preparing => |active| {
@@ -1028,7 +1231,7 @@ fn cancelSupersededTransfers(
             };
             const control = superseded orelse continue;
             traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
-            preparation.cancel();
+            workspace.model_preparation.cancel();
             finishCustodyNow(host, slot);
         },
         .model_authenticating => |*active| {
@@ -1051,6 +1254,17 @@ fn cancelSupersededTransfers(
             if (superseded) |control| {
                 traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
                 active.cancelled = true;
+            }
+        },
+        .model_failure_preparing => |*active| {
+            const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                fenceDispatch(host, "overflow control reconciliation", err);
+                return;
+            };
+            if (superseded) |control| {
+                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                active.deinit();
+                finishCustodyNow(host, slot);
             }
         },
         .provider => |*active| {
@@ -1113,6 +1327,7 @@ fn slotIsFree(slot: *const ExecutionSlot) bool {
 const ActiveSlots = struct {
     slots: []ExecutionSlot,
     mcp: ?*const server_mcp.Calls = null,
+    images: ?*const server_read_image.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1122,6 +1337,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
         .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
         .model_authenticating => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_refreshing => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .model_failure_preparing => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
     return false;
@@ -1130,6 +1346,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
+    if (active.images) |images| if (images.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
         .bash => |value| if (value.binding.action_id == action_id) return true,
@@ -1163,13 +1380,13 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                pause(host, .bash_exit_observed);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
             }
             if (active.delivery == .open and service.retired) {
-                completeBash(host, slot, &workspace.bash_outcome);
+                completeBash(host, slot);
                 made_progress = true;
             }
             if (active.delivery == .closed and service.retired) {
@@ -1185,7 +1402,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
     return made_progress;
 }
 
-noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
+noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
     const work = (host.store.nextCoreWork(host.custody.dispatchCapacity(!mcp.full())) catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
@@ -1193,6 +1410,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .mcp => |call| mcp.admit(host, call),
+        .read_image => |call| if (images) |calls| calls.admit(host, call) else .retry_later,
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .auto_deny => |decision| runMessageDecline(host, decision.action_id, decision.session.slice()),
@@ -1468,7 +1686,8 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
     };
-    testTransition(host, .action_attempt_admitted, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_attempt_committed, action_binding);
     const input = &workspace.bash_input;
     host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
@@ -1565,7 +1784,8 @@ fn discardBashResources(
 fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepared) void {
     const token = slot.bash_preparing.token;
     const action_binding = slot.bash_preparing.binding;
-    testTransition(host, .prepared_before_handoff, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_before_handoff, action_binding);
     pause(host, .{ .action_launch = action_binding });
     if (!host.launchAllowed()) {
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1672,37 +1892,54 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot, outcome: *bash.Outcome) void {
+noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
-    const token = active.token;
     const binding = active.binding;
-    const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
-        _ = failBash(host, slot, "Bash output reservation", err);
+    const profile = tool_record.Runner.bash.resultProfile(true);
+    const result = @import("tool_result.zig").Result.create(host, binding.action_id, profile) catch |err| {
+        _ = failBash(host, slot, "Bash result allocation", err);
         return;
     };
-    active.execution.outcome(bashScratch(host), include_paths, outcome) catch |err| {
-        active.execution.releaseOutputReservation(host.retention);
-        _ = failBash(host, slot, "Bash outcome materialization", err);
-        return;
-    };
+    defer result.destroy();
+    const materialized = materializeBashResult(host, slot, result) orelse return;
+    const code = materialized.code;
+    const value = materialized.value;
     pause(host, .{ .action_result = binding });
-    testTransition(host, .action_result_ready, binding);
-    if (host.custody.claimTerminalDelivery(token)) {
-        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
-            active.execution.releaseOutputReservation(host.retention);
-            _ = failBash(host, slot, "Bash result settlement", err);
-            return;
-        };
-        testTransition(host, .action_result_committed, binding);
-        if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
-    } else active.execution.releaseOutputReservation(host.retention);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_result_ready, binding);
+    const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value, result);
+    switch (delivered) {
+        // This blocking pause holds the shared execution loop until release.
+        .delivered, .session_stop => if (comptime test_pause.enabled) reachAction(host, .action_result_committed, binding),
+        .lost, .fenced => {},
+    }
     closeBashDelivery(host, slot);
 }
 
+const MaterializedBashResult = struct {
+    code: store_module.ActionResolutionCode,
+    value: @import("tool_result.zig").Value,
+};
+
+/// Keeps output materialization's frame off the stack while the result settles.
+noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@import("tool_result.zig").Result) ?MaterializedBashResult {
+    const code = slot.bash.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
+        _ = failBash(host, slot, "Bash outcome materialization", err);
+        return null;
+    };
+    return switch (result.finish()) {
+        .value => |value| .{ .code = code, .value = value },
+        .failed => |failure| {
+            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            closeBashDelivery(host, slot);
+            return null;
+        },
+    };
+}
+
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
-    fenceDispatch(host, phase, err);
+    _ = tool_settle.fence(host, phase, .{ .capture = err });
     if (slot.bash.delivery != .open) return false;
-    slot.bash.execution.releaseOutputReservation(host.retention);
     closeBashDelivery(host, slot);
     return true;
 }
@@ -1764,11 +2001,7 @@ fn settleActionFailure(
     code: store_module.ActionResolutionCode,
     result: []const u8,
 ) void {
-    if (!host.custody.claimTerminalDelivery(token)) return;
-    _ = host.store.settleActionAttempt(binding, code, result, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "Bash failure settlement", err);
-        return;
-    };
+    _ = tool_settle.fixed(host, .{ .token = token, .binding = binding, .publication_phase = "Bash failure settlement" }, code, result);
 }
 
 fn admitNewAttempt(
@@ -1776,15 +2009,33 @@ fn admitNewAttempt(
     slot: *ExecutionSlot,
     kind: store_module.ModelAdmissionKind,
     preparation: *model_adapter.Preparation,
+    pending: *store_module.ModelAdmissionPreparation,
 ) AdmissionProgress {
+    if (!host.launchAllowed()) {
+        pending.deinit();
+        return .no_work;
+    }
+    if (pending.pending() and !pending.pendingReady()) return .progress;
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.page, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
+    const progress = host.store.admitModelAttemptStep(kind, host.hooks.storeFaults(.attempt_admission), .{
+        .view = &preparation.page,
+        .settings = &preparation.settings,
+        .remembered = model_adapter.remembered(&host.history_memos),
+    }, pending) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
+        pending.deinit();
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
-    } orelse {
-        host.custody.releaseUnused(token) catch unreachable;
-        return .no_work;
+    };
+    var admission = switch (progress) {
+        .progress => {
+            host.custody.releaseUnused(token) catch unreachable;
+            return .progress;
+        },
+        .done => |admitted| admitted orelse {
+            host.custody.releaseUnused(token) catch unreachable;
+            return .no_work;
+        },
     };
     return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, admission.request_started);
 }
@@ -1879,7 +2130,8 @@ fn advanceModelPreparation(
         .read => unreachable,
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            pause(host, .preparation_advanced);
+            // This blocking pause holds the shared execution loop until release.
+            if (comptime test_pause.enabled) reachModel(host, .model_preparation_advanced, owner.binding);
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
@@ -1974,16 +2226,23 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     return true;
 }
 
-fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh) bool {
+fn retireAnsweredResponse(response: *?provider.SealedResponse) void {
+    if (response.*) |*sealed| sealed.deinit();
+    response.* = null;
+}
+
+fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh, response: *?provider.SealedResponse) bool {
     const owner = answered.owner;
     const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "credential refresh claim", err);
         slot.provider.transfer.deinit();
+        retireAnsweredResponse(response);
         finishCustodyNow(host, slot);
         return true;
     };
     if (!claimed) return false;
     slot.provider.transfer.deinit();
+    retireAnsweredResponse(response);
     moveSlot(host, slot, .model_refreshing, .{
         .owner = owner,
         .refresh = refresh,
@@ -2079,6 +2338,7 @@ fn launchPreparedRequest(
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
         .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
+        .response_workspace_bytes = if (owner.purpose == .compaction) @sizeOf(PendingFailure) else 0,
     }, &retained_response) catch |err| {
         request.deinit(host.io, host.scratch_budget.?);
         if (retained_response) |retained| {
@@ -2099,6 +2359,8 @@ fn launchPreparedRequest(
         return;
     };
     host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachModel(host, .model_before_handoff, binding);
     pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
         active.transfer.deinit();
@@ -2155,6 +2417,7 @@ fn completeTransfer(
     traceTransfer(host, &active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
+    defer retireAnsweredResponse(&answered_response);
     var http_status: ?u16 = null;
     switch (completion.outcome) {
         .transport_finished => |evidence| {
@@ -2183,12 +2446,13 @@ fn completeTransfer(
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
         });
-        response.deinit();
     }
     switch (decision) {
         .interpret_output => {
-            switch (completeSuccessfulTransfer(host, workspace, active, http_status.?)) {
+            var completed = completeSuccessfulTransfer(host, workspace, active, http_status.?);
+            switch (completed) {
                 .cleanup => finishCustodyNow(host, slot),
+                .rejected => |*rejected| completeRejectedTransfer(host, workspace, slot, rejected, http_status.?),
                 .named_scratch => |scratch| {
                     moveSlot(host, slot, .named_scratch, .{
                         .token = owner.token,
@@ -2205,10 +2469,22 @@ fn completeTransfer(
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 if (execution.rejectsCredential(failure)) switch (active.rejection) {
-                    .refresh_once => |refresh| if (beginForcedRefresh(host, slot, &answered, refresh)) return,
+                    .refresh_once => |refresh| if (beginForcedRefresh(host, slot, &answered, refresh, &answered_response)) return,
                     .settle, .key_rejected => {},
                 };
-                if (diagnostic) |detail| {
+                const failure_record: store_module.ModelFailure = if (diagnostic) |detail|
+                    answered.rejection(code, detail, workspace.provider_failure.report.slice())
+                else
+                    .{ .correlated = .{ .code = code, .request_id = answered.request_id, .report = workspace.provider_failure.report.slice() } };
+                if (beginOverflowFailure(host, owner, failure_record, disposition, &answered_response.?)) |pending| {
+                    if (pending) {
+                        const response = answered_response.?;
+                        answered_response = null;
+                        active.transfer.deinit();
+                        moveSlot(host, slot, .model_failure_preparing, .{ .owner = owner, .response = response });
+                        return;
+                    }
+                } else if (diagnostic) |detail| {
                     answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
                 } else {
                     answered.fail(code, workspace.provider_failure.report.slice(), disposition);
@@ -2225,6 +2501,7 @@ fn completeTransfer(
         },
     }
     active.transfer.deinit();
+    retireAnsweredResponse(&answered_response);
     finishCustodyNow(host, slot);
 }
 
@@ -2246,12 +2523,45 @@ fn failureClass(
     };
 }
 
+const RejectedCompletion = struct {
+    response: provider.SealedResponse,
+    request_id: protocol.Bounded(256),
+};
+
 const SuccessfulCompletion = union(enum) {
     cleanup,
+    rejected: RejectedCompletion,
     named_scratch: named_scratch.Owner,
 };
 
-fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
+// Keep failure settlement outside the parser's metadata and diagnostic frame.
+// The returned capture and request ID preserve ownership after transport ends.
+noinline fn completeRejectedTransfer(host: *Host, workspace: *Workspace, slot: *ExecutionSlot, rejected: *RejectedCompletion, http_status: u16) void {
+    const owner = slot.provider.owner;
+    const answered: AnsweredAttempt = .{ .host = host, .owner = owner, .request_id = rejected.request_id };
+    const response = &rejected.response;
+    var response_owned = true;
+    defer if (response_owned) response.deinit();
+    const rejection = &workspace.interpretation.rejected;
+    traceOperation(host, "validation_failed", owner.binding);
+    stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(&detail);
+    retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, answered.retention(rejection.code, diagnostic, http_status));
+    const disposition = failureClass(host, rejection.kind, null, null);
+    if (beginOverflowFailure(host, owner, answered.rejection(rejection.code, diagnostic, workspace.provider_failure.report.slice()), disposition, response)) |pending| {
+        if (pending) {
+            response_owned = false;
+            moveSlot(host, slot, .model_failure_preparing, .{ .owner = owner, .response = response.* });
+            return;
+        }
+    } else answered.reject(rejection.code, diagnostic, workspace.provider_failure.report.slice(), disposition);
+    response.deinit();
+    response_owned = false;
+    finishCustodyNow(host, slot);
+}
+
+noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
     const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -2262,13 +2572,11 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     const codec = active.transfer.codec();
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
-    defer response.deinit();
+    var response_owned = true;
+    defer if (response_owned) response.deinit();
     const rejected: failed_responses.Source = .{ .file = response.file, .length = response.length, .transfer = .complete };
     if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
-        var detail: [512]u8 = undefined;
-        const diagnostic = rejection.format(&detail);
-        retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-        answered.reject(rejection.code, diagnostic, "", .ordinary);
+        rejectOutputSchema(host, rejected, &answered, rejection, http_status);
         return .cleanup;
     }
 
@@ -2322,18 +2630,14 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     }, &workspace.provider_failure, &workspace.interpretation);
     const accepted = switch (workspace.interpretation) {
         .accepted => |*value| value,
-        .rejected => |*rejection| {
-            traceOperation(host, "validation_failed", owner.binding);
-            stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
-            var detail: [512]u8 = undefined;
-            const diagnostic = rejection.format(&detail);
-            retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-            answered.reject(rejection.code, diagnostic, workspace.provider_failure.report.slice(), failureClass(host, rejection.kind, null, null));
-            return .cleanup;
+        .rejected => {
+            response_owned = false;
+            return .{ .rejected = .{ .response = response, .request_id = answered.request_id } };
         },
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
+    if (comptime test_pause.enabled) reachModel(host, .model_result_ready, owner.binding);
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
@@ -2354,16 +2658,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
-            var detail: [512]u8 = undefined;
-            const diagnostic = rejection.format(err, &detail);
-            retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-            host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
-                "contradictory_provider_output",
-                diagnostic,
-                "",
-            ), .ordinary, host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
-                fenceDispatch(host, "model envelope rejection save", failure_err);
+            rejectContradictoryOutput(host, rejected, &answered, err, http_status);
         } else {
             fenceDispatch(host, "model output import", err);
         }
@@ -2371,6 +2666,36 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
     };
     traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
+}
+
+// Diagnostic buffers and the failure's Store settlement live in these frames,
+// not in completeSuccessfulTransfer's, which already holds the response
+// decode state on the engine's deepest stack chain.
+noinline fn rejectOutputSchema(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    rejection: output_decode.Rejected,
+    http_status: u16,
+) void {
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(&detail);
+    retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
+    answered.reject(rejection.code, diagnostic, "", .ordinary);
+}
+
+noinline fn rejectContradictoryOutput(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    err: anyerror,
+    http_status: u16,
+) void {
+    const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = rejected.length };
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(err, &detail);
+    retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
+    saveImmediateFailure(host, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, ""), .ordinary);
 }
 
 fn advanceRetainedCleanup(
@@ -2399,6 +2724,7 @@ fn advanceRetainedCleanup(
 }
 
 fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) void {
+    workspace.model_admission.deinit();
     for (slots) |*slot| switch (slot.*) {
         .free => {},
         .model_preparing => {
@@ -2410,6 +2736,10 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
         .model_refreshing => finishCustodyNow(host, slot),
+        .model_failure_preparing => |*active| {
+            active.deinit();
+            finishCustodyNow(host, slot);
+        },
         .bash_preparing => discardBashResources(host, slot, workspace.bash_preparation.cancel()),
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
         .bash_prepared_cleanup, .named_scratch => {},
@@ -2418,7 +2748,9 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
-    pause(host, .shutdown_signalled);
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
+    };
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(host, slots, workspace);
@@ -2533,8 +2865,85 @@ fn settleFailure(
     disposition: store_module.ModelFailureClass,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelAttemptFailure(binding, failure, disposition, host.hooks.storeFaults(.model_failure)) catch |err| if (err != error.SupersededByControl)
-        fenceDispatch(host, "model failure save", err);
+    saveImmediateFailure(host, binding, failure, disposition);
+}
+
+fn saveImmediateFailure(host: *Host, binding: store_module.AttemptBinding, failure: store_module.ModelFailure, disposition: store_module.ModelFailureClass) void {
+    const settled = host.store.settleModelAttemptFailurePrepared(binding, failure, disposition, host.hooks.storeFaults(.model_failure), null) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model failure save", err);
+        return;
+    };
+    // Compaction overflow is staged by beginOverflowFailure while its response
+    // still owns the pre-reserved continuation storage. No service caller may
+    // fall back to a synchronous history scan.
+    if (!settled) fenceDispatch(host, "model failure preparation", error.MissingOverflowPreparation);
+}
+
+fn beginOverflowFailure(
+    host: *Host,
+    owner: AttemptOwner,
+    failure: store_module.ModelFailure,
+    disposition: store_module.ModelFailureClass,
+    response: *provider.SealedResponse,
+) ?bool {
+    if (owner.purpose != .compaction or disposition != .context_overflow) return null;
+    if (!host.custody.claimTerminalDelivery(owner.token)) return false;
+    const settled = host.store.settleModelAttemptFailurePrepared(owner.binding, failure, disposition, host.hooks.storeFaults(.model_failure), null) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model failure save", err);
+        return false;
+    };
+    if (settled) return false;
+    // This storage was reserved and mapped before the provider was launched.
+    // Retaining an overflow therefore needs neither spare scratch nor a handle.
+    response.state(PendingFailure).init(owner.binding.operation_id, failure);
+    return true;
+}
+
+fn advancePendingFailure(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool {
+    if (slots.len == 0) return false;
+    for (0..slots.len) |offset| {
+        const index = (workspace.failure_after + offset) % slots.len;
+        const slot = &slots[index];
+        if (slot.* != .model_failure_preparing) continue;
+        workspace.failure_after = (index + 1) % slots.len;
+        const active = &slot.model_failure_preparing;
+        const owner = active.owner;
+        const pending = active.response.state(PendingFailure);
+        if (!host.launchAllowed()) {
+            active.deinit();
+            finishCustodyNow(host, slot);
+            return true;
+        }
+        if (!pending.floor.ready) {
+            _ = host.store.advanceHistoryFloor(&pending.floor) catch |err| {
+                if (err != error.SupersededByControl) fenceDispatch(host, "overflow floor preparation", err);
+                active.deinit();
+                finishCustodyNow(host, slot);
+            };
+            return true;
+        }
+        const settled = host.store.settleModelAttemptFailurePrepared(
+            owner.binding,
+            pending.value(),
+            .context_overflow,
+            host.hooks.storeFaults(.model_failure),
+            &pending.floor.prepared.?,
+        ) catch |err| {
+            if (err != error.SupersededByControl) fenceDispatch(host, "model failure save", err);
+            active.deinit();
+            finishCustodyNow(host, slot);
+            return true;
+        };
+        if (settled) {
+            active.deinit();
+            finishCustodyNow(host, slot);
+        } else {
+            pending.floor.deinit();
+            pending.floor.init(owner.binding.operation_id);
+        }
+        return true;
+    }
+    return false;
 }
 
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
@@ -2941,9 +3350,8 @@ test "HTTP error capture retires before execution custody" {
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
         const response = &slot.provider.transfer.response;
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .body = body.len }));
         try response.file.writeStreamingAll(io, body);
-        try std.testing.expect(budget.charge(body.len));
-        response.charged = body.len;
         try response.seal(io, false, body.len);
         Boundary.response_fd = response.file.handle;
         if (kind == 1) {
@@ -2962,6 +3370,173 @@ test "HTTP error capture retires before execution custody" {
         try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
         try std.testing.expect(slot == .free);
         try std.testing.expect(host.custody.reserve() != null);
+    }
+}
+
+test "forced refresh captures retire before custody publication across Store claims" {
+    const Case = enum { superseded, unreadable_store, declined, accepted };
+    const Fixture = struct {
+        tmp: std.testing.TmpDir,
+        storage: store_module.Store,
+        root: [platform.max_scratch_path_bytes]u8,
+        records: [1]execution.CustodyRecord,
+        host: Host,
+        slot: ExecutionSlot,
+        reactor: provider.Reactor,
+        workspace: Workspace,
+    };
+    const Boundary = struct {
+        var slot: *ExecutionSlot = undefined;
+        var custody: *execution.CustodyPool = undefined;
+        var token: execution.CustodyToken = undefined;
+        var binding: store_module.AttemptBinding = undefined;
+        var used: *std.atomic.Value(u64) = undefined;
+        var response_fd: std.Io.File.Handle = -1;
+        var response_charge: u64 = 0;
+        var closes: usize = 0;
+        var observing: bool = false;
+        var retirement_observed: bool = false;
+
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            if (observing) {
+                for (files) |file| {
+                    if (file.handle != response_fd) continue;
+                    custody.checkAttached(token, .{ .model = binding }) catch unreachable;
+                    std.debug.assert(used.load(.acquire) >= 17 + response_charge);
+                    closes += 1;
+                }
+            }
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (observing and slot.* == .free) {
+                std.debug.assert(closes == 1);
+                std.debug.assert(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+                std.debug.assert(used.load(.acquire) == 17);
+                custody.checkFree(token) catch unreachable;
+                retirement_observed = true;
+            }
+            return std.testing.io.vtable.now(userdata, clock);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileClose = Boundary.close;
+    vtable.now = Boundary.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for ([_]Case{ .superseded, .unreadable_store, .declined, .accepted }) |kind| {
+        const mapped = try pages.Mapped(Fixture).map();
+        defer mapped.unmap();
+        const fixture = mapped.value;
+        fixture.tmp = std.testing.tmpDir(.{});
+        defer fixture.tmp.cleanup();
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &fixture.storage, &fixture.tmp, std.testing.io, .{});
+        defer fixture.storage.close() catch unreachable;
+        const root = fixture.root[0..try fixture.tmp.dir.realPath(std.testing.io, &fixture.root)];
+        const session = try store_module.testing.configureTestSession(&fixture.storage, "refresh-custody-config");
+        try store_module.testingSubmitMessage(&fixture.storage, &fixture.tmp, "refresh-custody-message", "refresh-custody-message", session.slice(), "hello");
+        var admitted = (try fixture.storage.admitNextModelAttempt(.{})).?;
+        fixture.records = @splat(.{});
+        fixture.host = .{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = &fixture.storage,
+            .hooks = .{ .phase_trace = true },
+            .custody = execution.CustodyPool.initialize(&fixture.records),
+        };
+        fixture.host.scratch_used.store(17, .release);
+        const budget = ScratchBudget{ .used = &fixture.host.scratch_used, .limit = 4 * 1024 * 1024 };
+        const token = fixture.host.custody.reserve().?;
+        const binding = try fixture.host.custody.attach(token, &admitted.permit);
+        fixture.slot = .{ .provider = .{
+            .owner = .{ .token = token, .binding = binding, .purpose = .assistant_response },
+            .rejection = .{ .refresh_once = .{
+                .source = .{ .path = root, .wire = .codex_device },
+                .generation = 7,
+            } },
+        } };
+        try fixture.reactor.init(std.testing.allocator, io, .{
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = root,
+            .budget = budget,
+        });
+        defer fixture.reactor.deinit();
+        const request_file = try fixture.tmp.dir.createFile(io, "refresh-custody-request", .{ .read = true });
+        try request_file.writeStreamingAll(io, "{}");
+        try std.testing.expect(budget.charge(2));
+        var retained: ?named_scratch.Owner = null;
+        try fixture.slot.provider.transfer.start(&fixture.reactor, &.{
+            .file = request_file,
+            .length = 2,
+            .charged = 2,
+            .structured_output = false,
+            .provider = .codex,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
+        }, binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
+        defer if (fixture.slot == .provider) {
+            fixture.slot.provider.transfer.deinit();
+            finishCustodyNow(&fixture.host, &fixture.slot);
+        };
+        const body = "{\"error\":{\"code\":\"invalid_api_key\"}}";
+        const response = &fixture.slot.provider.transfer.response;
+        try std.testing.expectEqual(@as(usize, @sizeOf(PendingFailure)), response.workspace.len);
+        try std.testing.expectEqual(h2.Verdict.accept, fixture.reactor.observe(&fixture.slot.provider.transfer.stream, .{ .body = body.len }));
+        try response.file.writePositionalAll(io, body, 0);
+        try response.seal(io, false, body.len);
+        try std.testing.expectEqual(@as(u64, @max(@sizeOf(PendingFailure), body.len)), response.charged);
+        try std.testing.expectEqual(@as(u64, 19) + response.charged, fixture.host.scratch_used.load(.acquire));
+        switch (kind) {
+            .superseded => {
+                var stop: protocol.SessionStopCommand = .{};
+                try stop.key.set("refresh-custody-stop");
+                try stop.session.set(session.slice());
+                try std.testing.expect(fixture.storage.stopSession(&stop, .{}) == .accepted);
+            },
+            .unreadable_store => try store_module.testingFailReadsOf(&fixture.storage, "model_operation"),
+            .declined => try std.testing.expect(try fixture.storage.claimModelAuthRefresh(binding)),
+            .accepted => {},
+        }
+        Boundary.slot = &fixture.slot;
+        Boundary.custody = &fixture.host.custody;
+        Boundary.token = token;
+        Boundary.binding = binding;
+        Boundary.used = &fixture.host.scratch_used;
+        Boundary.response_fd = response.file.handle;
+        Boundary.response_charge = response.charged;
+        Boundary.closes = 0;
+        Boundary.retirement_observed = false;
+        Boundary.observing = true;
+        defer Boundary.observing = false;
+        completeTransfer(&fixture.host, &fixture.workspace, &fixture.slot, .{
+            .transfer = &fixture.slot.provider.transfer,
+            .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 401 } },
+            .queued_after = 0,
+        });
+        Boundary.observing = false;
+        try std.testing.expectEqual(@as(usize, 1), Boundary.closes);
+        try std.testing.expect(std.c.fcntl(Boundary.response_fd, std.c.F.GETFD) < 0);
+        try std.testing.expectEqual(@as(u64, 17), fixture.host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(kind != .accepted, Boundary.retirement_observed);
+        try std.testing.expectEqual(kind != .unreadable_store, fixture.host.launchAllowed());
+        if (kind == .accepted) {
+            try std.testing.expect(fixture.slot == .model_refreshing);
+            try fixture.host.custody.checkAttached(token, .{ .model = binding });
+            try std.testing.expectEqual(@as(usize, 1), fixture.host.custody.occupied());
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=1 AND last_failure_code IS NULL AND resolution_code IS NULL", .{binding.operation_id}));
+            finishCustodyNow(&fixture.host, &fixture.slot);
+        } else {
+            try std.testing.expect(fixture.slot == .free);
+            if (kind == .declined) try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=1 AND last_failure_code IS NULL AND resolution_code='provider_http_401'", .{binding.operation_id}));
+            if (kind == .superseded) try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=0 AND last_failure_code IS NULL AND interrupted_by_command_key='refresh-custody-stop'", .{binding.operation_id}));
+        }
+        try fixture.host.custody.checkFree(token);
+        try std.testing.expectEqual(@as(usize, 0), fixture.host.custody.occupied());
+        const reused = fixture.host.custody.reserve().?;
+        try fixture.host.custody.releaseUnused(reused);
     }
 }
 
@@ -3125,9 +3700,7 @@ test "cleanup publication follows complete execution retirement" {
     };
     try test_poll.waitUntil(std.testing.io, deadline, service, bash_service.retired);
     try slot.bash.execution.checkRetired();
-    var outcome: bash.Outcome = undefined;
-    try slot.bash.execution.outcome(scratch, false, &outcome);
-    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, outcome.code);
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, slot.bash.execution.resultCode(scratch));
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
     boundary.observed = false;
@@ -3150,6 +3723,169 @@ test "cleanup publication follows complete execution retirement" {
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "Bash releases both spills after lost custody or fenced settlement" {
+    // EXR-54
+    const Completion = struct {
+        host: *Host,
+        slot: *ExecutionSlot,
+        fn run(self: *@This()) void {
+            completeBash(self.host, self.slot);
+        }
+    };
+    for ([_]enum { lost, fenced }{ .lost, .fenced }) |outcome| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store_module.Store = undefined;
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+        defer storage.close() catch unreachable;
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var command = try store_module.testingCompleteConfiguration("bash-spill-config", "", root, "model-a");
+        command.configuration.tools = try .of(&.{"bash"});
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        const configured = try storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try store_module.testingSubmitMessage(&storage, &tmp, "bash-spill-message", "bash-spill-message", session.slice(), "run");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const arguments = "{\"description\":\"Write both streams\",\"cmd\":\"printf '%024000d' 0; printf '%024000d' 0 >&2\",\"timeout_ms\":10000}";
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+        defer std.testing.allocator.free(encoded);
+        try store_module.settleCallsForTesting(&storage, &tmp, model, "bash-spill-calls", &.{.{
+            .item_id = "item-1",
+            .name = "bash",
+            .encoded_call_id = "call-1",
+            .decoded_call_id = "call-1",
+            .encoded_arguments = encoded[1 .. encoded.len - 1],
+            .decoded_arguments = arguments,
+        }});
+        var admission = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 10_000, .{})).?;
+        var records: [1]execution.CustodyRecord = @splat(.{});
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.scratch.set(root);
+        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .custody = execution.CustodyPool.initialize(&records) };
+        var entries: [2]output_retention.Entry = @splat(.{});
+        var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 1024 * 1024 }, &entries);
+        defer retention.cleanupAll();
+        host.retention = &retention;
+        const token = host.custody.reserve().?;
+        var slot: ExecutionSlot = .free;
+        const binding = try attachSlot(&host, &slot, token, &admission.permit);
+        var input: store_module.ActionExecutionInput = undefined;
+        try storage.readActionExecutionInput(.bash, binding, &input);
+        const arguments_location = try storage.openContent(input.arguments);
+        const scratch = bashScratch(&host);
+        const work = try pages.Mapped(struct { preparation: bash.Preparation, prepared: bash.Prepared }).map();
+        defer work.unmap();
+        const preparation = &work.value.preparation;
+        if (preparation.start(scratch, std.testing.allocator, arguments_location, &input, root, default_bash_path, binding.action_id, .{})) |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup(scratch);
+            return failure.cause;
+        }
+        var preparation_owned = true;
+        defer if (preparation_owned) {
+            var cleanup = preparation.cancel();
+            cleanup.cleanup(scratch) catch unreachable;
+        };
+        const prepared = &work.value.prepared;
+        while (true) {
+            var progress = preparation.advance(prepared);
+            switch (progress) {
+                .pending => {},
+                .prepared => {
+                    preparation_owned = false;
+                    break;
+                },
+                .failed => |*failure| {
+                    preparation_owned = false;
+                    try failure.cleanup.cleanup(scratch);
+                    return failure.cause;
+                },
+            }
+        }
+        defer prepared.cleanup() catch unreachable;
+        var refused: bash.ArgumentSizes = .{};
+        var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
+        moveSlot(&host, &slot, .bash, .{ .token = token, .binding = binding, .execution = &bash_execution });
+        var window: [bash.copy_window_bytes]u8 = undefined;
+        const service = .{ .execution = &bash_execution, .scratch = scratch, .window = &window };
+        defer if (slot == .bash) {
+            bash_execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
+            test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), service, bash_service.retired) catch unreachable;
+            bash_execution.reclaim(scratch, &retention) catch unreachable;
+        };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), service, bash_service.retired);
+        try bash_execution.checkRetired();
+        try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, bash_execution.resultCode(scratch));
+        const stdout_name = bash_execution.stdout_capture.name;
+        const stderr_name = bash_execution.stderr_capture.name;
+        const bytes = try std.testing.allocator.alloc(u8, 24_000);
+        defer std.testing.allocator.free(bytes);
+        for ([_]protocol.Bounded(96){ stdout_name, stderr_name }) |name| {
+            const file = try tmp.dir.openFile(std.testing.io, name.slice(), .{});
+            defer file.close(std.testing.io);
+            try std.testing.expectEqual(@as(usize, 24_000), try file.readPositionalAll(std.testing.io, bytes, 0));
+            for (bytes) |byte| try std.testing.expectEqual(@as(u8, '0'), byte);
+        }
+        try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
+        if (outcome == .lost) {
+            try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
+        } else host.hooks.failures.insert(.result_before_commit);
+
+        var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
+        defer owner.deinit();
+        try owner.arm(.{ .point = .action_result_ready });
+        host.pause_owner = &owner;
+        var completion: Completion = .{ .host = &host, .slot = &slot };
+        const thread = try std.Thread.spawn(.{}, Completion.run, .{&completion});
+        var joined = false;
+        defer {
+            owner.close();
+            if (!joined) thread.join();
+        }
+        const arrival = try owner.wait(.{ .point = .action_result_ready });
+        try std.testing.expectEqual(@as(usize, 2), retention.occupied());
+        try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
+        for ([_]protocol.Bounded(96){ stdout_name, stderr_name }) |name| {
+            const stat = try tmp.dir.statFile(std.testing.io, name.slice(), .{});
+            try std.testing.expectEqual(@as(u64, 24_000), stat.size);
+            var reserved = false;
+            for (retention.entries) |entry| {
+                if (entry.state == .reserved and std.mem.eql(u8, entry.name.slice(), name.slice())) reserved = true;
+            }
+            try std.testing.expect(reserved);
+        }
+        try owner.release(arrival.id, .proceed);
+        thread.join();
+        joined = true;
+        host.pause_owner = null;
+        try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
+        try host.custody.checkDetached(token, .{ .action = binding });
+        try std.testing.expectEqual(outcome == .lost, host.launchAllowed());
+        try std.testing.expectEqual(@as(usize, 0), retention.occupied());
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, stdout_name.slice(), .{}));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, stderr_name.slice(), .{}));
+        try std.testing.expect(reclaimBash(&host, &slot, .now(std.testing.io, .awake)));
+        try std.testing.expect(slot == .free);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try storage.close();
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+        const resolved = try store_module.testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='succeeded'", .{binding.action_id});
+        try std.testing.expectEqual(@as(u64, if (outcome == .lost) 1 else 0), resolved);
+        const unresolved = try store_module.testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{binding.action_id});
+        try std.testing.expectEqual(@as(u64, if (outcome == .fenced) 1 else 0), unresolved);
+        if (outcome == .lost) {
+            const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
+            defer std.testing.allocator.free(report);
+            try std.testing.expect(std.mem.indexOf(u8, report, "prior result") != null);
+        }
+    }
 }
 
 test "named scratch retry releases custody through the shutdown owner path" {
@@ -3321,6 +4057,129 @@ test "execution slots agree with custody across the complete population" {
     try custody.cleanupComplete(reused);
 }
 
+test "compound admission preflight releases transient custody and cancels its readers" {
+    const Exit = enum { admit, control, pause, fence, shutdown };
+    for (std.enums.values(Exit)) |exit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+        var storage: store_module.Store = undefined;
+        try storage.open(std.testing.io, path, root);
+        defer storage.close() catch unreachable;
+        const session = try store_module.testing.configureTestSession(&storage, "preflight-config");
+        try store_module.testing.answerTestTurn(&storage, &tmp, session.slice(), "preflight-prior", &.{.{ .encoded = "prior", .decoded = "prior" }});
+        try store_module.testing.submitTestMessageParts(&storage, &tmp, "preflight-parts", session.slice(), &.{
+            .{ .bytes = "next" },
+            .{ .bytes = @embedFile("testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{ .assertion = .jpeg } } },
+        });
+        var paths: platform.Paths = .{};
+        try paths.scratch.set(root);
+        var lease = platform.StoreLease{
+            .io = std.testing.io,
+            .paths = paths,
+            .store_dir = undefined,
+            .lock_file = undefined,
+        };
+        var records: [1]execution.CustodyRecord = @splat(.{});
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = &lease,
+            .store = &storage,
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        host.scratch_budget = .{ .used = &host.scratch_used, .limit = 1024 * 1024 };
+        const mapped = try pages.Mapped(Workspace).map();
+        defer mapped.unmap();
+        const workspace = mapped.value;
+        workspace.model_admission.init();
+        defer workspace.model_admission.deinit();
+        var slots = [_]ExecutionSlot{.free};
+        defer if (slots[0] == .model_preparing) {
+            workspace.model_preparation.cancel();
+            finishCustodyNow(&host, &slots[0]);
+        };
+        var measurement: LifecycleMeasurement = .{};
+        var mcp: server_mcp.Calls = .{};
+        var native = NativeTurn{
+            .host = &host,
+            .reactor = null,
+            .slots = &slots,
+            .workspace = workspace,
+            .measurement = &measurement,
+            .mcp = &mcp,
+            .fenced = false,
+        };
+        const generation = storage.commitGeneration();
+        try std.testing.expectEqual(execution_turn.Admission.progress, native.admitNewModel(false));
+        try std.testing.expectEqual(execution_turn.PendingModelAdmission.message, native.pendingModelAdmission().?);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expect(slots[0] == .free);
+        try std.testing.expectEqual(generation, storage.commitGeneration());
+        try std.testing.expectEqual(execution_turn.Admission.no_work, native.admitRetry());
+        try std.testing.expectEqual(execution_turn.Admission.no_work, native.admitToolContinuation());
+
+        // Fill ordinary custody independently: preflight must still advance,
+        // and no model Attempt or request may exist until its final commit.
+        const held = host.custody.reserve().?;
+        var held_owned = true;
+        defer if (held_owned) host.custody.releaseUnused(held) catch unreachable;
+        try std.testing.expectEqual(@as(usize, 0), native.freeSlots());
+        var reads: usize = 0;
+        while (workspace.model_admission.read.cursor == null) : (reads += 1) {
+            try std.testing.expect(reads < 256);
+            try std.testing.expect(native.advanceModelAdmission());
+            try std.testing.expect(workspace.model_admission.pending());
+            try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+            try std.testing.expectEqual(generation, storage.commitGeneration());
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        }
+        try host.custody.releaseUnused(held);
+        held_owned = false;
+
+        switch (exit) {
+            .admit => {
+                var steps: usize = 0;
+                while (!workspace.model_admission.pendingReady()) : (steps += 1) {
+                    try std.testing.expect(steps < 256);
+                    try std.testing.expect(native.advanceModelAdmission());
+                    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+                    try std.testing.expect(slots[0] == .free);
+                    try std.testing.expectEqual(generation, storage.commitGeneration());
+                }
+                try std.testing.expect(!native.advanceModelAdmission());
+                try std.testing.expectEqual(execution_turn.Admission.admitted, native.admitNewModel(false));
+                try std.testing.expect(native.pendingModelAdmission() == null);
+                try std.testing.expect(slots[0] == .model_preparing);
+                try std.testing.expect(workspace.model_preparation.state.active);
+                try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
+                try checkSlotCustodyAgreement(&slots, &host.custody, null);
+            },
+            .control => native.reconcileControls(),
+            .pause => {
+                host.turns_paused.store(true, .release);
+                try std.testing.expect(native.advanceModelAdmission());
+            },
+            .fence => {
+                _ = host.advance(.fenced);
+                try std.testing.expect(native.advanceModelAdmission());
+            },
+            .shutdown => shutdownExecution(&host, &slots, workspace),
+        }
+        if (exit != .admit) {
+            try std.testing.expect(native.pendingModelAdmission() == null);
+            try std.testing.expect(workspace.model_admission.read.cursor == null);
+            try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expectEqual(generation, storage.commitGeneration());
+        }
+    }
+}
+
 test "no-work admission restores only its temporary custody reservation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3360,6 +4219,9 @@ test "no-work admission restores only its temporary custody reservation" {
             };
             const baseline: usize = if (with_sibling) 1 else 0;
             var model_preparation: model_adapter.Preparation = undefined;
+            var admission_preparation: store_module.ModelAdmissionPreparation = undefined;
+            admission_preparation.init();
+            defer admission_preparation.deinit();
             const workspace = try pages.Mapped(Workspace).map();
             defer workspace.unmap();
             var retry_scanned = false;
@@ -3367,8 +4229,8 @@ test "no-work admission restores only its temporary custody reservation" {
             const progress = switch (kind) {
                 .bash => admitBashAttempt(&host, &slots[0], workspace.value),
                 .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
-                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
-                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
+                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation, &admission_preparation),
+                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation, &admission_preparation),
             };
             try std.testing.expectEqual(AdmissionProgress.no_work, progress);
             try std.testing.expect(slots[0] == .free);
@@ -3469,6 +4331,9 @@ test "failed admission releases its reservation and fences the Store and dispatc
             };
             const baseline: usize = if (with_sibling) 1 else 0;
             var model_preparation: model_adapter.Preparation = undefined;
+            var admission_preparation: store_module.ModelAdmissionPreparation = undefined;
+            admission_preparation.init();
+            defer admission_preparation.deinit();
             const engine_workspace = try pages.Mapped(Workspace).map();
             defer engine_workspace.unmap();
             var retry_scanned = false;
@@ -3476,8 +4341,8 @@ test "failed admission releases its reservation and fences the Store and dispatc
             const progress = switch (kind) {
                 .bash => admitBashAttempt(&host, &slots[0], engine_workspace.value),
                 .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
-                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
-                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
+                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation, &admission_preparation),
+                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation, &admission_preparation),
             };
             try std.testing.expectEqual(AdmissionProgress.retry_later, progress);
             try std.testing.expect(storage.isFenced());
@@ -3821,10 +4686,10 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
 
-    var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
-    var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
-    try std.testing.expect(root_budget.charge(2));
-    const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
+    var stdout = output_retention.Spill.open(&retention, "stdout") orelse return error.TestUnexpectedResult;
+    var stderr_file = output_retention.Spill.open(&retention, "stderr") orelse return error.TestUnexpectedResult;
+    stdout.write("a");
+    stderr_file.write("b");
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(
         std.testing.io,
@@ -3841,9 +4706,10 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
 
-    stdout.close(std.testing.io);
-    stderr_file.close(std.testing.io);
-    try retention.publishPair(pair);
+    stdout.close();
+    stderr_file.close();
+    stdout.keep();
+    stderr_file.keep();
     try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
@@ -3923,91 +4789,265 @@ test "Host fences dispose admitted preparation without touching canonical state"
 }
 
 test "an encode failure settles unanswered and releases request scratch" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
-    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    var storage: store_module.Store = undefined;
-    try storage.open(std.testing.io, database, root);
-    defer storage.close() catch unreachable;
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
-    defer directory.close(std.testing.io);
-    const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
-    var command: wire_request.ConfigureCommand = .{};
-    try command.key.set("encode-failure-config");
-    command.configuration.workspace.state = .value;
-    try command.configuration.workspace.value.set(workspace);
-    command.configuration.provider.state = .value;
-    try command.configuration.provider.value.set("codex");
-    command.configuration.model.state = .value;
-    try command.configuration.model.value.set("model-a");
-    command.configuration.tools = try .of(&.{ "bash", "web_search" });
-    command.configuration.permission_mode.state = .value;
-    try command.configuration.permission_mode.value.set("bypass");
-    command.configuration.compaction_trigger.state = .value;
-    try command.configuration.compaction_trigger.value.set("115200");
-    command.configuration.reasoning_effort.state = .explicit_null;
-    const configured = try storage.configure(&command, .{});
-    try std.testing.expect(configured == .accepted);
-    const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
-    try file.writeStreamingAll(std.testing.io, "hello");
-    try file.sync(std.testing.io);
-    var message: wire_request.MessageCommand = .{};
-    try message.key.set("encode-failure-key");
-    message.session = configured.accepted.session;
-    message.text = .{
-        .state = .value,
-        .file = file,
-        .length = 5,
-        .digest = protocol.contentDigest("hello"),
-    };
-    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
-    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    const CountedEndpoint = struct {
+        peer: *h2.testing.Peer,
+        reactor: provider.Reactor,
+        requests: usize,
 
-    var records: [1]execution.CustodyRecord = @splat(.{});
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = &storage,
-        .custody = execution.CustodyPool.initialize(&records),
+        fn init(self: *@This(), root: []const u8, budget: ScratchBudget) !void {
+            self.requests = 0;
+            const Counter = @This();
+            self.peer = try h2.testing.Peer.start(std.testing.allocator, .{
+                .context = self,
+                .on_request = struct {
+                    fn received(peer: *h2.testing.Peer, stream: *h2.testing.Peer.Stream) void {
+                        const counter: *Counter = @ptrCast(@alignCast(peer.options.context.?));
+                        // Retain the observation before replying to either control.
+                        counter.requests += 1;
+                        peer.respond(stream, 200, "ok");
+                    }
+                }.received,
+            });
+            errdefer self.peer.stop();
+            try self.reactor.initForTesting(std.testing.allocator, std.testing.io, .{
+                .endpoints = .init(.{ .codex = self.peer.url(), .openai = null, .chatgpt = null }),
+                .capacity = 1,
+                .inactivity_seconds = 5,
+                .scratch_path = root,
+                .budget = budget,
+            });
+        }
+
+        fn deinit(self: *@This()) void {
+            self.reactor.deinit();
+            self.peer.stop();
+        }
+
+        fn pump(self: *@This()) !void {
+            try self.reactor.client.drive(&self.reactor);
+            try self.peer.pump();
+            try self.reactor.client.drive(&self.reactor);
+        }
+
+        fn positiveControl(self: *@This(), tmp: *std.testing.TmpDir) !void {
+            const expected = self.requests + 1;
+            const file = try tmp.dir.createFile(std.testing.io, "count-control", .{ .read = true });
+            var file_owned = true;
+            defer if (file_owned) file.close(std.testing.io);
+            try tmp.dir.deleteFile(std.testing.io, "count-control");
+            try file.writeStreamingAll(std.testing.io, "{}");
+            try file.sync(std.testing.io);
+            const budget = self.reactor.budget;
+            try std.testing.expect(budget.allocate(2));
+            var request = provider.PreparedRequest{
+                .file = file,
+                .length = 2,
+                .charged = 2,
+                .structured_output = false,
+                .provider = .codex,
+                .codec = .@"openai-responses/1",
+                .headers = .{ .count = 0 },
+            };
+            file_owned = false;
+            var request_owned = true;
+            defer if (request_owned) request.deinit(std.testing.io, budget);
+            var transfer: provider.Transfer = undefined;
+            var retained: ?named_scratch.Owner = null;
+            try transfer.start(&self.reactor, &request, .{
+                .turn_id = 1,
+                .operation_id = 9999,
+                .attempt_ordinal = @intCast(expected),
+            }, .{}, &retained);
+            request_owned = false;
+            defer transfer.deinit();
+            self.reactor.launch(&transfer);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), .{
+                .counter = self,
+                .expected = expected,
+            }, struct {
+                fn completed(context: anytype) !bool {
+                    try context.counter.pump();
+                    return context.counter.requests >= context.expected and context.counter.reactor.finishedCount() != 0;
+                }
+            }.completed);
+            try std.testing.expectEqual(expected, self.requests);
+            try std.testing.expectEqual(expected, self.peer.streams.items.len);
+            try std.testing.expectEqualStrings("{}", self.peer.streams.items[expected - 1].body.items);
+            try std.testing.expect(retained == null);
+        }
     };
-    const token = host.custody.reserve().?;
-    const binding = try host.custody.attach(token, &admitted.permit);
-    var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
-    var preparation: model_adapter.Preparation = undefined;
-    var retained: ?named_scratch.Owner = null;
-    preparation.page.open(binding);
-    try preparation.init(
-        std.testing.io,
-        root,
-        .{ .used = &host.scratch_used, .limit = 1024 * 1024 },
-        protocol.routesAll(.endpoint),
-        null,
-        .{ .codec_declines = .request_end },
-        &retained,
-    );
-    defer if (preparation.state.active) preparation.cancel();
-    var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
-    var advances: usize = 0;
-    while (slots[0] != .free) : (advances += 1) {
-        try std.testing.expect(advances < 4096);
-        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
+    for ([_]bool{ false, true }) |ordered_limit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+        var storage: store_module.Store = undefined;
+        try storage.open(std.testing.io, database, root);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+        defer directory.close(std.testing.io);
+        const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+        var command: wire_request.ConfigureCommand = .{};
+        try command.key.set("encode-failure-config");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
+        const configured = try storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, "hello");
+        try file.sync(std.testing.io);
+        var message: wire_request.MessageCommand = .{};
+        try message.key.set("encode-failure-key");
+        message.session = configured.accepted.session;
+        message.text = .{
+            .state = .value,
+            .file = file,
+            .length = 5,
+            .digest = protocol.contentDigest("hello"),
+        };
+        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+        if (ordered_limit) {
+            const Capture = @import("InputCapture.zig");
+            const image = @embedFile("testing/fixtures/input-baseline.jpg");
+            // Each Message fits the canonical part bound; their selected history
+            // exceeds the request-wide image limit by exactly one.
+            for ([_]usize{ 1500, 1 }, 0..) |image_count, ordinal| {
+                const files = files: {
+                    const spool = try tmp.dir.createFile(std.testing.io, "limit-spool", .{ .read = true });
+                    errdefer spool.close(std.testing.io);
+                    try tmp.dir.deleteFile(std.testing.io, "limit-spool");
+                    const index = try tmp.dir.createFile(std.testing.io, "limit-index", .{ .read = true });
+                    errdefer index.close(std.testing.io);
+                    try tmp.dir.deleteFile(std.testing.io, "limit-index");
+                    break :files .{ .spool = spool, .index = index };
+                };
+                var capture_used: std.atomic.Value(u64) = .init(0);
+                var capture: Capture = undefined;
+                capture.init(std.testing.io, files.spool, files.index, .{ .used = &capture_used, .limit = 2 * 1024 * 1024 });
+                defer capture.close();
+                for (0..image_count) |_| {
+                    try capture.begin(.{ .image = .{ .assertion = .jpeg } }, image.len);
+                    var allowance: usize = image.len;
+                    try std.testing.expectEqual(image.len, try capture.append(image, &allowance, false));
+                    try capture.end();
+                }
+                const loan = try capture.seal();
+                var ordered_message: wire_request.MessageCommand = .{};
+                try ordered_message.key.set(if (ordinal == 0) "encode-failure-key" else "encode-failure-over-limit");
+                ordered_message.session = configured.accepted.session;
+                try std.testing.expect((try storage.submitMessageParts(&ordered_message, loan, null, .{})) == .accepted);
+                capture.close();
+                try std.testing.expectEqual(@as(u64, 0), capture_used.load(.acquire));
+            }
+        } else try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+        var admitted = (try storage.admitNextModelAttempt(.{})).?;
+
+        var paths: platform.Paths = .{};
+        try paths.scratch.set(root);
+        var lease = platform.StoreLease{
+            .io = std.testing.io,
+            .paths = paths,
+            .store_dir = undefined,
+            .lock_file = undefined,
+        };
+        var records: [1]execution.CustodyRecord = @splat(.{});
+        var served: providers.Providers = .{};
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = &lease,
+            .store = &storage,
+            .providers = &served,
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        host.scratch_budget = .{ .used = &host.scratch_used, .limit = if (ordered_limit) 2 * 1024 * 1024 else 1024 * 1024 };
+        var counted: CountedEndpoint = undefined;
+        if (ordered_limit) {
+            try counted.init(root, host.scratch_budget.?);
+            served.table.set(.codex, .{ .endpoint = counted.peer.url(), .credential = .none });
+        }
+        defer if (ordered_limit) counted.deinit();
+        if (ordered_limit) {
+            try counted.positiveControl(&tmp);
+            try std.testing.expectEqual(@as(usize, 1), counted.requests);
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        }
+        const token = host.custody.reserve().?;
+        const binding = try host.custody.attach(token, &admitted.permit);
+        var slots = [_]ExecutionSlot{.{ .model_preparing = .{ .token = token, .binding = binding } }};
+        var preparation: model_adapter.Preparation = undefined;
+        var retained: ?named_scratch.Owner = null;
+        preparation.page.open(binding);
+        try preparation.init(
+            std.testing.io,
+            root,
+            .{ .used = &host.scratch_used, .limit = if (ordered_limit) 2 * 1024 * 1024 else 1024 * 1024 },
+            protocol.routesAll(.endpoint),
+            null,
+            if (ordered_limit) .{} else .{ .codec_declines = .request_end },
+            &retained,
+        );
+        defer if (preparation.state.active) preparation.cancel();
+        var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+        // The ordered-input case has a working counted loopback transport.
+        // The Text codec-decline control retains its original null reactor.
+        defer if (slots[0] == .provider) {
+            slots[0].provider.transfer.deinit();
+            finishCustodyNow(&host, &slots[0]);
+        };
+        var advances: usize = 0;
+        var scratch_written = false;
+        while (slots[0] != .free) : (advances += 1) {
+            try std.testing.expect(advances < if (ordered_limit) @as(usize, 65536) else 4096);
+            try std.testing.expect(advanceModelPreparation(&host, if (ordered_limit) &counted.reactor else null, &slots, &preparation, &listings, 64, 4));
+            scratch_written = scratch_written or host.scratch_used.load(.acquire) != 0;
+        }
+        try std.testing.expect(advances > 1 and scratch_written);
+        try std.testing.expect(retained == null);
+        try std.testing.expect(!preparation.state.active and !preparation.page.active);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        var observed: store_module.Observed = undefined;
+        if (ordered_limit) {
+            try counted.pump();
+            try std.testing.expectEqual(@as(usize, 1), counted.requests);
+            // A second real request drains the same connection after failure.
+            // Only these two controls may reach the peer, including headers.
+            try counted.positiveControl(&tmp);
+            try std.testing.expectEqual(@as(usize, 2), counted.requests);
+            try std.testing.expectEqual(@as(usize, 2), counted.peer.streams.items.len);
+            try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+            // The command observation preserves its compound input identity.
+            try storage.observeCommand("encode-failure-key", null, &observed);
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(
+                &storage,
+                "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal=?3 AND turn_id=?4 AND resolution_code=?5 AND resolved_at IS NOT NULL AND retry_due_at_ms IS NULL AND attempt_at IS NULL AND request_id IS NULL",
+                .{ binding.operation_id, configured.accepted.session.slice(), binding.attempt_ordinal, binding.turn_id, "local_ordered_input_limit" },
+            ));
+            try std.testing.expect(@import("marks.zig").cause("local_ordered_input_limit", null).key == null);
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+            try std.testing.expect(!storage.isFenced());
+            continue;
+        }
+        try storage.observeCommand("encode-failure-key", null, &observed);
+        const failed = observed.full.observation.kind.message.?.queue.?.state.failed;
+        try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
+        try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
     }
-    try std.testing.expect(advances > 1);
-    try std.testing.expect(!preparation.state.active and !preparation.page.active);
-    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    var observed: store_module.Observed = undefined;
-    try storage.observeCommand("encode-failure-key", null, &observed);
-    const failed = observed.full.observation.kind.message.?.queue.?.state.failed;
-    try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
-    try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
 }
 
 test "Host fences dispose a sealed request before native transfer construction" {
@@ -4382,4 +5422,316 @@ test "aggregate custody reconciles MCP and slots and rejects tokens shared acros
     try custody.detach(model_token);
     try custody.cleanupComplete(model_token);
     try checkSlotCustodyAgreement(&.{}, &custody, &mcp);
+}
+
+// These fixtures enter the real failure owner after transport completion. They
+// intentionally create no network request; transfer scheduling has its own tests.
+const PendingOverflowFixture = struct {
+    tmp: std.testing.TmpDir,
+    storage: store_module.Store,
+    root: [protocol.max_store_bytes]u8,
+    root_length: usize,
+    lease: platform.StoreLease,
+    records: [3]execution.CustodyRecord = @splat(.{}),
+    slots: [3]ExecutionSlot = @splat(.free),
+    sessions: [3]protocol.Bounded(protocol.max_session_bytes) = @splat(.{}),
+    host: Host,
+    work: pages.Mapped(Workspace),
+    entries: [4]output_retention.Entry = @splat(.{}),
+    retention: output_retention.Queue,
+
+    fn init(self: *PendingOverflowFixture) !void {
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &self.storage, &self.tmp, std.testing.io, .{});
+        errdefer self.storage.close() catch unreachable;
+        self.root_length = try self.tmp.dir.realPath(std.testing.io, &self.root);
+        self.lease.paths = .{};
+        try self.lease.paths.scratch.set(self.path());
+        self.host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &self.lease, .store = &self.storage, .custody = execution.CustodyPool.initialize(&self.records) };
+        self.retention = output_retention.Queue.initialize(std.testing.io, self.path(), self.budget(), &self.entries);
+        self.host.retention = &self.retention;
+        self.work = try pages.Mapped(Workspace).map();
+        self.work.value.failure_after = 0;
+        self.work.value.model_admission.init();
+    }
+
+    fn path(self: *PendingOverflowFixture) []const u8 {
+        return self.root[0..self.root_length];
+    }
+
+    fn budget(self: *PendingOverflowFixture) ScratchBudget {
+        return .{ .used = &self.host.scratch_used, .limit = 4 * 1024 * 1024 };
+    }
+
+    fn deinit(self: *PendingOverflowFixture) void {
+        // model_preparing here is an admitted fixture with no request cursor.
+        for (&self.slots) |*slot| if (slot.* == .model_preparing) finishCustodyNow(&self.host, slot);
+        shutdownExecution(&self.host, &self.slots, self.work.value);
+        self.work.unmap();
+        self.retention.cleanupAll();
+        self.storage.close() catch unreachable;
+        self.tmp.cleanup();
+    }
+
+    fn admit(self: *PendingOverflowFixture, index: usize, key: []const u8, compound: bool) !AttemptOwner {
+        const session = try store_module.testing.configureTestSession(&self.storage, key);
+        self.sessions[index] = session;
+        var name: [96]u8 = undefined;
+        try store_module.testingSubmitMessage(&self.storage, &self.tmp, try std.fmt.bufPrint(&name, "{s}-first", .{key}), try std.fmt.bufPrint(&name, "{s}-first", .{key}), session.slice(), "first");
+        if (compound) {
+            const large = try std.testing.allocator.alloc(u8, 200_000);
+            defer std.testing.allocator.free(large);
+            @memset(large, 'x');
+            try store_module.testing.submitTestMessageParts(&self.storage, &self.tmp, try std.fmt.bufPrint(&name, "{s}-middle", .{key}), session.slice(), &.{ .{ .bytes = large }, .{ .bytes = @embedFile("codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } } });
+            try store_module.testingSubmitMessage(&self.storage, &self.tmp, try std.fmt.bufPrint(&name, "{s}-last", .{key}), try std.fmt.bufPrint(&name, "{s}-last", .{key}), session.slice(), "last");
+        }
+        var admission = (try self.storage.admitNextModelAttempt(.{})).?;
+        if (compound) {
+            try self.storage.settleModelAttemptFailure(admission.permit.binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            admission = (try self.storage.admitNextModelAttempt(.{})).?;
+        }
+        const token = self.host.custody.reserve().?;
+        const binding = try attachSlot(&self.host, &self.slots[index], token, &admission.permit);
+        return .{ .token = token, .binding = binding, .purpose = if (compound) .compaction else .assistant_response };
+    }
+
+    fn stage(self: *PendingOverflowFixture, index: usize, owner: AttemptOwner) !void {
+        var retained: ?named_scratch.Owner = null;
+        var capture = try provider.ResponseCapture.init(std.testing.io, self.path(), self.budget(), owner.binding, false, false, &retained, @sizeOf(PendingFailure));
+        errdefer capture.deinit(std.testing.io, self.budget());
+        try capture.seal(std.testing.io, false, 0);
+        var response: provider.SealedResponse = .{ .io = std.testing.io, .file = capture.file, .length = capture.length, .charged = capture.charged, .budget = self.budget(), .workspace = capture.workspace };
+        var request_id: protocol.Bounded(256) = .{};
+        try request_id.set("original-overflow-request");
+        var diagnostic: [37]u8 = @splat('d');
+        const failure: store_module.ModelFailure = .{ .rejected = .{ .code = "provider_context_overflow", .request_id = request_id, .diagnostic = &diagnostic, .report = "original report" } };
+        try std.testing.expectEqual(@as(?bool, true), beginOverflowFailure(&self.host, owner, failure, .context_overflow, &response));
+        @memset(&diagnostic, 'z');
+        moveSlot(&self.host, &self.slots[index], .model_failure_preparing, .{ .owner = owner, .response = response });
+        try std.testing.expectEqualStrings("ddddddddddddddddddddddddddddddddddddd", self.slots[index].model_failure_preparing.response.state(PendingFailure).diagnostic.slice());
+    }
+
+    fn expectReleased(self: *PendingOverflowFixture) !void {
+        try std.testing.expectEqual(@as(u64, 0), self.host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), self.host.custody.occupied());
+        for (self.slots) |slot| try std.testing.expect(slot == .free);
+        try std.testing.expect(!self.storage.isFenced());
+    }
+};
+
+test "pending compound overflow advances round robin while another completion settles" {
+    var phase: []const u8 = "stage pending failures";
+    errdefer std.debug.print("pending fairness phase {s}\n", .{phase});
+    const mapped = try pages.Mapped(PendingOverflowFixture).map();
+    defer mapped.unmap();
+    const fixture = mapped.value;
+    fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
+    try fixture.init();
+    defer fixture.deinit();
+    const first = try fixture.admit(0, "pending-first", true);
+    try fixture.stage(0, first);
+    const second = try fixture.admit(1, "pending-second", true);
+    try fixture.stage(1, second);
+    const work = fixture.work.value;
+    try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, work));
+    try std.testing.expectEqual(@as(usize, 1), work.failure_after);
+    try std.testing.expect(fixture.slots[0].model_failure_preparing.response.state(PendingFailure).floor.stage == .walk);
+    try std.testing.expect(fixture.slots[1].model_failure_preparing.response.state(PendingFailure).floor.stage == .start);
+    try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, work));
+    try std.testing.expectEqual(@as(usize, 2), work.failure_after);
+    try std.testing.expect(fixture.slots[1].model_failure_preparing.response.state(PendingFailure).floor.stage == .walk);
+    // A normal completed provider response is decoded and committed while both
+    // independent compound floor walks still retain their response owners.
+    const normal = try fixture.admit(2, "pending-normal", false);
+    var reactor: provider.Reactor = undefined;
+    try reactor.initForTesting(std.testing.allocator, std.testing.io, .{ .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }), .capacity = 1, .inactivity_seconds = 1, .scratch_path = fixture.path(), .budget = fixture.budget() });
+    defer reactor.deinit();
+    const item = "{\"type\":\"message\",\"id\":\"normal-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"normal completed\"}]}";
+    const body = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"normal-response\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}\n\n";
+    var retained: ?named_scratch.Owner = null;
+    const request_file = try fixture.tmp.dir.createFile(std.testing.io, "normal-request", .{ .read = true });
+    const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
+    var transfer: provider.Transfer = undefined;
+    try transfer.start(&reactor, &request, normal.binding, .{ .response_workspace_bytes = body.len }, &retained);
+    moveSlot(&fixture.host, &fixture.slots[2], .provider, .{ .owner = normal, .transfer = transfer });
+    try fixture.slots[2].provider.transfer.response.file.writePositionalAll(std.testing.io, body, 0);
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fixture.slots[2].provider.transfer.stream, .{ .body = body.len }));
+    try fixture.slots[2].provider.transfer.response.seal(std.testing.io, false, body.len);
+    completeTransfer(&fixture.host, work, &fixture.slots[2], .{ .transfer = &fixture.slots[2].provider.transfer, .outcome = .{ .transport_finished = .{ .disposition = .success, .http_status = 200 } }, .queued_after = 0 });
+    try std.testing.expect(fixture.slots[2] == .free);
+    phase = "normal completion committed its authoritative final output";
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='answer' AND output_item_count=1", .{normal.binding.operation_id}));
+    try std.testing.expectEqual(@as(usize, 2), fixture.host.custody.occupied());
+    var steps: usize = 0;
+    while (fixture.host.custody.occupied() != 0) : (steps += 1) {
+        try std.testing.expect(steps < 512);
+        try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, work));
+    }
+    try std.testing.expect(steps > 4);
+    phase = "retained original failure committed";
+    for ([_]AttemptOwner{ first, second }) |owner| {
+        try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id WHERE o.operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id='original-overflow-request' AND c.digest=?2", .{ owner.binding.operation_id, store_module.testing.Blob{ .bytes = &protocol.contentDigest("ddddddddddddddddddddddddddddddddddddd") } }));
+    }
+    try fixture.expectReleased();
+    try std.testing.expect(fixture.host.launchAllowed());
+}
+
+test "pending compound overflow cancellation fence and shutdown release partial floor owners" {
+    for ([_]enum { stop_cursor, stop_ready, fence, shutdown }{ .stop_cursor, .stop_ready, .fence, .shutdown }) |mode| {
+        const mapped = try pages.Mapped(PendingOverflowFixture).map();
+        defer mapped.unmap();
+        const fixture = mapped.value;
+        fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const owner = try fixture.admit(0, "pending-control", true);
+        try fixture.stage(0, owner);
+        const pending = fixture.slots[0].model_failure_preparing.response.state(PendingFailure);
+        var steps: usize = 0;
+        while (if (mode == .stop_ready) !pending.floor.ready else pending.floor.cursor == null) : (steps += 1) {
+            try std.testing.expect(steps < 256);
+            try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, fixture.work.value));
+        }
+        try std.testing.expect(fixture.host.scratch_used.load(.acquire) >= @sizeOf(PendingFailure));
+        switch (mode) {
+            .stop_cursor, .stop_ready => {
+                var stop: protocol.SessionStopCommand = .{};
+                try stop.key.set("pending-stop");
+                // The admitted Operation determines the Session; no fixture SQL
+                // changes the stop or the retained failure's disposition.
+                try stop.session.set(fixture.sessions[0].slice());
+                try std.testing.expect(fixture.storage.stopSession(&stop, .{}) == .accepted);
+                cancelSupersededTransfers(&fixture.host, &fixture.slots, fixture.work.value);
+            },
+            .fence => {
+                _ = fixture.host.advance(.fenced);
+                try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, fixture.work.value));
+            },
+            .shutdown => shutdownExecution(&fixture.host, &fixture.slots, fixture.work.value),
+        }
+        try fixture.expectReleased();
+        try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND last_failure_code IS NULL", .{owner.binding.operation_id}));
+    }
+}
+
+test "pending compound overflow sent through immediate failure fences without a history scan" {
+    const mapped = try pages.Mapped(PendingOverflowFixture).map();
+    defer mapped.unmap();
+    const fixture = mapped.value;
+    fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
+    try fixture.init();
+    defer fixture.deinit();
+    const owner = try fixture.admit(0, "pending-immediate", true);
+    saveImmediateFailure(&fixture.host, owner.binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow);
+    try std.testing.expect(!fixture.host.launchAllowed());
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND last_failure_code IS NULL AND history_level IS NULL", .{owner.binding.operation_id}));
+    try std.testing.expectEqual(@as(u64, 0), fixture.host.scratch_used.load(.acquire));
+    try std.testing.expect(!fixture.storage.isFenced());
+}
+
+test "pending compound overflow from HTTP and SSE retains original failure through response ownership transfer" {
+    const Transport = enum { http, sse };
+    for ([_]Transport{ .http, .sse }) |transport| {
+        var phase: []const u8 = "prepare real transfer";
+        errdefer std.debug.print("pending {s} overflow phase {s}\n", .{ @tagName(transport), phase });
+        const mapped = try pages.Mapped(PendingOverflowFixture).map();
+        defer mapped.unmap();
+        const fixture = mapped.value;
+        fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const owner = try fixture.admit(0, if (transport == .http) "pending-http" else "pending-sse", true);
+        var reactor: provider.Reactor = undefined;
+        try reactor.initForTesting(std.testing.allocator, std.testing.io, .{
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = fixture.path(),
+            .budget = fixture.budget(),
+            .observation = .{ .names = .{ .request_id = "x-request-id" } },
+        });
+        defer reactor.deinit();
+        // Cleanup must precede the reactor even when an assertion leaves a
+        // prepared transfer in its slot. No reactor launch is needed.
+        defer shutdownExecution(&fixture.host, &fixture.slots, fixture.work.value);
+        const body: []const u8 = if (transport == .http)
+            "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"original HTTP report\"}}"
+        else
+            "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"original SSE report\"}\n\n";
+        const report: []const u8 = if (transport == .http) "context_length_exceeded: original HTTP report" else "context_length_exceeded: original SSE report";
+        const correlation: []const u8 = if (transport == .http) "original-http-request" else "original-sse-request";
+        const status: u16 = if (transport == .http) 400 else 200;
+        var retained: ?named_scratch.Owner = null;
+        const request_file = try fixture.tmp.dir.createFile(std.testing.io, "pending-overflow-request", .{ .read = true });
+        const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
+        var transfer: provider.Transfer = undefined;
+        try transfer.start(&reactor, &request, owner.binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
+        const slot = &fixture.slots[0];
+        moveSlot(&fixture.host, slot, .provider, .{ .owner = owner, .transfer = transfer });
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .head = .{
+            .kind = .final,
+            .status = status,
+            .fields = &.{.{ .name = "x-request-id", .value = correlation }},
+        } }));
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .body = body.len }));
+        try slot.provider.transfer.response.file.writePositionalAll(std.testing.io, body, 0);
+        try slot.provider.transfer.response.seal(std.testing.io, false, body.len);
+        const response_fd = slot.provider.transfer.response.file.handle;
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+        phase = "decode provider failure and hand response to pending owner";
+        completeTransfer(&fixture.host, fixture.work.value, slot, .{
+            .transfer = &slot.provider.transfer,
+            .outcome = .{ .transport_finished = .{ .disposition = if (transport == .http) .permanent_http else .success, .http_status = status } },
+            .queued_after = 0,
+        });
+        try std.testing.expect(slot.* == .model_failure_preparing);
+        try std.testing.expectEqual(response_fd, slot.model_failure_preparing.response.file.handle);
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+        try fixture.host.custody.checkAttached(owner.token, .{ .model = owner.binding });
+        try checkSlotCustodyAgreement(&fixture.slots, &fixture.host.custody, null);
+        const pending = slot.model_failure_preparing.response.state(PendingFailure);
+        const expected_kind: std.meta.Tag(store_module.ModelFailure) = if (transport == .http) .correlated else .rejected;
+        try std.testing.expectEqual(expected_kind, pending.kind);
+        try std.testing.expectEqualStrings("provider_context_overflow", pending.code.slice());
+        try std.testing.expectEqualStrings(correlation, pending.request_id.slice());
+        try std.testing.expectEqualStrings(report, pending.report.slice());
+        var diagnostic: protocol.Bounded(512) = .{};
+        if (transport == .sse) {
+            try std.testing.expectEqual(error.ContextOverflow, fixture.work.value.interpretation.rejected.reason);
+            var expected_buffer: [512]u8 = undefined;
+            try diagnostic.set(fixture.work.value.interpretation.rejected.format(&expected_buffer));
+        }
+        try std.testing.expectEqualStrings(diagnostic.slice(), pending.diagnostic.slice());
+        // Only the response workspace backing the bounded floor walk remains
+        // charged, including after the HTTP capture's local owner returns.
+        try std.testing.expectEqual(@as(u64, @sizeOf(PendingFailure)), fixture.host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), fixture.host.custody.occupied());
+        fixture.work.value.provider_failure.clear();
+        try fixture.work.value.provider_failure.report.set("later unrelated provider report");
+        if (transport == .sse) fixture.work.value.interpretation.rejected.code = "later_unrelated_rejection";
+        phase = "finish bounded floor walk with retained original failure";
+        var steps: usize = 0;
+        while (slot.* == .model_failure_preparing) : (steps += 1) {
+            try std.testing.expect(steps < 512);
+            try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+            try fixture.host.custody.checkAttached(owner.token, .{ .model = owner.binding });
+            const saved = slot.model_failure_preparing.response.state(PendingFailure);
+            try std.testing.expectEqual(expected_kind, saved.kind);
+            try std.testing.expectEqualStrings("provider_context_overflow", saved.code.slice());
+            try std.testing.expectEqualStrings(correlation, saved.request_id.slice());
+            try std.testing.expectEqualStrings(report, saved.report.slice());
+            try std.testing.expectEqualStrings(diagnostic.slice(), saved.diagnostic.slice());
+            try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, fixture.work.value));
+        }
+        try std.testing.expect(steps > 1);
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+        if (transport == .http) {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id=?2 AND resolution_content_id IS NULL", .{ owner.binding.operation_id, correlation }));
+        } else {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id WHERE o.operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id=?2 AND c.digest=?3", .{ owner.binding.operation_id, correlation, store_module.testing.Blob{ .bytes = &protocol.contentDigest(diagnostic.slice()) } }));
+        }
+        try fixture.expectReleased();
+        try std.testing.expect(fixture.host.launchAllowed());
+    }
 }

@@ -11,6 +11,7 @@ import subprocess
 import sys
 from itertools import pairwise
 from pathlib import Path
+from typing import NamedTuple
 
 from git_command import git
 import release_publication as publication
@@ -162,11 +163,44 @@ def refuse_drifted_schema(sha, path, schema, releases):
                          + drifted_row_fix(schema, released, current))
 
 
-def installer(template, version, digests, publish):
-    """Fill the release installer template: its version, archive digests and
-    the shared publication fragment (release/publish.sh) at @PUBLISH@."""
+class DownloadPolicy(NamedTuple):
+    connect_seconds: int
+    download_seconds: int
+    retry_codes: tuple[int, ...]
+
+
+POLICY_FIELDS = ("CONNECT_TIMEOUT_SECONDS", "DOWNLOAD_TIMEOUT_SECONDS", "RETRY_EXIT_CODES")
+
+
+def download_policy(source):
+    """Read the single-line literal release policy declarations from pinned Zig source."""
+    def declaration(name, value_pattern):
+        lines = re.findall(r"^[ \t]*pub[ \t]+const[ \t]+" + name + r"\b[^\n]*$", source, re.MULTILINE)
+        pattern = r"[ \t]*pub[ \t]+const[ \t]+" + name + value_pattern + r"[ \t]*;[ \t]*"
+        if len(lines) != 1 or not (match := re.fullmatch(pattern, lines[0])):
+            raise SystemExit(f"invalid download policy declaration: {name}")
+        return match[1]
+
+    number = r"[0-9]+(?:_[0-9]+)*"
+    scalar = r"[ \t]*:[ \t]*u32[ \t]*=[ \t]*(" + number + r")"
+    connect = int(declaration("connect_timeout_seconds", scalar).replace("_", ""))
+    total = int(declaration("download_timeout_seconds", scalar).replace("_", ""))
+    values = declaration("retry_exit_codes", r"[ \t]*=[ \t]*\[_\]u8[ \t]*\{[ \t]*(" + number + r"(?:[ \t]*,[ \t]*" + number + r")*[ \t]*,?)[ \t]*\}")
+    codes = tuple(int(value.strip().replace("_", "")) for value in values.rstrip(", \t").split(","))
+    if not (0 < connect <= total <= 86400) or any(not 0 < code <= 255 for code in codes) or len(set(codes)) != len(codes):
+        raise SystemExit("invalid download policy values")
+    return DownloadPolicy(connect, total, codes)
+
+
+def installer(template, version, digests, publish, policy):
+    """Fill a release installer from its target version, digests, publisher and policy."""
     if re.search(r"@[A-Z0-9_]+@", publish):
         raise SystemExit("release/publish.sh must not contain placeholders")
+    placeholders = [f"@{field}@" in template for field in POLICY_FIELDS]
+    if any(placeholders) and (not all(placeholders) or policy is None):
+        raise SystemExit("installer template has incomplete download policy placeholders")
+    if not any(placeholders) and policy is not None:
+        raise SystemExit("installer template has no download policy placeholders")
     text, count = PUBLISH.subn(lambda _: publish, template)
     if count != 1:
         raise SystemExit("installer template must contain @PUBLISH@ exactly once")
@@ -176,6 +210,9 @@ def installer(template, version, digests, publish):
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise SystemExit(f"{platform} digest is not SHA-256 hex")
         text = text.replace(f"@SHA256_{platform.upper().replace('-', '_')}@", digest)
+    if policy is not None:
+        for field, value in zip(POLICY_FIELDS, (policy.connect_seconds, policy.download_seconds, "|".join(map(str, policy.retry_codes)))):
+            text = text.replace(f"@{field}@", str(value))
     if re.search(r"@[A-Z0-9_]+@", text):
         raise SystemExit("installer template has an unfilled placeholder")
     return text
@@ -221,7 +258,9 @@ def main():
     root = args.source_root
     template = (root / "release/install.sh").read_text()
     fragment = (root / "release/publish.sh").read_text()
-    args.output.write_text(installer(template, args.version, digests, fragment))
+    policy = download_policy((root / "src/download_policy.zig").read_text()) if any(
+        f"@{field}@" in template for field in POLICY_FIELDS) else None
+    args.output.write_text(installer(template, args.version, digests, fragment, policy))
     args.output.chmod(0o755)
 
 

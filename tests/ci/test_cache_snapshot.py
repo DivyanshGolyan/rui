@@ -12,6 +12,28 @@ from unittest.mock import patch
 import cache_snapshot as snapshot
 
 
+def write_executable(directory, name, *, companion=True):
+    directory.mkdir(parents=True)
+    executable = directory / name
+    # Independent ELF64 ABI fixture, with one complete PT_LOAD header.
+    executable.write_bytes(struct.pack("<16sHHIQQQIHHHHHH",
+        b"\x7fELF\x02\x01\x01" + b"\0" * 9, 2, 62, 1, 0x400078,
+        64, 0, 0, 64, 56, 1, 0, 0, 0)
+        + struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 121, 121, 4096)
+        + b"\xc3")
+    executable.chmod(0o755)
+    if companion:
+        (directory / (name + "_zcu.o")).write_bytes(b"object")
+    return directory
+
+
+def decode_manifests(outputs, command):
+    """Stand-in for zig cache-cat over the fixture's own manifest-to-output map."""
+    return "\n".join('.{\n    .input_hash = "' + Path(path).name + '",\n'
+                     '    .files = .{},\n    .discovered_hash = "' + outputs[path] + '",\n}'
+                     for path in command[2:])
+
+
 class ManifestTest(unittest.TestCase):
     def record(self, path, prefix=4):
         return snapshot.HEADER.pack(17, 23, 31, b"a" * 16, prefix << 2) + os.fsencode(path) + b"\0"
@@ -81,24 +103,10 @@ class SnapshotTest(unittest.TestCase):
 
     def decode(self, command, **kwargs):
         self.assertEqual(command[:2], ["zig", "cache-cat"])
-        return "\n".join('.{\n    .input_hash = "' + Path(path).name + '",\n'
-                         '    .files = .{},\n    .discovered_hash = "' + self.outputs[path] + '",\n}'
-                         for path in command[2:])
+        return decode_manifests(self.outputs, command)
 
     def executable(self, digest, name="rui-debug-check", *, root=None, companion=True):
-        directory = (root or self.roots[0]) / "o" / digest
-        directory.mkdir()
-        executable = directory / name
-        # Independent ELF64 ABI fixture, with one complete PT_LOAD header.
-        executable.write_bytes(struct.pack("<16sHHIQQQIHHHHHH",
-            b"\x7fELF\x02\x01\x01" + b"\0" * 9, 2, 62, 1, 0x400078,
-            64, 0, 0, 64, 56, 1, 0, 0, 0)
-            + struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 121, 121, 4096)
-            + b"\xc3")
-        executable.chmod(0o755)
-        if companion:
-            (directory / (name + "_zcu.o")).write_bytes(b"object")
-        return directory
+        return write_executable((root or self.roots[0]) / "o" / digest, name, companion=companion)
 
     def audit(self):
         return snapshot.audit(*self.roots)
@@ -352,6 +360,99 @@ class SnapshotTest(unittest.TestCase):
                 self.audit()
             path.unlink()
 
+    def test_empty_manifest_placeholders_are_retained_without_decoder_roots(self):
+        placeholders = []
+        for root in self.roots:
+            path = root / "h" / ("c" * 32)
+            path.touch()
+            placeholders.append(path)
+        # The official decoder must never give an empty placeholder an owner.
+        # The mock has no output mapping for these paths, so decoding fails.
+        report = self.audit()
+        self.assertEqual(report["unfinalized_manifests"], list(map(str, placeholders)))
+        self.assertEqual(report["manifests"], 1)
+        decoded = [path for call in self.mock_cat.call_args_list for path in call.args[0][2:]]
+        self.assertEqual(decoded, [str(self.roots[0] / "h" / ("a" * 32))])
+        self.assertTrue(all(path.read_bytes() == b"" for path in placeholders))
+
+    def test_empty_placeholder_cannot_prove_cli_ownership_or_current_provenance(self):
+        prefix = self.current_prefix()
+        obsolete = self.executable("c" * 32)
+        with (obsolete / "rui-debug-check").open("ab") as stream:
+            stream.write(b"obsolete revision")
+        placeholder = self.roots[0] / "h" / ("d" * 32)
+        placeholder.touch()
+        report = snapshot.audit(*self.roots, prefixes=[prefix])
+        self.assertIn(str(obsolete), report["unknown"])
+        self.assertEqual(report["removable"], [])
+        active_owner = self.roots[0] / "h" / f"{180:032x}"
+        active_owner.write_bytes(b"")
+        with self.assertRaisesRegex(snapshot.SnapshotError, "current CLI is absent from manifest roots"):
+            snapshot.audit(*self.roots, prefixes=[prefix])
+
+    def test_colliding_complete_and_empty_manifests_do_not_fabricate_local_owners(self):
+        prefix = self.current_prefix()
+        for index, local_complete in enumerate((False, True), 210):
+            digest = f"{index:032x}"
+            seed = f"{index + 100:032x}"
+            directory = self.executable(digest)
+            with (directory / "rui-debug-check").open("ab") as stream:
+                stream.write(b"obsolete revision")
+            complete_root, empty_root = self.roots if local_complete else self.roots[::-1]
+            self.add_manifest(complete_root, seed, digest)
+            empty = empty_root / "h" / seed
+            empty.touch()
+            report = snapshot.compact(*self.roots, prefixes=[prefix])
+            self.assertEqual(empty.read_bytes(), b"")
+            self.assertEqual(directory.exists(), not local_complete)
+            if local_complete:
+                self.assertIn(str(directory), [item["path"] for item in report["removable"]])
+                self.assertFalse((complete_root / "h" / seed).exists())
+            else:
+                self.assertIn(str(directory), report["unknown"])
+                self.assertTrue((complete_root / "h" / seed).exists())
+
+    def test_empty_unknown_manifest_entries_still_block_the_plan(self):
+        for kind in ("symlink", "directory", "nonhex"):
+            with self.subTest(kind=kind):
+                path = self.roots[1] / "h" / ("unknown" if kind == "nonhex" else "d" * 32)
+                if kind == "symlink":
+                    target = self.root / "empty"
+                    target.touch()
+                    path.symlink_to(target)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    path.touch()
+                with self.assertRaises(snapshot.SnapshotError):
+                    self.audit()
+                path.rmdir() if path.is_dir() else path.unlink()
+
+    def test_all_empty_manifests_still_skip_without_a_complete_inventory(self):
+        (self.roots[0] / "h" / ("a" * 32)).write_bytes(b"")
+        with self.assertRaisesRegex(snapshot.SnapshotError, "no complete manifests"):
+            self.audit()
+        self.mock_cat.assert_not_called()
+
+    def test_empty_placeholder_mutation_during_decode_blocks_the_plan(self):
+        for kind in ("filled", "finalized", "removed", "new"):
+            with self.subTest(kind=kind):
+                path = self.roots[1] / "h" / ("d" * 32)
+                if kind != "new":
+                    path.touch()
+                def mutate(command, **kwargs):
+                    decoded = self.decode(command, **kwargs)
+                    if kind == "removed":
+                        path.unlink()
+                    else:
+                        path.write_bytes(b"\0" if kind == "finalized" else b"" if kind == "new" else b"changed")
+                    return decoded
+                self.mock_cat.side_effect = mutate
+                with self.assertRaises(snapshot.SnapshotError):
+                    self.audit()
+                if path.exists():
+                    path.unlink()
+
     def test_whole_output_namespace_reference_blocks_a_plan(self):
         self.add_manifest(self.roots[0], "d" * 32, "e" * 32, [".zig-cache/o"])
         with self.assertRaises(snapshot.SnapshotError):
@@ -409,8 +510,9 @@ class PublicationTest(unittest.TestCase):
         self.env = dict(GITHUB_REF="refs/heads/main", GITHUB_EVENT_NAME="workflow_dispatch",
                         RUNNER_OS="Linux", RUNNER_ARCH="X64", SETUP_OUTCOME="success",
                         WORK_OUTCOME="success", RUNNER_TEMP=str(self.root), GITHUB_RUN_ID="42",
-                        GITHUB_RUN_ATTEMPT="2", RUI_CACHE_BUILD_KEY="rui-build-v3-Linux-X64-0.17.1-"
+                        GITHUB_RUN_ATTEMPT="2", RUI_CACHE_BUILD_KEY="rui-build-v4-Linux-X64-0.17.1-"
                         + "a" * 64 + "-compiled." + "b" * 64 + "-" + "c" * 64)
+        self.outputs = {}
         self.inputs = dict(format=5, pr_ci=False, part="rest", targets=["check-full"], tree="tree",
                            system="Linux", machine="x86_64", compiler="compiler")
         self.receipt = dict(inputs=self.inputs, source_sha="current-head", run_id=42, run_attempt=2)
@@ -420,15 +522,69 @@ class PublicationTest(unittest.TestCase):
         import build_artifact
         patches = (patch.object(build_artifact, "identity", return_value=self.inputs),
                    patch.object(build_artifact, "git", return_value="current-head"),
-                   patch.object(snapshot.subprocess, "check_output", return_value="0.17.1\n"))
+                   patch.object(snapshot.subprocess, "check_output", side_effect=self.zig))
         for replacement in patches:
             replacement.start()
             self.addCleanup(replacement.stop)
 
+    def zig(self, command, **kwargs):
+        if command == ["zig", "version"]:
+            return "0.17.1\n"
+        self.assertEqual(command[:2], ["zig", "cache-cat"])
+        return decode_manifests(self.outputs, command)
+
     def write(self):
         self.path.write_text(json.dumps(self.receipt))
 
+    def manifest(self, root, seed, output, atime, paths=()):
+        path = root / "h" / seed
+        path.write_bytes(b"".join(ManifestTest().record(value) for value in paths) + b"\0")
+        os.utime(path, ns=(atime, 0))
+        self.outputs[str(path)] = output
+        return path
+
+    def publisher_cache(self, name, read):
+        """One restored-and-compiled cache: (local, global, expected removals by rule)."""
+        unread = snapshot.UNREAD_NS
+        local, global_cache = self.root / name / "local", self.root / name / "global"
+        for root in (local, global_cache):
+            (root / "h").mkdir(parents=True)
+            (root / "o").mkdir()
+        def output(index, executable, **kwargs):
+            return write_executable(local / "o" / f"{index:032x}", executable, **kwargs)
+        old_test = output(1, "test")
+        old_cli = output(2, "rui-debug-check")
+        with (old_cli / "rui-debug-check").open("ab") as out:
+            out.write(b"old revision")
+        library = output(3, "libghostty-vt.so.1.0.0", companion=False)
+        (library / "ghostty-vt_zcu.o").write_bytes(b"object")
+        (library / "libghostty-vt.so.1").symlink_to("libghostty-vt.so.1.0.0")
+        (library / "libghostty-vt.so").symlink_to("libghostty-vt.so.1")
+        read_tool, shared, global_owned = output(4, "translate-c"), output(5, "configurer"), output(6, "generate-def")
+        referenced, orphan = output(7, "parser-fuzz"), output(8, "uucode_generate")
+        c_object = local / "o" / f"{9:032x}"
+        c_object.mkdir()
+        (c_object / "sqlite3.o").write_bytes(b"\x7fELF relocatable")
+        owners = {}
+        for seed, directory, atime in ((21, old_test, unread), (22, old_cli, unread), (23, library, unread),
+                                       (24, read_tool, read), (25, shared, unread), (26, shared, read),
+                                       (27, global_owned, unread), (28, referenced, unread), (29, c_object, unread)):
+            owners[directory] = self.manifest(local, f"{seed:032x}", directory.name, atime)
+        self.manifest(global_cache, f"{30:032x}", global_owned.name, read)
+        self.manifest(local, f"{31:032x}", "f" * 32, read, [str(referenced / "parser-fuzz")])
+        prefix = self.root / "rui-compiled-build/bin"
+        prefix.mkdir(parents=True, exist_ok=True)
+        current = []
+        for index, product in enumerate(("rui-debug-check", "rui-release-safe-check", "rui-release-small-check"), 10):
+            directory = output(index, product)
+            owners[directory] = self.manifest(local, f"{index + 30:032x}", directory.name, read)
+            shutil.copy2(directory / product, prefix / product)
+            current.append(directory)
+        kept = [read_tool, shared, global_owned, referenced, orphan, c_object, *current]
+        return local, global_cache, owners, dict(read=[old_test, old_cli, library], cli=[old_cli]), kept
+
     def test_current_full_llvm_producer_can_prepare_a_save(self):
+        """CI-30: a qualified main producer publishes only the linked outputs its build read, failing closed."""
         for event in ("push", "workflow_dispatch", "workflow_call", "schedule"):
             for part in ("all", "rest"):
                 for gate in ("check", "check-full"):
@@ -437,6 +593,126 @@ class PublicationTest(unittest.TestCase):
                         self.inputs.update(part=part, targets=[gate])
                         self.write()
                         self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
+        unread = snapshot.UNREAD_NS
+        # The probe writes a mark only when a read moved the access time forward.
+        for after, expected in ((unread + 1, True), (unread + 10**18, True), (unread, False),
+                                (unread - 1, False), (0, False)):
+            with self.subTest(probe_after=after):
+                self.assertIs(snapshot.reads_move_atime(unread, after), expected)
+        # Liveness is only the manifests still at the mark, and only with a usable mark.
+        atimes = {"a" * 32: unread, "b" * 32: unread + 1, "c" * 32: unread - 1, "d" * 32: 0}
+        for record in (None, {}, {"atime": False}, {"atime": None}, {"atime": 1}, {"atime": "true"},
+                       [], "scalar", 42):
+            with self.subTest(mark_record=record):
+                self.assertIsNone(snapshot.unread_names(record, atimes))
+        usable = {"atime": True, "marked": 4}
+        self.assertEqual(snapshot.unread_names(usable, atimes), {"a" * 32},
+                         "advanced, backwards and zeroed access times all count as read")
+        self.assertEqual(snapshot.unread_names(usable, {}), set())
+        # The real mark on this filesystem follows the probe's decision.
+        probe = self.root / "probe"
+        (probe / "h").mkdir(parents=True)
+        self.manifest(probe, "a" * 32, "b" * 32, unread + 1)
+        record = self.root / "probe-mark.json"
+        marked = snapshot.mark(probe, record)
+        self.assertFalse((probe / "rui-atime-probe").exists())
+        self.assertEqual(record.exists(), marked["atime"])
+        self.assertEqual(marked["marked"], 1 if marked["atime"] else 0)
+        if marked["atime"]:
+            self.assertEqual(snapshot.unread_manifests(probe, record), {"a" * 32})
+            (probe / "h" / ("a" * 32)).read_bytes()
+            self.assertEqual(snapshot.unread_manifests(probe, record), set())
+        else:
+            self.assertIsNone(snapshot.unread_manifests(probe, record))
+        # Only linked outputs are eligible: executables or libraries, unit objects, in-directory aliases.
+        classes = self.root / "classes"
+        for index, (names, expected) in enumerate(((("test", "test_zcu.o"), True),
+                                                   (("sqlite3.o",), False), (("libcrypto.a",), False),
+                                                   (("tables.zig",), False), (("test_zcu.o",), False))):
+            with self.subTest(linked=names):
+                directory = classes / f"{index:032x}"
+                if names[0] == "test":
+                    write_executable(directory, "test")
+                else:
+                    directory.mkdir(parents=True)
+                    (directory / names[0]).write_bytes(b"data")
+                self.assertIs(snapshot.linked_output(directory), expected)
+        escaping = write_executable(classes / ("e" * 32), "test")
+        (escaping / "alias").symlink_to("../" + "0" * 32 + "/test")
+        self.assertFalse(snapshot.linked_output(escaping), "aliases stay inside the directory")
+        # Publication: a usable mark removes every unread linked output; without one, only old CLIs.
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for state in ("usable", "missing", "false"):
+            with self.subTest(mark=state):
+                local, global_cache, owners, removed, kept = self.publisher_cache(state, unread + 1)
+                mark = self.root / snapshot.MARK
+                mark.unlink(missing_ok=True)
+                if state != "missing":
+                    mark.write_text(json.dumps(dict(atime=state == "usable", marked=13)))
+                report = snapshot.publication_report(self.env, key, local, global_cache)
+                expected = removed["read" if state == "usable" else "cli"]
+                self.assertEqual(report["key"], key)
+                self.assertEqual([item["path"] for item in report["removable"]], [str(path) for path in expected])
+                self.assertEqual(report["unread_manifests"], 7 if state == "usable" else None)
+                for directory in expected:
+                    self.assertFalse(directory.exists())
+                    self.assertFalse(owners[directory].exists(), "owners go with their outputs")
+                for directory in kept:
+                    self.assertTrue(directory.exists(), directory)
+        # A mark that missed the producer's current output declines publication and removes nothing.
+        local, global_cache, owners, removed, kept = self.publisher_cache("missed", unread + 1)
+        mark.write_text(json.dumps(dict(atime=True, marked=13)))
+        os.utime(owners[kept[-3]], ns=(unread, 0))
+        with self.assertRaisesRegex(snapshot.SnapshotError, "mark missed"):
+            snapshot.publication_report(self.env, key, local, global_cache)
+        self.assertTrue(all(directory.exists() for directory in removed["read"]))
+        with self.assertRaisesRegex(snapshot.SnapshotError, "current producer outputs"):
+            snapshot.audit(local, global_cache, unread=set())
+
+    def test_complete_partial_by_work_outcome_uses_one_compaction_policy(self):
+        original = self.env["RUI_CACHE_BUILD_KEY"]
+        for partial in (False, True):
+            for outcome in ("success", "failure", "cancelled"):
+                for successful in ("true", "false"):
+                    with self.subTest(partial=partial, outcome=outcome, job_success=successful):
+                        env = dict(self.env, WORK_OUTCOME=outcome, JOB_SUCCESS=successful)
+                        key = original + ("-partial-42-2" if partial else "")
+                        with patch.object(snapshot, "compact", return_value=dict(
+                                removable=[], removable_bytes=0, invalidated_manifests=0)) as compact:
+                            if not partial and outcome == "success":
+                                report = snapshot.publication_report(env, key, "local", "global")
+                                self.assertEqual(report["key"], original)
+                                self.assertEqual(report["invalidated_manifests"], 0)
+                                compact.assert_called_once_with("local", "global", prefixes=[
+                                    self.root / "rui-compiled-build/bin"], unread=None)
+                            else:
+                                with self.assertRaises(snapshot.SnapshotError):
+                                    snapshot.publication_report(env, key, "local", "global")
+                                compact.assert_not_called()
+
+    def test_target_key_cannot_bypass_compaction_with_missing_or_mismatched_environment(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for changes in ({"RUI_CACHE_BUILD_KEY": ""}, {"RUNNER_OS": "macOS"},
+                        {"RUNNER_ARCH": "ARM64"}, {"SETUP_OUTCOME": "failure"}):
+            with self.subTest(changes=changes), patch.object(snapshot, "compact") as compact:
+                with self.assertRaises(snapshot.SnapshotError):
+                    snapshot.publication_report(dict(self.env, **changes), key, "local", "global")
+                compact.assert_not_called()
+        with patch.object(snapshot, "compact", side_effect=snapshot.SnapshotError("audit failed")):
+            with self.assertRaisesRegex(snapshot.SnapshotError, "audit failed"):
+                snapshot.publication_report(self.env, key, "local", "global")
+
+    def test_other_platform_and_partition_candidates_keep_their_partial_policy(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for other in (key.replace("Linux-X64", "macOS-ARM64"),
+                      key.replace("-compiled.", "-compiled-unit."),
+                      key.replace("-compiled.", "-baseline."),
+                      key.replace("-compiled.", "-typecheck.")):
+            for partial in ("", "-partial-42-2"):
+                with self.subTest(key=other, partial=partial), patch.object(snapshot, "compact") as compact:
+                    self.assertEqual(snapshot.publication_report({}, other + partial, "local", "global"),
+                                     dict(key=other + partial))
+                    compact.assert_not_called()
 
     def test_nonpublishers_failed_work_partitions_and_exact_hits_do_not_compact(self):
         cases = (("GITHUB_REF", "refs/pull/1/merge"), ("GITHUB_REF", "refs/heads/feature"),
@@ -447,7 +723,8 @@ class PublicationTest(unittest.TestCase):
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("-compiled.", "-compiled-unit.")),
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("-compiled.", "-baseline.")),
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"] + "-partial-42-1"),
-                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v3", "v2")))
+                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v4", "v3")),
+                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v4", "v2")))
         for field, value in cases:
             with self.subTest(field=field, value=value):
                 env = dict(self.env, **{field: value})

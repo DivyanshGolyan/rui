@@ -1,3 +1,4 @@
+from terminal_screen import RULE_GLYPHS
 from contextlib import contextmanager
 import json
 import os
@@ -35,13 +36,12 @@ def rows_by_mark():
                  **{name: (answer(name), held) for name, held in holds.items()}}
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
-            frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == " + New Session", frame
+            screen.contains("+ New chat")
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
             send(w, failing, "fail")
-            screen.wait(lambda f: "? Asking" in f and "× Failing" in f, "approval and failure rows")
+            screen.wait(lambda f: "● Asking" in f and "× Failing" in f, "approval and failure rows")
             for name in ("w1", "w2"):
                 send(w, w.session("--label", name), name)
             screen.wait(lambda f: "w1" in f and "w2" in f, "working rows")
@@ -53,9 +53,9 @@ def rows_by_mark():
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             for line in lines:
-                if not line.startswith("   Settings"):
+                if not line.startswith("     Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
-            assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
+            assert screen.style("● Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
             screen.wait(lambda f: "   w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():
@@ -66,25 +66,27 @@ def rows_by_mark():
 
 def pinned_settings():
     with world("drawing-settings") as w, w.overview(columns=46, rows=16) as screen:
-        frame = screen.contains("Settings")
-        rows = frame.split("\n")
+        frame = screen.wait(lambda f: any(re.fullmatch(r"\s*Settings\s+\d+(?:\.\d+)? (?:MB|GB)\s*", line)
+                            for line in f.splitlines()), "Settings and memory on the same row")
+        rows = frame.splitlines()
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
-        assert settings == len(rows) - 3, frame
-        assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
-        assert re.search(r"0\.\d+\.\d+|unreleased", rows[settings + 1]), frame
-        assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
+        assert settings == len(rows) - 1, frame
+        assert set(rows[settings - 1].strip()) <= set(RULE_GLYPHS) and rows[settings - 1].strip(), frame
+        assert not re.search(r"0\.\d+\.\d+|unreleased", frame), frame
+        assert "rui " not in rows[settings] and "tools " not in rows[settings], frame
         assert "enter open" not in frame, frame
-        assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
+        assert "What shall we work on?" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
         screen.keys(b"/nope\x1b[200~pasted task\x1b[201~\x1b[F\r")
         screen.contains("Notifications")
         screen.keys(b"\x1b")
         frame = screen.wait(lambda f: "Settings" in f and "Notifications" not in f, "return to list")
-        assert frame.split("\n")[settings].lstrip().startswith("Settings"), frame
-        assert "Type a task" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
+        assert frame.splitlines()[settings].lstrip().startswith("Settings"), frame
+        assert "What shall we work on?" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
         assert "Unknown command" not in frame and requests(w) == before, frame
         assert json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"] == [], frame
-    print("overview drawing: Settings sits above memory/version and one Footer; text and paste create no draft or request", flush=True)
+    print("overview drawing: Settings shares the bottom row with memory; version stays hidden; "
+          "text and paste create no draft or request", flush=True)
 
 
 def requests(w):
@@ -123,15 +125,15 @@ def unconfirmed_status():
             key = saved.pop()
             screen.keys(b"\x1b")
             line = f"! Not confirmed · rui request recover {key}"
-            frame = screen.wait(lambda f: line in f and "Settings" in f and "Type a task" not in f, line)
+            frame = screen.wait(lambda f: line in f and "Settings" in f and "What shall we work on?" not in f, line)
             rows = screen.rows()
             status = next(at for at, row in enumerate(rows) if line in row)
             settings = next(at for at, row in enumerate(rows) if "Settings" in row)
-            assert status > settings and "Type a task" not in frame, frame
+            assert status < settings - 1 and "What shall we work on?" not in frame, frame
             assert rows[status].strip() == line, frame
             assert "enter open" not in frame, frame
             assert screen.style("! Not confirmed").fg is not None, frame
-    print("overview counts: an unconfirmed send shows on its own row above the Footer with "
+    print("overview counts: an unconfirmed send shows above the Settings divider with "
           "rui request recover and its saved key", flush=True)
 
 

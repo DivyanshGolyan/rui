@@ -181,7 +181,7 @@ test "Option session navigation decodes exact Alt arrows without losing modifier
     }
 }
 
-test "Option question decodes legacy and extended terminal reports" {
+test "SUI-109 Option question decodes legacy and extended terminal reports" {
     const Events = @import("testing/app_events.zig").Events;
     for ([_][]const u8{ "\x1b?", "\x1b[63;3u", "\x1b[27;3;63~", "\x1b[47;4u" }) |bytes| {
         var events: Events = .init(bytes);

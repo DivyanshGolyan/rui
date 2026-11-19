@@ -112,24 +112,34 @@ test "compaction policy never infers a spec from the model catalog" {
     try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }
 
-test "reasoning effort checks listed models and passes grammar values for unlisted models" {
+test "CM-11 reasoning effort catalog admission" {
+    const efforts = std.enums.values(ReasoningEffort);
+    for (0..(@as(usize, 1) << efforts.len)) |mask| {
+        var row: catalog.Entry = .{ .id = "selected-model", .context_window = null, .efforts = .empty, .openai_listed = true };
+        for (efforts, 0..) |effort, index| if (mask & (@as(usize, 1) << @intCast(index)) != 0) {
+            row.efforts.insert(effort);
+        };
+        const facts = &[_]catalog.Entry{row};
+        try std.testing.expectEqual(mask == 0, supportsReasoningEffort(facts, row.id, null));
+        for (efforts, 0..) |effort, index| {
+            try std.testing.expectEqual(mask & (@as(usize, 1) << @intCast(index)) != 0, supportsReasoningEffort(facts, row.id, effort));
+            try std.testing.expect(supportsReasoningEffort(facts, "selected-model-suffix", effort));
+        }
+        try std.testing.expect(supportsReasoningEffort(facts, "selected-model-suffix", null));
+    }
+
     for (catalog.shipped) |row| {
-        try std.testing.expect(supportsModel(catalog.shipped, row.id));
         try std.testing.expectEqual(row.efforts.count() == 0, supportsReasoningEffort(catalog.shipped, row.id, null));
-        try std.testing.expectEqual(@as(u64, row.context_window orelse product_defaults.unlisted_context_window), contextWindow(catalog.shipped, row.id));
         inline for (std.meta.tags(ReasoningEffort)) |effort|
             try std.testing.expectEqual(row.efforts.contains(effort), supportsReasoningEffort(catalog.shipped, row.id, effort));
     }
-    try std.testing.expectEqual(@as(u64, 1050000), contextWindow(catalog.shipped, "gpt-6.1-sol"));
     for ([_]ReasoningEffort{ .low, .medium, .high, .xhigh, .max }) |effort|
         try std.testing.expect(supportsReasoningEffort(catalog.shipped, "gpt-6.1-sol", effort));
     try std.testing.expect(!supportsReasoningEffort(catalog.shipped, "gpt-6.1-sol", .none));
     try std.testing.expect(supportsReasoningEffort(catalog.shipped, "gpt-6.1-terra", .none));
     try std.testing.expect(!supportsReasoningEffort(catalog.shipped, "gpt-5.5", .max));
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |unknown| {
-        try std.testing.expect(!supportsModel(catalog.shipped, unknown));
         try std.testing.expect(supportsReasoningEffort(catalog.shipped, unknown, null));
-        try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(catalog.shipped, unknown));
         inline for (std.meta.tags(ReasoningEffort)) |effort|
             try std.testing.expect(supportsReasoningEffort(catalog.shipped, unknown, effort));
     }

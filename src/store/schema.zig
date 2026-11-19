@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
+const session_id = @import("../session_id.zig");
 const store_path = @import("../store_path.zig");
 const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
@@ -16,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 80;
+pub const schema_version: u32 = 84;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -59,6 +60,10 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
     .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
+    .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
+    .{ .schema_version = 82, .digest = 0x367836567791809e },
+    .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
+    .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -737,6 +742,97 @@ pub const migrations = [_]Migration{
             "UPDATE session SET creator_ref=parent_ref",
         },
     },
+    .{
+        .from = 80,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_81",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_81",
+            "DROP TABLE core_command_before_81",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE action_stop RENAME TO action_stop_before_81",
+            "CREATE TABLE action_stop(\n stop_key TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(stop_key AS BLOB))<=130),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_command_key TEXT UNIQUE REFERENCES core_command(command_key),\n target_action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n CHECK(source_action_id<>target_action_id),\n CHECK((source_action_id IS NULL)<>(source_command_key IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) SELECT 'a/'||source_action_id,source_action_id,target_action_id FROM action_stop_before_81",
+            "DROP TABLE action_stop_before_81",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+            "CREATE TABLE action_stop_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n resolution_position INTEGER CHECK(resolution_position>0)\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "SET @rui_action_stop_kind_ddl=NULL",
+            "SET @rui_action_stop_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 9)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')",
+            "PREPARE rui_action_stop_kind FROM @rui_action_stop_kind_ddl",
+            "EXECUTE rui_action_stop_kind",
+            "DEALLOCATE PREPARE rui_action_stop_kind",
+            "SET @rui_action_stop_kind_ddl=NULL",
+            "ALTER TABLE action_stop RENAME TO action_stop_before_81",
+            "CREATE TABLE action_stop(\n stop_key VARCHAR(130) NOT NULL,\n source_action_id BIGINT,\n source_command_key VARCHAR(128),\n target_action_id BIGINT NOT NULL,\n PRIMARY KEY(stop_key),\n UNIQUE(source_action_id),\n UNIQUE(source_command_key),\n FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id),\n FOREIGN KEY(source_command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(target_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(stop_key)<=130),\n CHECK(source_action_id<>target_action_id),\n CHECK((source_action_id IS NULL)<>(source_command_key IS NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) SELECT CONCAT('a/',source_action_id),source_action_id,target_action_id FROM action_stop_before_81",
+            "DROP TABLE action_stop_before_81",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+            "CREATE TABLE action_stop_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n resolution_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(resolution_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    .{
+        .from = 81,
+        .sqlite = &.{
+            "ALTER TABLE message_admission RENAME TO message_admission_before_82",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,CASE WHEN sender_session_ref IS NOT NULL THEN 2 WHEN source_action_id IS NOT NULL THEN 3 ELSE 1 END FROM message_admission_before_82",
+            "DROP TABLE message_admission_before_82",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE message_admission ADD COLUMN source_kind BIGINT AFTER source_action_id",
+            "UPDATE message_admission SET source_kind=CASE WHEN sender_session_ref IS NOT NULL THEN 2 WHEN source_action_id IS NOT NULL THEN 3 ELSE 1 END",
+            "ALTER TABLE message_admission MODIFY COLUMN source_kind BIGINT NOT NULL, ADD CHECK(source_kind BETWEEN 1 AND 5), ADD CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN source_kind=1 THEN session_ref END) STORED",
+        },
+    },
+    .{
+        .from = 82,
+        .sqlite = &.{
+            "CREATE TABLE action_value(\n action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>0),\n handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND (handle NOT GLOB '*[^0-9a-f]*' AND length(handle)=length(CAST(handle AS BLOB)))),\n publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n published_at INTEGER NOT NULL CHECK(published_at>0),\n PRIMARY KEY(action_id,ordinal),\n UNIQUE(handle,publication_key)\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_83",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n UNIQUE(admission_id,source_kind),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind FROM message_admission_before_83",
+            "DROP TABLE message_admission_before_83",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "ALTER TABLE conversation_entry RENAME TO conversation_entry_before_83",
+            "CREATE TABLE conversation_entry(\n session_ref TEXT NOT NULL,\n entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),\n session_position INTEGER NOT NULL CHECK(session_position>0),\n entry_kind INTEGER NOT NULL CHECK(entry_kind BETWEEN 1 AND 4),\n turn_id INTEGER REFERENCES turn(turn_id),\n source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n source_kind INTEGER,\n source_revision INTEGER,\n source_catalog_position INTEGER,\n source_skill_admission_id INTEGER,\n source_skill_position INTEGER,\n source_operation_id INTEGER REFERENCES model_operation(operation_id),\n source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n recorded_at INTEGER NOT NULL CHECK(recorded_at>0),\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n UNIQUE(source_skill_admission_id,source_skill_position),\n FOREIGN KEY(source_admission_id,source_kind) REFERENCES message_admission(admission_id,source_kind),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_skill_admission_id,source_skill_position) REFERENCES message_skill(admission_id,position),\n FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n CHECK((entry_kind=1)=(source_kind IS NOT NULL)),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((source_skill_admission_id IS NULL)=(source_skill_position IS NULL)),\n CHECK((entry_kind=4)=(source_skill_position IS NOT NULL)),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR (entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,m.source_kind,e.source_revision,e.source_catalog_position,e.source_skill_admission_id,e.source_skill_position,e.source_operation_id,e.source_item_ordinal,e.content_id,e.recorded_at FROM conversation_entry_before_83 e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id",
+            "DROP TABLE conversation_entry_before_83",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+            "CREATE INDEX conversation_entry_activity_user ON conversation_entry(session_ref,entry_kind,source_kind,session_position)",
+            "CREATE INDEX conversation_entry_activity_assistant ON conversation_entry(session_ref,entry_kind,session_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
+        .mysql = &.{
+            "CREATE TABLE action_value(action_id BIGINT NOT NULL, ordinal BIGINT NOT NULL, handle VARCHAR(32) NOT NULL, publication_key VARCHAR(128) NOT NULL, content_id BIGINT NOT NULL, admission_id BIGINT, published_at BIGINT NOT NULL, PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key), UNIQUE(admission_id), FOREIGN KEY(action_id) REFERENCES action_operation(action_id), FOREIGN KEY(content_id) REFERENCES content(content_id), FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id), CHECK(ordinal>0), CHECK(OCTET_LENGTH(handle)=32 AND NOT REGEXP_LIKE(handle,'[^0-9a-f]','c')), CHECK(OCTET_LENGTH(publication_key) BETWEEN 1 AND 128), CHECK(published_at>0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "ALTER TABLE message_admission ADD UNIQUE(admission_id,source_kind)",
+            "ALTER TABLE conversation_entry ADD COLUMN source_kind BIGINT NULL AFTER source_admission_id",
+            "UPDATE conversation_entry e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id SET e.source_kind=m.source_kind",
+            "ALTER TABLE conversation_entry ADD CHECK((entry_kind=1)=(source_kind IS NOT NULL)), ADD FOREIGN KEY(source_admission_id,source_kind) REFERENCES message_admission(admission_id,source_kind)",
+            "CREATE INDEX conversation_entry_activity_user ON conversation_entry(session_ref,entry_kind,source_kind,session_position)",
+            "CREATE INDEX conversation_entry_activity_assistant ON conversation_entry(session_ref,entry_kind,session_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
+    },
+    .{
+        .from = 83,
+        .sqlite = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
+        .mysql = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
+    },
 };
 
 comptime {
@@ -758,42 +854,78 @@ comptime {
     ));
 }
 
+const mysql_migration_metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
+
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
     return comptime blk: {
         if (from < migration_baseline or from - migration_baseline >= migrations.len)
             @compileError(std.fmt.comptimePrint("migrations: no step moves a Store from {d}", .{from}));
+        const index = from - migration_baseline;
+        if (rsql.generatedSchema()) |generated| {
+            const text = generated.mysql_migrations[index];
+            const suffix = if (index + 1 == generated.mysql_migrations.len - 1)
+                mysql_migration_metadata
+            else
+                generated.mysql_migrations[index + 1];
+            if (suffix.len > text.len) @compileError("generated MySQL migration suffix is too long");
+            const terminated = text[0 .. text.len - suffix.len] ++ "\x00";
+            break :blk terminated[0 .. terminated.len - 1 :0];
+        }
         var text: []const u8 = "";
-        for (migrations[from - migration_baseline].mysql) |statement| text = text ++ statement ++ ";\n";
+        for (migrations[index].mysql) |statement| text = text ++ statement ++ ";\n";
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
 }
 
 pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
-    const texts = comptime blk: {
+    const texts = comptime mysqlMigrationTexts();
+    if (from < migration_baseline or from > schema_version) return null;
+    return texts[@intCast(from - migration_baseline)];
+}
+
+fn mysqlMigrationTexts() [schema_version - migration_baseline + 1][:0]const u8 {
+    return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk generated.mysql_migrations;
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
         result[result.len - 1] = "";
-        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
         var index = result.len - 1;
         while (index > 0) {
             index -= 1;
             const text = mysqlMigration(migration_baseline + index) ++
-                (if (index + 1 == result.len - 1) metadata else result[index + 1]);
+                (if (index + 1 == result.len - 1) mysql_migration_metadata else result[index + 1]);
             const terminated = text ++ "\x00";
             result[index] = terminated[0..text.len :0];
         }
         break :blk result;
     };
-    if (from < migration_baseline or from > schema_version) return null;
-    return texts[@intCast(from - migration_baseline)];
 }
 
-test "store schema --from prints every remaining MySQL migration then sets the format once" {
+test "SH-8 MySQL schema export emits bootstrap and requested migrations" {
+    var bootstrap_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bootstrap_output.deinit();
+    for (objects(.mysql)) |object| {
+        try bootstrap_output.writer.writeAll(object.sql);
+        try bootstrap_output.writer.writeAll(";\n");
+    }
+    try std.testing.expectEqualStrings(bootstrap_output.written(), ddl(.mysql));
+    inline for (migrations) |step| {
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        for (step.mysql) |statement| {
+            try expected.writer.writeAll(statement);
+            try expected.writer.writeAll(";\n");
+        }
+        try std.testing.expectEqualStrings(expected.written(), mysqlMigration(step.from));
+    }
     for (migration_baseline..schema_version + 1) |from| {
         var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer expected.deinit();
         inline for (migrations) |step| {
-            if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
+            if (step.from >= from) for (step.mysql) |statement| {
+                try expected.writer.writeAll(statement);
+                try expected.writer.writeAll(";\n");
+            };
         }
         if (from < schema_version) try expected.writer.print(
             "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\n",
@@ -1142,7 +1274,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true, .holds = .value },
@@ -1229,9 +1361,10 @@ pub const tables = [_]Table{
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
             .{ .name = "source_action_id", .type = .int, .nullable = true },
+            .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
         },
         .primary_key = &.{"admission_id"},
-        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"} },
+        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"}, &.{ "admission_id", "source_kind" } },
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
@@ -1240,7 +1373,23 @@ pub const tables = [_]Table{
             references("sender_session_ref", "session", session_reference),
             references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL" },
+        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
+    },
+    .{
+        .name = "action_value",
+        .columns = &.{
+            .{ .name = "action_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>0" },
+            .{ .name = "handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .check = "@charset(handle,'0-9a-f')" },
+            .{ .name = "publication_key", .type = .{ .text = .{ .min = 1, .max = 128 } } },
+            .{ .name = "content_id", .type = .int },
+            .{ .name = "admission_id", .type = .int, .nullable = true },
+            .{ .name = "published_at", .type = .int, .check = "published_at>0" },
+        },
+        .primary_key = &.{ "action_id", "ordinal" },
+        .uniques = &.{ &.{ "handle", "publication_key" }, &.{"admission_id"} },
+        .foreign_keys = &.{ references("action_id", "action_operation", &.{"action_id"}), references("content_id", "content", content_reference), references("admission_id", "message_admission", &.{"admission_id"}) },
+        .without_rowid = true,
     },
     .{
         .name = "sent_rejection",
@@ -1500,6 +1649,7 @@ pub const tables = [_]Table{
             .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 4" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "source_admission_id", .type = .int, .nullable = true },
+            .{ .name = "source_kind", .type = .int, .nullable = true },
             .{ .name = "source_revision", .type = .int, .nullable = true },
             .{ .name = "source_catalog_position", .type = .int, .nullable = true },
             .{ .name = "source_skill_admission_id", .type = .int, .nullable = true },
@@ -1514,6 +1664,7 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("turn_id", "turn", &.{"turn_id"}),
             references("source_admission_id", "message_admission", &.{"admission_id"}),
+            .{ .columns = &.{ "source_admission_id", "source_kind" }, .references = "message_admission", .referenced = &.{ "admission_id", "source_kind" } },
             references("source_operation_id", "model_operation", &.{"operation_id"}),
             references("content_id", "content", content_reference),
             .{ .columns = &.{ "session_ref", "source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
@@ -1522,6 +1673,7 @@ pub const tables = [_]Table{
             .{ .columns = &.{ "source_operation_id", "source_item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
         },
         .checks = &.{
+            "(entry_kind=1)=(source_kind IS NOT NULL)",
             "(entry_kind=3)=(source_item_ordinal IS NOT NULL)",
             "(turn_id IS NULL)=(source_catalog_position IS NOT NULL)",
             "source_catalog_position IS NULL OR source_catalog_position=session_position",
@@ -1678,15 +1830,30 @@ pub const tables = [_]Table{
     .{
         .name = "action_stop",
         .columns = &.{
-            .{ .name = "source_action_id", .type = .int },
+            .{ .name = "stop_key", .type = .{ .text = .{ .max = 130 } } },
+            .{ .name = "source_action_id", .type = .int, .nullable = true },
+            .{ .name = "source_command_key", .type = .{ .text = null }, .nullable = true },
             .{ .name = "target_action_id", .type = .int },
         },
-        .primary_key = &.{"source_action_id"},
+        .primary_key = &.{"stop_key"},
+        .uniques = &.{ &.{"source_action_id"}, &.{"source_command_key"} },
         .foreign_keys = &.{
             references("source_action_id", "action_operation", &.{"action_id"}),
+            references("source_command_key", "core_command", command_reference),
             references("target_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{"source_action_id<>target_action_id"},
+        .checks = &.{ "source_action_id<>target_action_id", "(source_action_id IS NULL)<>(source_command_key IS NULL)" },
+        .without_rowid = true,
+    },
+    .{
+        .name = "action_stop_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "resolution_position", .type = .int, .nullable = true, .check = "resolution_position>0" },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{references("command_key", "core_command", command_reference)},
         .without_rowid = true,
     },
     .{
@@ -1709,18 +1876,22 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
+    .{ .name = "message_admission_activity", .table = "message_admission", .columns = &.{ "session_ref", "source_kind", "admission_position" } },
+    .{ .name = "conversation_entry_activity_user", .table = "conversation_entry", .columns = &.{ "session_ref", "entry_kind", "source_kind", "session_position" } },
+    .{ .name = "conversation_entry_activity_assistant", .table = "conversation_entry", .columns = &.{ "session_ref", "entry_kind", "session_position" } },
     .{ .name = "action_stop_target", .table = "action_stop", .columns = &.{"target_action_id"} },
     .{ .name = "content_part_by_part", .table = "content_part", .columns = &.{"part_content_id"} },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
+    .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
     .{ .name = "message_admission_pending", .table = "message_admission", .columns = &.{ "admission_id", "session_ref" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
-    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL AND source_action_id IS NULL" },
+    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "source_kind=1" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
@@ -1865,8 +2036,7 @@ pub const objects_quota = 120_000 * (tables.len + indexes.len);
 
 pub fn hasIndex(comptime name: []const u8) bool {
     comptime {
-        @setEvalBranchQuota(objects_quota);
-        for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return true;
         return false;
     }
 }
@@ -1910,6 +2080,7 @@ fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []con
 
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_ddl else generated.mysql_ddl;
         @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
         for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
@@ -1934,26 +2105,63 @@ fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const
     }
 }
 
+/// The schema values a collect build records, one separator between items; counted then filled, not grown by `++`.
+fn joined(comptime items: []const []const u8, comptime separator: []const u8) []const u8 {
+    comptime {
+        var length: usize = 0;
+        for (items, 0..) |item, position| length += item.len + if (position == 0) 0 else separator.len;
+        var buffer: [length]u8 = undefined;
+        var at: usize = 0;
+        for (items, 0..) |item, position| {
+            if (position != 0) {
+                @memcpy(buffer[at..][0..separator.len], separator);
+                at += separator.len;
+            }
+            @memcpy(buffer[at..][0..item.len], item);
+            at += item.len;
+        }
+        const result = buffer;
+        return &result;
+    }
+}
+
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_objects else generated.mysql_objects;
         @setEvalBranchQuota(objects_quota);
-        if (dialect == .mysql) break :blk switch (mysqlObjects(&tables, &indexes)) {
+        const result = renderedObjects(dialect);
+        break :blk result;
+    };
+}
+
+fn renderedObjects(comptime dialect: rsql.Dialect) []const Object {
+    comptime {
+        if (dialect == .mysql) return switch (mysqlObjects(&tables, &indexes)) {
             .refused => |message| @compileError(message),
             .objects => |result| result,
         };
         var result: []const Object = &.{};
         for (onEngine(&tables, .sqlite)) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
         for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
-        break :blk result;
-    };
+        return result;
+    }
 }
+
+pub const mysql_recursive_limit: u64 = blk: {
+    var ids: u64 = 1;
+    for (0..session_id.bytes) |_| ids = std.math.mul(u64, ids, session_id.alphabet.len) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    const limit = std.math.add(u64, ids, 1) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    if (limit > std.math.maxInt(u32)) @compileError("Session ID domain exceeds MySQL recursion capacity");
+    break :blk limit;
+};
 
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_offered_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION cte_max_recursion_depth={d}", .{mysql_recursive_limit}),
     "SET SESSION autocommit=1",
 };
 
@@ -2279,10 +2487,12 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
 
 pub fn digest() u64 {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk generated.digest;
         var text: []const u8 = "";
         for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
         @setEvalBranchQuota(10 * text.len + 1000);
-        break :blk std.hash.Fnv1a_64.hash(text);
+        const hash = std.hash.Fnv1a_64.hash(text);
+        break :blk hash;
     };
 }
 
@@ -2750,7 +2960,12 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
         for (statements) |statement| {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
-                if (std.mem.eql(u8, object.sql, statement)) {
+                const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 8")
+                else
+                    null;
+                defer if (historical) |text| std.testing.allocator.free(text);
+                if (std.mem.eql(u8, historical orelse object.sql, statement)) {
                     matched += 1;
                     break;
                 }
@@ -2776,7 +2991,7 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
                 const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
-                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 7")
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 7")
                 else
                     null;
                 defer if (historical) |text| std.testing.allocator.free(text);
@@ -3039,8 +3254,6 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_forward SET suppress_message=-1 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
-        "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
-        "UPDATE core_command SET kind=9 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','archive-request')",
@@ -3345,4 +3558,183 @@ test "schema 80 creator migration matches canonical SQLite and MySQL column cons
     try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
+}
+
+test "schema 81 preserves model stop sources and adds exclusive command sources" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/stop.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 80) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "INSERT INTO action_stop(source_action_id,target_action_id) SELECT min(action_id),max(action_id) FROM action_operation");
+    try sqlite.exec(database, "CREATE TEMP TABLE old_stops AS SELECT * FROM action_stop");
+    for (migrations[80 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_stop"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_stops EXCEPT SELECT source_action_id,target_action_id FROM action_stop)"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_stop SET source_action_id=NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_stop SET source_command_key=(SELECT command_key FROM core_command LIMIT 1)"));
+    inline for (.{ .sqlite, .mysql }) |dialect| {
+        inline for (comptime objects(dialect)) |object| {
+            if (comptime !std.mem.eql(u8, object.name, "action_stop") and !std.mem.eql(u8, object.name, "action_stop_command")) continue;
+            var found = false;
+            for (if (dialect == .sqlite) migrations[80 - migration_baseline].sqlite else migrations[80 - migration_baseline].mysql) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+            try std.testing.expect(found);
+        }
+    }
+}
+
+test "schema 82 backfills input sources and preserves admissions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/sources.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 81) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "UPDATE message_admission SET sender_session_ref='brhkcj',sender_position=1 WHERE admission_id=1");
+    try sqlite.exec(database, "UPDATE message_admission SET source_action_id=(SELECT min(action_id) FROM action_operation) WHERE admission_id=2");
+    try sqlite.exec(database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) VALUES(3,'rhvzwc','fixture-stop',1,1)");
+    try sqlite.exec(database, "CREATE TEMP TABLE old_admissions AS SELECT * FROM message_admission");
+    for (migrations[81 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_admissions EXCEPT SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id FROM message_admission)"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM message_admission WHERE (admission_id=1 AND source_kind=2) OR (admission_id=2 AND source_kind=3) OR (admission_id=3 AND source_kind=1)"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE message_admission SET source_kind=1 WHERE admission_id=1"));
+    for (comptime objects(.sqlite)) |object| {
+        if (std.mem.eql(u8, object.name, "message_admission") or std.mem.eql(u8, object.name, "message_admission_activity")) continue;
+        if (!std.mem.startsWith(u8, object.name, "message_admission_")) continue;
+        var found = false;
+        for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        try std.testing.expect(found);
+    }
+}
+
+test "schema 83 migration rebuilds canonical input tables" {
+    for (comptime objects(.sqlite)) |object| {
+        if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
+        var found = false;
+        for (migrations[82 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        try std.testing.expect(found);
+    }
+}
+
+test "schema 83 migration creates the canonical SQLite action value table" {
+    for (comptime objects(.sqlite)) |object| {
+        if (!std.mem.eql(u8, object.name, "action_value")) continue;
+        try std.testing.expectEqualStrings(object.sql, migrations[82 - migration_baseline].sqlite[0]);
+        return;
+    }
+    return error.MissingActionValue;
+}
+
+test "schema 83 migration creates constrained action values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/values.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 82) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_entries AS SELECT * FROM conversation_entry");
+    for (migrations[82 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_entries EXCEPT SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM conversation_entry)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM conversation_entry e JOIN message_admission m ON e.source_admission_id=m.admission_id WHERE e.source_kind<>m.source_kind OR e.source_kind IS NULL"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE conversation_entry SET source_kind=4 WHERE source_admission_id IS NOT NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE conversation_entry SET source_kind=NULL WHERE source_admission_id IS NOT NULL"));
+    try sqlite.exec(database, "INSERT INTO action_value(action_id,ordinal,handle,publication_key,content_id,published_at) SELECT min(action_id),1,'0123456789abcdef0123456789abcdef','test',1,1 FROM action_operation");
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_value"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET ordinal=0"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET handle='invalid'"));
+}
+
+test "schema 84 adds a canonical creator index without changing Sessions" {
+    const step = migrations[83 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 83), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (comptime objects(dialect)) |object| {
+            if (!std.mem.eql(u8, object.name, "session_creator")) continue;
+            try std.testing.expectEqualStrings(object.sql, statements[0]);
+            break;
+        } else return error.MissingCreatorIndex;
+    }
+    try std.testing.expect(comptime mysqlCanForceIndex("session_creator"));
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 83) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_sessions AS SELECT * FROM session");
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_sessions EXCEPT SELECT * FROM session)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM session EXCEPT SELECT * FROM old_sessions)"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM session INDEXED BY session_creator WHERE creator_ref=?1");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
+}
+
+// Export each schema value once per collect binary, under a stable symbol name.
+comptime {
+    if (rsql.collecting()) {
+        @setEvalBranchQuota(objects_quota);
+        for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+            const all = objects(dialect);
+            var items: [all.len][]const u8 = undefined;
+            for (all, &items) |object, *item| item.* = @tagName(object.kind) ++ "\x1e" ++ object.name ++ "\x1e" ++ object.sql;
+            rsql.collectSchema(@tagName(dialect) ++ "_objects", joined(&items, "\x1d"));
+            rsql.collectSchema(@tagName(dialect) ++ "_ddl", ddl(dialect));
+        }
+        const texts = mysqlMigrationTexts();
+        for (texts, 0..) |text, index| {
+            rsql.collectSchema(std.fmt.comptimePrint("mysql_migrations_{d}", .{index}), text);
+        }
+        rsql.collectSchema("digest", std.fmt.comptimePrint("{d}", .{digest()}));
+    }
 }

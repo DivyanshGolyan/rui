@@ -13,20 +13,23 @@ on:
         required: false
         type: string
         default: ''
-      systems:
-        description: JSON list of runners; PRs pass Linux only, promotion takes both
+      release-version:
+        description: Version of this run's release archives (Promote's Release build) to test; empty compiles the candidate
         required: false
         type: string
-        default: '["ubuntu-24.04", "macos-15"]'
+        default: ''
 
 permissions:
   contents: read
+  # Reads this run's release archives when a promotion supplies them.
+  actions: read
 
 # Restore shared compilation inputs without competing with the selected suites.
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}-${{ github.sha }}
+  # The caller's name keeps Promote's tiers on one SHA from cancelling each other.
+  group: previous-release-upgrade-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -38,8 +41,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Manual dispatch has no inputs and runs both systems.
-        os: ${{ fromJSON(inputs.systems || '["ubuntu-24.04", "macos-15"]') }}
+        # Promotion and manual dispatch run both systems; pull requests never run this.
+        os: [ubuntu-24.04, macos-15]
     steps:
       - name: Validate immutable candidate
         env:
@@ -80,6 +83,21 @@ jobs:
       # Setup's restat ran before this restore and only over the candidate's
       # caches. Without it Zig 0.17.1 misses every restored input
       # (tests/ci/zig_cache_restat.c) and rebuilds the pinned release whole.
+      # A cache miss above would make the previous build fetch its packages
+      # live, and codeberg outages then fail the gate (#1759). Packages are
+      # content-addressed, so the candidate's restored copies of any shared
+      # hash (translate-c, aro, ...) serve the previous release unchanged.
+      - name: Seed the previous release's packages from the candidate's
+        run: |
+          set -euo pipefail
+          previous="$RUNNER_TEMP/previous-release/zig-pkg"
+          mkdir -p "$previous"
+          # macOS cp -n exits 1 when it skips a file the restore already
+          # placed, so copy only the packages the restore did not bring.
+          for package in zig-pkg/*; do
+            [ -e "$package" ] || continue
+            [ -e "$previous/${package##*/}" ] || cp -R "$package" "$previous/"
+          done
       - name: Reuse the restored previous-release compilation at new inodes
         run: |
           set -euo pipefail
@@ -113,27 +131,36 @@ jobs:
           chmod 700 "$baseline/bin/rui"
           tar -xzOf "$baseline/$archive" "${archive%.tar.gz}/THIRD_PARTY_NOTICES.md" > "$baseline/THIRD_PARTY_NOTICES.md"
           "$baseline/bin/rui" --version
+      - name: Fetch the release executable this promotion publishes
+        id: release
+        if: ${{ inputs.release-version != '' }}
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.release-version }}
+          SHA: ${{ inputs.candidate-ref }}
+        run: |
+          set -euo pipefail
+          # A standalone assignment, so a failed fetch fails this step instead of leaving rui empty.
+          rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")
+          echo "rui=$rui" >> "$GITHUB_OUTPUT"
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
         env:
-          # A PR's Selected suites already run host-launch-integration on the PR
-          # build whenever the change reaches it. Promotion and manual runs
-          # repeat it here on the shipped build, which costs a second LLVM compile.
-          HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}
+          # A promotion tests its release executable instead of compiling rui twice more.
+          # Only this step sees it, so a bisect replay compiles each commit's own.
+          RUI_UNDER_TEST: ${{ steps.release.outputs.rui }}
         run: |
           set -euo pipefail
           uname -sm
           git rev-parse HEAD
           zig version
-          startup=()
-          if [ "$HOST_LAUNCH" = true ]; then
-            startup=('startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all')
-          fi
+          # Repeat host-launch-integration on the shipped build, which costs a second LLVM compile.
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/rui-upgrade-data" \
-            ${startup[@]+"${startup[@]}"} \
+            'startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}' \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
-            'running-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host "$RUNNER_TEMP/previous-running-release" .' \
+            'running-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host ${RUI_UNDER_TEST:+--candidate-release "$RUI_UNDER_TEST"} "$RUNNER_TEMP/previous-running-release" .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}

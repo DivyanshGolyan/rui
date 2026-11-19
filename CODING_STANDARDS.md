@@ -57,6 +57,7 @@ Obtain independent opinions on material design questions.
 Every PR body has a visible `Goal: #123 <how this change serves the issue>` line, using an issue number or full GitHub issue URL and at least three explanation words.
 For housekeeping, red-main reverts, model trials or similar work without an issue, use `No issue: <reason>` instead.
 The plan checks the text, not whether the issue exists.
+[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
 ### Shape before code
 
@@ -94,6 +95,9 @@ A new surface that does the same job as an existing component calls that compone
 
 Before correcting a failure, identify its owner, invariant and earliest violating transition.
 Correct that transition or replace the owning model, not a downstream observer.
+For a bug, that owner answers why the bug was possible: a rule with two owners, a rule applied beyond its case, a check only one path runs, a caller that must know a policy or a call order, or a test that pinned the broken promise ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
+The bug fix's `## Summary` states it in a `Why possible:` line and how the fix removes that class.
+Only a root fix that needs a user decision under [Authority](AGENTS.md#authority) (a contract or behavior change, or wider scope) may land after the instance fix, as a linked issue under the same workstream.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.
@@ -165,7 +169,7 @@ On Host threads:
 ## Review
 
 Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape and against the linked issue's goal; group symptoms by owner` when production or operational changes invalidate the previous review.
-[Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
+[Landing](docs/agents/landing.md#publish-and-merge) owns draft-first publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](docs/verification/gates.md#product-tenets).
@@ -184,6 +188,7 @@ Review parity and failure paths as well as the diff:
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
 - **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form. A test or fixture that restates it reads it from its owner instead ([Evidence](#evidence)); a consumer that cannot (a skill, helper script or document) changes in the same change.
 - **Runnable instructions.** A command in a skill, doc or script runs as written on the platforms it names: required inputs are supplied, nothing depends on one machine's paths or permissions, and a step that needs a person (such as a hardware check at the Mac) says so.
+- **Tests.** A change to production logic moves the touched owners' tests onto the [test requirements](docs/verification/testing.md#migration): catalog rows for the owners' promises, one owner test per invariant at the lowest level that observes it, and the replaced legacy tests deleted. A new test that names no invariant, checks internals, waits on time or replays one bug is a finding.
 - **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
@@ -227,7 +232,7 @@ A new TUI interaction still needs the independent plain-PTY journey in [landing]
 
 Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
 `python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
-It adds development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
+It adds the CI policy suite with the same unchanged-input self-check skips, development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
 UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
 Use a full composed suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) only to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` requires `RUI_CI_RED=<run or issue>` for those commands.
@@ -238,7 +243,7 @@ Drive fault injection through production transitions.
 Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority.
 A concurrent test peer records what it observed before it replies or exits, so cancelling or joining it once the code under test returns cannot change the result; check this by temporarily delaying each peer read, reply and exit.
 Order test actors with a gate or event, never a sleep.
-Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
+Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/flake_sources.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
 Shared fixture owners hold the I/O and platform cases that broke fixtures before, and `tests/ci` lints name the owner when a fixture bypasses one: Store fixture SQL passes the Store's own statement grammar (`rsql.fixtureError`), a child's stdin closes through `host_process.close_stdin`, a refusing TCP port comes from `socket_fixture.refusedPort`, a `std.testing.tmpDir` a test chmods or lists opens with `.iterate = true`, and trust in a fixture CA goes explicitly through `--set network.caFile=PATH` or the settings document's `network.caFile`, or through `os_semantics.system_trust` on Linux only.
 A fixture module, one with a main block or one that `build.zig` or `check.sh` launches, imports no other: fixtures share helpers through library modules such as `control_fixture.py`, and cases another script also runs live in a `*_cases.py` library behind a thin entry script.
@@ -251,7 +256,7 @@ A value another file owns is pinned only by that owner's tests: other tests read
 `test_store_schema_fixtures.py`, `test_wire_version.py` and `test_fixture_literals.py` in `tests/ci` take the forbidden values from the owners and reject restated ones.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 
-For each new owner-boundary regression on a [strict path](tests/ci/strict_paths.py), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
+For a fix on a [strict path](tests/ci/strict_paths.py), demonstrate that the owning invariant's test goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup; the fix sharpens that invariant rather than adding a test for the one bug ([Test requirements](docs/verification/testing.md#bugs-refine-the-catalog)).
 Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
 
 For documentation, check contract preservation, references and `git diff --check`.

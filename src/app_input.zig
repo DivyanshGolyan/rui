@@ -207,6 +207,7 @@ pub const Input = union(enum) {
         named: ?keymap.Key,
         /// Enter as the line editor reads it.
         enter: bool = false,
+        printable: bool = false,
     };
     pub const Mouse = enum { click, list_click, chat_click, wheel, motion };
 };
@@ -356,7 +357,7 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     }
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     if (state.layer == .sign_in) return .{ .route = .sign_in };
-    if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
+    if (input == .key and state.layer == .settings) return settingsKey(state, facts, input.key);
     if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down or input.key.named == .alt_question))
         return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide, .list_origin = state.listFocused() or !facts.session_open } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
@@ -457,7 +458,8 @@ fn focusChat(state: *State) Effects {
 
 const app_keys: Effects.Route = .{ .overview = .{ .under = .settings, .pasted = false } };
 
-fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
+fn settingsKey(state: *State, facts: Facts, key: Input.Key) Effects {
+    const page = facts.settings;
     if (state.pasting) return if (page.takes_paste) .{} else .{ .route = .swallow };
     const closes = key.named == .escape or key.named == .ctrl_g;
     if (closes and page.keys_open) return .{ .page = .close_keys, .route = .swallow, .redraw = true };
@@ -468,11 +470,17 @@ fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
         closed.route = .swallow;
         return closed;
     }
+    if (key.printable and facts.session_open and !page.takes_key) {
+        state.layer = .main;
+        state.area = .main;
+        state.field = .input;
+        return .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true };
+    }
     if (!page.takes_key) return .{ .route = app_keys, .redraw = true };
     return .{};
 }
 
-test "Root input routing over every layer, main pane, settings state and input" {
+pub fn sui4RootRouting() !void {
     const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
     const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
     const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, pasted_click, wheel, key_release, colors, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
@@ -525,7 +533,8 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{ .printable, .enter, .escape, .ctrl_g, .ctrl_c }, .effects = overview(false) },
         .{ .layers = &.{.settings}, .pages = &.{.model_filter}, .events = &.{ .pasted_printable, .pasted_enter, .printable }, .effects = .{} },
         .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{ .pasted_printable, .pasted_enter }, .effects = .{ .route = .swallow } },
-        .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .sessions = &.{false}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .sessions = &.{true}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true }, .layer = .main },
         .{ .layers = &.{.settings}, .events = &.{.enter}, .effects = .{} },
         .{ .layers = &.{.settings}, .events = &.{.ctrl_c}, .effects = .{ .route = app_keys, .redraw = true } },
         .{ .layers = &.{.settings}, .pages = &.{.keys_open}, .events = &closing, .effects = .{ .page = .close_keys, .route = .swallow, .redraw = true } },
@@ -573,7 +582,8 @@ test "Root input routing over every layer, main pane, settings state and input" 
         }
         fn input(event: Event) Input {
             return switch (event) {
-                .printable, .pasted_printable, .enter, .pasted_enter => .{ .key = .{ .named = null } },
+                .printable, .pasted_printable => .{ .key = .{ .named = null, .printable = true } },
+                .enter, .pasted_enter => .{ .key = .{ .named = null } },
                 .escape => .{ .key = .{ .named = .escape } },
                 .ctrl_g => .{ .key = .{ .named = .ctrl_g } },
                 .ctrl_c => .{ .key = .{ .named = .ctrl_c } },
@@ -594,7 +604,6 @@ test "Root input routing over every layer, main pane, settings state and input" 
     };
     var used: [rows.len]bool = @splat(false);
     for (all_layers) |layer| for ([_]bool{ false, true }) |session| for (all_pages) |page| for (std.enums.values(Event)) |event| {
-        errdefer std.debug.print("layer={s} session={} page={s} event={s}\n", .{ @tagName(layer), session, @tagName(page), @tagName(event) });
         var matched: ?usize = null;
         for (rows, 0..) |row, index| {
             if (!Case.has(LayerCase, row.layers, layer) or !Case.has(bool, row.sessions, session) or !Case.has(Page, row.pages, page) or !Case.has(Event, row.events, event)) continue;
@@ -637,8 +646,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .input = key, .effects = .{}, .layer = .settings, .pasting = false },
     };
     var state: State = .{ .layer = .settings };
-    for (straddles, 0..) |expected, index| {
-        errdefer std.debug.print("straddling paste step {d}\n", .{index});
+    for (straddles) |expected| {
         try std.testing.expectEqual(expected.effects, step(&state, Case.facts(false, .plain, .enter), expected.input));
         try std.testing.expectEqual(Case.layer(expected.layer), state.layer);
         try std.testing.expectEqual(expected.pasting, state.pasting);
@@ -787,7 +795,7 @@ test "App input Tab never activates or edits and paste cannot traverse" {
     try std.testing.expectEqual(Target.settings_row, currentFocus(state));
 }
 
-test "App input model choice Tab domain retains its candidate in the filter and excludes hidden rows" {
+pub fn sui4ChoiceFocus() !void {
     const hits = [_]usize{ 3, 7, 11 };
     for (0..4) |index| for ([_]bool{ false, true }) |reverse| {
         var focus: ChoiceFocus = if (index == 0) .{ .filter = 99 } else .{ .row = hits[index - 1] };
@@ -802,7 +810,7 @@ test "App input model choice Tab domain retains its candidate in the filter and 
     try std.testing.expect(focus == .filter);
 }
 
-test "App input paste completion routes to the same owner for every focus and paste shape" {
+pub fn sui4PasteOwnership() !void {
     for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
         var state: State = .{ .area = if (list_focused) .list else .main };
         const facts: Facts = .{ .wide = wide, .session_open = session_open };

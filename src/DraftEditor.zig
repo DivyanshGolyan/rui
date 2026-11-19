@@ -280,6 +280,91 @@ const Typing = struct {
     }
 };
 
+test "SUI-12 typed bytes give the draft and caret" {
+    const cases = [_]struct { typed: []const u8, text: []const u8, caret: usize }{
+        .{ .typed = "first second\x1b\x7fZ", .text = "first Z", .caret = 7 },
+        .{ .typed = "A中e\u{301}🧑‍🌾\x7f", .text = "A中e\u{301}", .caret = 7 },
+        .{ .typed = "\x1b[200~line1\nline2\x1b[201~", .text = "line1\nline2", .caret = 11 },
+        .{ .typed = "\x1b[200~a\n\u{301}\x1b[201~\x01\x7f\x7fZ", .text = "Z", .caret = 1 },
+        .{ .typed = "ab\x01\x04\x05\x04", .text = "b", .caret = 1 },
+        .{ .typed = "ask src/foo-bar\x17", .text = "ask ", .caret = 4 },
+        .{ .typed = "\x1b[123;4~Z", .text = "Z", .caret = 1 },
+        .{ .typed = "ok\x1bZ", .text = "ok", .caret = 2 },
+        .{ .typed = "abc\x1b[D\x1b[DZ", .text = "aZbc", .caret = 2 },
+        .{ .typed = "A中e\u{301}\x1b[DX", .text = "A中Xe\u{301}", .caret = 5 },
+        .{ .typed = "\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", .text = "Xline1\nline2", .caret = 1 },
+    };
+    for (cases) |case| {
+        for (0..case.typed.len + 1) |split| {
+            var storage: [128]u8 = undefined;
+            var editor: Editor = .init(&storage);
+            var safe = split;
+            // Keep incomplete UTF-8 and terminal sequences in the input buffer.
+            while (safe > 0 and !std.unicode.utf8ValidateSlice(case.typed[0..safe])) safe -= 1;
+            if (std.mem.lastIndexOfScalar(u8, case.typed[0..safe], 0x1b)) |esc| {
+                if (safe == esc + 1) {
+                    safe = esc;
+                } else if (case.typed[esc + 1] == '[') {
+                    var complete = false;
+                    for (case.typed[esc + 2 .. safe]) |byte| {
+                        if (byte >= 0x40 and byte <= 0x7e) {
+                            complete = true;
+                            break;
+                        }
+                    }
+                    if (!complete) safe = esc;
+                }
+            }
+            var events: AppEvents = .init(case.typed[0..safe]);
+            while (events.next()) |event| _ = editor.appEvent(keymap.every, event, events.pasting);
+            events.bytes = case.typed;
+            while (events.next()) |event| _ = editor.appEvent(keymap.every, event, events.pasting);
+            try std.testing.expectEqualStrings(case.text, editor.text());
+            try std.testing.expectEqual(case.caret, editor.cursor());
+            var stream: Typing = .{};
+            try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
+        }
+    }
+    var storage: [65536]u8 = undefined;
+    var editor: Editor = .init(&storage);
+    var stream: Typing = .{};
+    for (0..1000) |_| _ = stream.send(&editor, "a");
+    for (0..1000) |_| _ = stream.send(&editor, "\x7f");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "Z\r"));
+    try std.testing.expectEqualStrings("Z", editor.text());
+    editor = .init(&storage);
+    for (0..500) |_| _ = stream.send(&editor, "e\u{301}");
+    for (0..500) |_| _ = stream.send(&editor, "\x7f");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "Z\r"));
+    try std.testing.expectEqualStrings("Z", editor.text());
+    editor = .init(&storage);
+    for (0..2050) |_| _ = stream.send(&editor, "a");
+    for (0..2048) |_| _ = stream.send(&editor, "\x7f");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
+    try std.testing.expectEqualStrings("aa", editor.text());
+    for ([_][]const u8{ "\xc3(\r", "\xc3\r" }) |bytes| {
+        editor = .init(&storage);
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, bytes));
+    }
+    editor = .init(&storage);
+    for (0..65535) |_| _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(@as(usize, 65535), editor.text().len);
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
+    _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&editor, "a\x7f\r"));
+    try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
+    editor = .init(&storage);
+    for (0..65534) |_| _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "é\r"));
+    try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
+    editor = .init(&storage);
+    for (0..65535) |_| _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&editor, "é\x7f\r"));
+    try std.testing.expectEqual(@as(usize, 65535), editor.text().len);
+}
+
 test "modified kitty text cannot become an ordinary permission choice" {
     var storage: [64]u8 = undefined;
     for ([_]u8{ 3, 9, 17, 33, 57 }) |modifier| {
@@ -601,19 +686,6 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     _ = stream.send(&editor, "left\x1b[27uright");
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
     try std.testing.expectEqualStrings("leftright", editor.text());
-}
-
-test "exact UTF-8 bound and sticky rejection after backspace" {
-    var storage: [65536]u8 = undefined;
-    var editor: Editor = .init(&storage);
-    var stream: Typing = .{};
-    for (0..65534) |_| _ = stream.send(&editor, "a");
-    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "é\r"));
-    try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
-    editor = .init(&storage);
-    for (0..65535) |_| _ = stream.send(&editor, "a");
-    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&editor, "é\x7f\r"));
-    try std.testing.expectEqual(@as(usize, 65535), editor.text().len);
 }
 
 test "unknown CSI retains following text and malformed UTF-8 still rejects" {

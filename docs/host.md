@@ -47,7 +47,7 @@ rui host restart --all
 
 `--all` is required; this command does not accept `--store` yet.
 It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
-Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
+Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved, inspected or checked fails before any stop, and the Host keeps running; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
 A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
 For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.
@@ -65,8 +65,7 @@ A Host that an earlier release started with its retired flags (`--provider`, `--
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
-Unknown managed builds, foreign executables and hidden-option launches are not paused. Before any stop, the target's public `host settings --check` must admit the same DIR, settings file and ordered assignments the target's public `host start` will receive. Stdin documents/lifetime, relative paths and refused documents remain running with the target's typed start failure; these refusals count as failed (exit 6), rather than an unsupported successful skip.
-`--settings FILE` replay requires an absolute file name. Admission reads its current contents before retirement; it does not snapshot the document. Running-source syntax is shared with socket discovery, including translation of retired flags.
+Unknown managed builds, foreign executables and hidden-option launches are not paused. For admission, capability and source replay before retirement, see the [detached launch contract](contracts/host.md#detached-launch-admission). Stdin documents/lifetime, relative paths and refused documents leave the Host running and count as failed (exit 6), rather than an unsupported successful skip.
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Check, start and status receive the same captured Host environment with cwd `/` and null stdin. Snapshots, normalized source buffers, environment copies and subprocess captures are kept only in memory and wiped after the operation.
@@ -128,11 +127,18 @@ rui host settings --store PATH --check
 ```
 
 Settings are saved sparsely in `PATH/host.json`, privately and atomically.
-Bare `rui`, `rui host start` and `rui host serve` read that file.
+The settings document sets a new Host: `host_start` reads and composes its sources for bare `rui`, `rui host start` and `rui host serve`. Every client can inspect available leaves with `rui host settings --paths`, save them with `rui host set`, and check admission with `rui host settings --check`.
 The order is defaults, saved settings, `--settings FILE|-`, then repeatable `--set PATH=VALUE` assignments in order.
 Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
+`rui host set providers.NAME...`, or `unset providers.NAME` of a provider it serves automatically, on a Host with no saved `providers` first saves the providers it would serve automatically now, so it changes only that provider; the saved set is then exact, and a later sign-in or key is not added automatically. `--set` on `host start` still names the exact set for that start.
+
+Credential-location defaults for client and Host share `src/credential_location.zig`: `RUI_OPENAI_KEY_FILE`, `RUI_CODEX_CREDENTIAL_FILE` and `RUI_CHATGPT_CREDENTIAL_FILE` select absolute paths; a provider credential leaf overrides its default. Without a variable, the default is under `~/.config/rui/`.
+
+Retired environment inputs are refused by name: replace `RUI_OPENAI_BASE_URL` with `providers.openai.endpoint`, and `RUI_TEST_MODELS_DEV_URL` with `models.catalogUrl`. Hidden Host `--test-*-fixture-endpoint` flags are gone; fixture identity derives from the loopback endpoint and transport trust. The `providers.chatgpt.tokenEndpoint` leaf supplies the loopback token URL required for an authenticated ChatGPT fixture.
+
+On stderr, typed start, save and check refusal sentences respectively begin `rui: the Host did not start`, `rui: the setting was not saved`, and `rui: these settings would not start a Host`. For their `rui_start_error` stdout receipt and detached refusal presentation, see [CLI-26 and CLI-18](invariants/cli-inspection.md).
 `settings --check` checks a detached start without opening or locking a Store: it reads and applies every source, refuses stdin lifetime and unrooted paths, checks saved placement, resolves credentials, anchors and seals. Pass absolute `--settings FILE`, `@FILE` and path/secret sources; unlike a newly typed `host start`, this check does not rebase argv. It does not prove database availability or lock acquisition.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
@@ -143,7 +149,7 @@ Save Store and interface placement with `rui host set`; a differing placement su
 Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
 New generated and explicit request captures retain the selected Host directory in a private `.routing` companion, separately from the immutable request's Store identity. HANDLE-based recover, inspect, wait and read-result rediscover that directory's current saved placement and refuse if it identifies a different Store. Legacy opaque MySQL selection retains its runtime hint. Keep the companion with the request; older records without one retain their existing identity-based lookup.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
-A relative path saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
+For saved-path admission, see [SH-47](invariants/store-host.md). A relative path already saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
 
 ## MySQL
@@ -178,10 +184,10 @@ An explicit `providers` setting lists exactly which built-in providers to serve:
 Each is served at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
-To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
+To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `providers.openai.endpoint` to its `https://` Responses URL (for example `https://example.openai.azure.com/openai/v1/responses`) with `rui host set --store DIR providers.openai.endpoint URL`; the key is then sent only to that endpoint and its sibling `/models`.
 A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
 A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
-An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
+The endpoint comes from the [Host settings](#save-host-settings); a running Host keeps the URL it started with.
 An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.

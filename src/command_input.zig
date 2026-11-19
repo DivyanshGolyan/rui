@@ -97,6 +97,16 @@ pub const ToolsField = struct {
         return std.mem.tokenizeScalar(u8, self.names.slice(), ' ');
     }
 
+    pub fn eql(self: *const ToolsField, other: *const ToolsField) bool {
+        return self.state == other.state and self.count == other.count and self.names.eql(other.names.slice());
+    }
+
+    pub fn contains(self: *const ToolsField, name: []const u8) bool {
+        var names = self.iterator();
+        while (names.next()) |held| if (std.mem.eql(u8, held, name)) return true;
+        return false;
+    }
+
     pub fn of(names: []const []const u8) error{ InvalidToolName, InvalidJsonShape }!ToolsField {
         var out: ToolsField = .{ .state = .value };
         for (names) |name| try out.append(name);
@@ -145,6 +155,11 @@ pub const ToolsField = struct {
     }
 };
 
+pub const Preferences = struct {
+    reasoning_effort: OptionalBounded(16) = .{},
+    permission_mode: OptionalBounded(16) = .{},
+};
+
 fn ConfigurationOf(comptime Custody: type) type {
     const ContentField = Commands(Custody).ContentField;
     return struct {
@@ -163,12 +178,13 @@ fn ConfigurationOf(comptime Custody: type) type {
         reasoning_effort: OptionalBounded(16) = .{},
         label: OptionalBounded(max_label_bytes) = .{},
         parent: OptionalBounded(6) = .{},
+        preferences: ?Preferences = null,
 
         comptime {
             const fields = @typeInfo(Configuration).@"struct";
-            if (fields.field_names.len != session_settings.spec_entries.len)
+            if (fields.field_names.len != session_settings.spec_entries.len + 1)
                 @compileError("Session settings table must cover Configuration exactly");
-            for (session_settings.spec_entries, fields.field_names, fields.field_types) |entry, name, Field| {
+            for (session_settings.spec_entries, fields.field_names[0..session_settings.spec_entries.len], fields.field_types[0..session_settings.spec_entries.len]) |entry, name, Field| {
                 if (!std.mem.eql(u8, entry.field, name))
                     @compileError("Session settings table must follow Configuration field order: " ++ name);
                 const Expected = switch (entry.kind) {
@@ -253,6 +269,11 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
     if (configuration.parent.state != .omitted) {
         hashField(&hash, "rui/core/configure/parent/v1");
         hashOptional(&hash, &configuration.parent);
+    }
+    if (configuration.preferences) |preferences| {
+        hashField(&hash, "rui/core/configure/preferences/v1");
+        hashOptional(&hash, &preferences.reasoning_effort);
+        hashOptional(&hash, &preferences.permission_mode);
     }
     return hash.finalResult();
 }
@@ -424,6 +445,23 @@ pub const ActionBackgroundCommand = struct {
     }
 };
 
+pub const ActionStopCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action_id: u64 = 0,
+
+    pub fn semanticDigest(self: *const ActionStopCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/action-stop/v1");
+        hashField(&hash, self.session.slice());
+        var value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value, self.action_id, .big);
+        hash.update(&value);
+        return hash.finalResult();
+    }
+};
+
 fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     var length: [8]u8 = undefined;
     std.mem.writeInt(u64, &length, value.len, .big);
@@ -457,4 +495,19 @@ fn hashContentIdentity(hash: *std.crypto.hash.sha2.Sha256, state: FieldState, si
         hash.update(&length);
         hash.update(digest);
     }
+}
+
+test "tool list equality compares semantic names rather than unused capacity" {
+    var first = try ToolsField.of(&.{ "bash", "none" });
+    var second = first;
+    @memset(first.names.bytes[first.names.len..], 'a');
+    @memset(second.names.bytes[second.names.len..], 'b');
+    try std.testing.expect(first.eql(&second));
+    second.count -= 1;
+    try std.testing.expect(!first.eql(&second));
+    second = first;
+    second.state = .omitted;
+    try std.testing.expect(!first.eql(&second));
+    second = try .of(&.{ "bash", "lookup" });
+    try std.testing.expect(!first.eql(&second));
 }

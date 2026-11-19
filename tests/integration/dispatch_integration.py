@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import hashlib
 import json
 import os
@@ -15,14 +16,14 @@ import threading
 import time
 
 import host_process
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PauseGate, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from model_fixture import (
-    ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
+    ROOT, RUI, MODEL_CONTEXT_PARTS, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
     completed_observation, configure, configure_lost_reply, crash_host,
     encode_sse, finish_command, message, message_lost_reply,
-    model_instructions, observe, read_action, read_result, retry_message,
+    model_instructions, request_system_prompt, observe, read_action, read_result, retry_message,
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
     wait_for, wait_for_result_release, wait_model_cleanup,
 )
@@ -46,8 +47,14 @@ def seed_future_retries(store, sessions):
         database.close()
 
 
+def request_history(items):
+    if items and items[0].get("role") == "developer" and items[0].get("content", [{}])[0].get("text", "").startswith(MODEL_CONTEXT_PARTS[0]):
+        return items[1:]
+    return items
+
+
 def history(items):
-    return [item for item in items if item.get("type") != "additional_tools"]
+    return [item for item in request_history(items) if item.get("type") != "additional_tools"]
 
 
 def without_prose(schema):
@@ -62,7 +69,7 @@ def content_reference(text):
     data = text.encode()
     domain = b"rui/content/v1"
     digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).hexdigest()
-    return {"bytes": str(len(data)), "sha256": digest}
+    return {"type": "text", "bytes": str(len(data)), "sha256": digest}
 
 
 def stored_message_parts(database):
@@ -395,7 +402,7 @@ def compaction_cases(state, processes, endpoints, releases):
         compaction = json.loads(endpoint.requests[1])
         assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
         address = model_instructions(ROOT, "baseline", store=store, session=session, model="gpt-6-sol")
-        assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
+        assert [request_system_prompt(json.loads(request)) for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert compaction["text"] == {"verbosity": "low"}, compaction
@@ -411,7 +418,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert len(endpoint.requests) == 3, endpoint.requests
         successor = json.loads(endpoint.requests[2])
         assert user_texts(successor) == ["covered user input", "pending input"], successor
-        assert successor["instructions"] == address, successor
+        assert request_system_prompt(successor) == address, successor
         assert [item["content"][0]["text"] for item in history(successor["input"]) if item.get("role") == "developer"] == ["arrived during compaction"], successor
         assert not any(item.get("id") == items[0]["id"] for item in history(successor["input"])), successor
         replay_anchor = dict(items[1])
@@ -445,7 +452,7 @@ def compaction_cases(state, processes, endpoints, releases):
         restarted = json.loads(endpoint.requests[3])
         assert replay_anchor in history(restarted["input"]) and items[2] in history(restarted["input"]), restarted
         assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
-        assert restarted["instructions"] == address, restarted
+        assert request_system_prompt(restarted) == address, restarted
         execution = wait_for(lambda: (value := command("session", "inspect", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
         assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
         stop_host(host)
@@ -484,7 +491,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert str(store) not in address and "雪" not in address, address
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -500,7 +507,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert outcome["state"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -523,7 +530,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
     assert len(endpoint.requests) == 2, endpoint.requests
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 2, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 2, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -1182,6 +1189,91 @@ def held_message_denial_cases(state, processes, endpoints):
     print("Held Message: all pending approvals decline before the reason reaches the continuation")
 
 
+def read_image_cases(state, processes, endpoints):
+    fixtures = ROOT / "src"
+    for label, source, mime in (
+        ("png", fixtures / "codecs/fixtures/image-input/pixel.png", "image/png"),
+        ("baseline-jpeg", fixtures / "testing/fixtures/input-baseline.jpg", "image/jpeg"),
+        ("progressive-jpeg", fixtures / "testing/fixtures/input-progressive.jpg", "image/jpeg"),
+    ):
+        workspace = state / ("read-image-" + label)
+        workspace.mkdir()
+        image = workspace / 'image "quoted" 雪.bin'
+        original = source.read_bytes()
+        image.write_bytes(original)
+        call_id = 'read-image-"' + label
+        endpoint = SuccessEndpoint([
+            sse_tool_calls("read-image-" + label, [
+                ("read_image", call_id, json.dumps({"path": image.name}, ensure_ascii=False)),
+            ]),
+            sse_answer("image-answer", "image-reasoning", "image-message", "Image received")[0],
+            sse_answer("replay-answer", "replay-reasoning", "replay-message", "Image replayed")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = workspace / "store"
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host = start_host(store, url)
+        processes.append(host)
+        configured = command(
+            "session", "configure", "--store", store, "--workspace", workspace,
+            "--record", state / f"image-{label}-config.json", "--key", f"image-{label}-config",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
+            "--permission-mode", "bypass",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        key = "image-" + label
+        message(state, store, key, session, "Read the image in this workspace")
+        result, _, _ = wait_for_result_release(store, key, session, time.monotonic() + 15)
+        assert result["result"]["status"] == "completed", result
+        assert read_result(store, key) == b"Image received"
+        assert len(endpoint.requests) == 2, endpoint.requests
+        first, continuation = map(json.loads, endpoint.requests)
+        tools = first.get("tools", []) + [tool for item in first["input"]
+                if item.get("type") == "additional_tools" for tool in item["tools"]]
+        assert any(tool.get("name") == "read_image" for tool in tools), tools
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == call_id, outputs
+        output = outputs[0]
+        assert isinstance(output["output"], list), output
+        images = [part for part in output["output"] if part.get("type") == "input_image"]
+        assert len(images) == 1, output
+        part = images[0]
+        assert part["detail"] == "auto", part
+        prefix = f"data:{mime};base64,"
+        assert part["image_url"].startswith(prefix), part
+        assert base64.b64decode(part["image_url"][len(prefix):], validate=True) == original, label
+        assert [item for item in continuation["input"] if item.get("role") == "user"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "Read the image in this workspace"}]},
+        ], continuation
+
+        # A later request must use the saved observation, even without its source file.
+        image.unlink()
+        crash_host(host, state, "image-" + label)
+        processes.remove(host)
+        host = start_host(store, url)
+        processes.append(host)
+        assert read_result(store, key) == b"Image received"
+        replay_key = key + "-replay"
+        message(state, store, replay_key, session, "Recall the image")
+        replay_result, _, _ = wait_for_result_release(store, replay_key, session, time.monotonic() + 15)
+        assert replay_result["result"]["status"] == "completed", replay_result
+        assert read_result(store, replay_key) == b"Image replayed"
+        assert len(endpoint.requests) == 3, endpoint.requests
+        replay = json.loads(endpoint.requests[2])
+        assert [item for item in replay["input"] if item.get("type") == "function_call_output"] == [output], replay
+        assert [item for item in replay["input"] if item.get("type") == "function_call"] == [
+            item for item in continuation["input"] if item.get("type") == "function_call"
+        ], replay
+        assert not image.exists(), "historical replay recreated the source image"
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("read_image: PNG and baseline/progressive JPEG exact bytes in tool output; saved replay after source removal and Host restart")
+
+
 def builtin_instruction_cases(state, processes, endpoints, releases):
     workspace = state / 'workspace{} "quoted"\\雪\nSession instructions:'
     workspace.mkdir()
@@ -1222,7 +1314,7 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
             wait_for_result_release(store, key, session, time.monotonic() + 15)
             request = json.loads(endpoint.requests[index])
             assert request["model"] == model, request
-            assert request["instructions"] == model_instructions(
+            assert request_system_prompt(request) == model_instructions(
                 workspace, baseline, store=store, session=session, model=model), request
         assert len(endpoint.requests) == len(selected), endpoint.requests
         stop_host(host)
@@ -1251,10 +1343,10 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert endpoint.requests[0] == endpoint.requests[1], "replacement Attempt changed its frozen request"
     original, _, fresh = map(json.loads, endpoint.requests)
     assert original["model"] == "gpt-6-luna", original
-    assert original["instructions"] == model_instructions(
+    assert request_system_prompt(original) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6-luna"), original
     assert fresh["model"] == "gpt-6.1-sol", fresh
-    assert fresh["instructions"] == model_instructions(
+    assert request_system_prompt(fresh) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6.1-sol"), fresh
     updates = [item for item in history(fresh["input"]) if item.get("role") == "developer"]
     assert updates == initial_developers + [
@@ -1300,10 +1392,10 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert len(endpoint.requests) == 3, endpoint.requests
     requests = list(map(json.loads, endpoint.requests))
     expected = model_instructions(workspace, baseline, store=store, session=session, model="gpt-6.1-sol")
-    assert all(request["model"] == "gpt-6.1-sol" and request["instructions"] == expected for request in requests[:2])
+    assert all(request["model"] == "gpt-6.1-sol" and request_system_prompt(request) == expected for request in requests[:2])
     assert any(item.get("type") == "compaction_trigger" for item in requests[1]["input"]), requests[1]
     assert requests[2]["model"] == "gpt-6-luna", requests[2]
-    assert requests[2]["instructions"] == model_instructions(
+    assert request_system_prompt(requests[2]) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6-luna"), requests[2]
     assert "pending input" in [item["content"][0]["text"] for item in requests[2]["input"] if item.get("role") == "user"]
     updates = [item for item in history(requests[2]["input"]) if item.get("role") == "developer"]
@@ -1335,6 +1427,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "read-image"):
+            read_image_cases(state, processes, endpoints)
+            if mode == "read-image":
+                completed = True
+                return
         if mode in ("all", "builtin-instructions"):
             builtin_instruction_cases(state, processes, endpoints, releases)
             if mode == "builtin-instructions":
@@ -1704,34 +1801,29 @@ def main(mode="all", correlation_case="all"):
         assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        # EXR-58
+        continuation_handoff = PauseGate("model.before_handoff")
+        releases.append(continuation_handoff.close)
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=continuation_handoff,
         )
         processes.append(continuation_host)
         continuation_diagnostics = HostDiagnostics(continuation_host)
-        continuation_deadline = time.monotonic() + 8
-
-        def continuation_successor_admitted():
-            value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
-            return (
-                value
-                if value.get("state") == "processing"
-                and value.get("binding") == {
-                    "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
-                }
-                else None
-            )
-
-        wait_for(continuation_successor_admitted, "tool-result successor admission", deadline=continuation_deadline)
+        held = continuation_handoff.wait(operation=2)
+        assert held["context"]["attempt"] == 1, held
+        successor = observe(continuation_store, "continuation-first")
+        assert successor.get("state") == "processing" and successor.get("binding") == {
+            "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
+        }, successor
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
         continuation_after_admission_crash = crash_host(
             continuation_host, state, "continuation-after-admission-crash", diagnostics=continuation_diagnostics
         )
         continuation_diagnostics = None
         processes.remove(continuation_host)
+        continuation_handoff.close()
         assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute(
@@ -2020,9 +2112,9 @@ def main(mode="all", correlation_case="all"):
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
         assert first_request["model"] == "gpt-6-sol", first_request
-        assert first_request["instructions"] == model_instructions(
+        assert request_system_prompt(first_request) == model_instructions(
             ROOT, store=success_store, session=success_session, model="gpt-6-sol"), first_request
-        assert second_request["instructions"] == model_instructions(
+        assert request_system_prompt(second_request) == model_instructions(
             ROOT, store=success_store, session=success_session, model="gpt-6.1-sol"), second_request
         assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
@@ -2141,7 +2233,7 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
+        assert request_system_prompt(json.loads(retry_endpoint.requests[0])) == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
         stop_host(retry_host)
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
@@ -2424,7 +2516,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(continued_endpoint.requests) >= 3, "replacement continued Attempt")
         assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
         frozen_retry = json.loads(continued_endpoint.requests[2])
-        assert frozen_retry["instructions"] == model_instructions(
+        assert request_system_prompt(frozen_retry) == model_instructions(
             ROOT, "original instructions", store=continued_store, session=continued_retry_session, model="gpt-6-sol"
         ), frozen_retry
         expected_private = dict(continued_reasoning)
@@ -2690,7 +2782,7 @@ def main(mode="all", correlation_case="all"):
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
+        assert request_system_prompt(pending_request) == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
         assert history(pending_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -3502,7 +3594,6 @@ def main(mode="all", correlation_case="all"):
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": start_effort("gpt-6-sol")},
-            "instructions": model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol"),
             "input": [
                 {
                     "role": "user",
@@ -3545,7 +3636,9 @@ def main(mode="all", correlation_case="all"):
                 }
             },
         }
-        observed["input"] = without_prose(observed["input"])
+        assert request_system_prompt(observed) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol")
+        observed.pop("instructions", None)
+        observed["input"] = without_prose(request_history(observed["input"]))
         assert observed == expected, (observed, expected)
         stop_host(host)
         frozen_peers.finish(time.monotonic() + 5)
@@ -3561,12 +3654,12 @@ def main(mode="all", correlation_case="all"):
         processes.remove(offline)
 
         successor = json.loads(endpoint.requests[1])
-        successor["input"] = without_prose(successor["input"])
+        assert request_system_prompt(successor) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol")
+        successor["input"] = without_prose(request_history(successor["input"]))
         later_input = expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
         assert successor["input"] == later_input, successor
-        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol"), successor
         assert successor["model"] == "gpt-6.1-sol", successor
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
@@ -3575,11 +3668,11 @@ def main(mode="all", correlation_case="all"):
         processes.append(host)
         wait_for(lambda: len(endpoint.requests) == 3, "post-restart successor request")
         restarted = json.loads(endpoint.requests[2])
-        restarted["input"] = without_prose(restarted["input"])
+        assert request_system_prompt(restarted) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol")
+        restarted["input"] = without_prose(request_history(restarted["input"]))
         assert restarted["input"] == later_input + [
             {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
         ], restarted
-        assert restarted["instructions"] == successor["instructions"], restarted
         assert restarted["model"] == "gpt-6.1-sol", restarted
         assert restarted["tools"] == [], restarted
         assert restarted["text"] == {"verbosity": "low"}, restarted
@@ -3715,11 +3808,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[prelaunch_endpoint] = prelaunch_thread
         prelaunch_thread.start()
         prelaunch_store = state / "crash-prelaunch-store"
+        # EXR-57
+        prelaunch_handoff = PauseGate("model.before_handoff")
+        releases.append(prelaunch_handoff.close)
         prelaunch_host = start_host(
             prelaunch_store,
             f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=prelaunch_handoff,
         )
         processes.append(prelaunch_host)
         prelaunch_session = configure(
@@ -3733,22 +3828,16 @@ def main(mode="all", correlation_case="all"):
             "crash before launch",
         )
 
-        def prelaunch_attempt_one():
-            observation = observe(prelaunch_store, "prelaunch-message")
-            return (
-                observation
-                if observation.get("binding", {}).get("attempt") == "1"
-                else None
-            )
-
-        prelaunch_observation = wait_for(
-            prelaunch_attempt_one,
-            "publicly observed prelaunch Attempt 1",
-        )
-        assert prelaunch_observation["state"] == "processing"
+        held = prelaunch_handoff.wait()
+        assert held["context"]["attempt"] == 1, held
+        prelaunch_observation = observe(prelaunch_store, "prelaunch-message")
+        assert prelaunch_observation["state"] == "processing", prelaunch_observation
+        assert prelaunch_observation["binding"]["operation"] == str(held["context"]["operation"]), prelaunch_observation
+        assert prelaunch_observation["binding"]["attempt"] == "1", prelaunch_observation
         assert prelaunch_endpoint.requests == []
         prelaunch_crash = crash_host(prelaunch_host, state, "prelaunch-crash")
         processes.remove(prelaunch_host)
+        prelaunch_handoff.close()
         assert prelaunch_crash["returncode"] == -signal.SIGKILL, {
             "crash": prelaunch_crash,
             "endpoint_requests": prelaunch_endpoint.requests,
@@ -3865,11 +3954,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[sealed_endpoint] = sealed_thread
         sealed_thread.start()
         sealed_store = state / "crash-sealed-store"
+        # EXR-62
+        sealed_result = PauseGate("model.result_ready")
+        releases.append(sealed_result.close)
         sealed_host = start_host(
             sealed_store,
             f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
-            "--test-before-result-delay-ms",
-            "5000",
+            pause=sealed_result,
         )
         processes.append(sealed_host)
         sealed_session = configure(state, sealed_store, "sealed-config", None, "gpt-6-sol")
@@ -3880,12 +3971,17 @@ def main(mode="all", correlation_case="all"):
             sealed_session,
             "crash after seal",
         )
-        wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
-        time.sleep(0.5)
+        held = sealed_result.wait()
+        assert len(sealed_endpoint.requests) == 1, sealed_endpoint.requests
         sealed_observation = observe(sealed_store, "sealed-message")
-        assert sealed_observation["binding"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        assert sealed_observation["binding"] == {
+            "turn": sealed_observation["binding"]["turn"],
+            "operation": str(held["context"]["operation"]),
+            "attempt": "1",
+        } and "result" not in sealed_observation, sealed_observation
         stop_host(sealed_host)
         processes.remove(sealed_host)
+        sealed_result.close()
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,(resolution_code IS NULL AND retry_due_at_ms IS 0),resolution_code FROM model_operation"
@@ -4337,8 +4433,6 @@ def main(mode="all", correlation_case="all"):
             "--set", 'execution.activeCapacity=101',
             "--test-retry-recovery-gate-path",
             str(recovery_gate.path),
-            "--test-before-launch-delay-ms",
-            "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )
@@ -4838,16 +4932,15 @@ def main(mode="all", correlation_case="all"):
         endpoints[preparation_stop_endpoint] = preparation_stop_thread
         preparation_stop_thread.start()
         preparation_stop_store = state / "preparation-stop-store"
+        # EXR-63
+        preparation_stop_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_stop_gate.close)
         preparation_stop_host = start_host(
             preparation_stop_store,
             f"http://127.0.0.1:{preparation_stop_endpoint.server_port}/responses",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
-            observations="dispatch",
+            pause=preparation_stop_gate,
         )
         processes.append(preparation_stop_host)
-        preparation_stop_trace = HostDiagnostics(preparation_stop_host)
         preparation_stop_session = configure(
             state,
             preparation_stop_store,
@@ -4862,7 +4955,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
             "p" * (64 * 1024),
         )
-        preparation_stop_trace.wait("preparation_advance_completed")
+        preparation_stop_gate.wait()
         stopped_preparation = command(
             "session", "stop",
             "--store",
@@ -4875,6 +4968,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
         )
         assert stopped_preparation["answer"]["status"] == "accepted", stopped_preparation
+        preparation_stop_gate.release()
         stopped_resources = wait_for(
             lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0"
                     and value["execution"]["scratch_used_bytes"] == "0" else None)(
@@ -4892,6 +4986,7 @@ def main(mode="all", correlation_case="all"):
         assert preparation_stop_endpoint.requests == []
         stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
+        preparation_stop_gate.close()
         with sqlite3.connect(preparation_stop_store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,resolution_code FROM model_operation"
@@ -4930,20 +5025,19 @@ def main(mode="all", correlation_case="all"):
         )
         stop_host(offline_shutdown_host)
         processes.remove(offline_shutdown_host)
+        # EXR-64
+        preparation_shutdown_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_shutdown_gate.close)
         preparation_shutdown_host = start_host(
             preparation_shutdown_store,
             f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
             "--fault",
             "shutdown-after-accept",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
             accelerated_retries=False,
-            observations="dispatch",
+            pause=preparation_shutdown_gate,
         )
         processes.append(preparation_shutdown_host)
-        preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)
-        preparation_shutdown_trace.wait("preparation_advance_completed")
+        preparation_shutdown_gate.wait()
         shutdown_trigger = subprocess.run(
             [
                 str(RUI),
@@ -4957,9 +5051,11 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
+        preparation_shutdown_gate.release()
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
+        preparation_shutdown_gate.close()
         assert preparation_shutdown_endpoint.requests == []
         assert not list((preparation_shutdown_store / "scratch").glob("provider-request-*.tmp"))
         preparation_shutdown_host = start_host(
@@ -5300,13 +5396,14 @@ def main(mode="all", correlation_case="all"):
         )
         database.commit()
         database.close()
-        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        # EXR-59
+        race_handoff = PauseGate("model.before_handoff")
+        releases.append(race_handoff.close)
+        host = start_host(race_store, url, pause=race_handoff)
         processes.append(host)
         message(state, race_store, "race-message", race_session, "race")
-        wait_for(
-            lambda: observe(race_store, "race-message")["state"] == "processing",
-            "admitted request before launch",
-        )
+        race_handoff.wait()
+        assert observe(race_store, "race-message")["state"] == "processing"
         canonical_read = subprocess.run(
             [str(RUI), "session", "inspect", "--store", str(race_store), "--session", other_session],
             text=True,
@@ -5314,10 +5411,12 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert canonical_read.returncode != 0
+        race_handoff.release()
         wait_for(lambda: host.poll() is not None, "effect-aware Host shutdown", timeout=5)
         assert host.returncode != 0
         stop_host(host)
         processes.remove(host)
+        race_handoff.close()
         assert endpoint.requests == []
         database = sqlite3.connect(race_store / "rui.sqlite3")
         uncertain = database.execute(
@@ -5551,8 +5650,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "read-image", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|read-image|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

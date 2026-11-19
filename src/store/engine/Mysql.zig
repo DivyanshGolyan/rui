@@ -9,6 +9,8 @@ const row_decoder = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const content = @import("mysql_content.zig");
 const mysql_open = @import("mysql_open.zig");
+const pass_plan = @import("../pass_plan.zig");
+const mysql_commit = @import("mysql_commit.zig");
 const Mysql = @This();
 const Failure = engine.Failure;
 const allocator = std.heap.page_allocator;
@@ -165,12 +167,7 @@ pub fn close(self: *Mysql) error{StoreCloseFailed}!void {
     if (failed) return error.StoreCloseFailed;
 }
 
-fn fences(err: Failure) bool {
-    return switch (err) {
-        error.StoreConnectionLost, error.CommitOutcomeUnknown, error.OwnershipLost => true,
-        else => false,
-    };
-}
+const fences = pass_plan.fences;
 
 pub fn check(self: *Mysql) Failure!void {
     if (self.state.failure) |err| {
@@ -180,10 +177,36 @@ pub fn check(self: *Mysql) Failure!void {
 }
 
 fn lost(self: *Mysql) Failure {
-    const err: Failure = if (self.state.committing) error.CommitOutcomeUnknown else error.StoreConnectionLost;
+    const decided = mysql_commit.lost(self.state.committing, self.state.armed);
+    const err: Failure = switch (decided.failure) {
+        .connection_lost => error.StoreConnectionLost,
+        .commit_outcome_unknown => error.CommitOutcomeUnknown,
+    };
     self.state.failure = err;
-    self.state.rerunnable = self.state.armed;
+    self.state.rerunnable = decided.rerunnable;
     return err;
+}
+
+fn commitFailure(err: Failure) mysql_commit.Failure {
+    return switch (err) {
+        error.StoreConnectionLost => .connection_lost,
+        error.CommitOutcomeUnknown => .commit_outcome_unknown,
+        error.OwnershipLost => .ownership_lost,
+        else => .other,
+    };
+}
+
+fn commitFacts(s: *const State) mysql_commit.Facts {
+    return .{
+        .armed = s.armed,
+        .rerunnable = s.rerunnable,
+        .login = s.login != null,
+        .failure = if (s.failure) |err| commitFailure(err) else null,
+    };
+}
+
+fn ownerOf(epoch: u64, commit_seq: u64) mysql_commit.Owner {
+    return .{ .epoch = epoch, .commit_seq = commit_seq };
 }
 
 pub fn next(self: *Mysql) Failure!wire.mysql.Event {
@@ -590,18 +613,20 @@ fn settleLostCommit(self: *Mysql) Failure!void {
     s.commit_result = 0;
     s.committing = false;
     s.pass_failure = null;
-    const err: Failure = if (owner.epoch != s.epoch)
-        error.OwnershipLost
-    else if (owner.commit_seq == s.commit_seq + 1) {
-        s.failure = null;
-        s.changes +|= 1;
-        s.commit_seq += 1;
-        s.armed = false;
-        return self.sendAgain(reads);
-    } else if (owner.commit_seq == s.commit_seq) blk: {
-        s.replaced = true;
-        break :blk error.StoreConnectionLost;
-    } else error.OwnershipLost;
+    const err: Failure = switch (mysql_commit.settle(ownerOf(s.epoch, s.commit_seq), ownerOf(owner.epoch, owner.commit_seq))) {
+        .ownership_lost => error.OwnershipLost,
+        .saved => {
+            s.failure = null;
+            s.changes +|= 1;
+            s.commit_seq += 1;
+            s.armed = false;
+            return self.sendAgain(reads);
+        },
+        .not_saved => blk: {
+            s.replaced = true;
+            break :blk error.StoreConnectionLost;
+        },
+    };
     s.failure = err;
     return err;
 }
@@ -617,20 +642,22 @@ fn sendAgain(self: *Mysql, reads: ?[]const u8) Failure!void {
 }
 
 pub fn defersFence(self: *const Mysql) bool {
-    const s = self.state;
-    return s.armed and s.rerunnable and s.login != null and s.failure != null and s.failure.? == error.StoreConnectionLost;
+    return mysql_commit.defers(commitFacts(self.state));
 }
 
 pub fn recover(self: *Mysql) bool {
     const s = self.state;
     defer s.replaced = false;
-    if (!s.rerunnable or s.login == null or s.failure == null or s.failure.? != error.StoreConnectionLost) return false;
-    if (!s.replaced) {
-        const owner = self.reconnect() catch return false;
-        if (owner.epoch != s.epoch or owner.commit_seq != s.commit_seq) {
-            s.failure = error.OwnershipLost;
-            return false;
-        }
+    switch (mysql_commit.recover(commitFacts(s), s.replaced)) {
+        .no => return false,
+        .reconnect => {
+            const owner = self.reconnect() catch return false;
+            if (!mysql_commit.rerunAfter(ownerOf(s.epoch, s.commit_seq), ownerOf(owner.epoch, owner.commit_seq))) {
+                s.failure = error.OwnershipLost;
+                return false;
+            }
+        },
+        .rerun => {},
     }
     s.endTransaction();
     s.sink.close();

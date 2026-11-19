@@ -10,6 +10,7 @@ const cores = .{
     .{ "action_read.zig", @import("action_read.zig") },
     .{ "action_receipt.zig", @import("action_receipt.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
+    .{ "action_value_limits.zig", @import("action_value_limits.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
@@ -21,6 +22,7 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
+    .{ "byte_size.zig", @import("byte_size.zig") },
     .{ "call_classification.zig", @import("call_classification.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
@@ -30,9 +32,9 @@ const cores = .{
     .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
+    .{ "cli_invocation.zig", @import("cli_invocation.zig") },
     .{ "cli_option_names.zig", @import("cli_option_names.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
-    .{ "client_defaults.zig", @import("client_defaults.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
     .{ "codecs/json.zig", @import("codecs/json.zig") },
     .{ "codecs/responses.zig", @import("codecs/responses.zig") },
@@ -43,10 +45,15 @@ const cores = .{
     .{ "command_spec.zig", @import("command_spec.zig") },
     .{ "command_value.zig", @import("command_value.zig") },
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
+    .{ "configuration_defaults.zig", @import("configuration_defaults.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
+    .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
+    .{ "creation_receipt.zig", @import("creation_receipt.zig") },
+    .{ "creation_receipt_wire.zig", @import("creation_receipt_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
+    .{ "defaults_report.zig", @import("defaults_report.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "display_text.zig", @import("display_text.zig") },
     .{ "download_policy.zig", @import("download_policy.zig") },
@@ -54,14 +61,17 @@ const cores = .{
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "error_set.zig", @import("error_set.zig") },
+    .{ "excerpt.zig", @import("excerpt.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "hex_value.zig", @import("hex_value.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
+    .{ "host_activation.zig", @import("host_activation.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "host_restart.zig", @import("host_restart.zig") },
     .{ "host_settings.zig", @import("host_settings.zig") },
+    .{ "host_settings_handoff.zig", @import("host_settings_handoff.zig") },
     .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
@@ -80,7 +90,11 @@ const cores = .{
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/post.zig", @import("mcp/post.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
+    .{ "mcp/result_parts.zig", @import("mcp/result_parts.zig") },
+    .{ "mcp/result_parts_legacy_test.zig", @import("mcp/result_parts_legacy_test.zig") },
     .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
+    .{ "mcp/result_text_golden_test.zig", @import("mcp/result_text_golden_test.zig") },
+    .{ "mcp/result_text_legacy_test.zig", @import("mcp/result_text_legacy_test.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
@@ -99,8 +113,11 @@ const cores = .{
     .{ "outcome_code.zig", @import("outcome_code.zig") },
     .{ "output_item.zig", @import("output_item.zig") },
     .{ "overview_style.zig", @import("overview_style.zig") },
+    // Includes the on-demand Lines projection and its fixture domain.
     .{ "overview_view.zig", @import("overview_view.zig") },
+    .{ "part_text.zig", @import("part_text.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
+    .{ "preference_document.zig", @import("preference_document.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
     .{ "process_memory.zig", @import("process_memory.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
@@ -109,8 +126,11 @@ const cores = .{
     .{ "provider_route.zig", @import("provider_route.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
+    .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
+    .{ "result_fault.zig", @import("result_fault.zig") },
+    .{ "result_layout.zig", @import("result_layout.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "schema_json.zig", @import("schema_json.zig") },
@@ -138,14 +158,20 @@ const cores = .{
     .{ "slash_menu.zig", @import("slash_menu.zig") },
     .{ "start_report.zig", @import("start_report.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
+    .{ "store/command_replay.zig", @import("store/command_replay.zig") },
+    .{ "store/engine/mysql_commit.zig", @import("store/engine/mysql_commit.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
+    .{ "store/pass_plan.zig", @import("store/pass_plan.zig") },
+    .{ "store/round_order.zig", @import("store/round_order.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
+    .{ "store/write_batch.zig", @import("store/write_batch.zig") },
     .{ "store_id.zig", @import("store_id.zig") },
     .{ "store_path.zig", @import("store_path.zig") },
     .{ "store_target.zig", @import("store_target.zig") },
     .{ "submission_state.zig", @import("submission_state.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
+    .{ "tool_digests_generated.zig", @import("tool_digests_generated.zig") },
     .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
@@ -155,6 +181,7 @@ const cores = .{
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "unit_test_partition.zig", @import("unit_test_partition.zig") },
+    .{ "upgrade_run.zig", @import("upgrade_run.zig") },
     .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "url.zig", @import("url") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
@@ -168,6 +195,7 @@ const cores = .{
 };
 
 test {
+    _ = @import("credential_location.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("AnswerRenderer.zig");
     _ = @import("core_boundary.zig");
@@ -192,6 +220,18 @@ test {
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];
+}
+
+test "positional I/O errors retain provenance across the whole domain" {
+    const fault = @import("result_fault.zig");
+    inline for (.{ std.Io.File.ReadPositionalError, std.Io.File.WritePositionalError }) |ErrorSet| {
+        inline for (@typeInfo(ErrorSet).error_set.error_names.?) |name| {
+            const err = @field(anyerror, name);
+            try std.testing.expectEqual(fault.Fault.rejected, fault.classify(.{ .source = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .capture = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .store = err }));
+        }
+    }
 }
 
 test "functional cores stay within the core boundary" {
@@ -263,16 +303,16 @@ test "the overview core reads session list pages as the client decodes them" {
         std.debug.assert(overview_view.max_page_rows == protocol.session_list_page_size);
     }
     var page: protocol_reply.SessionListPage = .{ .count = 2, .delta = .changed, .since = .{ .instance = @splat(7), .generation = 42 }, .next = .{ .since = null, .changed = .{ .through = 41, .after_reference = "r4t9vw".* } } };
-    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } } }, .peers = .{ .from_person_at = 1_792_925_001 } };
+    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } }, .attention = .{ .kind = .approval, .turn = 0, .step = 0 }, .group = .needs_you }, .peers = .{ .from_person_at = 1_792_925_001 } };
     try page.rows[0].reference.set("k7m2qx");
     try page.rows[0].workspace.set("/home/d/code/rui");
     page.rows[0].label = .{};
     try page.rows[0].label.?.set("Review PR 412");
-    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .length = 5, .digest = @splat(0xaa) } };
+    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } };
     page.rows[1] = .{ .read_version = page.since, .work = .{ .state = .{ .stopped = .{ .since = 1_792_925_400, .cause = .stop } } } };
     try page.rows[1].reference.set("r4t9vw");
     try page.rows[1].workspace.set("/srv/work");
-    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .length = 3, .digest = @splat(0xbb) } };
+    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .text = .{ .length = 3, .digest = @splat(0xbb) } } };
     try page.rows[1].first_message.?.sender.?.session.set("k7m2qx");
 
     var traversal = protocol_reply.SessionTraversal.init(.{ .instance = @splat(7), .generation = 40 });
@@ -287,7 +327,7 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqualStrings("/home/d/code/rui", started.workspace);
     try std.testing.expectEqualStrings("Review PR 412", started.label.?);
     try std.testing.expectEqual(page.rows[0].work.state, started.state);
-    try std.testing.expectEqual(overview_view.First{ .position = 1, .admission = 4, .sender = null }, started.first.?);
+    try std.testing.expectEqualDeep(overview_view.First{ .position = 1, .admission = 4, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } }, started.first.?);
     try std.testing.expectEqual(@as(?u64, 1_792_925_001), started.from_person_at);
     const delegated = read.rows[1];
     try std.testing.expectEqual(@as(?[]const u8, null), delegated.label);
@@ -387,7 +427,10 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
             .state_change_at = since,
-            .first = .{ .position = 1, .admission = at + 1, .sender = null },
+            .subtree_state_change_at = since,
+            .descendant_count = 0,
+            .descendant_needs_you_count = 0,
+            .first = .{ .position = 1, .admission = at + 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (at % 10 == 0) since else null,
         };
     }
@@ -458,13 +501,12 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             const Source = struct {
                 fn row(userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
                     const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
-                    const item = overview_view.listItem(shown, index).?;
-                    const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
+                    const built = (try overview_view.Lines.at(arena, shown, index, 200, .{}, 0)).?;
                     return .{ .segments = built.segments, .heading = built.heading };
                 }
             };
-            list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
-            list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
+            list.rows = .{ .userdata = &state, .count = @intCast(overview_view.Lines.count(&state)), .rowFn = Source.row };
+            list.selected = if (overview_view.Lines.named(&state)) |at| @intCast(at) else null;
             _ = try list.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
             const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = overview_view.footerRight(&state), .notice = overview_view.footerNotice(&state) };
             _ = try footer.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });

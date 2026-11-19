@@ -10,6 +10,8 @@ const display_text = @import("display_text.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
+const prose_width = 88;
+
 pub const capacity = 256 * 1024;
 pub const widest_cluster = display_text.widest_cluster;
 pub const longest_cluster = display_text.longest_cluster;
@@ -55,7 +57,8 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
-            quoted = std.mem.eql(u8, glyph, "?") or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
+            const approval = state_marks.marks.get(.needs_you);
+            quoted = std.mem.eql(u8, glyph, approval.unicode) or std.mem.eql(u8, glyph, approval.ascii) or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -74,12 +77,18 @@ pub const Colours = struct {
     band: vaxis.Color = .default,
     user_band: vaxis.Color = .default,
     selection: vaxis.Color = .default,
+    no_depth: bool = false,
 };
 
 pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
+const feed_inset: u16 = 2;
+
 const exit_bit: RetainedStyle = 1 << 9;
 const user_message_bit: RetainedStyle = 1 << 10;
+const user_start_bit: RetainedStyle = 1 << 11;
+const user_end_bit: RetainedStyle = 1 << 12;
+const full_width_bit: RetainedStyle = 1 << 13;
 const AllText = struct {
     pub fn includes(_: *@This(), _: usize) bool {
         return true;
@@ -92,7 +101,7 @@ const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 pub fn seamStyle(value: RetainedStyle) RetainedStyle {
-    return (value & (body_bit | user_message_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
+    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
 
 fn foregroundIndex(value: RetainedStyle) u8 {
@@ -145,6 +154,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         bytes: [limit]u8 = undefined,
         styles: [if (styled) limit else 0]RetainedStyle = undefined,
         style: RetainedStyle = 0,
+        user_start_pending: bool = false,
         control: [8]u8 = undefined,
         control_length: usize = 0,
         link: enum { none, address, text, exit_text } = .none,
@@ -169,7 +179,14 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     self.control_length += 1;
                     if (byte == 'm') {
                         const code = self.control[0..self.control_length];
-                        if (std.mem.eql(u8, code, TerminalText.user_message_on)) self.style |= user_message_bit else if (std.mem.eql(u8, code, TerminalText.user_message_off)) self.style &= ~user_message_bit else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~body_bit else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
+                        if (std.mem.eql(u8, code, TerminalText.user_message_on)) {
+                            self.style |= user_message_bit;
+                            self.user_start_pending = true;
+                        } else if (std.mem.eql(u8, code, TerminalText.user_message_off)) {
+                            if (self.length != 0 and !self.user_start_pending and self.styles[self.length - 1] & user_message_bit != 0) self.styles[self.length - 1] |= user_end_bit;
+                            self.style &= ~user_message_bit;
+                            self.user_start_pending = false;
+                        } else if (std.mem.eql(u8, code, TerminalText.full_width_on)) self.style |= full_width_bit else if (std.mem.eql(u8, code, TerminalText.full_width_off)) self.style &= ~full_width_bit else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~(body_bit | full_width_bit) else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit | full_width_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
                             self.style = (self.style & ~foreground_mask) | (@as(RetainedStyle, colour_index) << 3);
                         }
@@ -208,7 +225,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 const count = @min(input.len - position, limit - self.length);
                 @memcpy(self.bytes[self.length..][0..count], input[position..][0..count]);
-                if (styled) @memset(self.styles[self.length..][0..count], self.cellValue());
+                if (styled) {
+                    @memset(self.styles[self.length..][0..count], self.cellValue());
+                    if (self.user_start_pending) {
+                        self.styles[self.length] |= user_start_bit;
+                        self.user_start_pending = false;
+                    }
+                }
                 if (self.link == .address) self.address_length += count;
                 self.length += count;
                 position += count;
@@ -299,6 +322,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.origin = 0;
             self.top = null;
             self.style = 0;
+            self.user_start_pending = false;
             self.control_length = 0;
             self.link = .none;
             self.dirty = true;
@@ -411,7 +435,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
             fn style(kind: Line, colour: bool, base: vaxis.Style, colours: Colours) vaxis.Style {
                 var result = base;
-                if (!colour) return result;
+                if (!colour) {
+                    if (kind == .user_message) result.reverse = true;
+                    return result;
+                }
                 result.bg = switch (kind) {
                     .plain => base.bg,
                     .user_message => colours.user_band,
@@ -456,13 +483,43 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
             const end = self.lineEnd(offset);
+            const after = end + @intFromBool(end < self.length);
+            const kind = self.lineKind(offset, self.lineMarker(offset));
+            var top = false;
+            var lower_cap = false;
+            if (styled and kind == .user_message) {
+                for (self.styles[offset..after]) |value| {
+                    top = top or value & user_start_bit != 0;
+                    lower_cap = lower_cap or value & user_end_bit != 0;
+                }
+                if (after == self.length and self.style & user_message_bit != 0) lower_cap = true;
+            }
+            const body_row = row + @as(i17, @intFromBool(top));
+            const can_colour = colour and !colours.no_depth;
+            const used = self.printBody(window, body_row, offset, commit, can_colour, base, colours);
+            if (commit and kind == .user_message) {
+                if (top) paintCap(window, row, can_colour, base, colours);
+                if (lower_cap) paintCap(window, body_row + @as(i17, @intCast(used)), can_colour, base, colours);
+            }
+            return used + @as(u16, @intFromBool(top)) + @as(u16, @intFromBool(lower_cap));
+        }
+
+        fn paintCap(window: vaxis.Window, row: i17, colour: bool, base: vaxis.Style, colours: Colours) void {
+            if (row < 0 or row >= window.height) return;
+            var style = base;
+            if (colour) style.bg = colours.user_band else style.reverse = true;
+            window.child(.{ .y_off = row, .height = 1 }).fill(.{ .style = style });
+        }
+
+        fn printBody(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
+            const end = self.lineEnd(offset);
             const mark = self.lineMarker(offset);
             const content_start = if (mark) |value| value.end else offset;
             const kind = self.lineKind(offset, mark);
             const output = kind == .output;
             const plain = kind.style(colour, base, colours);
-            if (commit and colour and kind != .plain) {
-                const used = self.printLine(window, row, offset, false, colour, base, colours);
+            if (commit and (colour or kind == .user_message) and kind != .plain) {
+                const used = self.printBody(window, row, offset, false, colour, base, colours);
                 const first_row: i32 = @max(row, 0);
                 const last_row: i32 = @min(@as(i32, row) + used, window.height);
                 if (last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = plain });
@@ -479,7 +536,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (styled) for (self.styles[content_start..end], content_start..) |value, index| {
                 if (value & exit_bit == 0) continue;
                 if (commit) {
-                    const line = window.child(.{ .y_off = row, .height = 1 });
+                    const line = window.child(.{ .y_off = row, .height = 1, .width = window.width -| feed_inset });
                     const exit_width = display_text.width(self.bytes[index..end], .{ .viewport = self.width_method });
                     if (line.width < exit_width) {
                         self.printTruncated(line, index, end, colour, plain, colours);
@@ -504,11 +561,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             if (output) single = true;
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
-            const body = window.child(.{ .width = window.width - margin });
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin + (if (kind == .user_message) feed_inset else 0) else 0;
+            const inset: u16 = if (kind == .user_message) @min(feed_inset, window.width) else 0;
+            const right: u16 = if (kind == .user_message and margin == 0) @min(feed_inset, window.width -| inset) else 0;
+            const available = window.width -| margin -| inset -| right;
+            const prose = styled and offset < self.length and (self.styles[offset] & body_bit != 0 or kind == .user_message) and self.styles[offset] & full_width_bit == 0 and !output;
+            const body = window.child(.{ .x_off = inset, .width = if (prose) @min(available, prose_width) else available });
             if (commit and margin != 0) if (note) |range| {
                 if (self.timestampShown(range.start, range.end)) {
-                    _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
+                    _ = self.printRange(window.child(.{ .x_off = window.width -| sidenote_cells -| (if (kind == .user_message) feed_inset else 0), .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
                 }
             };
             if (single) {
@@ -561,7 +622,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 var stop = end;
                 if (styled) {
                     stop = start + 1;
-                    while (stop < end and (self.styles[stop] & ~body_bit) == (self.styles[start] & ~body_bit)) stop += 1;
+                    while (stop < end and (self.styles[stop] & ~(body_bit | user_start_bit | user_end_bit)) == (self.styles[start] & ~(body_bit | user_start_bit | user_end_bit))) stop += 1;
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
@@ -592,7 +653,24 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     .user => colours.user,
                 } else if (value.quiet) colours.quiet else plain.fg,
                 .bg = plain.bg,
+                .reverse = plain.reverse,
             };
+        }
+
+        // A cap has no source cells. Map its lower edge to the end of its
+        // message line so a drag starting there selects toward the body.
+        pub fn selectionLine(self: *const Self, layout: Layout, position: Position) usize {
+            if (!styled or position.offset >= self.length) return position.offset;
+            const end = self.lineEnd(position.offset);
+            const after = end + @intFromBool(end < self.length);
+            var lower = false;
+            for (self.styles[position.offset..after]) |value| lower = lower or value & user_end_bit != 0;
+            if (after == self.length and self.style & user_message_bit != 0) lower = true;
+            return if (lower and position.row + 1 == self.lineRows(layout, position.offset)) end else position.offset;
+        }
+
+        pub fn endsUserMessage(self: *const Self, end: usize) bool {
+            return styled and end != 0 and end <= self.length and self.styles[end - 1] & user_end_bit != 0;
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
@@ -777,7 +855,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
 const TestScreen = struct {
     screen: vaxis.Screen,
-    cells: [40 * 14]vaxis.Cell = @splat(.{}),
+    cells: [140 * 20]vaxis.Cell = @splat(.{}),
 
     fn window(self: *TestScreen, width: u16, height: u16) vaxis.Window {
         @memset(&self.cells, .{});
@@ -827,6 +905,27 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
     }
 }
 
+test "APPROVAL-2 wrapped permission headings mark continuation rows in both scripts" {
+    const approval = state_marks.marks.get(.needs_you);
+    for ([_][]const u8{ approval.unicode, approval.ascii }) |glyph| {
+        for ([_]bool{ false, true }) |quotes| {
+            var text: [128]u8 = undefined;
+            const line = try std.fmt.bufPrint(&text, "{s} Approval description continues on another row\n", .{glyph});
+            var view: Sized(256, false) = .{ .quotes = quotes };
+            try view.append(line);
+            try view.prepare();
+            var screen: TestScreen = undefined;
+            const drawn = view.draw(screen.window(20, 10), .{}, true, false, .{}, .{});
+            try std.testing.expect(drawn.rows > 1);
+            var storage: [128]u8 = undefined;
+            try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &storage), glyph));
+            for (1..drawn.rows) |row| {
+                try std.testing.expect(std.mem.startsWith(u8, screen.row(@intCast(row), &storage), if (quotes) "┆ " else "  "));
+            }
+        }
+    }
+}
+
 test "every state mark hangs continuation text in both scripts" {
     for (state_marks.marks.values) |mark| {
         for ([_][]const u8{ mark.unicode, mark.ascii }) |glyph| {
@@ -842,7 +941,7 @@ test "every state mark hangs continuation text in both scripts" {
 
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n⠹ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n◝ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
@@ -852,7 +951,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "0123456789abcdef", "next",
         "› a longword",
         "  supercalifragi", "  listic x",
-        "⠹ one two three",
+        "◝ one two three",
         "  four",
         "中中中中中中中中",
         "Z",
@@ -1644,7 +1743,7 @@ test "quote body extraction metadata leaves grapheme layout and visual styles un
     };
 }
 
-test "tool exit field aligns quietly and truncates only the label across scripts widths colours and splits" {
+fn toolExitInsets() !void {
     const View = @import("session_view.zig");
     const Sink = struct {
         writer: *std.Io.Writer,
@@ -1676,22 +1775,23 @@ test "tool exit field aligns quietly and truncates only the label across scripts
                     window.fill(.{ .style = plain });
                     try std.testing.expectEqual(@as(u16, 1), document.printLine(window, 0, 0, true, colour, plain, colours));
                     try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = width, .method = method }, 0));
-                    if (width >= 8) {
+                    if (width >= 2) for (width - 2..width) |at| try std.testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                    if (width >= 10) {
                         for ("exit 127", 0..) |byte, at| {
-                            const cell = screen.screen.readCell(width - 8 + @as(u16, @intCast(at)), 0).?;
+                            const cell = screen.screen.readCell(width - 10 + @as(u16, @intCast(at)), 0).?;
                             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                             try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, cell.style.fg);
                             try std.testing.expectEqualStrings("", cell.link.uri);
                         }
-                        if (width > 8) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 9, 0).?.char.grapheme);
-                        if (width == 12) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
+                        if (width > 10) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 11, 0).?.char.grapheme);
+                        if (width == 14) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
                         if (width == 80) {
                             var row: [256]u8 = undefined;
                             try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &row), "× "));
                         }
-                    } else if (width != 0) {
-                        for (0..width - 1) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
-                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 1, 0).?.char.grapheme);
+                    } else if (width > 2) {
+                        for (0..width - 3) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 3, 0).?.char.grapheme);
                     }
                 }
             }
@@ -1699,7 +1799,7 @@ test "tool exit field aligns quietly and truncates only the label across scripts
     };
 }
 
-test "tool exit field keeps ASCII headings readable without colour and open output directly below" {
+fn toolExitAscii() !void {
     var document: Sized(256, true) = .{};
     try document.append(tool_fold.heading_marker ++ "x Run tests" ++ tool_fold.exit_open ++ "exit 127" ++ TerminalText.link_close ++ "\n" ++ tool_fold.output_marker ++ "    saved output\n");
     try document.prepare();
@@ -1712,7 +1812,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
         const window = screen.window(32, 3);
         window.fill(.{ .style = plain });
         _ = document.draw(window, .{}, true, colour, plain, colours);
-        try std.testing.expectEqualStrings("x Run tests             exit 127", screen.row(0, &row));
+        try std.testing.expectEqualStrings("x Run tests           exit 127", screen.row(0, &row));
         try std.testing.expectEqualStrings("    saved output", screen.row(1, &row));
         for (0..32) |column| {
             try std.testing.expectEqual(if (colour) colours.selection else plain.bg, screen.screen.readCell(@intCast(column), 0).?.style.bg);
@@ -1721,7 +1821,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
     }
 }
 
-test "timestamp owner covers first same minute new minute and intervening tool rows at both widths" {
+fn timestampChanges() !void {
     const cases = [_]struct { previous: ?[]const u8, tool: bool, current: []const u8, shown: bool }{
         .{ .previous = null, .tool = false, .current = "08:00", .shown = true },
         .{ .previous = "08:00", .tool = false, .current = "08:00", .shown = false },
@@ -1755,7 +1855,7 @@ test "timestamp owner covers first same minute new minute and intervening tool r
     }
 }
 
-test "user band fills wrapped rows and summaries without tinting the next tool row" {
+fn wrappedBand() !void {
     var document: Sized(512, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[2ma long user message spanning several rows\x1b[0m\n  \x1b[2;8m┄ 3 more lines\x1b[0m\n" ++ TerminalText.user_message_off ++ "  Ran tool\n");
     for ([_]bool{ false, true }) |colour| {
@@ -1781,23 +1881,23 @@ test "user band fills wrapped rows and summaries without tinting the next tool r
     }
 }
 
-test "whole user message provenance tints empty bodies and rejects italics without tinting peers" {
+fn bandProvenance() !void {
     var document: Sized(256, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[0m\n\x1b[3mupright\x1b[0m\n" ++ TerminalText.user_message_off ++ "\x1b[2;8m← Received message from peer\x1b[0m\n");
     var screen: TestScreen = undefined;
-    const window = screen.window(40, 3);
+    const window = screen.window(40, 5);
     const plain: vaxis.Style = .{ .bg = .{ .index = 1 } };
     const colours: Colours = .{ .user_band = .{ .index = 2 } };
     window.fill(.{ .style = plain });
     _ = document.draw(window, .{}, true, true, plain, colours);
-    for (0..3) |row| for (0..40) |column| {
+    for (0..5) |row| for (0..40) |column| {
         const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
-        try std.testing.expectEqual(if (row < 2) colours.user_band else plain.bg, cell.style.bg);
+        try std.testing.expectEqual(if (row < 4) colours.user_band else plain.bg, cell.style.bg);
         try std.testing.expect(!cell.style.italic);
     };
 }
 
-test "user band provenance includes blank and wrapped message lines only" {
+fn bandLines() !void {
     const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
         .{ .body = "› \n", .lines = 1, .wraps = false },
         .{ .body = "\n", .lines = 1, .wraps = false },
@@ -1836,4 +1936,160 @@ test "user band provenance includes blank and wrapped message lines only" {
     try unfinished.append(TerminalText.user_message_on ++ "unfinished");
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .user_message), unfinished.lineKind(0, null));
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
+}
+
+pub fn testBandPadding() !void {
+    const testing = std.testing;
+    for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
+        const method: Method = if (unicode_caps) .unicode else .wcwidth;
+        var document: Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
+        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n" ++ TerminalText.user_message_off);
+        try document.prepare();
+        const second = document.nextLine(0).?;
+        const layout: Layout = .{ .width = width, .method = method };
+        try testing.expectEqual(@as(u16, 3), document.lineRows(layout, 0));
+        const second_rows = document.lineRows(layout, second);
+        try testing.expectEqual(@as(u16, if (width == 46) 5 else 6), second_rows);
+        const colour = depth != 0;
+        const band: vaxis.Color = if (depth == 1) .{ .index = 8 } else .{ .rgb = .{ 10, 20, 30 } };
+        const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
+        const colours: Colours = .{ .user_band = band, .no_depth = !colour };
+        var screen: TestScreen = undefined;
+        const height: u16 = 12;
+        const window = screen.window(width, height);
+        screen.screen.width_method = method;
+        window.fill(.{ .style = ground });
+        _ = document.draw(window, .{}, true, true, ground, colours);
+        for ([_]u16{ 0, 2, 3, 3 + second_rows - 1 }) |row| for (0..width) |column| {
+            const cell = screen.screen.readCell(@intCast(column), row).?;
+            try testing.expect(document.cellOffset(cell) == null);
+            try testing.expectEqualStrings(" ", cell.char.grapheme);
+            if (colour) {
+                try testing.expectEqual(band, cell.style.bg);
+                try testing.expect(!cell.style.reverse);
+            } else try testing.expect(cell.style.reverse);
+        };
+        try testing.expectEqualStrings("›", screen.screen.readCell(2, 1).?.char.grapheme);
+        try testing.expectEqualStrings("s", screen.screen.readCell(4, 1).?.char.grapheme);
+        for ("14:20", 0..) |byte, index| try testing.expectEqualStrings(&.{byte}, screen.screen.readCell(width - 7 + @as(u16, @intCast(index)), 1).?.char.grapheme);
+        for (width - 2..width) |column| try testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(column), 1).?.char.grapheme);
+        for (0..2) |column| {
+            const cell = screen.screen.readCell(@intCast(column), 1).?;
+            if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
+        }
+        for ([_]Position{ .{ .row = 1 }, .{ .offset = second, .row = second_rows - 1 } }) |from| {
+            window.fill(.{ .style = ground });
+            const drawn = document.draw(window.child(.{ .height = 1 }), from, true, true, ground, colours);
+            try testing.expectEqual(@as(usize, 1), drawn.rows);
+            const cell = screen.screen.readCell(0, 0).?;
+            try testing.expect(document.cellOffset(cell) == null);
+            if (from.offset == 0) {
+                try testing.expectEqualStrings("›", screen.screen.readCell(2, 0).?.char.grapheme);
+            } else {
+                try testing.expectEqualStrings(" ", cell.char.grapheme);
+                if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
+            }
+        }
+    };
+}
+
+fn legacyBandShape() !void {
+    for ([_]u16{ 46, 140 }) |width| {
+        var document: Sized(1024, true) = .{ .sidenotes = true };
+        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
+        try document.append("\x1b[90m›\x1b[39m \x1b[8m14:21\x1b[0m");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n");
+        try document.prepare();
+        const layout: Layout = .{ .width = width, .method = .unicode };
+        try std.testing.expectEqual(@as(u16, 1), document.lineRows(layout, 0));
+        try std.testing.expectEqual(@as(u16, 3), document.lineRows(layout, document.nextLine(0).?));
+        var screen: TestScreen = undefined;
+        const window = screen.window(width, 5);
+        _ = document.draw(window, .{}, true, true, .{}, .{});
+        try std.testing.expectEqualStrings("›", screen.screen.readCell(0, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("s", screen.screen.readCell(2, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("1", screen.screen.readCell(width - 5, 0).?.char.grapheme);
+    }
+}
+
+pub fn testMessageLayout() !void {
+    try toolExitInsets();
+    try toolExitAscii();
+    try timestampChanges();
+    try wrappedBand();
+    try bandProvenance();
+    try bandLines();
+    try legacyBandShape();
+}
+
+test "SUI-31 answer prose has a bounded measure while code and tables use the pane" {
+    const word = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const input = word ++ "\n- " ++ word ++ "\n> " ++ word ++ "\n# " ++ word ++ "\n```\n" ++ word ++ "\n```\n| " ++ word ++ " | z |\n| --- | --- |\n| " ++ word ++ " | z |\n";
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = .unicode } };
+        try renderer.feed(input);
+        try renderer.finish();
+        var view: Sized(2048, true) = .{};
+        try view.append(TerminalText.body_on);
+        try view.append(output.written());
+        try view.append(TerminalText.body_off);
+        try view.prepare();
+        const paragraph: usize = 0;
+        const list = view.nextLine(paragraph).?;
+        const quote = view.nextLine(list).?;
+        const heading = view.nextLine(quote).?;
+        const code = view.nextLine(heading).?;
+        const table = view.nextLine(code).?;
+        for ([_]u16{ 86, 88, 89, 120 }) |width| {
+            const layout: Layout = .{ .width = width, .method = .unicode };
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, paragraph));
+            var screen: TestScreen = undefined;
+            const window = screen.window(width, 12);
+            _ = view.draw(window, .{}, true, colour, .{}, .{});
+            var row_buffer: [512]u8 = undefined;
+            try std.testing.expectEqual(@as(usize, @min(width, 88)), screen.row(0, &row_buffer).len);
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, list));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, quote));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, heading));
+            try std.testing.expectEqual(@as(u16, if (width < 103) 2 else 1), view.lineRows(layout, code));
+            try std.testing.expectEqual(@as(u16, if (width < 105) 2 else 1), view.lineRows(layout, table));
+        }
+        var user: Sized(256, true) = .{};
+        try user.append(TerminalText.user_message_on ++ TerminalText.body_on ++ word ++ TerminalText.body_off ++ TerminalText.user_message_off);
+        try user.prepare();
+        try std.testing.expectEqual(@as(u16, 4), user.lineRows(.{ .width = 120, .method = .unicode }, 0));
+    }
+
+    const long = @as([4200]u8, @splat('x'));
+    for ([_][]const u8{ "```\n", "| h |\n| --- |\n| " }) |opening| {
+        for ([_]bool{ false, true }) |colour| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = .unicode } };
+            try renderer.feed(opening);
+            for (long) |byte| try renderer.feed(&.{byte});
+            try renderer.feed(if (opening[0] == '`') "\n```\n" else " |\n");
+            try renderer.finish();
+            var view: Sized(8192, true) = .{};
+            try view.append(TerminalText.body_on);
+            for (output.written()) |byte| try view.append(&.{byte});
+            try view.append(TerminalText.body_off);
+            try view.prepare();
+            const at = std.mem.indexOf(u8, view.text(), "xxxxxxxx").?;
+            try std.testing.expect(view.lineRows(.{ .width = 120, .method = .unicode }, view.previousLine(at + 1) orelse 0) < 48);
+        }
+    }
+    var cut: Sized(512, true) = .{};
+    try cut.append(TerminalText.body_on ++ TerminalText.full_width_on ++ "code\n" ++ TerminalText.body_off ++ "\x1b[0m\n" ++ TerminalText.body_on ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+    try cut.prepare();
+    const prose = std.mem.indexOf(u8, cut.text(), "xxxxxxxx").?;
+    try std.testing.expectEqual(@as(u16, 2), cut.lineRows(.{ .width = 120, .method = .unicode }, prose));
 }

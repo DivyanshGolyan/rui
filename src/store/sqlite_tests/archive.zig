@@ -92,7 +92,7 @@ test "archive reports retain pending stops and changed rows outside the full fil
     const pending = try TestingListing.read(&storage, &tmp, .{ .since = before.since });
     try std.testing.expectEqual(protocol.ListDelta.changed, pending.delta);
     try pending.expectReferences(&.{session.slice()[0..protocol.session_id_bytes].*});
-    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
     try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .archived);
     const active_delta: protocol.ListSessions = .{ .since = pending.since };
     const closed = try TestingListing.read(&storage, &tmp, active_delta);

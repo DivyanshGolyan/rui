@@ -24,7 +24,7 @@ RESULT = re.compile(r"ENV\[([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]")
 
 
 def session_of(request):
-    return fixture.instructions_session(request["instructions"])
+    return fixture.instructions_session(fixture.request_system_prompt(request))
 
 
 def last_user_text(request):
@@ -131,7 +131,7 @@ def main(placement="default"):
                     interfaces.enter_context(host_process.short_interface_directory()))
         host, fields = start_ready_process(
             fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-            env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", "HOST_SECRET": HOST_SECRET},
+            env={"PATH": os.environ["PATH"], "HOME": str(home), "HOST_SECRET": HOST_SECRET},
             required_fields={"execution": "enabled"})
         rui_dir = str(fixture.RUI.parent)
 

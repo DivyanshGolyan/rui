@@ -1020,7 +1020,7 @@ test "feed_window target capacity admits whole entries atomically across trim re
     window.* = .{};
     var prepared: viewport.Sized(1024, true) = .{};
     var targets: [16]MessageTarget = undefined;
-    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 99, .digest = @splat(7) }, .row = false };
+    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .text = .{ .length = 99, .digest = @splat(7) } }, .row = false };
     for (&targets, 0..) |*target, index| {
         target.* = .{ .offset = index * "┄\n".len, .target = reference };
         try prepared.append(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n");
@@ -1308,4 +1308,49 @@ test "feed message identity survives display replacement and trimming" {
     window.trim(1, 0);
     try std.testing.expectEqual(next, window.entries[0].message_key.?);
     try std.testing.expectEqual(@as(u64, 2), window.entries[0].key.position);
+}
+
+test "content_links SUI-26 rendered links wrap, hit and leave with their content" {
+    const input = "See [Tool loading docs](/Users/divyanshgolyan/code/personal/rui/docs/using-rui.md:316).";
+    const label = "Tool loading docs";
+    const expected = "See " ++ label ++ ".";
+    const uri = "file:///Users/divyanshgolyan/code/personal/rui/docs/using-rui.md";
+    for (0..input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .home = "/home/test" };
+        try renderer.feed(input[0..split]);
+        try renderer.feed(input[split..]);
+        try renderer.finish();
+        var rendered: viewport.Sized(1024, true) = .{};
+        try rendered.append(output.written());
+        try rendered.prepare();
+        var window: Window = .{};
+        try window.append(&.{ .{ .key = .{ .position = 10 }, .text = Text.fromDocument(&rendered) }, testEntry(20, "tail") });
+        var screen: TestScreen = .{};
+        for ([_]u16{ 8, 40 }) |width| {
+            _ = window.heights(.{ .width = width, .method = .unicode });
+            window.draw(.{ .first = 0 }, screen.window(width, 8), true, .{}, .{});
+            var seen: usize = 0;
+            for (0..8) |row| for (0..width) |column| {
+                if (seen == expected.len) break;
+                const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
+                if (cell.char.grapheme.len == 0) continue;
+                if (expected[seen] == ' ' and cell.char.grapheme[0] != ' ') seen += 1;
+                if (cell.char.grapheme[0] == ' ' and expected[seen] != ' ') continue;
+                try testing.expectEqualStrings(expected[seen .. seen + 1], cell.char.grapheme);
+                const in_link = seen >= 4 and seen < 4 + label.len;
+                try testing.expectEqualStrings(if (in_link) uri else "", cell.link.uri);
+                try testing.expectEqual(in_link, cell.style.ul_style == .single);
+                seen += 1;
+            };
+            try testing.expectEqual(expected.len, seen);
+        }
+        window.trim(1, 0);
+        _ = window.heights(.{ .width = 8, .method = .unicode });
+        window.draw(.{ .first = 0 }, screen.window(8, 3), true, .{}, .{});
+        var row: [64]u8 = undefined;
+        try testing.expectEqualStrings("tail", screen.row(0, &row));
+        for (0..8) |column| try testing.expectEqualStrings("", screen.screen.readCell(@intCast(column), 0).?.link.uri);
+    }
 }

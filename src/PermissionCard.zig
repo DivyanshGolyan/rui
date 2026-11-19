@@ -11,6 +11,7 @@ consent: *Consent,
 body: vxfw.Widget,
 userdata: *anyopaque,
 on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerror!void,
+caps: @import("overview_view.zig").Caps = .{},
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
@@ -78,8 +79,8 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const draft = if (composer) |widget_| try widget_.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(size.height, @import("draft_layout.zig").cap(size.height) + 2) })) else null;
-    const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(3, size.height);
-    const rule: u16 = if (input_height >= 3) 1 else 0;
+    const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(@import("draft_layout.zig").min_rule_height, size.height);
+    const rule: u16 = if (input_height >= @import("draft_layout.zig").min_rule_height) 1 else 0;
     const body_height = size.height - input_height;
     self.choice_column = if (size.width >= 6 and size.height >= 4) input_choice.prompt_cells else 0;
     self.choice_width = size.width - 2 * self.choice_column;
@@ -97,7 +98,7 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
         children[count] = .{ .origin = .{ .col = 0, .row = body_height }, .surface = drawn };
     } else {
         if (rule != 0) for (0..size.width) |col| {
-            const cell: vaxis.Cell = .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.quiet };
+            const cell = @import("widget_style.zig").line(self.caps, .horizontal);
             surface.writeCell(@intCast(col), body_height, cell);
             surface.writeCell(@intCast(col), size.height - 1, cell);
         };
@@ -163,8 +164,8 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     owner.decision = null;
     consent.adopt(63);
     const shown = try card.widget().draw(ctx);
-    try std.testing.expectEqualStrings("─", shown.readCell(0, 2).char.grapheme);
-    try std.testing.expectEqualStrings("─", shown.readCell(39, 4).char.grapheme);
+    try std.testing.expectEqualStrings("┄", shown.readCell(0, 2).char.grapheme);
+    try std.testing.expectEqualStrings("┄", shown.readCell(39, 4).char.grapheme);
     try std.testing.expect(shown.readCell(3, 3).style.reverse);
     try std.testing.expect(!shown.readCell(17, 3).style.reverse);
     const click: vaxis.Mouse = .{ .col = 0, .row = 3, .button = .left, .type = .press, .mods = .{} };

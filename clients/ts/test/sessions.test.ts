@@ -1,23 +1,30 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Http2ServerResponse, type ServerHttp2Session } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { Rui, RuiRequestError, type AgentSpec } from "../src/index.ts";
+import { Rui, RuiRequestError, type AgentSpec, type HostSettings } from "../src/index.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
+import type { components } from "../src/wire.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
 
-async function connect(): Promise<Rui> {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
+async function connect(settings: Partial<HostSettings> = {}): Promise<Rui> {
+	const store = settings.store ?? { sqlite: { dir: join(realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-"))), "store") } };
 	return Rui.connect({
-		store: { sqlite: { dir: join(root, "store") } },
+		store,
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-client-test" } },
+		...settings,
 	}, { binary: binary ?? "rui" });
 }
 
-const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" } satisfies AgentSpec;
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -84,8 +91,9 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:status" });
 		const idle = await session.status();
 		assert.deepEqual(idle, {
-			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
-			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
+			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, interruptTarget: null, pendingMessages: "0",
+			attention: null, group: "done", canStop: false, decide: null,
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
 		await session.send("queued", { idempotencyKey: "status:message" });
@@ -93,10 +101,55 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const queued = await session.status();
 		assert.deepEqual(queued, {
 			...idle, state: "pending", since: queued.since, pendingMessages: "1", label: "Queued work", effort: "high",
+			attention: null, group: "queued", canStop: true, decide: null,
 		});
 		assert.match(queued.since, /^[1-9][0-9]*$/);
 		await session.interrupt();
 		assert.equal((await session.status()).pendingMessages, "1");
+	} finally {
+		await rui.close();
+	}
+});
+
+test("status agrees with native and CLI inspection for configured and loaded tool intent", { skip }, async (t) => {
+	assert.ok(binary);
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-tool-intent-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const storeDirectory = join(root, "store");
+	const interfaceSettings = { dir: join(root, "interface") };
+	mkdirSync(storeDirectory, { mode: 0o700 });
+	// CLI readers resolve the saved interface placement; the child Host uses it too.
+	writeFileSync(join(storeDirectory, "host.json"), JSON.stringify({ interface: interfaceSettings }), { mode: 0o600 });
+	const rui = await connect({ store: { sqlite: { dir: storeDirectory } }, interface: interfaceSettings, execution: { paused: true } });
+	try {
+		const configurations = [
+			{ tools: ["bash", "find_tools"], loadedTools: ["find_tools"] },
+			{ tools: ["bash"], loadedTools: ["bash"] },
+			{ tools: [], loadedTools: [] },
+		];
+		const session = await rui.sessions.create({ ...spec, ...configurations[0] }, { idempotencyKey: "chat:tool-intent" });
+		const store = rui.hostInfo?.store;
+		assert.ok(store);
+		for (const [index, configuration] of configurations.entries()) {
+			if (index > 0) await session.update(configuration);
+			const status = await session.status();
+			const native = JSON.parse((await rui.exchange("/v1/inspect-session", (canonicalStore) => JSON.stringify({
+				version: WIRE_VERSION, kind: "inspect_session", store: canonicalStore, session: session.id,
+			}))).toString("utf8")) as components["schemas"]["InspectSessionReply"];
+			assert.equal(native.profile, "current");
+			assert.ok(native.session);
+			assert.deepEqual(status.tools, configuration.tools);
+			assert.deepEqual(status.loadedTools, configuration.loadedTools);
+			assert.deepEqual(native.session.tools, configuration.tools);
+			assert.deepEqual(native.session.loaded_tools, configuration.loadedTools);
+			for (const profile of ["current", "full"]) {
+				const cli = JSON.parse(execFileSync(binary, [
+					"session", "inspect", "--store", store, "--session", session.id, "--profile", profile,
+				], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR } })) as components["schemas"]["InspectSessionReply"];
+				assert.equal(cli.profile, profile);
+				assert.deepEqual(cli.session, native.session);
+			}
+		}
 	} finally {
 		await rui.close();
 	}
@@ -232,10 +285,61 @@ test("create parent inherits binding and refuses widening as field-specific requ
 			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
 			[{ parent: "zzzzzz" }, "unknown_session"],
 		] as const) {
-			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides }, { idempotencyKey: `parent:${code}` }),
+			// Exercise Host validation for values a JavaScript caller can still send.
+			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides } as never, { idempotencyKey: `parent:${code}` }),
 				(error: unknown) => error instanceof RuiRequestError && error.code === code);
 		}
 	} finally {
 		await rui.close();
+	}
+});
+
+test("replaying an interruption cannot cut a later model call", { skip, timeout: 30_000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-interrupt-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const connections = new Set<ServerHttp2Session>();
+	const responses: Http2ServerResponse[] = [];
+	const provider = createServer((request, response) => {
+		request.resume();
+		request.on("end", () => {
+			if (request.url !== "/responses") { response.writeHead(200); response.end('{"data":[]}'); return; }
+			responses.push(response);
+			response.writeHead(200, { "content-type": "text/event-stream" });
+		});
+	});
+	provider.on("session", (connection) => { connections.add(connection); connection.on("close", () => connections.delete(connection)); });
+	provider.listen(0, "127.0.0.1");
+	await once(provider, "listening");
+	const address = provider.address();
+	assert.ok(address && typeof address !== "string");
+	let rui: Rui | undefined;
+	const until = async (condition: () => Promise<boolean>) => {
+		const deadline = Date.now() + 15_000;
+		while (!(await condition())) { if (Date.now() >= deadline) throw new Error("timed out waiting for model call"); await sleep(50); }
+	};
+	try {
+		rui = await Rui.connect({ store: { sqlite: { dir: join(root, "store") } },
+			providers: { codex: { endpoint: `http://127.0.0.1:${address.port}/responses`, unauthenticated: true } },
+		}, { binary: binary ?? "rui" });
+		const session = await rui.sessions.create({ provider: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000,
+			workspace: root, tools: [], permissionMode: "ask" }, { idempotencyKey: "session" });
+		await session.send("first", { idempotencyKey: "first" });
+		await until(async () => responses.length >= 1 && (await session.status()).interruptTarget !== null);
+		const first = (await session.status()).interruptTarget;
+		assert.ok(first);
+		await session.interrupt(first, { key: "interrupt" });
+		await session.send("second", { idempotencyKey: "second" });
+		await until(async () => { const current = (await session.status()).interruptTarget; return responses.length >= 2 && current !== null && current.operation !== first.operation; });
+		await session.interrupt(first, { key: "interrupt" });
+		const item = { type: "message", id: "done", status: "completed", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "second completed", annotations: [] }] };
+		const events = [ { type: "response.output_item.added", output_index: 0, item: { type: "message", id: item.id } },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{ type: "response.completed", response: { id: "done-response", status: "completed", output: [item] } } ];
+		responses[1]!.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n");
+		let completed = false;
+		await until(async () => { for await (const entry of session.listActivity()) if (entry.kind === "assistant" && entry.text === "second completed") completed = true; return completed; });
+		assert.equal(responses.length, 2);
+	} finally {
+		try { await rui?.close(); } finally { for (const connection of connections) connection.destroy(); await new Promise<void>((resolve) => provider.close(() => resolve())); }
 	}
 });

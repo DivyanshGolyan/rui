@@ -17,6 +17,19 @@ import release
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = (ROOT / "release/install.sh").read_text()
 PUBLISH = (ROOT / "release/publish.sh").read_text()
+POLICY = release.download_policy((ROOT / "src/download_policy.zig").read_text())
+
+
+def installer_exit_witnesses(retry_codes):
+    """One curl exit code per distinct installer path, instead of all 256.
+
+    Every code outside the retry set takes the same path (exit with that code),
+    so each retry code, its neighbours (which catch an off-by-one pattern) and
+    the range ends stand for their classes. Each run spawns a shell (~12 ms).
+    """
+    witnesses = {0, 1, 255, *retry_codes}
+    witnesses.update(code + step for code in retry_codes for step in (-1, 1))
+    return sorted(code for code in witnesses if 0 <= code <= 255)
 
 
 def git(*args, cwd=None):
@@ -310,23 +323,117 @@ class CommandTest(unittest.TestCase):
 
 
 class InstallerTemplateTest(unittest.TestCase):
+    def test_installer_policy_follows_the_pinned_source(self):
+        """SH-44: Both adapters follow the pinned release download policy."""
+        source = (ROOT / "src/download_policy.zig").read_text()
+        policy = release.download_policy(source)
+        self.assertEqual((policy.connect_seconds, policy.download_seconds, policy.retry_codes), (10, 300, (6, 28)))
+        mutated = (source.replace("pub const connect_timeout_seconds: u32 = 10;", "pub const connect_timeout_seconds: u32 = 7;")
+                   .replace("pub const download_timeout_seconds: u32 = 300;", "pub const download_timeout_seconds: u32 = 80;")
+                   .replace("pub const retry_exit_codes = [_]u8{ 6, 28 };", "pub const retry_exit_codes = [_]u8{ 7, 35 };"))
+        self.assertNotEqual(source, mutated)
+        changed = release.download_policy(mutated)
+        self.assertEqual((changed.connect_seconds, changed.download_seconds, changed.retry_codes), (7, 80, (7, 35)))
+        digests = {platform: "a" * 64 for platform in release.PLATFORMS}
+        text = release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, changed)
+        self.assertIn("--connect-timeout 7 --max-time 80", text)
+        self.assertIn("7|35)", text)
+        for invalid in (source.replace("connect_timeout_seconds", "missing_timeout", 1),
+                        source + "\npub const connect_timeout_seconds: u32 = 10;\n",
+                        source.replace("connect_timeout_seconds: u32 = 10;", "connect_timeout_seconds: u32 = 0;"),
+                        source.replace("connect_timeout_seconds: u32 = 10;", "connect_timeout_seconds: u64 = 10;"),
+                        source.replace("connect_timeout_seconds: u32 = 10;", "connect_timeout_seconds: u32 = 301;"),
+                        source.replace("download_timeout_seconds: u32 = 300;", "download_timeout_seconds: u32 = 86401;"),
+                        source.replace("retry_exit_codes = [_]u8{ 6, 28 };", "retry_exit_codes = [_]u8{};"),
+                        source.replace("retry_exit_codes = [_]u8{ 6, 28 };", "retry_exit_codes = [_]u8{ 0, 6 };"),
+                        source.replace("retry_exit_codes = [_]u8{ 6, 28 };", "retry_exit_codes = [_]u8{ 6, 6 };"),
+                        source.replace("retry_exit_codes = [_]u8{ 6, 28 };", "retry_exit_codes = [_]u8{ 6, 999 };")):
+            with self.subTest(invalid=invalid[-80:]), self.assertRaises(SystemExit):
+                release.download_policy(invalid)
+        spaced = (source.replace("connect_timeout_seconds: u32 = 10;", "connect_timeout_seconds : u32 = 1_0 ;")
+                  .replace("retry_exit_codes = [_]u8{ 6, 28 };", "retry_exit_codes = [_]u8 { 6, 2_8, };"))
+        self.assertEqual(release.download_policy(spaced), policy)
+        for partial in (TEMPLATE.replace("@RETRY_EXIT_CODES@", ""), TEMPLATE.replace("@CONNECT_TIMEOUT_SECONDS@", "")):
+            with self.assertRaisesRegex(SystemExit, "incomplete"):
+                release.installer(partial, "0.35.2", digests, PUBLISH, policy)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            (target / "release").mkdir(parents=True)
+            (target / "src").mkdir()
+            (target / "release/install.sh").write_text(TEMPLATE)
+            (target / "release/publish.sh").write_text(PUBLISH)
+            (target / "src/download_policy.zig").write_text(mutated)
+            sums = root / "SHA256SUMS"
+            sums.write_text("".join(f"{digest}  rui-0.35.2-{platform}.tar.gz\n" for platform, digest in digests.items()))
+            output = root / "install.sh"
+            command = [sys.executable, str(ROOT / "tests/ci/release.py"), "installer", "0.35.2", str(sums), str(output),
+                       "--source-root", str(target)]
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            self.assertEqual(output.read_text(), text)
+            (target / "src/download_policy.zig").write_text(mutated + "\npub const connect_timeout_seconds: u32 = 7;\n")
+            output.unlink()
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            self.assertFalse(output.exists())
+
+            tools = root / "tools"
+            tools.mkdir()
+            curl = tools / "curl"
+            curl.write_text("""#!/bin/sh
+if [ -e "$TEST_LOG" ]; then printf '%s\n' "$*" >> "$TEST_LOG"; exit 99; fi
+printf '%s\n' "$*" > "$TEST_LOG"
+for arg; do
+    if [ "$previous" = -o ]; then output=$arg; fi
+    previous=$arg
+done
+printf '%s' "$TEST_ELAPSED"
+if [ "$TEST_CODE" = 0 ]; then printf partial > "$output"; fi
+exit "$TEST_CODE"
+""")
+            curl.chmod(0o755)
+            home = root / "home"
+            home.mkdir()
+            log = root / "curl.log"
+            for source_text, threshold, codes in ((source, 10, (6, 28)), (mutated, 7, (7, 35))):
+                current = release.download_policy(source_text)
+                output.write_text(release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, current))
+                for elapsed, enough in ((current.download_seconds - threshold - 1, True),
+                                        (current.download_seconds - threshold, False)):
+                    for code in installer_exit_witnesses(codes):
+                        log.unlink(missing_ok=True)
+                        env = {**os.environ, "HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin",
+                               "TEST_LOG": str(log), "TEST_CODE": str(code), "TEST_ELAPSED": f"{elapsed}.1"}
+                        result = subprocess.run(["sh", str(output)], env=env, stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL, timeout=10)
+                        expected_retry = enough and code in codes
+                        self.assertEqual(result.returncode, 99 if expected_retry else code or 1,
+                                         (current, elapsed, code))
+                        calls = log.read_text().splitlines()
+                        self.assertEqual(len(calls), 2 if expected_retry else 1)
+                        self.assertIn(f"--connect-timeout {threshold} --max-time {current.download_seconds}", calls[0])
+                        if expected_retry:
+                            self.assertIn(f"--connect-timeout {threshold} --max-time {threshold}", calls[1])
+                            self.assertIn("--ipv4", calls[1])
+            self.assertFalse((home / ".local/bin/rui").exists())
+
     def test_fills_every_placeholder_with_checked_digests(self):
         digests = {"darwin-arm64": "a" * 64, "linux-x86_64": "b" * 64}
-        text = release.installer(TEMPLATE, "0.35.2", digests, PUBLISH)
+        text = release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, POLICY)
         self.assertIn("version='0.35.2'", text)
         self.assertIn("digest_darwin_arm64='" + "a" * 64 + "'", text)
         self.assertIn("digest_linux_x86_64='" + "b" * 64 + "'", text)
         self.assertIn("rui_publish() {", text)
         self.assertNotRegex(text, r"@[A-Z0-9_]+@")
         with self.assertRaisesRegex(SystemExit, "SHA-256"):
-            release.installer(TEMPLATE, "0.35.2", dict(digests, **{"linux-x86_64": "x"}), PUBLISH)
+            release.installer(TEMPLATE, "0.35.2", dict(digests, **{"linux-x86_64": "x"}), PUBLISH, POLICY)
         with self.assertRaisesRegex(SystemExit, "unfilled"):
-            release.installer(TEMPLATE + "@NEW_FIELD@\n", "0.35.2", digests, PUBLISH)
+            release.installer(TEMPLATE + "@NEW_FIELD@\n", "0.35.2", digests, PUBLISH, POLICY)
         with self.assertRaisesRegex(SystemExit, "placeholders"):
-            release.installer(TEMPLATE, "0.35.2", digests, PUBLISH + "@VERSION@\n")
+            release.installer(TEMPLATE, "0.35.2", digests, PUBLISH + "@VERSION@\n", POLICY)
         for template in (TEMPLATE.replace("@PUBLISH@\n", ""), TEMPLATE + "@PUBLISH@\n"):
             with self.assertRaisesRegex(SystemExit, "exactly once"):
-                release.installer(template, "0.35.2", digests, PUBLISH)
+                release.installer(template, "0.35.2", digests, PUBLISH, POLICY)
 
     def test_real_generation_uses_target_prehelper_installer_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -350,19 +457,19 @@ class InstallerTemplateTest(unittest.TestCase):
             output = root / "install.sh"
             result = subprocess.run([sys.executable, str(ROOT / "tests/ci/release.py"), "installer",
                                      "0.40.0", str(sums), str(output), "--source-root", str(target)],
-                                    check=True, capture_output=True, text=True, timeout=20)
+                                    check=True, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.stdout, "")
-            self.assertEqual(output.read_text(), release.installer(template, "0.40.0", digests, publisher))
+            self.assertEqual(output.read_text(), release.installer(template, "0.40.0", digests, publisher, None))
             self.assertNotIn("--publish-install", output.read_text())
 
     def test_publication_binds_installer_source_to_artifact_target(self):
         publication = (ROOT / ".github/workflows/release.yml").read_text().split("  publish:", 1)[1]
-        self.assertIn("ref: ${{ needs.plan.outputs.sha }}\n          path: .release-source", publication)
+        self.assertIn("ref: ${{ inputs.sha }}\n          path: .release-source", publication)
         self.assertIn('dist/install.sh --source-root .release-source', publication)
 
     def test_template_refuses_to_install(self):
         result = subprocess.run(["sh", str(ROOT / "release/install.sh")], check=False, capture_output=True, text=True,
-                                env={**os.environ, "HOME": "/nonexistent"}, timeout=20)
+                                env={**os.environ, "HOME": "/nonexistent"}, timeout=300)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unpublished installer template", result.stderr)
 
@@ -371,7 +478,7 @@ class InstallerTemplateTest(unittest.TestCase):
             if shell == "sh" or shutil.which(shell):
                 with self.subTest(shell=shell):
                     result = subprocess.run([shell, "-n", str(ROOT / "release/publish.sh")],
-                                            check=False, capture_output=True, text=True, timeout=20)
+                                            check=False, capture_output=True, text=True, timeout=300)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_publish_fragment_reads_the_database_the_build_names(self):

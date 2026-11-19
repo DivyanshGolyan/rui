@@ -112,7 +112,9 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         const before = storage.testing_content_work.rounds;
-        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        const row_reads = try std.testing.allocator.create([reads_domain.PublicConversationPage.capacity]reads_domain.PublicRowRead);
+        defer std.testing.allocator.destroy(row_reads);
+        try reads_domain.publicConversationPage(&a, conversation, &public_page, row_reads);
         result.rounds[0] = storage.testing_content_work.rounds - before;
     }
     {
@@ -148,7 +150,7 @@ test "an activity page reports the queued Messages at its end, until applied or 
             const waiting = try store_core.activityPageForTesting(&storage, request);
             const first = waiting.items[0];
             const second = waiting.items[1];
-            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
+            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position, .newest_content = second.value.admission.content }), waiting.queued);
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             _ = try admitted.permit.consume();
             try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
@@ -165,6 +167,49 @@ test "an activity page reports the queued Messages at its end, until applied or 
             try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
             frozen.end = behind.end;
             try std.testing.expectEqual(behind.queued, (try store_core.activityPageForTesting(&storage, frozen)).queued);
+        }
+    }.run);
+}
+
+test "activity queue follows compaction and taken messages" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "queue-compact-config");
+            var patch: @import("../../wire_request.zig").ConfigureCommand = .{};
+            try patch.key.set("queue-compact-settings");
+            patch.session = session;
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1");
+            patch.configuration.output_reservation.state = .value;
+            try patch.configuration.output_reservation.value.set("1");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "queue-compact-first", "first", session.slice(), "first");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+            try submitTestMessage(&storage, &tmp, "queue-compact-second", "second", session.slice(), "second");
+            const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(historical_domain.ModelOperationKind.compaction, try storage.modelOperationKind(compact));
+            var request: protocol.ActivityPage = .{};
+            request.session = session;
+            const compacting = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(u64, 1), compacting.queued.count);
+            try std.testing.expect(compacting.work.work.state == .working and compacting.work.work.state.working.compaction);
+            try submitTestMessage(&storage, &tmp, "queue-compact-third", "third", session.slice(), "third");
+            const behind = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(u64, 2), behind.queued.count);
+            try store_testing.settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(historical_domain.ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
+            const answering = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(u64, 0), answering.queued.count);
+            try std.testing.expect(answering.work.work.state == .working and !answering.work.work.state.working.compaction);
+            try submitTestMessage(&storage, &tmp, "queue-compact-fourth", "fourth", session.slice(), "fourth");
+            try std.testing.expectEqual(@as(u64, 1), (try store_core.activityPageForTesting(&storage, request)).queued.count);
         }
     }.run);
 }
@@ -637,9 +682,9 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             const session = try configureTestSession(&storage, "cost-config");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session", .{});
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
                 sequence_to_first_argument ++
-                "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1,1 FROM sequence", .{ history, session.slice(), start, content });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
                 "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
@@ -703,9 +748,9 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position,source_kind) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value,2 FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -779,9 +824,9 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             const session = try configureTestSession(&storage, "waiting-config");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_kind) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,1 FROM sequence", .{ history, session.slice(), start, content });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");

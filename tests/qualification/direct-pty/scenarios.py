@@ -13,6 +13,7 @@ import model_fixture as model
 import codex_fixture as codex
 from canonical_fixture import ReplyProxy
 from human_cli_fixture import conversation_text, composer_line, chat_footer_row
+from terminal_screen import HORIZONTAL_RULE, VERTICAL_DIVIDER
 
 
 def assert_submitted(requests, expected):
@@ -129,10 +130,10 @@ def leave(tty):
 
 def escaped_overview(tty, conversation):
     tty.wait(lambda: all(marker in tty.screen.completed for marker in
-                         ("+ New Session", conversation, "Settings")),
+                         ("+ New chat", conversation, "Settings")),
              label="overview after expired standalone Esc")
-    assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
-    assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", tty.screen.completed), \
+    assert "What shall we work on?" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
+    assert not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", tty.screen.completed), \
         ("overview has a composer", tty.screen.completed)
 
 
@@ -233,7 +234,7 @@ def navigation_rows(screen):
     prompts = [at for at, line in enumerate(lines) if re.match(r"\s*[›>]($|\s)", line)]
     assert len(prompts) == 1, ("navigation composer", prompts)
     top_rule = prompts[0] - 1
-    assert top_rule > 1 and set(lines[top_rule].strip()) in ({"─"}, {"-"}), ("navigation composer rule", lines)
+    assert top_rule > 1 and set(lines[top_rule].strip()) in ({HORIZONTAL_RULE}, {"-"}), ("navigation composer rule", lines)
     return top_rule - 1
 
 
@@ -255,16 +256,17 @@ def assert_navigation_history(screen, first, browsing, feed_rows):
 
 
 def chat_info_ready(tty, folder):
-    fields = ("Effort", "Permissions", "Tools", "Folder", "Model")
+    fields = ("Effort", "Permissions", "Allowed tools", "Folder", "Model")
     actions = ("Rename", "Archive", "Copy last answer")
     def ready():
         lines = tty.screen.completed.split("\n")
-        return bool(lines) and " · info" in lines[-1] and "esc close" in lines[-1] and all(
+        return bool(lines) and re.fullmatch(r" Chat +esc", composer_line(tty.screen.completed, len(lines) - 1)) and all(
             any(line.strip().startswith(label) and "unavailable" not in line for line in lines) for label in fields) and all(
                 any(action in line for line in lines) for action in actions)
     tty.wait(ready, label="chat info fields and footer")
     lines = tty.screen.completed.split("\n")
-    assert [index for index, line in enumerate(lines) if " · info" in line] == [len(lines) - 1], \
+    assert [index for index in range(len(lines)) if re.fullmatch(
+        r" Chat +esc", composer_line(tty.screen.completed, index))] == [len(lines) - 1], \
         ("single bottom info footer", tty.screen.completed)
     value = next(line.split("Folder", 1)[1].strip() for line in lines if line.strip().startswith("Folder"))
     assert value.endswith("/" + folder), ("read-only Folder retains basename", value, folder)

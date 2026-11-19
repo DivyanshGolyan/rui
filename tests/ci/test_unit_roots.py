@@ -110,9 +110,10 @@ class ParallelRootsTest(unittest.TestCase):
         if store is not None:
             command.append(store)
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, start_new_session=True)
+                                   text=True, start_new_session=True,
+                                   env=dict(os.environ, RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket"))
         try:
-            stdout, stderr = process.communicate(timeout=8)
+            stdout, stderr = process.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
@@ -173,7 +174,7 @@ class BuildWiringTest(unittest.TestCase):
         self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
         self.assertIn('unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs)', gate)
         self.assertIn('if (unit_module.includes("check-full", check_part, .native_pair))', gate)
-        self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), ["&units.run_renderer_allocation.step"])
+        self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), ["&units.run_renderer_allocation.step", "&units.run_os_tests.step"])
         for row in build_files.unit_roots():
             if row["name"] in ("unit-native", "unit-store") or row["source"] in ("src/h2/h2.zig", "src/store/wire/pg.zig"):
                 self.assertIn(("check-full", "all"), row["owners"])

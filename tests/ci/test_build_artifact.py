@@ -60,7 +60,9 @@ import subprocess
 import sys
 if sys.argv[2] == 'ci-build':
     Path('compiled').write_text(' '.join(sys.argv[1:]))
-    assert Path('zig-pkg/pinned-source').read_text() == 'fetched\\n'
+    # A fresh fetch, or the package sources setup restored for a single job's own compile.
+    assert Path('zig-pkg/pinned-source').read_text() in ('fetched\\n', 'restored by setup\\n')
+    Path('compiled-packages').write_text(Path('zig-pkg/pinned-source').read_text())
     assert not Path('.zig-cache/o/ci-compiled').exists()
     if int(os.environ['BUILD_EXIT']):
         sys.exit(int(os.environ['BUILD_EXIT']))
@@ -398,13 +400,35 @@ else:
     def test_failed_local_compilation_stops_with_its_exit_and_executes_nothing(self):
         self.receipt['inputs']['compiler'] = 'd' * 64
         self.refresh_download()
-        with patch.dict(os.environ, BUILD_EXIT='37'), \
-                patch.object(sys, 'argv', ['build_artifact.py', 'restore', '["test"]', '--artifact-id', '101']), \
-                self.assertRaises(SystemExit) as failure:
-            build_artifact.main()
-        self.assertEqual(failure.exception.code, 37)
-        self.assertFalse(build_artifact.roots()['binaries'].exists())
-        self.assertFalse((self.root / 'gates').exists())
+        for operation, options in (('restore', ['--artifact-id', '101']), ('compile', [])):
+            for exit in ('37', '0'):
+                with self.subTest(operation=operation, exit=exit):
+                    (self.root / 'gates').unlink(missing_ok=True)
+                    (self.root / 'compiled-packages').unlink(missing_ok=True)
+                    if operation == 'compile':
+                        (self.root / 'zig-pkg/pinned-source').write_text('restored by setup\n')
+                    with patch.dict(os.environ, BUILD_EXIT=exit), \
+                            patch.object(sys, 'argv', ['build_artifact.py', operation, '["test"]', *options]), \
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        try:
+                            build_artifact.main()
+                            code = 0
+                        except SystemExit as failure:
+                            code = failure.code
+                    self.assertEqual(code, int(exit))
+                    self.assertFalse((self.root / 'gates').exists())
+                    # restore refetches over a rejected handoff; compile keeps setup's sources
+                    # so their restored, restat-repaired manifests still hit.
+                    packages = 'fetched\n' if operation == 'restore' else 'restored by setup\n'
+                    self.assertEqual((self.root / 'compiled-packages').read_text(), packages)
+                    self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), packages)
+                    if exit != '0':
+                        self.assertFalse(build_artifact.roots()['binaries'].exists())
+                        continue
+                    if operation == 'compile':
+                        self.assertIn("Compiled locally for this job's own gates; compiled only, acceptance not yet "
+                                      "established", output.getvalue())
+                    self.assertEqual(self.gates(), ['consumer'])
 
     def test_one_retry_only_when_requested(self):
         build_artifact.restore(['101'], ['test'])
@@ -455,9 +479,13 @@ class PrModeTest(unittest.TestCase):
         build = build_files.source()
         integration = build.split("pub fn addIntegrationRui(", 1)[1]
         integration = integration.split("\n}", 1)[0]
-        self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity)", integration)
-        self.assertIn("if (pr_ci) executable.use_llvm = false;", integration)
+        self.assertIn("withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci)", integration)
+        pause = build.split("pub fn addPauseIntegrationRui(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci)", pause)
+        backend = build.split("fn withPrBackend(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if (pr_ci) executable.use_llvm = false;", backend)
         self.assertEqual(build.count("use_llvm = false;"), 1)
+        self.assertIn('product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci)', build)
         self.assertNotIn("release_safe.use_llvm", build)
         self.assertNotIn("pub fn addRuiWithIdentity", build)
         for name in ("rui-pr-check", "rui-upgrade-release-fixture"):
@@ -465,9 +493,12 @@ class PrModeTest(unittest.TestCase):
                 self.assertIn(f'product.addIntegrationRui(b, target, "{name}", pinned_transport, pr_ci,', build)
         self.assertIn('product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport)', build)
         ordinary = build.split("pub fn addRui(", 1)[1].split("\n}", 1)[0]
-        self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b))", ordinary)
+        self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false)", ordinary)
         identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
         self.assertNotIn("use_llvm", identity)
+        self.assertEqual(build.count("b.graph.host = "), 1)
+        self.assertIn("if (ci_mode) b.graph.host = target;", build)
+        self.assertIn('const bindings: Translator = .init(b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast }), .{', build)
 
     def test_only_the_pr_upgrade_fixture_strips_its_debug_payload(self):
         build = build_files.source()
@@ -499,6 +530,11 @@ class PrModeTest(unittest.TestCase):
                 self.assertEqual("-Dpr-ci=true" in command, fast)
                 self.assertEqual("-j8" in command, system == "Linux" and machine == "x86_64")
                 self.assertEqual(command.count("-j8"), int(system == "Linux" and machine == "x86_64"))
+                self.assertNotIn("-j4", command)
+                serialized = build_artifact.compile_command(["check"], jobs=1)
+                self.assertIn("-j1", serialized)
+                self.assertNotIn("-j4", serialized)
+                self.assertNotIn("-j8", serialized)
                 self.assertIn("-Dci-targets=check", command)
                 self.assertIn("-Dci-part=all", command)
                 self.assertEqual("-Dpr-ci=true" in run_selected.command(["check"]), fast)

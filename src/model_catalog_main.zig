@@ -42,7 +42,20 @@ fn writeSnapshot(scratch: std.mem.Allocator, out: *std.Io.Writer, source_name: [
         try out.print("}}), .openai_listed = {} }},\n", .{entry.openai_listed});
     }
     try out.writeAll("    };\n}\n");
+    try writeImageProjection(out, records);
     try writeChatProjection(scratch, out, source_name, body, records);
+}
+
+fn writeImageProjection(out: *std.Io.Writer, records: []const models_dev.Generated) !void {
+    try out.writeAll("\n// Exact IDs with explicit input modalities in the source snapshot.\n");
+    inline for (.{ true, false }) |supported| {
+        try out.print("pub const image_{s}_ids = [_][]const u8{{\n", .{if (supported) "supported" else "unsupported"});
+        for (records) |record| {
+            if (record.input_image == null or record.input_image.? != supported) continue;
+            try out.print("    \"{f}\",\n", .{std.zig.fmtString(record.model.id)});
+        }
+        try out.writeAll("};\n");
+    }
 }
 
 fn writeChatProjection(scratch: std.mem.Allocator, out: *std.Io.Writer, source_name: []const u8, body: []const u8, records: []const models_dev.Generated) !void {
@@ -152,4 +165,14 @@ test "model catalog generator releases every failed projection allocation" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "model catalog generator preserves tri-state image modalities" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeSnapshot(std.testing.allocator, &output.writer, "test.json",
+        \\{"openai":{"models":{"yes":{"modalities":{"input":["text","image"]}},"no":{"modalities":{"input":["text"]}},"unknown":{}}}}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "pub const image_supported_ids = [_][]const u8{\n    \"yes\",\n};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "pub const image_unsupported_ids = [_][]const u8{\n    \"no\",\n};") != null);
 }

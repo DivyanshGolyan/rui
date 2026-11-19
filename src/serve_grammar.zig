@@ -1,5 +1,6 @@
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const provider_name = @import("provider_name.zig");
 const retention_capacity = @import("retention_capacity.zig");
 const Option = grammar.Option;
@@ -94,6 +95,7 @@ pub fn runningSources(arena: std.mem.Allocator, argv: []const []const u8) !Runni
     };
     for (definition.options) |option| {
         if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
+        if (std.mem.eql(u8, option.name, settings_handoff.input_option)) continue; // consumed descriptor is provenance, never a replay input
         if (option.hidden and parsed.hasNamed(option.name)) restartable = false;
     }
     return .{
@@ -140,22 +142,24 @@ pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
 } };
 pub const settings_options = host_destination ++ &[_]Option{
     value("settings", "FILE|-"),
+    hiddenNumber(settings_handoff.input_option, 0, std.math.maxInt(c_int)),
     .{ .name = "set", .argument = "PATH=VALUE", .repeated = true },
 };
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
-    hiddenValue("test-models-dev-url"),
-    hiddenValue("test-codex-fixture-endpoint"),
-    hiddenValue("test-openai-fixture-endpoint"),
-    hiddenValue("test-chatgpt-fixture-endpoint"),
     hiddenNumber("test-bash-scratch-limit-bytes", 0, std.math.maxInt(u64)),
     hiddenNumber("test-retention-entry-capacity", 2, retention_capacity.entries),
     hiddenFlag("test-retention-removal-failure"),
     hiddenNumber("test-provider-inactivity-seconds", 1, std.math.maxInt(i64) / 1_000_000_000),
     hiddenValue("test-retry-waits-ms"),
+    // Integration fixtures order handoff through the model.before_handoff and
+    // action.before_handoff pause points; only the model-retry qualification
+    // runner, which measures the release product, still separates admission
+    // from launch with this delay.
     hiddenNumber("test-before-launch-delay-ms", 0, 10_000),
+    // Fixtures hold results at the model.result_ready and action.result_ready
+    // pause points; only the model-control qualification runner still uses it.
     hiddenNumber("test-before-result-delay-ms", 0, 10_000),
-    hiddenValue("test-model-result-gate-path"),
     hiddenValue("test-retry-recovery-gate-path"),
     hiddenValue("test-inspection-reply-gate-path"),
     hiddenNumber("test-inspection-reply-delay-ms", 0, 60_000),
@@ -164,10 +168,6 @@ const serve_test = &[_]Option{
     hiddenNumber("test-observation-fd", 0, std.math.maxInt(c_int)),
     hiddenNumber("test-observation-state-fd", 0, std.math.maxInt(c_int)),
     hiddenValue("test-observation-plan"),
-    hiddenValue("test-transition"),
-    hiddenValue("test-transition-gate-path"),
-    hiddenValue("test-bash-observed-exit-gate-path"),
-    hiddenValue("test-shutdown-signalled-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),
     hiddenValue("test-control-gate-keys"),
     hiddenValue("test-control-gate-path"),
@@ -178,14 +178,13 @@ const serve_test = &[_]Option{
     hiddenNumber("test-request-scratch-limit", 0, std.math.maxInt(u64)),
     hiddenNumber("test-request-preparation-byte-allowance", 1, std.math.maxInt(usize)),
     hiddenNumber("test-request-preparation-item-allowance", 1, std.math.maxInt(usize)),
-    hiddenNumber("test-request-preparation-advance-delay-ms", 0, std.math.maxInt(i64)),
 };
 
 pub const definition: grammar.Definition = .{
     .resource = .host,
     .name = "serve",
     .description = "Run a foreground Host. Apply saved Host settings, then --settings FILE|- and repeated --set PATH=VALUE in order. Provider credentials belong to this Host, not its peer callers.",
-    .options = settings_options ++ serve_test,
+    .options = settings_options ++ serve_test ++ if (@import("build_options").test_pauses) &[_]Option{hiddenNumber("test-pause-fd", 0, std.math.maxInt(c_int))} else &[_]Option{},
     .retired_options = retired_options,
 };
 
@@ -219,6 +218,7 @@ test "running Host sources have one syntax owner across current and retired argv
         .{ .argv = &.{ "rui", "host", "serve", "--store", "/host" }, .dir = "/host" },
         .{ .argv = &.{ "rui", "host", "serve", "--store-hex", "2f686f7374", "--settings", "/document-\xff" }, .dir = "/host", .settings = "/document-\xff" },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "/document", "--set", "providers={}", "--set", "execution.activeCapacity=3" }, .settings = "/document", .assignments = &.{ "providers={}", "execution.activeCapacity=3" } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--settings", "/document-\xff", "--set", "execution=@/values-\xff", "--" ++ settings_handoff.input_option, "5" }, .dir = "/host", .settings = "/document-\xff", .assignments = &.{"execution=@/values-\xff"} },
         .{ .argv = &.{ "rui", "host", "serve", "--provider", "codex", "--provider", "openai", "--active-capacity", "4", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1000", "--provider-ca-file", "/network-ca" }, .assignments = &.{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4", "tools.bash.path=/bin/bash", "tools.bash.timeoutMs=1000", "network.caFile=/network-ca" } },
         // Syntax keeps source spellings; only admission can decide whether
         // their effective settings reproduce in a detached replacement.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const tool_settle = @import("tool_settle.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
 const action_read = @import("action_read.zig");
@@ -16,7 +17,7 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
     };
     if (check == .rejected) return fail(store, arena, input, check.rejected, faults);
     const result = try arena.create(action_read.Read);
-    store.readAction(&.{ .session = input.session, .action_id = arguments.action, .offset = arguments.offset }, result) catch |err| switch (err) {
+    store.readAction(&.{ .session = input.session, .action_id = arguments.action, .offset = arguments.offset, .after = arguments.after }, result) catch |err| switch (err) {
         error.ActionNotFound => return fail(store, arena, input, "action names no Action in your own Session", faults),
         error.InvalidCursor => return fail(store, arena, input, "offset must be within the result and on a UTF-8 character boundary; pending Actions require zero", faults),
         else => return err,
@@ -24,12 +25,12 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
     const bytes = try arena.alloc(u8, protocol.action_read_reply.max_bytes);
     var writer: std.Io.Writer = .fixed(bytes);
     try host_reply.renderActionRead(.{ .writer = &writer }, result);
-    _ = try store.succeedCoreCall(input.binding, writer.buffered(), faults);
+    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .succeeded, .{ .text = writer.buffered() }, faults);
 }
 
 fn fail(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, reason: []const u8, faults: storage.Faults) !void {
     const text = try std.fmt.allocPrint(arena, "Rui could not read the Action: {s}.", .{reason});
-    _ = try store.failCoreCall(input.binding, text, faults);
+    _ = try tool_settle.deliver(store, .{ .core = input.binding }, .failed, .{ .text = text }, faults);
 }
 
 test "read_action core reads own pending and immutable final windows without credit" {

@@ -140,7 +140,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-18 facts require the provider; the wire-17 and wire-16 profiles preserve the same complete provider facts, and the wire-15 and wire-14 profiles freeze v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current Host-info facts require the provider; the historical wire-20, wire-18, wire-17 and wire-16 profiles preserve the same complete provider facts, and the wire-15 and wire-14 profiles freeze v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
@@ -155,8 +155,28 @@ Explicit Store selection bypasses private preferences; otherwise it uses the sam
 Ready output includes the canonical Store, compatible wire, actual capacity, slots in use, Host start time, capabilities and opaque instance.
 Unavailable and owned-but-unavailable never claim that outstanding effects have finished.
 
+#### Detached launch admission
+
 `rui host start [--store PATH]` attaches to a ready Host without changing it.
-Otherwise it creates only a candidate private Store directory, resolves the canonical selector and launches this executable's `host serve --store DIR` with generic settings assignments in a separate session; the Host reads saved settings and owns automatic provider selection.
+Otherwise the existing starter retains one pointer-stable, wiping-owned unresolved Settings allocation and its provider intent through launch.
+The admitted allocation determines both local placement and a versioned source-only frame; counting and the complete composed bound are checked before directory creation or child launch.
+The bound includes every typed field, encoding expansion, all independently assigned presets, intent and framing, not merely one input document's limit.
+Before serialization the schema owner proves that every Secret, including vacant named slots, has no owned credential bytes and MySQL has no parsed value.
+The child decodes through the existing file-origin schema policy, then performs defaults, credential resolution and service admission; it never reopens saved settings, explicit documents or assignment files.
+An omitted provider set stays automatic and explicit empty stays none.
+Source descriptions freeze the selected environment/file reference, not its future contents or resolved credentials.
+
+The original public sources remain in the child's argv as replay provenance only.
+A later upgrade deliberately makes a new admission from their then-current contents, rather than recovering the earlier frozen document.
+The target's private versioned settings check emits the admitted frame, which the lifecycle holds as opaque wiping-owned bytes across exact retirement and forwards to the same target starter.
+Capability and the composed bound must be established before stopping; a missing or unsupported private version leaves the old Host running, with no mutable-source fallback.
+This includes earlier source builds that supported only the public check/start pair.
+No persistent launch record, registry, Host-info, Store or wire change carries this frame.
+
+One nonblocking transfer owner pumps partial writes while draining both bounded startup channels under the existing deadline and cancellation policies.
+Linux and Darwin explicitly inherit the reserved private input descriptor; the child marks it close-on-exec, consumes it and closes it before serving or launching workloads.
+Interrupted/blocked writes, a closed reader and early refusal do not replace readiness proof or kill the caller with SIGPIPE.
+Public foreground `host serve --settings -` retains its existing layering and stdin-lifetime policy.
 Bare `rui`, `host start` and `host serve` all use the product default Active Capacity of 100 unless settings override it; `host start --set execution.activeCapacity=N` overrides it for the Host it launches, and `host serve --set execution.activeCapacity=N` overrides it with caller-owned lifetime.
 The Host setting `execution.backgroundAfterMs` defaults to 30,000 milliseconds and applies to every live Host-run Action. It is available in the settings document, generic `--set execution.backgroundAfterMs=N` assignments, and the generated TypeScript Host settings. The TUI uses those Host startup settings; its Session settings do not reconfigure a running Host.
 A running Host keeps the capacity it started with, including across Rui upgrades, until it stops and a new Host starts.
@@ -294,3 +314,7 @@ A lead checks its delegates with ordinary Session listing and inspection.
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Store ownership](#exclusive-store-ownership) through listener failure | `admission_integration.sh` (`InjectedListenerFailure`) | A fixed sleep is not ownership evidence |
+
+| [Frozen detached launch](#detached-launch-admission) | Native `host_launch_integration.py frozen-settings`, full `upgrade-integration`/`frozen-settings`, `pre-freeze-target` with an actual earlier target, and the `frozen launch`, `Host settings composed`, `Host settings unresolved`, `Host settings private decode` owner tests, `src/host_settings_handoff.zig` `frozen settings handoff preserves OS-byte selector intent and file-origin schema without public sources`, and `src/HostLifecycle.zig` `upgrade target capability exception is the witnessed release not a future version threshold` | Initial launch consumes admitted A; a later activation (`host restart --all`, the path Upgrade takes after publication) admits new B, and the checked frame survives later source edits. References do not freeze credential contents. An invalid saved locator may still prevent later DIR lookup; explicit-source edits do not alter placement. Linux process receipts do not establish Darwin runtime inheritance. |
+| Settings admission | `src/host_start.zig` `Host detached check shares source admission then resolves and seals without opening a Store` and `retired endpoint environment is refused by each admission before effects`; [SH-47](../invariants/store-host.md), [CLI-26 and CLI-18](../invariants/cli-inspection.md) | Check does not prove Store availability or lock acquisition. The catalog rows own saved-path and refusal cases. |
+| Credential locations and fixtures | `src/credential_location.zig` `credential default covers each variable and home combination`; `src/host_start.zig` `sign-in leaf overrides environment location before dispatch`; `src/host_settings.zig` `Host provider credential policy derives fixture mode from the endpoint`; `tests/integration/settings_integration.py` `credential_location_matrix`, `signin_dispatch_matrix`, `token_endpoint_refusals` | Sign-in admission resolves a path but does not read the file until dispatch. Integration matrices distinguish client/check/start and dispatch; these tests are evidence to run, not a claim of execution here. |

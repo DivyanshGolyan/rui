@@ -38,10 +38,12 @@ A clock that ticks every second is motion with no news, so times read "now" for 
 
 ## 5. Tint is what you said, lines are where you act
 
-A tinted band always means a message the person sent, and nothing else is tinted.
+A tinted message band means a message the person sent. List selection and hover use tint to show where the person can act.
 The two lines at the bottom of a chat hold the live area: the input, and any panel opened from it (the command list, chat info, Settings).
 Panels opened from the input appear between those two lines, on the plain background, with no box and no tint.
 So a glance answers two questions: what did I say (tint), and where do I type or choose (between the lines).
+
+Tint never touches text: leave at least two columns before it and at least one, preferably two, after it. Sent-message bands keep one blank tinted row above and below. List rows keep only the sideways inset so neighbours stay together. Plain rows keep the same inset, so selection and hover never move text.
 
 ## 6. One edge, one grammar
 
@@ -59,7 +61,7 @@ The chat footer carries only news about that chat; app news, such as an upgrade,
 
 Rui means cotton, and the screens should feel like cloth, friendly and warm, not like a hacker's console.
 Grounds are cotton or dyed cotton: the night theme is indigo cloth, the day theme undyed cotton.
-Lines are stitches: rules and dividers are a light running stitch in a thread colour, quieter than any text.
+Lines are stitches: rules and dividers use a dashed running stitch (`┄` horizontally, `┆` vertically) in the thread colour, quieter than any text. ASCII uses `-` and `|`; without colour the stitch remains uncoloured.
 Accents are dyes: indigo for links and names, turmeric for what needs the person, madder for what failed.
 Nothing glows: no neon, no pure black or pure white grounds, no reverse-video highlight.
 Words are warm too: a person has chats, not Sessions, and the screen speaks to them plainly ("No chats yet.").

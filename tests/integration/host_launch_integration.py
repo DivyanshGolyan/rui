@@ -52,8 +52,43 @@ LAUNCH_PROBE = r"""
 
 extern int rui_launch_detached(const char *, const char *const *, size_t);
 extern int rui_launch_detached_observed(const char *, const char *const *, size_t, int *);
+extern int rui_launch_detached_reported(const char *, const char *const *, size_t, int, int *, int *, int *, unsigned long long *);
+extern int rui_launch_input_pipe(int *, int *);
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "settings-descendant") == 0) {
+        errno = 0;
+        if (fcntl(5, F_GETFD) != -1 || errno != EBADF) return 112;
+        return write(1, "isolated", 8) == 8 ? 0 : 113;
+    }
+    if (argc == 2 && strcmp(argv[1], "settings-child") == 0) {
+        char bytes[6];
+        if (fcntl(5, F_GETFD) != 0 || read(5, bytes, sizeof(bytes)) != 5 || memcmp(bytes, "frame", 5)) return 114;
+        if (read(5, bytes, sizeof(bytes)) != 0 || fcntl(5, F_SETFD, FD_CLOEXEC) != 0) return 115;
+        const char *next[] = {argv[0], "settings-descendant", NULL};
+        execv(argv[0], (char *const *)next);
+        return 116;
+    }
+    if (argc == 3 && strcmp(argv[1], "input-launch") == 0) {
+        int mask = atoi(argv[2]);
+        for (int fd = 0; fd < 3; fd++) if (mask & (1 << fd)) close(fd);
+        int reader = -1, writer = -1;
+        if (rui_launch_input_pipe(&reader, &writer) || write(writer, "frame", 5) != 5) return 117;
+        close(writer);
+        const char *next[] = {argv[0], "settings-child", NULL};
+        int startup = -1, output = -1, pid = 0;
+        unsigned long long started = 0;
+        if (rui_launch_detached_reported(argv[0], next, 2, reader, &startup, &output, &pid, &started)) return 118;
+        if (pid <= 0 || started == 0 || fcntl(reader, F_GETFD) != FD_CLOEXEC) return 119;
+        close(reader);
+        struct pollfd ready = {.fd = output, .events = POLLIN};
+        if (poll(&ready, 1, 3000) <= 0) return 120;
+        char reply[9];
+        ssize_t count = read(output, reply, sizeof(reply));
+        close(output);
+        close(startup);
+        return count == 8 && !memcmp(reply, "isolated", 8) ? 0 : 121;
+    }
     if (argc == 2 && strcmp(argv[1], "startup-failure") == 0) {
         const char failure[] = "error: StartupProbeFailed (exit status 1)\n";
         if (write(2, failure, sizeof(failure) - 1) != sizeof(failure) - 1) return 108;
@@ -135,6 +170,10 @@ def assert_launch_adapter(root, env):
     result = subprocess.run([actor, "launch"], cwd=root, env=probe_env,
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result
+    for mask in range(8):
+        result = subprocess.run([actor, "input-launch", str(mask)], env=probe_env,
+                                capture_output=True, timeout=5)
+        assert result.returncode == 0, ("private input inheritance and descendant isolation", mask, result)
     for mask in range(1, 8):
         result = subprocess.run([actor, "closed-startup", str(mask)], env=probe_env,
                                 capture_output=True, timeout=5)
@@ -684,7 +723,8 @@ def new_host_provider_policy(root, env):
                         dispose_provider_case(process, store)
         assert checked == 60 and intercepted_cases == 25, (checked, intercepted_cases)
         with proxy.receipt_lock:
-            assert proxy.targets == {"api.openai.com:443"}, proxy.targets
+            assert "api.openai.com:443" in proxy.targets, proxy.targets
+            assert proxy.targets <= {"api.openai.com:443", "models.dev:443"}, proxy.targets
             assert not proxy.authorized, "provider authorization escaped a refused CONNECT"
     finally:
         stop_endpoint(proxy, proxy_threads)
@@ -725,7 +765,8 @@ def detached_settings_checks(root, env):
         else:
             assert checked.returncode == 2, (name, checked)
             failure = json.loads(checked.stdout)["rui_start_error"]
-            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, failure)
+            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, checked)
+            assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, (name, checked)
         assert not matching_processes(directory), (name, checked)
     for arguments, reason in (
             (("--settings", "-"), "no stdin"),
@@ -735,7 +776,8 @@ def detached_settings_checks(root, env):
         checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
         assert checked.returncode == 2, (arguments, checked)
         failure = json.loads(checked.stdout)["rui_start_error"]
-        assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
+        assert failure["code"] == "settings_invalid" and reason in failure["message"], checked
+        assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, checked
     # No database, diagnostics or lease was created by a check.
     assert {path.name for path in directory.iterdir()} == original_files
     assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
@@ -756,12 +798,237 @@ def detached_settings_checks(root, env):
     print("detached settings check passed: sources, detached refusal, placement, resolution/seal, no Store effects, live Host unchanged", flush=True)
 
 
+def frozen_settings_launches(root, env):
+    """Admitted A survives deterministic public-source mutation before launch."""
+    private = root / "frozen-settings"
+    private.mkdir(mode=0o700)
+    missing = private / "absent-credential"
+    selected_env = {**env, "RUI_CODEX_CREDENTIAL_FILE": str(missing),
+                    "RUI_CHATGPT_CREDENTIAL_FILE": str(missing), "RUI_OPENAI_KEY_FILE": str(missing)}
+    none = {"codex": "unserved", "chatgpt": "unserved", "openai": "unserved"}
+    automatic = {**none, "codex": "chatgpt_device"}
+    exact = {"openai": {"endpoint": "http://127.0.0.1:9/v1/responses", "unauthenticated": True}}
+    expected_exact = {**none, "openai": "endpoint"}
+
+    def write_source(path, value):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    def held_start(directory, arguments, mutate, *, expected_refusal=None):
+        gate = directory.parent / (directory.name + ".after-freeze.gate")
+        gate.touch(mode=0o600)
+        entered = gate.with_name(gate.name + ".entered")
+        child = None
+        try:
+            child = subprocess.Popen([str(RUI), "host", "start", "--store", str(directory),
+                                      *map(str, arguments)],
+                                     env={**selected_env, "RUI_TEST_HOST_AFTER_FREEZE_GATE": str(gate)},
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            def reached():
+                if child.poll() is not None:
+                    output, diagnostic = child.communicate(timeout=3)
+                    raise AssertionError(("starter exited before freeze acknowledgement", child.returncode,
+                                          output, diagnostic))
+                return entered.exists()
+
+            wait_for(reached, "parent admitted and counted frozen settings before launch", timeout=10)
+            assert gate.exists() and child.poll() is None
+            assert not matching_processes(directory), "Host launched before the freeze interposition"
+            assert not (directory / "rui.sqlite3").exists()
+            assert not (directory / "diagnostics").exists()
+            mutate()
+            assert gate.exists() and child.poll() is None
+            gate.unlink()
+            output, diagnostic = child.communicate(timeout=COMMAND_TIMEOUT)
+            if expected_refusal is not None:
+                assert child.returncode == 1, (child.returncode, output, diagnostic)
+                report = json.loads(output)["rui_start_error"]
+                assert report["code"] == "settings_invalid" and expected_refusal in report["message"], report
+                assert not matching_processes(directory) and not (directory / "rui.sqlite3").exists()
+                return report
+            assert child.returncode == 0, (child.returncode, output, diagnostic)
+            ready = json.loads(output)
+            assert instance(ready, 2)
+            return ready
+        finally:
+            dispose_all(lambda: gate.unlink(missing_ok=True),
+                        lambda: stop_process(child) if child is not None else None)
+
+    # A frozen source reference is not a frozen credential value. A child-only
+    # resolution failure still crosses both startup channels as the ORIGINAL
+    # typed refusal, rather than a generic child-closed outcome.
+    failure_root = private / "referenced-file-refusal"
+    failure_root.mkdir(mode=0o700)
+    key = failure_root / "private-key"
+    key.write_text("frozen-source-test-key")
+    key.chmod(0o600)
+    source = failure_root / "settings.json"
+    write_source(source, {"providers": {"openai": {"endpoint": "https://127.0.0.1:9/v1/responses", "key": {"file": str(key)}}}})
+    report = held_start(failure_root / "host", ["--settings", source], key.unlink,
+                        expected_refusal="providers.openai.key")
+    assert "frozen-source-test-key" not in json.dumps(report), report
+
+    for label, payload in (("missing", b""), ("future", b"rui-host-settings-v99\n")):
+        directory = private / ("refused-private-" + label)
+        failed = subprocess.run([str(RUI), "host", "start", "--store", directory,
+                                 "--settings-handoff-input-v1", "0"], input=payload,
+                                env=selected_env, capture_output=True, timeout=COMMAND_TIMEOUT)
+        assert failed.returncode == 2, (label, failed.returncode, failed.stdout, failed.stderr)
+        assert json.loads(failed.stdout)["rui_start_error"]["code"] == "settings_invalid", failed.stdout
+        assert not directory.exists() and not matching_processes(directory), "private refusal fell back to public sources"
+
+    checked = 0
+    # Every source door sees a valid changed B, malformed B, and removed B.
+    # Rotate provider intent through omission, explicit none, and exact one.
+    for door_index, door in enumerate(("saved", "file", "assignment-file")):
+        for mutation_index, mutation in enumerate(("changed", "malformed", "removed")):
+            case_root = private / f"{door}-{mutation}"
+            case_root.mkdir(mode=0o700)
+            directory = case_root / "host"
+            policy = ("empty", "exact", "omitted")[(door_index + mutation_index) % 3]
+            document = {"execution": {"activeCapacity": 2}}
+            if policy != "omitted":
+                document["providers"] = {} if policy == "empty" else exact
+            expected = none if policy == "empty" else expected_exact if policy == "exact" else automatic
+            arguments = []
+            if door == "saved":
+                directory.mkdir(mode=0o700)
+                source = directory / "host.json"
+                source_value = document
+            elif door == "file":
+                source = case_root / "settings.json"
+                source_value = document
+                arguments = ["--settings", source]
+            else:
+                source = case_root / "execution.json"
+                source_value = document["execution"]
+                arguments = ["--set", f"execution=@{source}"]
+                if policy != "omitted":
+                    arguments += ["--set", "providers=" + json.dumps(document["providers"])]
+            write_source(source, source_value)
+            admitted = source.read_bytes()
+
+            def mutate():
+                if door != "saved":
+                    assert not directory.exists(), "source admission created the Host directory"
+                if mutation == "changed":
+                    replacement = json.loads(admitted)
+                    if door == "assignment-file":
+                        replacement["activeCapacity"] = 7
+                    else:
+                        replacement["execution"]["activeCapacity"] = 7
+                    write_source(source, replacement)
+                elif mutation == "malformed":
+                    source.write_text("{not-json")
+                else:
+                    source.unlink()
+
+            try:
+                ready = held_start(directory, arguments, mutate)
+                assert ready["capabilities"]["providers"] == expected, (door, mutation, policy, ready)
+                # Saved document bytes also locate a later DIR client. Restore
+                # them only AFTER launch returned positive A readiness with B
+                # still installed; explicit and assignment sources stay B.
+                if door == "saved":
+                    source.write_bytes(admitted)
+                observed = status(directory, selected_env)
+                assert instance(observed, 2) == ready["instance"]
+                assert observed["capabilities"]["providers"] == expected, observed
+                assert (directory / "rui.sqlite3").is_file()
+                checked += 1
+            finally:
+                forced_crash_cleanup(directory)
+
+    # A private interface independent of long CI TMPDIR proves both the parent
+    # route and child Store came from A, not just that some child was launched.
+    with host_process.short_interface_directory() as interface:
+        directory = private / "saved-placement"
+        directory.mkdir(mode=0o700)
+        source = directory / "host.json"
+        data_a, data_b = directory / "data-a", directory / "data-b"
+        document = {"providers": {}, "execution": {"activeCapacity": 2},
+                    "store": {"sqlite": {"dir": str(data_a)}}, "interface": {"dir": str(interface)}}
+        write_source(source, document)
+        admitted = source.read_bytes()
+
+        def move_source():
+            assert not data_a.exists() and not data_b.exists()
+            replacement = json.loads(admitted)
+            replacement["execution"]["activeCapacity"] = 7
+            replacement["store"]["sqlite"]["dir"] = str(data_b)
+            write_source(source, replacement)
+
+        try:
+            ready = held_start(directory, [], move_source)
+            assert ready["store"] == str(data_a.resolve()) and ready["capabilities"]["providers"] == none, ready
+            assert (data_a / "rui.sqlite3").is_file() and not data_b.exists()
+            assert (interface / "rui.sock").is_socket()
+            source.write_bytes(admitted)
+            observed = status(directory, selected_env)
+            assert instance(observed, 2) == ready["instance"] and observed["store"] == str(data_a.resolve()), observed
+            assert not data_b.exists(), "unadmitted B created a Store"
+            checked += 1
+        finally:
+            forced_crash_cleanup(directory)
+
+    # Each complete preset is a valid independent public input below 1 MiB.
+    # Their composed frame exceeds 1 MiB, not merely a usual 64 KiB pipe, and
+    # deleting both inputs proves the child did not reopen assignment files.
+    directory = private / "large-frame-host"
+    preset = {"model": "gpt-6-sol", "effort": "low", "compactAt": 100000,
+              "tools": [], "permissionMode": "ask", "label": "Frozen preset",
+              "instructions": "f" * (600 * 1024)}
+    sources = [private / "first-preset.json", private / "second-preset.json"]
+    arguments = ["--set", "execution.activeCapacity=2", "--set", "providers={}"]
+    for name, source in zip(("first", "second"), sources):
+        write_source(source, preset)
+        assert source.stat().st_size < 1024 * 1024
+        arguments += ["--set", f"presets.{name}=@{source}"]
+    assert sum(source.stat().st_size for source in sources) > 1024 * 1024
+
+    def remove_presets():
+        assert not directory.exists()
+        for source in sources:
+            source.unlink()
+
+    try:
+        ready = held_start(directory, arguments, remove_presets)
+        observed = status(directory, selected_env)
+        assert instance(observed, 2) == ready["instance"]
+        assert observed["capabilities"]["providers"] == none, observed
+        assert all(not source.exists() for source in sources)
+        checked += 1
+    finally:
+        forced_crash_cleanup(directory)
+
+    # Literal credentials in a file are rejected before snapshot creation,
+    # gate acknowledgement, directory creation, diagnostics, or a Host child.
+    directory = private / "literal-refused-host"
+    source = private / "literal-settings.json"
+    secret = "native-freeze-never-print-this"
+    write_source(source, {"providers": {"openai": {"key": {"value": secret}}}})
+    gate = private / "literal-refused.gate"
+    gate.touch(mode=0o600)
+    try:
+        refused = run_start(directory, {**selected_env, "RUI_TEST_HOST_AFTER_FREEZE_GATE": str(gate)},
+                            "--settings", str(source))
+        assert refused.returncode != 0 and "settings_invalid" in refused.stdout, refused
+        assert secret not in refused.stdout + refused.stderr
+        assert not directory.exists() and not matching_processes(directory)
+        assert not gate.with_name(gate.name + ".entered").exists(), "unsafe sources reached the frozen boundary"
+    finally:
+        dispose_all(lambda: gate.unlink(missing_ok=True), lambda: forced_crash_cleanup(directory))
+    print(f"frozen detached settings passed: {checked} positive A launches after source mutation, "
+          "saved SQLite placement, provider omission/empty/exact, composed frame >1 MiB, literal refusal before effects", flush=True)
+
+
 def resume_saved_host(root, env, directory, reference):
     with terminal_process([RUI, "session", "resume", "--store", directory, "--", reference], env=env, cwd=root) as (caller, master):
         output = bytearray()
         screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
         until = time.monotonic() + COMMAND_TIMEOUT
-        while "Type a task" not in screen.completed or "Opening…" in screen.completed:
+        while "What shall we work on?" not in screen.completed or "Opening…" in screen.completed:
             remaining = until - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (caller.poll(), screen.completed, output)
             chunk = os.read(master, 65536)
@@ -921,7 +1188,14 @@ def saved_settings(root, env):
     for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
                               ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
         unrooted = root / f"saved-unrooted-{path}"
-        host_ok(env, "set", "--store", unrooted, path, value)
+        if path == "tools.bash.path":
+            # Existing files from before detached-safe edits must still refuse at start.
+            unrooted.mkdir(mode=0o700)
+            saved = unrooted / "host.json"
+            saved.write_text(json.dumps({"tools": {"bash": {"path": value}}}))
+            saved.chmod(0o600)
+        else:
+            host_ok(env, "set", "--store", unrooted, path, value)
         refused = run_start(unrooted, env)
         assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
         assert not matching_processes(unrooted), refused
@@ -1002,7 +1276,7 @@ def saved_settings_served(root, env):
         assert started.returncode == 0, started.stderr
         sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
         create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
-                  "session": "", "preset": "review", "configuration": {"label": None}}
+                  "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         created = post(sock, "configure", create)
         assert created["answer"]["status"] == "accepted", created
         inspected = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session",
@@ -1125,7 +1399,7 @@ def contended_starters(root, env):
         loser = winner = None
         lock = os.fdopen(os.open(store / "host.lock", os.O_RDWR | os.O_CREAT, 0o600), "r+b")
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert os_semantics.try_lock(lock), "a fresh Store's lease was already held"
             loser = subprocess.Popen(
                 [RUI, "host", "start", "--store", store, "--set", "providers={}"],
                 env={**env, "RUI_TEST_HOST_STORE_LOCKED_GATE": str(gate)},
@@ -1168,8 +1442,58 @@ def contended_starters(root, env):
     print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
 
 
+def host_refusal_receipts(root, env):
+    # CLI-18
+    directory = root / "saved-path-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}},
+                                 "tools": {"bash": {"path": "relative/bash"}}}))
+    saved.chmod(0o600)
+    start = run_start(directory, env)
+    assert start.returncode == 2, start
+    failure = json.loads(start.stdout)["rui_start_error"]
+    assert failure["code"] == "settings_invalid" and "tools.bash.path" in failure["message"], failure
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    before = saved.read_bytes()
+    edit = host_command(env, "set", "--store", directory, "tools.bash.path", "relative/bash")
+    assert edit.returncode == 2 and json.loads(edit.stdout)["rui_start_error"] == failure and saved.read_bytes() == before, edit
+    assert edit.stderr.split(": ", 2)[2] == start.stderr.split(": ", 2)[2], (edit, start)
+    after = run_start(directory, env)
+    assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after
+
+    directory = root / "typed-child-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    saved.chmod(0o600)
+    selected_env = {**env, "RUI_STORE": str(directory)}
+    selected_env.pop("PR7C_ABSENT_KEY", None)
+    child = subprocess.run([RUI, "host", "serve", "--store", directory], env=selected_env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+    assert child.returncode == 2 and json.loads(child.stdout)["rui_start_error"]["code"] == "settings_invalid", child
+    result = run_start(directory, selected_env)
+    assert result.returncode == 1 and result.stdout == child.stdout, result
+    assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    credential = root / "typed-child-codex.json"
+    codex_fixture.credentials(credential)
+    selected_env["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
+    master, slave = open_pty()
+    bare = None
+    try:
+        bare = spawn([RUI, "--store", directory, "--provider", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
+        assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
+    finally:
+        if bare is not None and bare.poll() is None:
+            bare.kill()
+            bare.wait(timeout=5)
+        close_pty(master, slave)
+    managed_descriptor_rejection(root / "unexpected-parent", selected_env, 64)
+
+
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks|contention]"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks|frozen-settings|contention]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
@@ -1177,7 +1501,14 @@ def main():
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        if len(sys.argv) == 3 and sys.argv[2] == "typed-refusal":
+            host_refusal_receipts(root, env)
+            return
+        host_refusal_receipts(root, env)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
+        if len(sys.argv) == 3 and sys.argv[2] == "frozen-settings":
+            frozen_settings_launches(root, env)
+            return
         if len(sys.argv) == 3 and sys.argv[2] == "contention":
             contended_starters(root, env)
             return
@@ -1239,6 +1570,7 @@ def main():
 
         new_host_provider_policy(root, env)
         detached_settings_checks(root, env)
+        frozen_settings_launches(root, env)
         saved_settings(root, env)
         saved_settings_served(root, env)
 
@@ -1270,20 +1602,15 @@ def main():
         finally:
             forced_crash_cleanup(invalid_store)
         key_file.write_text("sk-host-launch\n")
-        for base, served, message in (("https://proxy.example/v1", "key_file", None),
-                                      ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
-            openai_store = root / f"openai-{served}"
-            openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file), "RUI_OPENAI_BASE_URL": base}
-            try:
-                started = run_start(openai_store, openai_env)
-                assert started.returncode == 0, started.stderr
-                assert (message is None) == ("RUI_OPENAI_BASE_URL" not in started.stderr), started.stderr
-                if message:
-                    assert message in started.stderr, started.stderr
-                providers = status(openai_store, openai_env)["capabilities"]["providers"]
-                assert providers == {"codex": "chatgpt_device", "openai": served, "chatgpt": "unserved"}, providers
-            finally:
-                forced_crash_cleanup(openai_store)
+        openai_store = root / "openai-explicit-endpoint"
+        openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file)}
+        try:
+            started = run_start(openai_store, openai_env, "--set", "providers.openai.endpoint=https://proxy.example/v1/responses")
+            assert started.returncode == 0, started.stderr
+            providers = status(openai_store, openai_env)["capabilities"]["providers"]
+            assert providers["openai"] == "key_file", providers
+        finally:
+            forced_crash_cleanup(openai_store)
 
         store = root / "detached-store"
         store.mkdir(mode=0o700)
@@ -1314,10 +1641,10 @@ def main():
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if os_semantics.PROC_FS:
-                assert os.readlink(f"/proc/{pids[0]}/fd/0") == "/dev/null"
+                assert os.readlink(os_semantics.descriptor_link(pids[0], 0)) == "/dev/null"
                 for descriptor in (1, 2):
-                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}").startswith("pipe:[")
-                assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
+                    assert os.readlink(os_semantics.descriptor_link(pids[0], descriptor)).startswith("pipe:[")
+                assert os.readlink(os_semantics.working_directory_link(pids[0])) == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
             started = [json.loads(stdout) for _, stdout, _ in results]
@@ -1418,7 +1745,7 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            while not all(marker in screen.completed for marker in ("+ New Session", "Settings")):
+            while not all(marker in screen.completed for marker in ("+ New chat", "Settings")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
@@ -1427,7 +1754,7 @@ def main():
                 output.extend(chunk)
                 screen.feed(chunk)
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
-            assert "Type a task" not in screen.completed and "enter open" not in screen.completed, screen.completed
+            assert "What shall we work on?" not in screen.completed and "enter open" not in screen.completed, screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"

@@ -9,14 +9,14 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 | Screen | How to get there | Main actions (keyboard and mouse) | Feature |
 | --- | --- | --- | --- |
 | Overview | Run `rui`; Esc back from a chat | Up/Down, Home/End select; Enter or click opens; Left/Right collapse or expand descendants; Alt-? opens the next question; Alt-Up/Down switch; Ctrl-X stops; Alt-A archives | [Overview and session list](./overview.md) |
-| Chat | Open a list row or **+ New Session** | Type and Enter send; Shift-Enter adds a line; Ctrl-P/Ctrl-N recall messages; PgUp/PgDn, arrows or wheel scroll; click **↓**, Esc, End (empty draft) or Ctrl-G return to latest; Left focuses the list; Enter on the open row or a click returns to chat | [Compose and submit](./compose-submit.md), [New Session](./new-chat.md), [navigation](./status-navigation.md) |
+| Chat | Open a list row or **+ New chat** | Type and Enter send; Shift-Enter adds a line; Ctrl-P/Ctrl-N recall messages; PgUp/PgDn, arrows or wheel scroll; click **↓**, Esc, End (empty draft) or Ctrl-G return to latest; Left focuses the list; Enter on the open row or a click returns to chat | [Compose and submit](./compose-submit.md), [New Session](./new-chat.md), [navigation](./status-navigation.md) |
 | App settings | End then Enter on Overview, or click **Settings** | Up/Down then Enter, or click a field/choice; **Version** starts Upgrade; Esc goes back | [App settings and Keys](./app-settings.md) |
 | Keys | Open **Keys** in Settings | Read the key reference; Esc returns to Settings | [App settings and Keys](./app-settings.md) |
 | Model choice | Click a chat's model, Tab then Enter, `/model`, or open **Model** in Settings/Chat info | Type to filter; Up/Down then Enter, or click a match; Esc closes | [Model choice and Effort](./model-choice.md) |
 | Effort | Click chat effort, Tab twice then Enter, or open **Effort** in Settings/Chat info | Arrows then Enter, or click a level; Esc closes | [Model choice and Effort](./model-choice.md) |
 | Sign-in | First run without credentials, or **Sign-in** in Settings | Tab/Shift-Tab then Enter, or click account/method/controls; edit API fields; **Copy code**, **Open browser**, **Back**, **Close** | [Sign-in and first run](./sign-in.md) |
 | Approval | A chat using **ask first** needs a tool decision | PgUp/PgDn or wheel reads; Left/Right selects **Allow once**/**Deny**, Enter confirms; click a choice; typing moves to draft; Esc restores the choice | [Consent](./consent.md) |
-| Chat info | Alt-I or click **alt+i info** | Arrows and Enter, or click fields/actions; **Rename**, **Archive**, **Copy last answer**; Esc closes | [Chat info and navigation](./status-navigation.md) |
+| Chat info | Alt-I or click the chat footer | Arrows and Enter, or click fields/actions; **Rename**, **Archive**, **Copy last answer**; Esc closes | [Chat info and navigation](./status-navigation.md) |
 | Tool output | Ctrl-O on a tool or click its heading | Ctrl-O or another click folds it; arrows, PgUp/PgDn or wheel scroll | [Chat info and navigation](./status-navigation.md) |
 | Message | Ctrl-O on a collapsed message | Read its full text; arrows, PgUp/PgDn or wheel scroll; Ctrl-O or Esc returns | [Chat info and navigation](./status-navigation.md) |
 | Archived | Home, Down, Right, Enter on Overview, or click **Archived** | Up/Down then Enter or click opens a chat; Esc returns; `/unarchive` in the chat restores it | [Archive and Archived](./archive.md) |
@@ -26,7 +26,7 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 | Defaults for new chats | Send `/setup` in Chat | Read the defaults; scroll a long page with arrows, PgUp/PgDn or wheel; Esc returns | [Slash commands and skills](./slash-commands.md) |
 | Submission details | Alt-D or click **alt+d details** for a held or rejected submission; click **details** on an environment refusal | Read repair instructions; arrows, PgUp/PgDn or wheel scroll; Esc returns | [Chat info and navigation](./status-navigation.md) |
 | Host stopped | The connected Host stops | Use the shown start/retry control; `r` starts from Chat when offered; Ctrl-C leaves | [Working, queued and stopped](./work-stop.md) |
-| Exit | Ctrl-C or a termination signal | Read **Detached. Host work continues.** and the resume command; mouse actions end with the client | [Exit and terminal restoration](./exit-restore.md) |
+| Exit | Ctrl-C or a termination signal | Read **Your chats keep working while you are away.** and the resume command; mouse actions end with the client | [Exit and terminal restoration](./exit-restore.md) |
 
 Working, queued, stopped and failed messages are Chat states; [work and stop](./work-stop.md) covers them. [Terminal themes and input focus](./appearance.md) covers night, day, mist and no-color views across screens.
 
@@ -53,7 +53,7 @@ Working, queued, stopped and failed messages are Chat states; [work and stop](./
 
 - [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer, capture correlation, and the input matrix every editor-hosting surface must pass.
 - [Consent](./consent.md): approval prompt reading, **Allow once**, **Deny**, retained drafts and pasted input.
-- [Chat info and navigation](./status-navigation.md): Alt-I or **alt+i info**, panels above visible feed, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
+- [Chat info and navigation](./status-navigation.md): Alt-I or the clickable chat footer, panels above visible feed, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
 - [Exit and terminal restoration](./exit-restore.md): Ctrl-C and SIGTERM restore termios and the screen.
 - [tmux attached and detached](./tmux.md): the same journeys through a private tmux server, with or without a client.
 - [Hardware input](./hardware-input.md): physical keys and wheel in a GUI terminal (L4, needs a human).

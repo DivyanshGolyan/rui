@@ -1,3 +1,4 @@
+from terminal_screen import RULE_GLYPHS, VERTICAL_DIVIDER, split_pane_row
 import errno
 import fcntl
 import json
@@ -10,9 +11,13 @@ import termios
 import threading
 import time
 
-import model_fixture as fixture
 import terminal_process as terminal_process_module
 from terminal_process import answers_to
+
+
+def _fixture():
+    import model_fixture
+    return model_fixture
 
 
 CHOICE = "Allow once    Deny"
@@ -43,7 +48,7 @@ def pick_deny(master):
 
 def run(home, *args, success=True, environment=None, input=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
     if success:
         assert result.returncode == 0, (args, result.stdout, result.stderr)
     else:
@@ -56,7 +61,7 @@ CAPTURE_NOTICE = re.compile(r"request: (\S+) \(wait: rui request wait \1; if unc
 
 def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True,
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True,
         text=True, timeout=20, input=input, cwd=cwd)
     assert result.returncode == expect, (args, result.stdout, result.stderr)
     notice = CAPTURE_NOTICE.match(result.stderr)
@@ -137,22 +142,25 @@ def chat_content_row(row):
     return row.removeprefix(" ")
 
 
+def pane_content(row):
+    return split_pane_row(row)[2]
+
+
 def conversation_text(frame):
-    return "\n".join(chat_content_row(row.partition("│")[2] if "│" in row else row)
-                     for row in frame.split("\n"))
+    rows = (split_pane_row(row) for row in frame.split("\n"))
+    return "\n".join(chat_content_row(content.removeprefix(" ") if divider else content)
+                     for _, divider, content in rows)
 
 
 def composer_line(screen, y):
     lines = screen.split("\n")
-    line = lines[y] if y < len(lines) else ""
-    if not line.startswith((" ›", " >")) and "│" in line:
-        line = line.partition("│")[2]
-    return line
+    return pane_content(lines[y]) if y < len(lines) else ""
 
 
 def composer_bounds(screen):
     rules = [index for index in range(len(screen.split("\n")))
-             if set(composer_line(screen, index)) == {"─"}]
+             if len(set(composer_line(screen, index))) == 1
+             and composer_line(screen, index)[0] in RULE_GLYPHS]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
@@ -163,7 +171,7 @@ def chat_footer_row(screen):
 
 
 def composer_empty(screen, y):
-    return composer_line(screen, y) in (" ›", " >", " › Type a task", " > Type a task")
+    return composer_line(screen, y) in (" ›", " >", " › What shall we work on?", " > What shall we work on?")
 
 
 def composer_ready(screen, x, y):
@@ -201,16 +209,17 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 
 def overview_title(frame):
-    return " + New Session" in frame and "   Settings" in frame and "Type a task" not in frame
+    return "   + New chat" in frame and "     Settings" in frame and "What shall we work on?" not in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
+                       and not any(re.match(r"\s*[›>](?: |$)", pane_content(row))
+                                   for row in screen.split("\n")), timeout)
 
 
 def open_new_chat(master, timeout=15):
-    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "Type a task" in screen
+    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "What shall we work on?" in screen
                        and composer_ready(screen, x, y), timeout)
 
 
@@ -221,14 +230,20 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
-    contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
-    footers = [index for index, row in enumerate(contents) if " · info" in row]
-    assert footers == [len(rows) - 1], ("one info footer at the bottom", screen)
+    contents = [pane_content(row) for row in rows]
+    footers = [index for index, row in enumerate(contents) if re.search(r"(?:^|\s)esc$", row)]
+    assert footers == [chat_footer_row(screen)], ("one plain panel footer after the input", screen)
+    assert " · info" not in screen and "esc close" not in screen, screen
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
-    prompts = [index for index, row in enumerate(contents)
-               if row.strip() in ("›", ">") or row.lstrip().startswith(("› ", "> "))]
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    prompts = [index for index in range(bounds[0] + 1, bounds[1])
+               if contents[index].strip() in ("›", ">") or contents[index].lstrip().startswith(("› ", "> "))]
     assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
-    actions = next(index for index, row in enumerate(contents) if "Rename" in row)
+    effort = next(index for index in range(bounds[0] + 1, bounds[1]) if contents[index].startswith("   Effort"))
+    assert bounds[0] < effort < min(prompts), ("panel inside input rules", screen)
+    assert not any(any(char in row for char in ("┌┐└┘" + VERTICAL_DIVIDER)) for row in contents[bounds[0] + 1:bounds[1]]), screen
+    actions = next(index for index in range(bounds[0] + 1, bounds[1]) if "Rename" in contents[index])
     assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
     assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
     if context is not None:
@@ -237,14 +252,17 @@ def assert_chat_info_layout(screen, *, context=None):
 
 
 def chat_info_geometry(screen):
-    content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
-    effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
-    composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
-    actions = [index for index, row in enumerate(content)
-               if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
-    assert actions and actions[-1] == composer - 3, screen
-    return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
-            "feed": content[:effort - 2], "rows": content}
+    content = [pane_content(row) for row in screen.split("\n")]
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    panel_rows = range(bounds[0] + 1, bounds[1])
+    effort = next(index for index in panel_rows if content[index].startswith("   Effort"))
+    composer = next(index for index in panel_rows if content[index].rstrip() in (" ›", " >") or content[index].startswith((" › ", " > ")))
+    actions = [index for index in panel_rows
+               if content[index].strip().startswith(("Rename", "Archive", "Copy last answer"))]
+    assert actions and bounds[0] < effort <= actions[-1] < composer < bounds[1], screen
+    return {"top": bounds[0], "input": composer, "footer": chat_footer_row(screen),
+            "feed": content[:bounds[0]], "rows": content}
 
 
 
@@ -254,13 +272,13 @@ def footer_click(screen, *, column=None, marker=None):
     line = content[row]
     if marker is not None:
         column = line.index(marker)
-    assert column is not None and 0 <= column < len(line), (column, line)
+    assert column is not None and 0 <= column < len(content[row - 1]), (column, line)
     return f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
 
 
 def chat_info_open(master, timeout=15):
     screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
-                         ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
+                         ("Effort", "Permissions", "Allowed tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
                          b"\x1bi", timeout)
     assert_chat_info_layout(screen)
     return screen
@@ -274,13 +292,12 @@ def chat_info_frame(master, timeout=15):
 
 def app_settings_open(master):
     overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
-    return panel_frame(master, lambda screen: any("Rui" in row and "settings" in row
-                       for row in screen.splitlines()), b"\r")
+    return panel_frame(master, lambda screen: composer_line(screen, len(screen.split("\n")) - 1).split() == ["Settings", "esc"], b"\r")
 
 
 
 def model_choice_details(screen):
-    rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    rows = [pane_content(row) for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
     more = None
@@ -337,7 +354,7 @@ class AppModelCatalog:
 
     def hold(self, _):
         self.entered.set()
-        fixture.wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
+        _fixture().wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
         return True
 
     def close(self):
@@ -351,7 +368,7 @@ def app_model_open(master, query=b"", *, catalog=None):
     app_settings_open(master)
     shown = model_choice_frame(master, b"\r", query="")
     if catalog is not None:
-        fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
+        _fixture().wait_for(catalog.entered.is_set, "initial Model catalog requested")
         catalog.release.set()
         panel_frame(master, lambda screen: not model_choice_shown(screen))
         catalog.close()
@@ -516,7 +533,7 @@ def return_to_live(master, live, key=b"\x1b", timeout=15):
         lambda screen, x, y: composer_ready(screen, x, y) and live(screen), timeout)
 
 
-LIVE_CLOCK = re.compile(r"^([⠹◌?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
+LIVE_CLOCK = re.compile(r"^([◝◌●] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
 
 
 def settle_screen(master, quiet=1.0, timeout=15):

@@ -5,6 +5,7 @@ pub const BuiltinInstructions = enum {
     terra,
     sol,
     astra,
+    sol_astra_6_2,
 
     pub fn bytes(self: BuiltinInstructions) []const u8 {
         return switch (self) {
@@ -12,6 +13,7 @@ pub const BuiltinInstructions = enum {
             .luna => @embedFile("model_instructions/luna.txt"),
             .terra, .astra => @embedFile("model_instructions/terra-astra.txt"),
             .sol => @embedFile("model_instructions/sol.txt"),
+            .sol_astra_6_2 => @embedFile("model_instructions/sol-astra-62.txt"),
         };
     }
 };
@@ -22,9 +24,66 @@ pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
         .{ "gpt-6.1-terra", BuiltinInstructions.terra },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol },
         .{ "gpt-6-astra", BuiltinInstructions.astra },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol_astra_6_2 },
+        .{ "gpt-6.2-astra", BuiltinInstructions.sol_astra_6_2 },
     };
     inline for (reviewed) |entry| if (std.mem.eql(u8, model, entry[0])) return entry[1];
     return .generic;
+}
+
+pub const ImageCapability = enum { supported, unsupported, unknown };
+
+// The generated snapshot owns image facts. Saved catalog rows do not carry
+// modalities, so a refresh cannot turn missing evidence into a capability.
+pub fn imageCapability(model: []const u8) ImageCapability {
+    const snapshot = @import("model_catalog_snapshot.zig");
+    if (containsId(&snapshot.image_supported_ids, model)) return .supported;
+    if (containsId(&snapshot.image_unsupported_ids, model)) return .unsupported;
+    return .unknown;
+}
+
+fn containsId(ids: []const []const u8, id: []const u8) bool {
+    var start: usize = 0;
+    var end = ids.len;
+    while (start < end) {
+        const mid = start + (end - start) / 2;
+        switch (std.mem.order(u8, id, ids[mid])) {
+            .eq => return true,
+            .lt => end = mid,
+            .gt => start = mid + 1,
+        }
+    }
+    return false;
+}
+
+// OpenAI images and vision guide, checked 2026-11-18:
+// https://developers.openai.com/api/docs/guides/images-vision.md
+// These rules apply to auto detail on the API route only.
+pub const ImageCostRule = enum { astra_auto, gpt41_auto };
+pub fn imageCostRule(provider: @import("provider_name.zig").Provider, model: []const u8) ?ImageCostRule {
+    if (provider != .openai) return null;
+    if (std.mem.eql(u8, model, "gpt-6-astra")) return .astra_auto;
+    if (std.mem.eql(u8, model, "gpt-4.1")) return .gpt41_auto;
+    return null;
+}
+
+test "image cost facts are exact and provider qualified" {
+    try std.testing.expectEqual(ImageCostRule.astra_auto, imageCostRule(.openai, "gpt-6-astra").?);
+    try std.testing.expectEqual(ImageCostRule.gpt41_auto, imageCostRule(.openai, "gpt-4.1").?);
+    for ([_]@import("provider_name.zig").Provider{ .codex, .chatgpt }) |provider| {
+        try std.testing.expect(imageCostRule(provider, "gpt-6-astra") == null);
+        try std.testing.expect(imageCostRule(provider, "gpt-4.1") == null);
+    }
+    try std.testing.expect(imageCostRule(.openai, "gpt-4.1-mini") == null);
+    try std.testing.expect(imageCostRule(.openai, "GPT-6-ASTRA") == null);
+}
+
+test "image capability uses exact sourced facts and preserves unknown" {
+    try std.testing.expectEqual(ImageCapability.supported, imageCapability("gpt-4.1"));
+    for ([_][]const u8{ "gpt-3.5-turbo", "gpt-3.5-turbo-0125", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-instruct" }) |id|
+        try std.testing.expectEqual(ImageCapability.unsupported, imageCapability(id));
+    for ([_][]const u8{ "future-model", "GPT-3.5-TURBO", "gpt-3.5-turbo-next" }) |id|
+        try std.testing.expectEqual(ImageCapability.unknown, imageCapability(id));
 }
 
 pub const max_model_bytes = 256;
@@ -129,6 +188,12 @@ test "model catalog shipped facts are sorted unique and valid" {
     try std.testing.expectEqual(Efforts.init(.{ .low = true, .medium = true, .high = true, .xhigh = true, .max = true }), sol.efforts);
     const terra = find(shipped, "gpt-6.1-terra").?;
     try std.testing.expect(terra.efforts.contains(.none));
+    for ([_][]const u8{ "gpt-6.2-sol", "gpt-6.2-astra" }) |id| {
+        const entry = find(shipped, id).?;
+        try std.testing.expect(entry.openai_listed);
+        try std.testing.expectEqual(@as(?u32, 1050000), entry.context_window);
+        try std.testing.expectEqual(Efforts.init(.{ .low = true, .medium = true, .high = true, .xhigh = true, .max = true }), entry.efforts);
+    }
 }
 
 test "model catalog effort bits are part of the Store format" {
@@ -166,18 +231,20 @@ test "model catalog chat facts cover exact types modalities and whole non-chat f
     }
 }
 
-test "built-in instructions select only four exact requested model identities" {
+test "built-in instructions select only six exact requested model identities" {
     const cases = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna, @embedFile("model_instructions/luna.txt") },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra, @embedFile("model_instructions/terra-astra.txt") },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
         .{ "gpt-6-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol_astra_6_2, @embedFile("model_instructions/sol-astra-62.txt") },
+        .{ "gpt-6.2-astra", BuiltinInstructions.sol_astra_6_2, @embedFile("model_instructions/sol-astra-62.txt") },
     };
     inline for (cases) |case| {
         try std.testing.expectEqual(case[1], builtinInstructions(case[0]));
         try std.testing.expectEqualStrings(case[2], builtinInstructions(case[0]).bytes());
     }
-    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "future-chat" }) |model| {
+    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "gpt-6.2-terra", "gpt-6.2-sol-extra", "future-chat" }) |model| {
         try std.testing.expectEqual(BuiltinInstructions.generic, builtinInstructions(model));
         try std.testing.expectEqualStrings("", builtinInstructions(model).bytes());
     }

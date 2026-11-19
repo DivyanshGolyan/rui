@@ -117,7 +117,7 @@ def catalog(*entries):
 
 def content_reference(raw):
     domain = b"rui/content/v1"
-    return {"bytes": str(len(raw)), "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + raw).hexdigest()}
+    return {"type": "text", "bytes": str(len(raw)), "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + raw).hexdigest()}
 
 
 def main():
@@ -147,8 +147,7 @@ def main():
         skill(project / "container", "nested", "Not advertised")
         initial_catalog = catalog(demo, shared, removed, home_only, switching)
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "OPENAI_API_KEY": "sk-fixture-only",
-                       "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "OPENAI_API_KEY": "sk-fixture-only"}
         endpoint = SkillsEndpoint()
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
@@ -510,7 +509,7 @@ def main():
         wait_for(lambda: any(CHILD_TASK in messages(request, "user") for request in endpoint.decoded()), "child provider request")
         child_request = next(request for request in endpoint.decoded() if CHILD_TASK in messages(request, "user"))
         assert messages(child_request, "user")[-2:] == [CHILD_TASK, invocation(child_only)], child_request
-        child = fixture.instructions_session(child_request["instructions"])
+        child = fixture.instructions_session(fixture.request_system_prompt(child_request))
         assert child not in (parent, restricted_session), child
         assert metadata(child_request, "Available skills") == [catalog(*updated_catalog["entries"], child_only)], child_request
         assert CHILD_INSTRUCTIONS in json.dumps(child_request), child_request

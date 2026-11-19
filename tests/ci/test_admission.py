@@ -1,4 +1,5 @@
 from functools import cache
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -17,11 +18,15 @@ from strict_paths import STRICT, strict
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
+POLICY = ROOT / '.github/actions/policy/action.yml'
+POLICY_CHECKS = ROOT / '.github/actions/policy/checks.sh'
+BESIDE = ROOT / '.github/actions/policy/beside.sh'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
+RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
-MAIN_BUILD = ROOT / '.github/workflows/main-build.yml'
+TIER = ROOT / '.github/workflows/qualification-tier.yml'
 
 
 def job(text, name):
@@ -29,6 +34,11 @@ def job(text, name):
     if not match:
         raise AssertionError(f'missing job {name}')
     return match[1]
+
+
+def permissions_of(body):
+    block = body.split('\n    permissions:\n', 1)[1]
+    return dict(re.findall(r'(?m)^      ([a-z-]+): (read|write)$', block.split('\n    uses:', 1)[0].split('\n    runs-on:', 1)[0]))
 
 
 def step_script(text, name):
@@ -44,9 +54,9 @@ def step_script(text, name):
 
 def documentation_env():
     return dict(CHANGE_KIND='documentation', POLICY_RESULT='skipped', MACOS_RESULT='skipped',
-                UPGRADE_RESULT='skipped', NATIVE='false', UPGRADE='false', TARGETS='[]', NATIVE_TARGETS='[]',
+                NATIVE='false', TARGETS='[]', NATIVE_TARGETS='[]',
                 LINUX_MATRIX='{"include": []}', MACOS_MATRIX='{"include": []}',
-                LINUX_SPLIT='false', MACOS_SPLIT='false', CODEGEN='false', LINUX_MEMORY='false')
+                LINUX_SPLIT='false', MACOS_SPLIT='false', LINUX_MEMORY='false')
 
 
 @cache
@@ -100,14 +110,15 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head=''):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, native_targets=None):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
-                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(), BRANCH_HEAD=branch_head,
+                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
-                   GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+                   GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
+                   NATIVE_TARGETS=json.dumps(native_targets) if native_targets is not None else '')
         return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
                               capture_output=True, text=True)
 
@@ -118,6 +129,23 @@ class PlanFixture:
 
 
 class AdmissionTest(unittest.TestCase):
+    def test_screen_check_is_selected_by_plan_and_precedes_acceptance(self):
+        text = CHECK.read_text()
+        plan = job(text, 'plan')
+        admission = job(text, 'admission')
+        self.assertIn('screens_required: ${{ steps.shape.outputs.screens_required }}', plan)
+        self.assertIn('- name: Require PR Shape\n        id: shape', plan)
+        self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
+        self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 2)
+        self.assertIn('sparse-checkout: tests/ci', admission)
+        self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
+        self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
+        self.assertLess(admission.index('- name: Require screen evidence'),
+                        admission.index('- name: Require candidate acceptance'))
+        for name in ('PR_BODY', 'PR_NUMBER', 'GITHUB_REPOSITORY', 'GH_TOKEN'):
+            screen_step = admission.split('- name: Require screen evidence', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn(name + ':', screen_step)
+
     def test_cold_native_compile_budget_does_not_extend_runtime_deadlines(self):
         text = CHECK.read_text()
 
@@ -128,7 +156,7 @@ class AdmissionTest(unittest.TestCase):
             step = body.split(f'      - name: {name}\n', 1)[1].split('\n      - ', 1)[0]
             return int(re.search(r'(?m)^        timeout-minutes: (\d+)$', step)[1])
 
-        release = RELEASE.read_text()
+        release = RELEASE_BUILD.read_text()
         self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
@@ -161,19 +189,27 @@ class AdmissionTest(unittest.TestCase):
 
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
-                   LINUX_RESULT='success', MACOS_RESULT='success', UPGRADE_RESULT='success',
-                   NATIVE='true', UPGRADE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
+                   LINUX_RESULT='success', MACOS_RESULT='success', PR_JOB='false',
+                   NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
         return subprocess.run(['bash', '-c', script], env=dict(os.environ, **env),
                               capture_output=True, text=True)
+
+    def test_single_pr_job_admits_only_with_policy_folded_into_it(self):
+        self.assertEqual(self.admission(PR_JOB='true', POLICY_RESULT='skipped', NATIVE='false',
+                                        MACOS_RESULT='skipped').returncode, 0)
+        for pr_job, policy in (('true', 'success'), ('true', 'failure'), ('false', 'skipped'),
+                               ('', 'success'), ('unknown', 'skipped')):
+            with self.subTest(pr_job=pr_job, policy=policy):
+                self.assertNotEqual(self.admission(PR_JOB=pr_job, POLICY_RESULT=policy).returncode, 0)
 
     def test_all_green_and_only_unselected_cache_skip_pass(self):
         self.assertEqual(self.admission().returncode, 0)
         self.assertEqual(self.admission(CACHE_SELECTED='true', CACHE_RESULT='success').returncode, 0)
 
     def test_each_required_part_rejects_pending_cancelled_failed_skipped_or_missing(self):
-        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'LINUX_RESULT', 'MACOS_RESULT', 'UPGRADE_RESULT'):
+        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'LINUX_RESULT', 'MACOS_RESULT'):
             for result in ('queued', 'pending', 'in_progress', 'cancelled', 'failure', 'skipped', ''):
                 with self.subTest(part=part, result=result):
                     self.assertNotEqual(self.admission(**{part: result}).returncode, 0)
@@ -183,21 +219,17 @@ class AdmissionTest(unittest.TestCase):
             self.assertNotEqual(self.admission(DRAFT=value).returncode, 0)
         for value in ('', 'unknown'):
             self.assertNotEqual(self.admission(NATIVE=value).returncode, 0)
-            self.assertNotEqual(self.admission(UPGRADE=value).returncode, 0)
 
-    def test_mac_and_upgrade_admit_only_their_exact_selection(self):
-        for native, upgrade in (('false', 'false'), ('true', 'false'), ('false', 'true')):
-            env = dict(NATIVE=native, UPGRADE=upgrade,
-                       MACOS_RESULT='success' if native == 'true' else 'skipped',
-                       UPGRADE_RESULT='success' if upgrade == 'true' else 'skipped')
-            with self.subTest(native=native, upgrade=upgrade):
+    def test_mac_admits_only_its_exact_selection(self):
+        for native in ('false', 'true'):
+            env = dict(NATIVE=native, MACOS_RESULT='success' if native == 'true' else 'skipped')
+            with self.subTest(native=native):
                 self.assertEqual(self.admission(**env).returncode, 0)
-            for key, selected in (('MACOS_RESULT', native), ('UPGRADE_RESULT', upgrade)):
-                for result in ('success', 'skipped', 'failure', 'cancelled', 'in_progress', ''):
-                    if result == env[key]:
-                        continue
-                    with self.subTest(native=native, upgrade=upgrade, key=key, result=result):
-                        self.assertNotEqual(self.admission(**dict(env, **{key: result})).returncode, 0)
+            for result in ('success', 'skipped', 'failure', 'cancelled', 'in_progress', ''):
+                if result == env['MACOS_RESULT']:
+                    continue
+                with self.subTest(native=native, result=result):
+                    self.assertNotEqual(self.admission(**dict(env, MACOS_RESULT=result)).returncode, 0)
 
     def test_cache_selection_has_no_unknown_or_unexpected_skips(self):
         for selected, results in (
@@ -244,8 +276,8 @@ class AdmissionTest(unittest.TestCase):
     def test_documentation_linux_requires_exact_skips_and_controls(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
-                   TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
-                   UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
+                   TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', BUILD_RESULT='skipped',
+                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped', PR_JOB='false', PR_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
         def run(values):
@@ -268,9 +300,9 @@ class AdmissionTest(unittest.TestCase):
     def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
-                   CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
-                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
-                   COMPILE_ONLY='false')
+                   BUILD_RESULT='skipped', UNIT_RESULT='skipped',
+                   NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
+                   PR_JOB='false', PR_RESULT='skipped', COMPILE_ONLY='false')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -284,9 +316,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
         self.assertIn("needs.plan.outputs.draft_run == 'false'", policy)
         self.assertIn('draft_run: ${{ steps.select.outputs.draft_run }}', job(text, 'plan'))
-        for name in ('policy', 'linux', 'previous_release_upgrade'):
+        for name in ('policy', 'linux'):
             self.assertNotIn('github.event.pull_request.draft', job(text, name))
-        self.assertIn("needs.plan.outputs.upgrade == 'true'", job(text, 'previous_release_upgrade'))
         for name in ('macos_build', 'macos_suites', 'macos'):
             self.assertIn("needs.plan.outputs.native == 'true'", job(text, name))
         for name in ('plan', 'linux', 'admission'):
@@ -297,12 +328,121 @@ class AdmissionTest(unittest.TestCase):
         self.assertNotIn('paths-ignore', text)
 
     def test_policy_runs_live_client_locality_with_trusted_main_history(self):
-        policy = job(CHECK.read_text(), 'policy')
-        self.assertIn('fetch-depth: 0', policy)
-        self.assertIn('        run: python3 -B tests/ci/client_locality.py\n', policy)
+        for name in ('policy', 'pr_linux'):
+            self.assertIn('fetch-depth: 0', job(CHECK.read_text(), name))
+        self.assertIn('uses: ./.github/actions/policy\n', job(CHECK.read_text(), 'policy'))
+        self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
+
+    def test_policy_beside_the_compile_keeps_its_status_and_fails_the_job_through_its_final_gate(self):
+        # CI-77: policy {passes, fails, killed by a signal} x compile {passes, fails}, through the real
+        # PR job's compile step and final gate. The compile stub blocks on a fifo until the policy stub
+        # has written it, so the two run at once; the subprocess timeout is only a watchdog.
+        workflow = job(CHECK.read_text(), 'pr_linux')
+        compile_step = step_script(workflow, 'Compile only the binaries the selected targets need')
+        gate = 'Fail for the policy or format checks that failed above'
+        gate_script = step_script(workflow, gate)
+        gate_if = re.search(r'(?m)^        if: \$\{\{ (.*) \}\}$',
+                            workflow.split(f'      - name: {gate}\n', 1)[1].split('\n      - ', 1)[0])[1]
+
+        def gate_runs(policy):
+            expression = gate_if.replace('!cancelled()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            expression = expression.replace('steps.compile.outputs.policy', repr(policy))
+            return eval(expression.replace('steps.format.outcome', repr('success')), {})
+
+        plan = {'linux_compile_targets': '["test-logic"]', 'policy_skips': '["test_unchanged"]'}
+        step_env = re.search(r'(?ms)^      - name: Compile only the binaries the selected targets need\n.*?^        run:',
+                             workflow)[0]
+        env = {key: plan[output] for key, output in
+               re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ needs\.plan\.outputs\.(\w+) \}\}$', step_env)}
+        policies = {'passes': 'exit 0', 'fails': 'exit 3', 'killed by a signal': 'kill -KILL $$'}
+        compiles = {'passes': 0, 'fails': 5}
+        for (policy, ending), (compiled, code) in product(policies.items(), compiles.items()):
+            with self.subTest(policy=policy, compile=compiled), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                (root / '.github/actions/policy').mkdir(parents=True)
+                (root / 'bin').mkdir()
+                (root / '.github/actions/policy/beside.sh').write_text(BESIDE.read_text())
+                fifo, calls, output = root / 'started', root / 'calls', root / 'output'
+                os.mkfifo(fifo)
+                (root / '.github/actions/policy/checks.sh').write_text(
+                    f'echo "checks SKIPS=$SKIPS" >> "{calls}"\necho "policy log line"\n'
+                    f'echo started > "{fifo}"\n{ending}\n')
+                (root / 'bin/python3').write_text(
+                    f'#!/bin/sh\necho "python3 $*" >> "{calls}"\nread line < "{fifo}"\n'
+                    f'[ "$line" = started ] || exit 9\necho "compile log line"\nexit {code}\n')
+                (root / 'bin/zig').write_text(f'#!/bin/sh\necho "zig $*" >> "{calls}"\n')
+                for tool in ('python3', 'zig'):
+                    (root / 'bin' / tool).chmod(0o755)
+                result = subprocess.run(['bash', '-euo', 'pipefail', '-c', compile_step], cwd=root,
+                                        capture_output=True, text=True, timeout=120,
+                                        env=dict(os.environ, **env, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(output)))
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                expected = ['checks SKIPS=["test_unchanged"]', 'python3 -B tests/ci/build_artifact.py compile ["test-logic"]']
+                if code == 0:
+                    expected.append('zig build --fetch=all')
+                self.assertEqual(sorted(calls.read_text().splitlines()), sorted(expected))
+                self.assertIn('policy log line', result.stdout)
+                self.assertIn('compile log line', result.stdout)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(gate_runs(outputs.get('policy', '')), policy != 'passes')
+                if policy != 'passes':
+                    failed = subprocess.run(['bash', '-euc', gate_script], capture_output=True, text=True,
+                                            env=dict(POLICY=outputs['policy'], FORMAT='success'))
+                    self.assertNotEqual(failed.returncode, 0)
+
+    def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
+        # CI-76: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
+        calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
+                 'python3 -B tests/ci/client_locality.py',
+                 'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
+                 'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
+                 'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 8, 9)]
+        names = ['Check caller error coverage and shrink-only pending causes',
+                 'Check flake sources and shrink-only allowances',
+                 'Check client locality and shrink-only exceptions',
+                 'Run tests/ci, less self-checks whose inputs are unchanged',
+                 'Check the Store statement table was generated from the current inputs',
+                 'Reject undefined fixture names before native builds',
+                 "Check the TypeScript client's generated wire types and type-check it",
+                 'Validate workflows with pinned-linter compatibility exceptions']
+        cases = [(failing, []) for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]]
+        cases.append(([last_of_each_check[0]], [last_of_each_check[2]]))
+        for failing, killed in cases:
+            with self.subTest(failing=failing, killed=killed), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                for directory in ('bin', 'clients/ts', '.github/workflows', 'actionlint'):
+                    (root / directory).mkdir(parents=True)
+                (root / '.github/workflows/check.yml').write_text('on: push\n')
+                (root / 'failing').write_text(''.join(call + '\n' for call in failing))
+                (root / 'killed').write_text(''.join(call + '\n' for call in killed))
+                for tool in ('bin/python3', 'bin/npm', 'actionlint/actionlint'):
+                    (root / tool).write_text(
+                        '#!/bin/sh\ncall="$(basename "$0") $*"\necho "$call" >> "$CALLS"\n'
+                        'echo "output from $call"\n'
+                        'if grep -qxF -- "$call" "$KILLED"; then kill -TERM $$; fi\n'
+                        'if grep -qxF -- "$call" "$FAILING"; then exit 3; fi\n')
+                    (root / tool).chmod(0o755)
+                result = subprocess.run(['bash', str(POLICY_CHECKS)], cwd=root, capture_output=True, text=True,
+                                        env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), SKIPS='["test_unchanged"]',
+                                                 CALLS=str(root / 'calls'), FAILING=str(root / 'failing'),
+                                                 KILLED=str(root / 'killed')))
+                self.assertEqual(sorted((root / 'calls').read_text().splitlines()), sorted(calls), result.stdout)
+                self.assertEqual(result.returncode, 1 if failing or killed else 0, result.stdout + result.stderr)
+                for name, call in zip(names, last_of_each_check):
+                    group = result.stdout.split('::group::' + name + '\n', 1)[1].split('::endgroup::', 1)[0]
+                    self.assertIn('output from ' + call, group)
+                    self.assertEqual(('::error::' + name + ' failed') in result.stdout, call in failing + killed)
+                if killed:
+                    self.assertIn('exit 143', result.stdout)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
-        script = step_script(job(CHECK.read_text(), 'policy'), 'Run tests/ci, less self-checks whose inputs are unchanged')
+        script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
+        self.assertIn(' ' + script + '\n', POLICY_CHECKS.read_text())
+        self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
+        self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'policy'))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -311,6 +451,8 @@ class AdmissionTest(unittest.TestCase):
             'test_gamma_more': 'class More(unittest.TestCase):\n    def test_more(self): pass\n',
         }
         with tempfile.TemporaryDirectory() as root:
+            Path(root, 'tests/ci').mkdir(parents=True)
+            Path(root, 'tests/ci/policy_suite.py').write_text((ROOT / 'tests/ci/policy_suite.py').read_text())
             for name, body in modules.items():
                 path = Path(root, 'tests/ci', name + '.py')
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,7 +472,7 @@ class AdmissionTest(unittest.TestCase):
     def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
         self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
-        required = ('plan', 'policy', 'linux', 'macos', 'previous_release_upgrade', 'cache_execution')
+        required = ('plan', 'policy', 'linux', 'macos', 'cache_execution')
         needs = re.search(r'(?m)^    needs: \[(.*?)\]$', text)[1].split(', ')
         self.assertCountEqual(needs, required)
         for name in required:
@@ -361,28 +503,22 @@ class AdmissionTest(unittest.TestCase):
             checkouts = re.findall(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', body)
             for checkout in checkouts:
                 with self.subTest(job=name):
-                    expected = '${{ github.sha }}' if name in ('plan', 'policy') else '${{ needs.plan.outputs.candidate_ref }}'
+                    expected = '${{ github.sha }}' if name in ('plan', 'policy', 'mac_runner') else '${{ needs.plan.outputs.candidate_ref }}'
                     self.assertIn('ref: ' + expected, checkout)
         self.assertIn('candidate_ref: ${{ steps.select.outputs.candidate_ref }}', job(text, 'plan'))
         self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))
         self.assertNotIn('refs/pull/', text)
 
-    def test_reusable_upgrade_runs_linux_on_prs_and_both_platforms_in_promotion(self):
-        caller = job(CHECK.read_text(), 'previous_release_upgrade')
-        self.assertIn("""systems: '["ubuntu-24.04"]'""", caller)
-        promotion = job(PROMOTE.read_text(), 'upgrade')
+    def test_upgrade_runs_both_platforms_in_promotion_and_never_on_prs(self):
+        self.assertNotIn('uses: ./.github/workflows/previous-release-upgrade.yml', CHECK.read_text())
+        promotion = job(TIER.read_text(), 'upgrade')
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', promotion)
-        self.assertNotIn('systems:', promotion)
-        self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', caller)
-        self.assertIn('candidate-ref: ${{ needs.plan.outputs.candidate_ref }}', caller)
-        self.assertIn("github.event_name == 'pull_request'", caller)
-        self.assertNotIn('github.event.pull_request.draft', caller)
         text = UPGRADE.read_text()
+        self.assertNotIn('pull_request', text)
         self.assertIn('  workflow_call:', text)
         self.assertIn('      candidate-ref:', text)
         upgrade = job(text, 'upgrade')
-        self.assertIn("""os: ${{ fromJSON(inputs.systems || '["ubuntu-24.04", "macos-15"]') }}""", upgrade)
-        self.assertIn("""default: '["ubuntu-24.04", "macos-15"]'""", text)
+        self.assertIn('os: [ubuntu-24.04, macos-15]', upgrade)
         self.assertIn('ref: ${{ inputs.candidate-ref || github.sha }}', upgrade)
         self.assertIn('python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .', upgrade)
         script = step_script(upgrade, 'Validate immutable candidate')
@@ -461,7 +597,7 @@ class CandidatePlanTest(unittest.TestCase):
             with self.subTest(upgrade=upgrade), PlanFixture() as fixture:
                 fixture.write(schema, after)
                 output = fixture.plan(self, candidate=fixture.commit())
-                self.assertEqual(output['upgrade'], upgrade)
+                self.assertIn(f'"upgrade_required": {upgrade}', (fixture.root / 'summary').read_text())
                 self.assertEqual(set(json.loads(output['linux_compile_targets'])) - set(json.loads(output['targets'])), {'test'})
                 self.assertIn('test-store', json.loads(output['targets']))
                 self.assertNotIn('test', json.loads(output['targets']))
@@ -475,9 +611,62 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], '[]', key)
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
-        for key in ('native', 'upgrade', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
+        for key in ('native', 'retry', 'linux_split', 'macos_split',
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
+
+    # CI-1: written as literals, independent of select_tests' tier constants.
+    PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full', 'stack-frames', 'mysql-wire-integration'}
+    # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
+    PR_TIER_CASES = {
+        'documentation': (['README.md'], set()),
+        'tests/ci only': (['tests/ci/select_tests.py'], set()),
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
+        'build hub': (['build.zig'], {'test-logic'}),
+        'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
+        'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic'}),
+        'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
+                                      'tests/ci/ci_plan.py'], set()),
+        'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
+        'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
+                                     {'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'test-native', 'test-store'}),
+        'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
+        'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
+        'core owning many fixtures (Mac path)': (['src/client.zig'], {
+            'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
+            'conversation-page-integration',
+            'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
+            'session-list-integration', 'test-logic', 'test-native'}),
+    }
+
+    def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        available = set(build_files.steps())
+        for name, (paths, expected) in self.PR_TIER_CASES.items():
+            with self.subTest(case=name):
+                selected = select(paths, 'review', available)
+
+                kind = ChangeKind.DOCUMENTATION if name == 'documentation' else ChangeKind.NORMAL
+
+                def run(event, draft=False, promotion=False):
+                    return plan(selected, event_name=event, draft=draft, promotion=promotion,
+                                change_kind=kind).outputs
+                ready = run('pull_request')
+                self.assertEqual(set(ready['targets']), expected)
+                self.assertFalse(set(ready['targets']) & self.PR_TIER_NEVER)
+                self.assertEqual(ready['pr_job'], name != 'documentation', 'every ready normal PR is one job')
+                self.assertEqual(ready['linux_matrix'], {'include': []})
+                self.assertEqual(run('pull_request', draft=True)['targets'], [])
+                self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
+                promoted = set(run('workflow_dispatch', promotion=True)['targets'])
+                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
+                from select_tests import covers
+                self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
 
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
         with PlanFixture() as fixture:
@@ -512,6 +701,17 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(fixture.plan(self, base=stale)['change_kind'], 'normal')
             self.assert_documentation_plan(fixture.plan(self, base=pr_base))
 
+    def test_manual_native_targets_reach_existing_producers_and_matrix(self):
+        with PlanFixture() as fixture:
+            output = fixture.plan(self, event='workflow_dispatch', native_targets=['test-logic'])
+            self.assertEqual(json.loads(output['native_targets']), ['test-logic'])
+            self.assertEqual(output['native'], 'true')
+            self.assertEqual(output['retry'], 'false')
+            self.assertEqual(output['quarantine'], 'off')
+            [row] = json.loads(output['macos_matrix'])['include']
+            self.assertEqual(row['targets'], ['test-logic'])
+            self.assertEqual(row['part'], 'all')
+
     def test_plan_step_serializes_the_value_owners_result(self):
         with PlanFixture() as fixture:
             fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
@@ -545,7 +745,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             empty = fixture.plan(self)
             self.assertEqual(empty['change_kind'], 'normal')
             self.assertEqual(empty['native'], 'false')
-            self.assertEqual(empty['upgrade'], 'false')
             (fixture.repo / 'README.md').unlink()
             deleted = fixture.commit()
             self.assert_documentation_plan(fixture.plan(self, candidate=deleted))
@@ -564,8 +763,8 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate)
             results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
-                           previous_release_upgrade='skipped', cache_execution='skipped',
-                           linux_build='skipped', linux_build_unit='skipped', linux_codegen='skipped',
+                           cache_execution='skipped', pr_linux='skipped',
+                           linux_build='skipped', linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             for name, script in (('linux', linux), ('admission', admission)):
                 result = self.aggregate(workflow, name, script, output, results)
@@ -574,7 +773,10 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
     @staticmethod
     def aggregate(workflow, name, script, output, results, draft=False):
         env = {}
-        for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', job(workflow, name)):
+        body = job(workflow, name)
+        if name == 'admission':
+            body = body.split('      - name: Require candidate acceptance\n', 1)[1].split('\n      - ', 1)[0]
+        for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', body):
             if expression.startswith('needs.plan.outputs.'):
                 env[key] = output[expression.removeprefix('needs.plan.outputs.')]
             elif expression == 'github.event.pull_request.draft':
@@ -600,8 +802,8 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(draft['draft_run'], 'true')
             self.assert_quick_plan(draft)
             results = {name: 'skipped' for name in (
-                'policy', 'macos', 'previous_release_upgrade', 'cache_execution',
-                'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck')}
+                'policy', 'macos', 'cache_execution', 'pr_linux',
+                'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck')}
             results.update(plan='success', linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, draft, results, draft=True).returncode, 0)
             refused = self.aggregate(workflow, 'admission', admission, draft, results, draft=True)
@@ -610,29 +812,28 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             ready = fixture.plan(self, candidate=candidate)
             self.assertEqual(ready['change_kind'], 'normal')
             self.assertEqual(ready['draft_run'], 'false')
-            has_targets = bool(json.loads(ready['targets']))
-            self.assertTrue(has_targets)
-            selected = dict(results, policy='success',
-                            linux_build='success' if has_targets else 'skipped',
-                            linux_suites='success' if has_targets else 'skipped',
-                            linux_build_unit='success' if ready['linux_split'] == 'true' else 'skipped',
-                            linux_codegen='success' if ready['linux_codegen'] == 'true' else 'skipped',
-                            macos_typecheck='success' if ready['typecheck_macos'] == 'true' else 'skipped')
+            self.assertTrue(json.loads(ready['targets']))
+            self.assertEqual(ready['pr_job'], 'true')
+            selected = dict(results, pr_linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, ready, selected).returncode, 0)
-            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck'):
-                if selected[part] == 'success':
-                    with self.subTest(skipped=part):
+            for part in ('pr_linux',):
+                for value in ('skipped', 'failure', 'cancelled'):
+                    with self.subTest(part=part, value=value):
                         self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
-                            dict(selected, **{part: 'skipped'})).returncode, 0)
+                            dict(selected, **{part: value})).returncode, 0)
+            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
+                with self.subTest(ran_beside_the_single_job=part):
+                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
+                        dict(selected, **{part: 'success'})).returncode, 0)
             accepted = dict(selected,
                 macos='success' if ready['native'] == 'true' else 'skipped',
-                previous_release_upgrade='success' if ready['upgrade'] == 'true' else 'skipped',
                 cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
             result = self.aggregate(workflow, 'admission', admission, ready, accepted)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
-    def test_main_merge_obligation_requires_compile_without_running_unselected_units(self):
+    def test_a_branch_that_merged_main_gets_only_its_own_diffs_pr_tier(self):
+        # CI-4: a branch merge alone adds nothing to the PR tier.
         workflow = CHECK.read_text()
         linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
         with PlanFixture() as fixture:
@@ -650,23 +851,21 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.git('rev-parse', 'HEAD')
             self.assertEqual(fixture.git('rev-parse', 'HEAD^1'), main)
             self.assertEqual(fixture.git('rev-parse', 'HEAD^2'), branch)
-            output = fixture.plan(self, base=main, candidate=candidate, branch_head=branch)
+            output = fixture.plan(self, base=main, candidate=candidate)
+            # The PR tier no longer compiles every unit partition for a branch that merged
+            # main: the candidate gets only what its own diff selects (here, documentation).
             self.assertEqual(output['candidate_ref'], candidate)
-            self.assertEqual(output['change_kind'], 'normal')
+            self.assertEqual(output['change_kind'], 'documentation')
             self.assertEqual(json.loads(output['targets']), [])
-            self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
+            self.assertEqual(json.loads(output['linux_compile_targets']), [])
+            self.assertEqual(output['pr_job'], 'false')
+            self.assertEqual(json.loads(output['pr_setup_targets']), [])
             self.assertEqual(output['linux_matrix'], '{"include": []}')
-            self.assertEqual(output['linux_split'], 'false')
-            results = dict(plan='success', policy='success', linux_build='success',
-                           linux_build_unit='skipped', linux_codegen='skipped',
-                           linux_suites='skipped', macos_typecheck='skipped')
+            results = dict(plan='success', policy='skipped', pr_linux='skipped', linux_build='skipped',
+                           linux_build_unit='skipped', linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
-            for status in ('skipped', 'failure', 'cancelled', ''):
-                with self.subTest(status=status):
-                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                        dict(results, linux_build=status)).returncode, 0)
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                dict(results, linux_suites='success')).returncode, 0)
+                dict(results, pr_linux='success')).returncode, 0)
 
     def test_linux_suite_scheduling_uses_execution_not_compile_selection(self):
         from ci_plan import plan
@@ -677,8 +876,12 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
         for targets in ([], ['test-native']):
             for required in (False, True):
                 source = dict(select([], 'review', set(build_files.steps())), targets=targets,
-                              unit_compile_required=required)
-                output = plan(source, event_name='pull_request', draft=False,
+                              fast_targets=targets, unit_compile_required=required)
+                # Shards serve every non-PR run; a ready PR runs its single job instead.
+                ready = plan(source, event_name='pull_request', draft=False,
+                             promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                self.assertTrue(ready['pr_job'])
+                output = plan(source, event_name='workflow_dispatch', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 encoded = {key: json.dumps(value) if not isinstance(value, str) else value
                            for key, value in output.items()}
@@ -714,8 +917,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             output = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
             self.assertEqual(output['compile_only'], 'true')
             self.assertEqual(json.loads(output['targets']), ['check', 'test-logic'])
-            built = {name: 'skipped' for name in ('policy', 'macos', 'previous_release_upgrade', 'cache_execution',
-                                                  'linux_codegen', 'linux_suites')}
+            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites', 'pr_linux')}
             built.update(plan='success', linux_build='success', linux_build_unit='success',
                          macos_typecheck='success')
             result = self.aggregate(workflow, 'linux', linux, output, built)
@@ -748,66 +950,139 @@ class ReleaseFlowTest(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
-    def test_only_a_manual_promotion_publishes_main(self):
-        release = RELEASE.read_text().split('\npermissions:', 1)[0]
-        self.assertIn('  workflow_call:', release)
-        for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
-            self.assertNotIn(trigger, release)
+    def test_only_promote_publishes_main(self):
+        # One tier builds and judges the archives for Promote, scheduled or by hand; only Promote publishes them.
+        for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['qualification-tier.yml']),
+                                   (UPGRADE, ['qualification-tier.yml']), (RENDERER, ['qualification-tier.yml']),
+                                   (TIER, ['promote.yml'])):
+            release = workflow.read_text().split('\npermissions:', 1)[0]
+            self.assertIn('  workflow_call:', release)
+            # The upgrade check and renderer contracts also run by hand for diagnosis.
+            for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
+                if workflow not in (UPGRADE, RENDERER) or trigger != 'workflow_dispatch:':
+                    self.assertNotIn(trigger, release)
+            callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
+                       if f'uses: ./.github/workflows/{workflow.name}' in path.read_text()]
+            self.assertCountEqual(callers, expected)
         promote = PROMOTE.read_text()
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]), ['workflow_dispatch'])
-        callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
-                   if 'uses: ./.github/workflows/release.yml' in path.read_text()]
-        self.assertEqual(callers, ['promote.yml'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]),
+                         ['workflow_dispatch', 'schedule'])
         selected = CHECK.read_text().split('\npermissions:', 1)[0]
         self.assertIn('  pull_request:', selected)
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
 
-    def test_main_build_compiles_through_selected_checks_and_reports_outside_it(self):
-        text = MAIN_BUILD.read_text()
-        on = text.split('\npermissions:', 1)[0]
-        self.assertIn('  push:\n    branches: [main]\n', on)
-        self.assertNotIn('pull_request', on)
-        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-build\n  cancel-in-progress: true$')
-        build = job(text, 'build')
-        self.assertIn('uses: ./.github/workflows/check.yml', build)
-        self.assertIn('compile_only: true', build)
-        self.assertIn('promotion: false', build)
-        self.assertNotIn('write', build)
-        self.assertNotRegex(text, r'zig build|build_artifact|\.github/actions/setup')
-        report = job(text, 'report')
-        self.assertIn('needs: build', report)
-        self.assertIn('issues: write', report)
-        self.assertIn('python3 -B tests/ci/main_build.py', report)
-        self.assertIn('compile_only:', CHECK.read_text().split('\npermissions:', 1)[0])
-
-    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
+    def test_scheduled_promotion_qualifies_main_head_and_files_main_red(self):
+        self.assertFalse((ROOT / '.github/workflows/main-qualifier.yml').exists())
+        self.assertFalse((ROOT / '.github/workflows/main-build.yml').exists())
         text = PROMOTE.read_text()
-        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        on = text.split('\npermissions:', 1)[0]
+        self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
+        self.assertIn('  workflow_dispatch:', on)
+        self.assertNotRegex(on, r'push:|pull_request')
+        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: promote\n  cancel-in-progress: false$')
+        batch = job(text, 'batch')
+        self.assertIn("github.ref == 'refs/heads/main'", batch)
+        self.assertIn("SCHEDULED: ${{ github.event_name == 'schedule' }}", batch)
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', batch)
+        self.assertEqual(batch.count('--scheduled'), 1)
+        self.assertIn('$( [ "$SCHEDULED" = true ] && echo --scheduled )', batch)
+        qualify = job(text, 'qualify')
+        self.assertIn('uses: ./.github/workflows/qualification-tier.yml', qualify)
+        self.assertIn("red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}", qualify)
+        # Promote's scheduled and manual runs on one SHA never cancel each other's tiers.
+        self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+
+    def test_one_tier_owns_qualification_and_its_verdict(self):
+        text = TIER.read_text()
+        on = text.split('\npermissions:', 1)[0]
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_call'])
+        self.assertEqual(re.findall(r'(?m)^      ([a-z-]+):\n        description', on), ['base', 'head', 'red-label', 'version'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]),
+                         ['release_build', 'selected', 'upgrade', 'renderer', 'qualified', 'report'])
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
+        build = job(text, 'release_build')
+        self.assertIn('uses: ./.github/workflows/release-build.yml', build)
+        self.assertIn('sha: ${{ inputs.head }}', build)
         selected = job(text, 'selected')
         self.assertIn('uses: ./.github/workflows/check.yml', selected)
         self.assertIn('promotion: true', selected)
+        self.assertIn('base: ${{ inputs.base }}', selected)
         for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
             body = job(text, name)
             self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
-            self.assertIn('${{ needs.batch.outputs.head }}', body)
-            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
+            self.assertIn('${{ inputs.head }}', body)
+            self.assertIn('batch-base: ${{ inputs.base }}', body)
+            # The tiers test the bytes the release publishes.
+            self.assertIn('needs: release_build', body)
+            self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
         qualified = job(text, 'qualified')
-        needs = re.search(r'(?m)^    needs: \[(.*?)\]$', qualified)[1].split(', ')
-        self.assertCountEqual(needs, ['batch', 'selected', 'upgrade', 'renderer'])
+        self.assertIn('needs: [release_build, selected, upgrade, renderer]', qualified)
+        self.assertIn('if: ${{ always() }}', qualified)
+        self.assertEqual(permissions_of(qualified), {'contents': 'read', 'statuses': 'write'})
+        script = step_script(qualified, 'Record the verdict on HEAD')
+        self.assertIn('main_qualified.py verdict $RESULTS', script)
+        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
+                      script)
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
+        # The requirement is report_issue.py's aggregate step: it files nothing of its own.
+        self.assertIn('      - name: Require every selected qualification tier\n', qualified)
+        self.assertIn('run: test "$STATE" = success', qualified.split('Require every selected qualification tier', 1)[1])
+        report = job(text, 'report')
+        self.assertIn('if: ${{ failure() }}', report)
+        self.assertIn('WORKFLOW: ${{ github.workflow }}', report)
+        self.assertIn('report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label "$RED_LABEL"',
+                      report)
+        # No caller enumerates the tiers, collects their results or records a verdict itself.
+        workflows = {path.name: path.read_text() for path in (ROOT / '.github/workflows').glob('*.yml')}
+        authorities = {
+            'calls the release build': r'uses: \./\.github/workflows/release-build\.yml',
+            'calls the upgrade check': r'uses: \./\.github/workflows/previous-release-upgrade\.yml',
+            'calls the renderer contracts': r'uses: \./\.github/workflows/renderer-contracts\.yml',
+            'runs Selected checks as a promotion': r'promotion: true',
+            'derives a verdict': r'main_qualified\.py verdict',
+            'records a final verdict': r'main_qualified\.py record [^\n]*--state "\$state"',
+        }
+        for what, pattern in authorities.items():
+            with self.subTest(authority=what):
+                self.assertEqual([name for name, body in sorted(workflows.items()) if re.search(pattern, body)],
+                                 ['qualification-tier.yml'])
+
+    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
+        text = PROMOTE.read_text()
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release'])
+        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
+        qualify = job(text, 'qualify')
+        for line in ('uses: ./.github/workflows/qualification-tier.yml',
+                     "if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}",
+                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
+                     "red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}"):
+            self.assertIn(line, qualify)
+        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
+                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
         release = job(text, 'release')
-        self.assertIn('needs: [batch, qualified]', release)
-        self.assertNotIn('if:', release)
+        self.assertIn('needs: [batch, qualify]', release)
+        self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && "
+                      "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
-        script = step_script(qualified, 'Require every selected promotion tier')
-        good = dict(BATCH_RESULT='success', SELECTED_RESULT='success', UPGRADE_RESULT='success',
-                    RENDERER_RESULT='success')
-        self.assertEqual(subprocess.run(['bash', '-c', script], env=good).returncode, 0)
-        for key in good:
-            for result in ('failure', 'cancelled', 'skipped', ''):
-                with self.subTest(key=key, result=result):
-                    self.assertNotEqual(subprocess.run(['bash', '-c', script],
-                        env=dict(good, **{key: result}), capture_output=True).returncode, 0)
+        self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
+                      " || needs.qualify.outputs.version }}", release)
+        self.assertIn('value: ${{ jobs.release_build.outputs.version }}', TIER.read_text())
+        # A green qualification publishes that run's archives without qualifying again.
+        self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
+        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
+        self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
+        # Publication never rebuilds: it checks the archives against the digests recorded at build time.
+        publication = RELEASE.read_text()
+        self.assertNotRegex(publication, r'zig build|\.github/actions/setup')
+        self.assertIn('rui-digests/SHA256SUMS', publication)
+        self.assertIn('sha256sum --check --strict SHA256SUMS', publication)
+        self.assertIn('name: rui-digests', RELEASE_BUILD.read_text())
 
     BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 
@@ -835,16 +1110,10 @@ class ReleaseFlowTest(unittest.TestCase):
     def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
         upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))
         self.assertEqual([name for name, _ in upgrade],
-                         ['current-upgrade', 'running-upgrade', 'previous-upgrade'])
+                         ['startup', 'current-upgrade', 'running-upgrade', 'previous-upgrade'])
         self.assertIn('previous_release_upgrade.py --running-host', dict(upgrade)['running-upgrade'])
         self.assertIn('$RUNNER_TEMP/previous-running-release', dict(upgrade)['running-upgrade'])
-        body = job(UPGRADE.read_text(), 'upgrade')
-        self.assertIn("HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}", body)
-        startup = steps.parse(shlex.split(body.split("startup=(", 2)[2].split(")\n", 1)[0])[0])
-        self.assertEqual(startup[0], 'startup')
-        self.assertIn('zig build host-launch-integration', startup[1])
-        upgrade.append(startup)
-        self.assertLess(body.index('${startup[@]+"${startup[@]}"}'), body.index("'current-upgrade="))
+        self.assertIn('zig build host-launch-integration', dict(upgrade)['startup'])
         contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
         self.assertEqual([name for name, _ in contracts],
                          ['selftest', 'pty', 'ghostty', 'controls', 'recovery'])
@@ -867,6 +1136,24 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertLess(body.index('uses: actions/cache/restore@'), body.index(restat))
         self.assertLess(body.index(restat), checks)
 
+
+    def test_compiler_backed_acceptance_proof_uses_existing_cache_execution_job(self):
+        workflow = CHECK.read_text()
+        cache = job(workflow, 'cache_execution')
+        proof = 'python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v'
+        self.assertIn(proof, cache)
+        self.assertLess(cache.index('uses: ./.github/actions/setup'), cache.index(proof))
+        self.assertNotIn('native_acceptance', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 10', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 20', cache)
+        discovered = unittest.defaultTestLoader.discover(str(ROOT / 'tests/ci'))
+        def ids(suite):
+            for test in suite:
+                if isinstance(test, unittest.TestSuite):
+                    yield from ids(test)
+                else:
+                    yield test.id()
+        self.assertFalse(any('native_acceptance' in name for name in ids(discovered)))
 
     def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):
         for path in (CHECK, UPGRADE):

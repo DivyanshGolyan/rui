@@ -28,6 +28,14 @@ pub const Range = struct {
 
 pub const Row = RowFor(Document);
 
+// Selection composes with an existing reverse-video band in either theme.
+pub fn highlight(cells: []vaxis.Cell, columns: []const bool) void {
+    std.debug.assert(cells.len == columns.len);
+    for (cells, columns) |*cell, selected| if (selected) {
+        cell.style.reverse = !cell.style.reverse;
+    };
+}
+
 pub fn RowFor(comptime Doc: type) type {
     return struct {
         const Self = @This();
@@ -184,7 +192,7 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    try document.append("⠹ 雪 fall fast\n\nend");
+    try document.append("◝ 雪 fall fast\n\nend");
     try document.prepare();
     var cells: [10 * 4]vaxis.Cell = undefined;
     layOut(document, .{}, 10, 4, &cells);
@@ -285,4 +293,75 @@ test "copying code across wrapped and blank band rows contains only code text" {
         defer gpa.free(whole.text.bytes);
         try std.testing.expectEqualStrings(text, whole.text.bytes);
     }
+}
+
+test "selection contrasts with sent bands and padding at both widths" {
+    const testing = std.testing;
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]bool{ false, true }) |wrapped| {
+        var document: viewport.Sized(1024, true) = .{ .sidenotes = true };
+        try document.append(TerminalText.user_message_on ++ "› ");
+        const count: usize = if (!wrapped) 5 else if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n" ++ TerminalText.user_message_off);
+        try document.prepare();
+        const layout: viewport.Layout = .{ .width = width, .method = .unicode };
+        const height = document.lineRows(layout, 0);
+        try testing.expectEqual(@as(u16, if (!wrapped) 3 else if (width == 46) 5 else 6), height);
+        var cells: [140 * 6]vaxis.Cell = @splat(.{});
+        var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = cells[0 .. @as(usize, width) * height] };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        const colours: viewport.Colours = .{ .user_band = .{ .index = 2 }, .no_depth = !colour };
+        _ = document.draw(window, .{}, true, true, .{}, colours);
+        var positions = document.rowsFrom(layout, .{});
+        var columns: [140]bool = undefined;
+        for (0..height) |row_index| {
+            const position = positions.next().?;
+            const row_cells = cells[row_index * width ..][0..width];
+            const row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
+            row.covered(.{ .from = 0, .to = document.text().len }, columns[0..width]);
+            const old = row_cells[0].style.reverse;
+            const old_text = row_cells[4].style.reverse;
+            const old_unselected = row_cells[1].style.reverse;
+            try testing.expectEqual(!colour, old);
+            try testing.expect(columns[0] and columns[4]);
+            columns[1] = false;
+            highlight(row_cells, columns[0..width]);
+            try testing.expectEqual(!old, row_cells[0].style.reverse);
+            try testing.expectEqual(!old_text, row_cells[4].style.reverse);
+            try testing.expectEqual(old_unselected, row_cells[1].style.reverse);
+        }
+    };
+}
+
+fn testBandCopy() !void {
+    const testing = std.testing;
+    for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
+        const method: vaxis.gwidth.Method = if (unicode_caps) .unicode else .wcwidth;
+        var document: viewport.Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
+        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n" ++ TerminalText.user_message_off);
+        try document.prepare();
+        const layout: viewport.Layout = .{ .width = width, .method = method };
+        var cells: [140 * 12]vaxis.Cell = @splat(.{});
+        var screen: vaxis.Screen = .{ .width = width, .height = 12, .width_method = method, .buf = cells[0 .. @as(usize, width) * 12] };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen };
+        const band: vaxis.Color = if (depth == 1) .{ .index = 8 } else .{ .rgb = .{ 10, 20, 30 } };
+        const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
+        window.fill(.{ .style = ground });
+        _ = document.draw(window, .{}, true, true, ground, .{ .user_band = band, .no_depth = depth == 0 });
+        const content_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[width..][0..width], .line = 0 };
+        const cap_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[2 * @as(usize, width) ..][0..width], .line = document.selectionLine(layout, .{ .row = 2 }) };
+        const result = try copy(testing.allocator, &document, .of(content_row.spot(4), cap_row.spot(width)));
+        try testing.expect(result == .text);
+        defer testing.allocator.free(result.text.bytes);
+        try testing.expectEqualStrings("short", result.text.bytes);
+    };
+}
+
+test "SUI-34 user message bands retain padded rows and selectable source text" {
+    try viewport.testBandPadding();
+    try testBandCopy();
 }

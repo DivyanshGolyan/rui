@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
-import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -15,28 +16,30 @@ type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
 export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
-/** The Session settings the Host takes today. */
+/** Session settings. The Host resolves omitted creation settings. */
 export interface AgentSpec {
-	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
+	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** May change within the Session's fixed provider. */
+	/** Creation requires a model, supplied directly or by a preset. May change within the fixed provider. */
 	model: string;
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
-	/** Tool names the Host offers, such as `bash` and `web_search`. */
-	tools: readonly string[];
-	/** Tools loaded from the first model request. */
+	/** Configured allowed tool names, such as `bash` and `web_search`. */
+	tools?: readonly string[];
+	/** Loaded tool intent within `tools`; each Operation freezes its effective model offer. */
 	loadedTools?: readonly string[];
 	/** Tokens reserved for model output; null clears the override. */
 	outputReservation?: number | null;
-	permissionMode: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
-	effort: Schemas["AgentSpec"]["effort"];
-	/** Compact the conversation at this many tokens. */
-	compactAt: number;
+	permissionMode?: "ask" | "bypass";
+	/** Reasoning effort. `null` requests the Host default for the selected model. */
+	effort?: Schemas["AgentSpec"]["effort"];
+	/** Compact the conversation at this many tokens. `null` requests the Host default. */
+	compactAt?: number | null;
+	/** Soft creation preferences, used when no stronger setting applies. */
+	preferences?: { reasoningEffort?: NonNullable<Schemas["AgentSpec"]["effort"]>; permissionMode?: "ask" | "bypass" };
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
@@ -44,16 +47,26 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Creation needs a complete spec, or a named preset with explicit overrides. */
-export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
-	/** Create an attached child, inheriting provider, workspace and Bash environment. */
-	parent?: string;
-};
+type CreationSettings = (AgentSpec & { preset?: never }) | (Partial<AgentSpec> & { preset: string });
+
+/** Creation needs a model, directly or from a preset. Roots carry a Workspace; children inherit it. */
+export type SessionCreate = CreationSettings & (
+	| { workspace: string; parent?: never }
+	| { preset: string; parent?: never }
+	| {
+		/** Create an attached child, inheriting provider, Workspace and Bash environment. */
+		parent: string;
+		workspace?: never;
+		provider?: never;
+	}
+);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
 
 export interface WriteOptions {
+	/** Optional caller-supplied key for replay. Takes precedence over `idempotencyKey`. */
+	key?: string;
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
 	idempotencyKey?: string;
 }
@@ -79,7 +92,20 @@ export interface SessionArchiveResult {
 
 export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
 
-export interface SessionSummary {
+export interface ServedWork {
+	attention: Schemas["SessionWork"]["attention"];
+	group: Schemas["SessionWork"]["group"];
+	canStop: boolean;
+	decide: string | null;
+	interruptTarget: InterruptTarget | null;
+}
+
+export interface SessionSummary extends ServedWork {
+	/** Decimal times and counts remain lossless strings. */
+	stateChangeAt: Schemas["SessionRow"]["state_change_at"];
+	subtreeStateChangeAt: Schemas["SessionRow"]["subtree_state_change_at"];
+	descendantCount: Schemas["SessionRow"]["descendant_count"];
+	descendantNeedsYouCount: Schemas["SessionRow"]["descendant_needs_you_count"];
 	id: string;
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
@@ -92,20 +118,28 @@ export interface SessionSummary {
 
 type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
 
+/** The observed Turn and Operation IDs as decimal strings. */
+export interface InterruptTarget { turn: string; operation: string }
+
 /** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
-export interface SessionStatus {
+export interface SessionStatus extends ServedWork {
 	archiveState: SessionArchiveState;
 	/** `working` includes owed attached-tree work, including unpublished child endings. */
 	state: CurrentReport["work"]["state"]["kind"];
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];
 	operation: CurrentReport["work"]["operation"];
+	/** The Host-served target for interrupting the observed model call. */
+	interruptTarget: InterruptTarget | null;
 	pendingMessages: CurrentReport["pending_messages"];
 	parent: CurrentReport["session"]["parent"];
 	label: CurrentReport["session"]["label"];
 	model: CurrentReport["session"]["model"];
 	effort: CurrentReport["session"]["reasoning_effort"];
+	/** Configured allowed tool names. */
 	tools: CurrentReport["session"]["tools"];
+	/** Loaded tool intent; an active Operation keeps its frozen model offer. */
+	loadedTools: CurrentReport["session"]["loaded_tools"];
 	permissionMode: CurrentReport["session"]["permission_mode"];
 	latestOutcome: CurrentReport["work"]["latest_outcome"];
 }
@@ -130,6 +164,10 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),
 		...(spec.label === undefined ? {} : { label: spec.label }),
+		...(spec.preferences === undefined ? {} : { preferences: {
+			...(spec.preferences.reasoningEffort === undefined ? {} : { reasoning_effort: spec.preferences.reasoningEffort }),
+			...(spec.preferences.permissionMode === undefined ? {} : { permission_mode: spec.preferences.permissionMode }),
+		} }),
 	};
 }
 
@@ -146,7 +184,7 @@ function configureBody(store: string, key: string, session: string, spec: Partia
 }
 
 function key(options: WriteOptions | undefined): string {
-	return options?.idempotencyKey ?? randomUUID();
+	return options?.key ?? options?.idempotencyKey ?? randomUUID();
 }
 
 function parse<T>(reply: Buffer): T {
@@ -167,6 +205,7 @@ export function environmentBytes(env: Record<string, string> | undefined): Buffe
 
 export class Session {
 	readonly #link: Link;
+	#interruptTarget: InterruptTarget | null = null;
 	readonly id: string;
 
 	constructor(link: Link, id: string) {
@@ -181,7 +220,7 @@ export class Session {
 	 * See `ListActivityOptions.follow`; `signal` abort also ends an idle wait.
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
-		return listActivity(this.#link, this.id, options);
+		return listActivity(this.#link, this.id, options, (target) => { this.#interruptTarget = target; });
 	}
 
 	/** Search public feed text newest first, with bounded snippets. */
@@ -199,6 +238,12 @@ export class Session {
 		return readContentBytes(this.#link, this.id, entry);
 	}
 
+	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */
+	async readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
+		if (entry.content?.type !== "parts") throw new TypeError("entry content is not parts");
+		return readPartBytes(this.#link, this.id, entry.content.owner, ordinal);
+	}
+
 	/** A Current report's summary (D12). A separate ending is not reported. */
 	async status(): Promise<SessionStatus> {
 		const reply = parse<Extract<Schemas["InspectSessionReply"], { profile: "current" }>>(
@@ -210,18 +255,22 @@ export class Session {
 			} satisfies Schemas["InspectSessionRequest"])),
 		);
 		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
+		const served = servedWork(reply.work);
+		this.#interruptTarget = served.interruptTarget === null ? null : { ...served.interruptTarget };
 		return {
 			archiveState: reply.archive_state,
 			state: reply.work.state.kind,
 			since: reply.work.state.since,
 			turn: reply.work.turn,
 			operation: reply.work.operation,
+			...served,
 			pendingMessages: reply.pending_messages,
 			parent: reply.session.parent,
 			label: reply.session.label,
 			model: reply.session.model,
 			effort: reply.session.reasoning_effort,
 			tools: reply.session.tools,
+			loadedTools: reply.session.loaded_tools,
 			permissionMode: reply.session.permission_mode,
 			latestOutcome: reply.work.latest_outcome,
 		};
@@ -344,35 +393,45 @@ export class Session {
 		return answer.action_selection;
 	}
 
+	/** Selects an owned Action for stop. Reuse the key to recover a lost reply. */
+	async stopAction(action: string, options?: WriteOptions): Promise<string | null> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionStopReply"]>(await this.#link.exchange(
+			"/v1/control/action-stop",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_stop", store,
+				key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionStopRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return answer.resolution_position;
+	}
+
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
-	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+	async readAction(action: string, offset = "0", after = "0"): Promise<ActionStatus> {
 		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
-			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset, after,
 		} satisfies Schemas["ReadActionRequest"])));
 	}
 
-	/**
-	 * Cuts off the model call that is current now while the Session keeps going.
-	 * It takes no key: each call names the work it sees at that moment, so a
-	 * repeat is a new cut, not a replay. Resolves without effect when no model
-	 * call is current, or when the call ended before the cut arrived (D167, D171).
+	/** Interrupt an observed target with one keyed request. Reuse the key to replay its answer.
+	 * `operation_resolved` and `target_mismatch` resolve without effect. With no target, use this handle's
+	 * last status or feed observation; send nothing when it had no interrupt target.
+	 * Neither form reads first.
 	 */
-	async interrupt(): Promise<void> {
-		const status = await this.status();
-		const { turn, operation } = status;
-		if (turn === null || operation === null || !modelCallCurrent(status.state)) {
-			this.#link.activity?.notify(this.id);
-			return;
-		}
-		const idempotencyKey = randomUUID();
-		const body = (store: string) =>
-			JSON.stringify({
-				version: WIRE_VERSION,
-				kind: "model_interruption",
-				store,
-				key: idempotencyKey,
-				target: { session: this.id, turn, operation },
-			} satisfies Schemas["ModelInterruptionRequest"]);
+	interrupt(target: InterruptTarget, options?: WriteOptions): Promise<void>;
+	interrupt(options?: WriteOptions): Promise<void>;
+	async interrupt(targetOrOptions?: InterruptTarget | WriteOptions, options?: WriteOptions): Promise<void> {
+		const explicit = targetOrOptions !== undefined && "turn" in targetOrOptions;
+		const target = explicit ? targetOrOptions : this.#interruptTarget;
+		if (target === null) return;
+		const { turn, operation } = target;
+		const idempotencyKey = key(explicit ? options : targetOrOptions);
+		const body = (store: string) => JSON.stringify({
+			version: WIRE_VERSION, kind: "model_interruption", store,
+			key: idempotencyKey, target: { session: this.id, turn, operation },
+		} satisfies Schemas["ModelInterruptionRequest"]);
 		try {
 			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
 		} catch (error) {
@@ -399,10 +458,6 @@ export class Session {
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
 		this.#link.activity?.notify(this.id);
 	}
-}
-
-function modelCallCurrent(kind: string): boolean {
-	return kind === "working" || kind === "retrying" || kind === "pending";
 }
 
 export class Sessions {
@@ -443,7 +498,11 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent, creator: row.creator });
+				summaries.push({
+					id: row.reference, label: row.label, state: row.work.state.kind, ...servedWork(row.work), archiveState: row.archive_state, parent: row.parent, creator: row.creator,
+					stateChangeAt: row.state_change_at, subtreeStateChangeAt: row.subtree_state_change_at,
+					descendantCount: row.descendant_count, descendantNeedsYouCount: row.descendant_needs_you_count,
+				});
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

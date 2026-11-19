@@ -155,6 +155,21 @@ Only top-level field names become camelCase (for example `callOrdinal`); nested 
 Text-bearing kinds add `text`, or `truncated: true` when the text exceeds 16 KiB; `contentBytes` gives its byte length.
 Use `session.readContent(entry)` or `readContentBytes(entry)` for the whole text.
 
+A parts value has `entry.parts`, the certified ordered list, and no `entry.text`. Any entry that carries content can carry parts. Text parts have `text` inline, in order, while the entry's inline total stays within 16 KiB; a part past that has `truncated: true`. Image parts include their MIME type as the Host reports it, dimensions and optional name. `contentBytes` is the manifest length, not the sum of the parts. Read any part's exact bytes with `session.readPart(entry, part.ordinal)`. `readContent` and `readContentBytes` reject with `ContentIsPartsError` for a parts value, as the Host refuses it on its text route.
+
+```ts
+for await (const entry of session.listActivity()) {
+    if ("parts" in entry && entry.parts) {
+        for (const part of entry.parts) {
+            if (part.type === "text") console.log(part.text ?? `(use readPart for ${part.bytes} bytes)`);
+            else await writeFile(`image-${part.ordinal}.${part.mime === "image/png" ? "png" : "jpg"}`, await session.readPart(entry, part.ordinal));
+        }
+    } else if ("text" in entry) console.log(entry.text);
+}
+```
+
+The example uses `writeFile` from `node:fs/promises`.
+
 Following polls with backoff from 250 ms to 2 s only while the Session is busy.
 An empty page in `idle`, `finished`, `failed`, or `stopped` state with nothing queued puts the iterator to sleep **without a timer**.
 It wakes after a successful `send`, `update`, `decide`, `interrupt`, `stop`, `archive`, or `unarchive` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.
@@ -181,11 +196,14 @@ The settings process test also runs on MySQL when `RUI_TEST_MYSQL_SOCKET`, `RUI_
 
 ## Session settings
 
-`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
+Creation requires a `model`, supplied directly or by a named preset.
+Root creation also carries the caller's `workspace`, supplied directly or by the preset.
+Within that Workspace, the Host fills omitted `effort`, `compactAt`, `tools`, `loadedTools` and `permissionMode` settings.
+An explicit `tools: []` allows no tools.
 `provider` may be left out when the Host serves one provider.
-`effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
-Updates may change the model within the Session's fixed provider; the Workspace also remains fixed.
-An omitted setting stays as it is.
+A creation naming `parent` inherits that Session's Workspace and provider and cannot supply either field.
+`effort: null` and `compactAt: null` request the Host defaults for the selected model.
+Updates preserve omitted settings and may change the model within the Session's fixed provider; the Workspace remains fixed.
 
 ```ts
 const session = await rui.sessions.create({
@@ -203,17 +221,25 @@ await session.update({ model: "gpt-5.5" });
 `await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.
 Counts, times and Turn/Operation IDs stay decimal strings; absent targets, parents and outcomes are `null`.
 A separate ending is not in the report, so status does not invent one.
-`interrupt()` uses this status snapshot to select its exact model target.
+`interruptTarget` is the Host-served target from that snapshot. Pass it explicitly with a key to interrupt that observed call in one request, and reuse the same key to recover its answer:
 
-Presets are complete agent specs passed at connect and kept only in Host memory.
-Creation copies the preset, with every supplied field (including `null`) overriding it.
+```ts
+const { interruptTarget } = await session.status();
+if (interruptTarget) await session.interrupt(interruptTarget, { key: "interrupt:1" });
+```
+
+`key` is also accepted by other writes using `WriteOptions`; it takes precedence if `idempotencyKey` is also supplied. `operation_resolved` and `target_mismatch` resolve without effect; other rejections throw. The convenience `interrupt({ key: "interrupt:1" })` uses the last target observed by this handle through `status()` or a feed page. It sends nothing if the handle has observed no target, or its last observation had a null target. Neither form reads first.
+
+Presets supply a model and may omit the other agent settings; they are passed at connect and kept only in Host memory.
+Creation copies the preset, with every supplied field (including `null`) overriding it, then the Host resolves omitted settings.
+A root creation must resolve a Workspace from the preset or its overrides.
 
 ```ts
 const rui = await Rui.connect({
 	store: { sqlite: { dir: "/var/lib/myapp/rui-store" } },
 	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: process.env.OPENAI_API_KEY! } },
 	presets: {
-		review: { model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: [], permissionMode: "ask" },
+		review: { workspace: "/work/project", model: "gpt-6.1-sol", instructions: "Review patches", tools: [], permissionMode: "ask" },
 	},
 });
 const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });
@@ -241,3 +267,12 @@ A later Message to an archived Session restores it transactionally before admitt
 `unarchive()` restores only organization and never resumes stopped work.
 Replaying an archive request with its original key does not archive again after a later restore.
 Both methods notify local activity followers without submitting a Message or starting work.
+
+## Stop one Action
+
+`session.stopAction(action, { idempotencyKey })` selects one Action in that Session for stop.
+It returns the existing Resolution position when the Action has already ended, or `null` when stop selection precedes completion.
+Use `session.readAction(action)` to read completion, saved output, and published values. To continue a value page, pass its `values.next` as the third argument: `session.readAction(action, "0", values.next)`. The second argument is the independent final-output byte offset.
+Retain the key and exact inputs before sending. Retry them unchanged to recover a lost reply.
+A stop selection suppresses that Action's final Session input and preserves its sole Resolution.
+Other Actions continue.

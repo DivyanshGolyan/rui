@@ -1,436 +1,445 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const Self = @This();
 const Hover = @import("Hover.zig");
+const RowInset = @import("RowInset.zig");
 
-pub const Line = []const vaxis.Segment;
-pub const Region = struct {
-    start: u16,
-    end: u16,
-    target: u32,
-    selected: bool = false,
-};
-pub const Row = struct {
-    lines: []const Line,
-    target: ?u32 = null,
-    alternate_target: ?u32 = null,
-    regions: []const Region = &.{},
-};
+pub fn List(comptime Target: type) type {
+    return struct {
+        const Self = @This();
+        pub const Line = []const vaxis.Segment;
+        pub const Region = struct {
+            start: u16,
+            end: u16,
+            target: Target,
+            selected: bool = false,
+            tint_start: ?u16 = null,
+            tint_end: ?u16 = null,
+        };
+        pub const Row = struct {
+            lines: []const Line,
+            target: ?Target = null,
+            alternate_target: ?Target = null,
+            regions: []const Region = &.{},
+        };
 
-pub const Rows = struct {
-    userdata: *const anyopaque,
-    count: u32,
-    rowFn: *const fn (*const anyopaque, usize, std.mem.Allocator) std.mem.Allocator.Error!Row,
-    countFromFn: ?*const fn (*const anyopaque, first: u32) u32 = null,
+        pub const Rows = struct {
+            userdata: *const anyopaque,
+            count: u32,
+            rowFn: *const fn (*const anyopaque, usize, std.mem.Allocator) std.mem.Allocator.Error!Row,
+            countFromFn: ?*const fn (*const anyopaque, first: u32) u32 = null,
 
-    pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
+            pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
 
-    pub fn of(rows: *const []const Row) Rows {
-        return .{ .userdata = @ptrCast(rows), .count = @intCast(rows.len), .rowFn = struct {
-            fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
-                const all: *const []const Row = @ptrCast(@alignCast(raw));
-                return all.*[index];
-            }
-        }.at, .countFromFn = struct {
-            fn count(raw: *const anyopaque, first: u32) u32 {
-                const all: *const []const Row = @ptrCast(@alignCast(raw));
-                var result: u32 = 0;
-                for (all.*[first..]) |row| if (row.target != null or row.regions.len != 0) {
-                    result += 1;
-                };
-                return result;
-            }
-        }.count };
-    }
-};
-
-pub const Press = struct {
-    userdata: *anyopaque,
-    pressed: *const fn (*anyopaque, *vxfw.EventContext, u32) anyerror!void,
-};
-pub const Presence = struct {
-    userdata: *anyopaque,
-    changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void,
-};
-pub const Span = struct { row: i17, height: u16, target: ?u32, alternate_target: ?u32 = null, regions: []const Region = &.{} };
-pub const Range = struct { first: u32 = 0, end: u32 = 0 };
-pub const Edge = enum { above, below };
-pub const Counts = struct { above: u32, below: u32 };
-pub const Edges = struct {
-    userdata: *const anyopaque,
-    lineFn: *const fn (*const anyopaque, Edge, Range, Counts, std.mem.Allocator) std.mem.Allocator.Error!?Line,
-};
-
-rows: Rows = .none,
-selected: ?u32 = null,
-anchor: ?struct { index: u32, row: u16 } = null,
-on_press: ?Press = null,
-on_presence: ?Presence = null,
-base_style: vaxis.Style = .{},
-selection_style: vaxis.Style = .{ .reverse = true },
-indicator_style: ?vaxis.Style = null,
-indicator_align: @FieldType(vxfw.RichText, "text_align") = .left,
-edges: ?Edges = null,
-hover_style: vaxis.Style = .{ .ul_style = .single },
-list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
-shown: Range = .{},
-shown_at: []const Span = &.{},
-last_size: ?vxfw.Size = null,
-hover: Hover = .{},
-
-pub fn widget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
-}
-
-fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    try self.hover.handleEvent(ctx, input);
-    if (self.on_presence) |presence| switch (input) {
-        .mouse_enter => try presence.changed(presence.userdata, ctx, true),
-        .mouse_leave => try presence.changed(presence.userdata, ctx, false),
-        else => {},
-    };
-    if (input != .mouse) return;
-    const mouse = input.mouse;
-    if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
-        const press = self.on_press orelse return;
-        const size = self.last_size orelse return;
-        if (mouse.col < 0 or mouse.col >= size.width) return;
-        for (self.shown_at) |span| {
-            if (mouse.row >= span.row and mouse.row < span.row + span.height) {
-                const alternate = mouse.button == .right or mouse.mods.alt;
-                const target = if (alternate) span.alternate_target orelse return else for (span.regions) |region| {
-                    if (mouse.col >= region.start and mouse.col < region.end) break region.target;
-                } else span.target orelse return;
-                ctx.consume_event = true;
-                return press.pressed(press.userdata, ctx, target);
-            }
-        }
-        return;
-    }
-    try self.list.handleEvent(ctx, input);
-}
-
-const Lazy = struct {
-    owner: *const Self,
-    index: u32,
-    row: ?Row = null,
-    base_style: vaxis.Style = .{},
-    hovered: ?struct { start: u16, end: u16 } = null,
-    selection_style: vaxis.Style = .{},
-    hover_style: ?vaxis.Style = null,
-
-    fn widget(self: *Lazy) vxfw.Widget {
-        return .{ .userdata = self, .drawFn = drawRow };
-    }
-
-    fn load(self: *Lazy, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
-        if (self.row == null) {
-            const row = try self.owner.rows.rowFn(self.owner.rows.userdata, self.index, arena);
-            std.debug.assert(row.lines.len > 0 and row.lines.len <= std.math.maxInt(u16));
-            const selected = self.owner.selected == self.index;
-            self.hover_style = if (selected) null else self.owner.hover_style;
-            self.selection_style = self.owner.selection_style;
-            self.base_style = self.owner.base_style;
-            if (selected) self.base_style = selection(self.base_style, self.owner.selection_style);
-            const lines = try arena.alloc(Line, row.lines.len);
-            for (row.lines, lines) |line, *copy| {
-                const segments = try arena.alloc(vaxis.Segment, line.len);
-                for (line, segments) |segment, *dest| {
-                    dest.* = .{ .text = try arena.dupe(u8, segment.text), .style = if (selected) selection(segment.style, self.owner.selection_style) else segment.style };
-                }
-                copy.* = segments;
-            }
-            self.row = .{ .lines = lines, .target = row.target, .alternate_target = row.alternate_target, .regions = try arena.dupe(Region, row.regions) };
-        }
-    }
-
-    fn drawRow(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *Lazy = @ptrCast(@alignCast(raw));
-        try self.load(ctx.arena);
-        const row = self.row.?;
-        const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
-        @memset(surface.buffer, .{ .style = self.base_style });
-        if (surface.size.width == 0) return surface;
-        for (row.lines, 0..) |line, y| {
-            var label: vxfw.RichText = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
-            const drawn = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = surface.size.width, .height = 1 }));
-            if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
-        }
-        if (self.hovered) |range| if (self.hover_style) |hover| for (0..surface.size.height) |y| {
-            for (range.start..range.end) |x| {
-                const focused = for (row.regions) |region| {
-                    if (region.selected and x >= region.start and x < region.end) break true;
-                } else false;
-                if (!focused) {
-                    const cell = &surface.buffer[y * surface.size.width + x];
-                    cell.style = hovering(cell.style, hover);
-                }
+            pub fn of(rows: *const []const Row) Rows {
+                return .{ .userdata = @ptrCast(rows), .count = @intCast(rows.len), .rowFn = struct {
+                    fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+                        const all: *const []const Row = @ptrCast(@alignCast(raw));
+                        return all.*[index];
+                    }
+                }.at, .countFromFn = struct {
+                    fn count(raw: *const anyopaque, first: u32) u32 {
+                        const all: *const []const Row = @ptrCast(@alignCast(raw));
+                        var result: u32 = 0;
+                        for (all.*[first..]) |row| if (row.target != null or row.regions.len != 0) {
+                            result += 1;
+                        };
+                        return result;
+                    }
+                }.count };
             }
         };
-        for (row.regions) |region| if (region.selected and region.start < surface.size.width) {
-            for (0..surface.size.height) |y| for (region.start..@min(region.end, surface.size.width)) |x| {
-                const cell = &surface.buffer[y * surface.size.width + x];
-                cell.style = selection(cell.style, self.selection_style);
+
+        pub const Press = struct {
+            userdata: *anyopaque,
+            pressed: *const fn (*anyopaque, *vxfw.EventContext, Target) anyerror!void,
+        };
+        pub const Span = struct { row: i17, height: u16, target: ?Target, alternate_target: ?Target = null, regions: []const Region = &.{} };
+        pub const Range = struct { first: u32 = 0, end: u32 = 0 };
+        pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
+        pub const Edge = enum { above, below };
+        pub const Counts = struct { above: u32, below: u32 };
+        pub const Edges = struct { userdata: *const anyopaque, lineFn: *const fn (*const anyopaque, Edge, Range, Counts, std.mem.Allocator) std.mem.Allocator.Error!?Line };
+
+        rows: Rows = .none,
+        inset_rows: bool = false,
+        selected: ?u32 = null,
+        anchor: ?struct { index: u32, row: u16 } = null,
+        on_presence: ?Presence = null,
+        edges: ?Edges = null,
+        on_press: ?Press = null,
+        base_style: vaxis.Style = .{},
+        selection_style: vaxis.Style = .{ .reverse = true },
+        indicator_style: ?vaxis.Style = null,
+        indicator_align: @FieldType(vxfw.RichText, "text_align") = .left,
+        aboveFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
+        hover_style: vaxis.Style = .{ .ul_style = .single },
+        belowFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
+        list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
+        shown: Range = .{},
+        shown_at: []const Span = &.{},
+        last_size: ?vxfw.Size = null,
+        hover: Hover = .{},
+
+        pub fn widget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+        }
+
+        fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            try self.hover.handleEvent(ctx, input);
+            if (self.on_presence) |presence| switch (input) {
+                .mouse_enter => try presence.changed(presence.userdata, ctx, true),
+                .mouse_leave => try presence.changed(presence.userdata, ctx, false),
+                else => {},
             };
+            if (input != .mouse) return;
+            const mouse = input.mouse;
+            if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
+                const press = self.on_press orelse return;
+                const size = self.last_size orelse return;
+                if (mouse.col < 0 or mouse.col >= size.width) return;
+                for (self.shown_at) |span| {
+                    if (mouse.row >= span.row and mouse.row < span.row + span.height) {
+                        const alternate = mouse.button == .right or mouse.mods.alt;
+                        const target = if (alternate) span.alternate_target orelse return else for (span.regions) |region| {
+                            if (mouse.col >= region.start and mouse.col < region.end) break region.target;
+                        } else span.target orelse return;
+                        ctx.consume_event = true;
+                        return press.pressed(press.userdata, ctx, target);
+                    }
+                }
+                return;
+            }
+            try self.list.handleEvent(ctx, input);
+        }
+
+        const Lazy = struct {
+            owner: *const Self,
+            index: u32,
+            row: ?Row = null,
+            base_style: vaxis.Style = .{},
+            hovered: ?struct { start: u16, end: u16 } = null,
+            selection_style: vaxis.Style = .{},
+            hover_style: ?vaxis.Style = null,
+
+            fn widget(self: *Lazy) vxfw.Widget {
+                return .{ .userdata = self, .drawFn = drawRow };
+            }
+
+            fn load(self: *Lazy, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
+                if (self.row == null) {
+                    const row = try self.owner.rows.rowFn(self.owner.rows.userdata, self.index, arena);
+                    std.debug.assert(row.lines.len > 0 and row.lines.len <= std.math.maxInt(u16));
+                    const selected = self.owner.selected == self.index;
+                    self.hover_style = if (selected) null else self.owner.hover_style;
+                    self.selection_style = self.owner.selection_style;
+                    self.base_style = self.owner.base_style;
+                    if (selected) self.base_style = selection(self.base_style, self.owner.selection_style);
+                    const lines = try arena.alloc(Line, row.lines.len);
+                    for (row.lines, lines) |line, *copy| {
+                        const segments = try arena.alloc(vaxis.Segment, line.len);
+                        for (line, segments) |segment, *dest| {
+                            dest.* = .{ .text = try arena.dupe(u8, segment.text), .style = if (selected) selection(segment.style, self.owner.selection_style) else segment.style };
+                        }
+                        copy.* = segments;
+                    }
+                    self.row = .{ .lines = lines, .target = row.target, .alternate_target = row.alternate_target, .regions = try arena.dupe(Region, row.regions) };
+                }
+            }
+
+            fn drawRow(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+                const self: *Lazy = @ptrCast(@alignCast(raw));
+                try self.load(ctx.arena);
+                const row = self.row.?;
+                const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
+                @memset(surface.buffer, .{ .style = self.base_style });
+                if (surface.size.width == 0) return surface;
+                for (row.lines, 0..) |line, y| {
+                    if (self.owner.inset_rows) {
+                        try RowInset.draw(ctx, surface, @intCast(y), line, self.base_style);
+                    } else {
+                        var label: vxfw.RichText = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
+                        const drawn = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = surface.size.width, .height = 1 }));
+                        if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
+                    }
+                }
+                if (self.hovered) |range| if (self.hover_style) |hover| for (0..surface.size.height) |y| {
+                    for (range.start..range.end) |x| {
+                        const focused = for (row.regions) |region| {
+                            if (region.selected and x >= (region.tint_start orelse region.start) and x < (region.tint_end orelse region.end)) break true;
+                        } else false;
+                        if (!focused) {
+                            const cell = &surface.buffer[y * surface.size.width + x];
+                            cell.style = hovering(cell.style, hover);
+                        }
+                    }
+                };
+                for (row.regions) |region| if (region.selected and (region.tint_start orelse region.start) < surface.size.width) {
+                    for (0..surface.size.height) |y| for ((region.tint_start orelse region.start)..@min(region.tint_end orelse region.end, surface.size.width)) |x| {
+                        const cell = &surface.buffer[y * surface.size.width + x];
+                        cell.style = selection(cell.style, self.selection_style);
+                    };
+                };
+                return surface;
+            }
         };
-        return surface;
-    }
-};
 
-fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
-    var result = style;
-    result.bg = selected.bg;
-    result.reverse = selected.reverse;
-    result.dim = false;
-    return result;
-}
-
-fn hovering(style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
-    var result = Hover.look(style, hover);
-    result.dim = false;
-    return result;
-}
-
-const Building = struct {
-    owner: *const Self,
-    arena: std.mem.Allocator,
-    built: std.ArrayList(*Lazy) = .empty,
-
-    fn at(self: *Building, index: u32) std.mem.Allocator.Error!*Lazy {
-        for (self.built.items) |row| if (row.index == index) return row;
-        const row = try self.arena.create(Lazy);
-        row.* = .{ .owner = self.owner, .index = index };
-        try row.load(self.arena);
-        try self.built.append(self.arena, row);
-        return row;
-    }
-
-    fn height(self: *Building, index: u32) std.mem.Allocator.Error!u16 {
-        return @intCast((try self.at(index)).row.?.lines.len);
-    }
-
-    fn fit(self: *Building, first: u32, room: u16) std.mem.Allocator.Error!Window {
-        var window: Window = .{ .first = first, .end = first };
-        while (window.end < self.owner.rows.count and window.height < room) {
-            const rows = try self.height(window.end);
-            if (rows > room - window.height) break;
-            window.height += rows;
-            window.end += 1;
+        fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
+            var result = style;
+            result.bg = selected.bg;
+            result.reverse = selected.reverse;
+            result.dim = false;
+            return result;
         }
-        return window;
-    }
-};
 
-const Window = struct {
-    first: u32,
-    end: u32,
-    height: u16 = 0,
-    above: u16 = 0,
-    below: u16 = 0,
-};
+        fn hovering(style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
+            var result = Hover.look(style, hover);
+            result.dim = false;
+            return result;
+        }
 
-fn edgeLine(self: *const Self, side: Edge, range: Range, arena: std.mem.Allocator) std.mem.Allocator.Error!?Line {
-    const edges = self.edges orelse return null;
-    const count_from = self.rows.countFromFn orelse return edges.lineFn(edges.userdata, side, range, .{ .above = range.first, .below = self.rows.count -| range.end }, arena);
-    const counts: Counts = .{
-        .above = count_from(self.rows.userdata, 0) -| count_from(self.rows.userdata, range.first),
-        .below = count_from(self.rows.userdata, range.end),
-    };
-    return edges.lineFn(edges.userdata, side, range, counts, arena);
-}
+        const Building = struct {
+            owner: *const Self,
+            arena: std.mem.Allocator,
+            built: std.ArrayList(*Lazy) = .empty,
 
-fn measure(self: *const Self, building: *Building, first: u32, height: u16, keep_selected: bool) std.mem.Allocator.Error!Window {
-    const minimum = try building.height(if (keep_selected) self.selected.? else first);
-    const marker_room = height -| minimum;
-    var above: u16 = 0;
-    var below: u16 = 0;
-    var window = try building.fit(first, height);
-    while (true) {
-        var changed = false;
-        const range: Range = .{ .first = window.first, .end = window.end };
-        if (above == 0 and marker_room > above + below and try self.edgeLine(.above, range, building.arena) != null) {
-            above = 1;
-            changed = true;
-        }
-        if (below == 0 and marker_room > above + below and try self.edgeLine(.below, range, building.arena) != null) {
-            below = 1;
-            changed = true;
-        }
-        if (!changed) break;
-        window = try building.fit(first, height - above - below);
-    }
-    window.above = above;
-    window.below = below;
-    return window;
-}
-
-fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.selected) |selected| std.debug.assert(selected < self.rows.count);
-    const size = ctx.max.size();
-    const previously_shown = self.shown;
-    self.shown = .{};
-    self.shown_at = &.{};
-    self.hover.targets = &.{};
-    if (size.width == 0 or size.height == 0 or self.rows.count == 0) {
-        self.last_size = null;
-        self.list.item_count = self.rows.count;
-        self.list.cursor = self.selected orelse 0;
-        if (self.rows.count == 0) self.list.scroll = .{};
-        return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = &.{} };
-    }
-    const cursor = self.selected orelse 0;
-    const changed = self.list.item_count != self.rows.count or self.list.cursor != cursor or self.last_size == null or !std.meta.eql(self.last_size.?, size);
-    self.last_size = size;
-    self.list.item_count = self.rows.count;
-    self.list.cursor = cursor;
-    var building: Building = .{ .owner = self, .arena = ctx.arena };
-    var first = @min(self.list.scroll.top, self.rows.count - 1);
-    var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
-    const keep_selected = if (self.selected) |selected| self.anchor == null and self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
-    if (keep_selected and (cursor < first or cursor - first > size.height)) first = cursor;
-    if (offset < 0) {
-        while (offset < 0 and first > 0) {
-            first -= 1;
-            offset += try building.height(first);
-        }
-    } else {
-        while (offset > 0 and first + 1 < self.rows.count) {
-            offset -= try building.height(first);
-            first += 1;
-        }
-    }
-    if (keep_selected and self.selected.? < first) first = self.selected.?;
-    var window = try self.measure(&building, first, size.height, keep_selected);
-    if (keep_selected) {
-        const selected = self.selected.?;
-        while (selected >= window.end and window.first < selected) {
-            window = try self.measure(&building, window.first + 1, size.height, true);
-        }
-    }
-    if (self.anchor) |anchor| {
-        // Keep the captured physical row, including marker rows and mixed heights.
-        // A boundary can make the exact offset impossible; choose the closest one.
-        var best = window;
-        var best_distance: u32 = std.math.maxInt(u32);
-        var candidate = window.first;
-        var direction: i8 = 0;
-        while (true) {
-            const measured = try self.measure(&building, candidate, size.height, false);
-            var position: u32 = measured.above;
-            if (candidate <= anchor.index) {
-                for (candidate..anchor.index) |index| position += try building.height(@intCast(index));
-            } else {
-                position = 0;
+            fn at(self: *Building, index: u32) std.mem.Allocator.Error!*Lazy {
+                for (self.built.items) |row| if (row.index == index) return row;
+                const row = try self.arena.create(Lazy);
+                row.* = .{ .owner = self.owner, .index = index };
+                try row.load(self.arena);
+                try self.built.append(self.arena, row);
+                return row;
             }
-            const distance: u32 = if (candidate > anchor.index) std.math.maxInt(u32) else if (position > anchor.row) position - anchor.row else anchor.row - position;
-            if (distance < best_distance) {
-                best = measured;
-                best_distance = distance;
-            }
-            if (distance == 0) break;
-            const next_direction: i8 = if (candidate > anchor.index or position < anchor.row) -1 else 1;
-            if (direction != 0 and direction != next_direction) break;
-            direction = next_direction;
-            if (direction < 0) {
-                if (candidate == 0) break;
-                candidate -= 1;
-            } else {
-                if (candidate >= anchor.index) break;
-                candidate += 1;
-            }
-        }
-        window = best;
-    } else while (window.end == self.rows.count and window.first > 0) {
-        const previous = try self.measure(&building, window.first - 1, size.height, keep_selected);
-        if (previous.end != self.rows.count) break;
-        window = previous;
-    }
-    self.list.scroll = .{ .top = window.first, .has_more = window.end < self.rows.count };
-    self.shown = .{ .first = window.first, .end = window.end };
-    const above_rows = window.above;
-    const below_rows = window.below;
-    const content = try ctx.arena.alloc(vxfw.SubSurface, window.end - window.first);
-    const spans = try ctx.arena.alloc(Span, content.len);
-    var hover_targets: std.ArrayList(Hover.Rect) = .empty;
-    var y: u16 = 0;
-    for (content, spans, window.first..) |*child, *span, index| {
-        const row = try building.at(@intCast(index));
-        const target = row.row.?.target;
-        const regions = row.row.?.regions;
-        const rect: Hover.Rect = .{ .row = y + above_rows, .width = size.width, .height = @intCast(row.row.?.lines.len) };
-        if ((target != null or regions.len != 0) and self.on_press != null) {
-            if (target != null) {
-                try hover_targets.append(ctx.arena, rect);
-                row.hovered = if (self.hover.contains(rect)) .{ .start = 0, .end = size.width } else null;
-            } else for (regions) |region| {
-                if (region.start >= size.width) continue;
-                const region_rect: Hover.Rect = .{ .row = rect.row, .col = region.start, .width = @min(region.end, size.width) - region.start, .height = rect.height };
-                try hover_targets.append(ctx.arena, region_rect);
-                if (self.hover.contains(region_rect)) row.hovered = .{ .start = region.start, .end = @min(region.end, size.width) };
-            }
-        }
-        const drawn = try row.widget().draw(ctx);
-        child.* = .{ .origin = .{ .row = y, .col = 0 }, .surface = drawn };
-        span.* = .{ .row = y + above_rows, .height = drawn.size.height, .target = target, .alternate_target = row.row.?.alternate_target, .regions = regions };
-        y += drawn.size.height;
-    }
-    var surface: vxfw.Surface = .{ .widget = self.list.widget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };
-    self.shown_at = spans;
-    self.hover.targets = hover_targets.items;
-    if (above_rows + below_rows > 0) {
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + above_rows + below_rows);
-        children[0] = .{ .origin = .{ .row = above_rows, .col = 0 }, .surface = surface };
-        if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.above, self.shown, ctx.arena)) orelse &.{}) };
-        if (below_rows > 0) children[children.len - 1] = .{ .origin = .{ .row = above_rows + window.height, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.below, self.shown, ctx.arena)) orelse &.{}) };
-        surface = .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
-    }
-    surface.size = size;
-    surface.widget = self.widget();
-    return surface;
-}
 
-fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: Line) std.mem.Allocator.Error!vxfw.Surface {
-    var line = words;
-    if (self.indicator_style) |style| {
-        const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
-        for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = if (std.meta.eql(segment.style, vaxis.Style{})) style else segment.style };
-        line = styled;
-    }
-    const label = try ctx.arena.create(vxfw.RichText);
-    label.* = .{ .text = line, .text_align = self.indicator_align, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
-    return label.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = 1 }));
-}
+            fn height(self: *Building, index: u32) std.mem.Allocator.Error!u16 {
+                return @intCast((try self.at(index)).row.?.lines.len);
+            }
 
-const Testing = struct {
-    fn counted(comptime above_fn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!Line, comptime below_fn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!Line) Edges {
-        return .{ .userdata = undefined, .lineFn = struct {
-            fn line(_: *const anyopaque, side: Edge, _: Range, counts: Counts, arena: std.mem.Allocator) std.mem.Allocator.Error!?Line {
-                const words = switch (side) {
-                    .above => above_fn,
-                    .below => below_fn,
-                } orelse return null;
+            fn fit(self: *Building, first: u32, room: u16) std.mem.Allocator.Error!Window {
+                var window: Window = .{ .first = first, .end = first };
+                while (window.end < self.owner.rows.count and window.height < room) {
+                    const rows = try self.height(window.end);
+                    if (rows > room - window.height) break;
+                    window.height += rows;
+                    window.end += 1;
+                }
+                return window;
+            }
+        };
+
+        const Window = struct {
+            first: u32,
+            end: u32,
+            height: u16 = 0,
+            above: u16 = 0,
+            below: u16 = 0,
+        };
+
+        fn edgeLine(self: *const Self, side: Edge, range: Range, arena: std.mem.Allocator) std.mem.Allocator.Error!?Line {
+            const edges = self.edges orelse {
+                const count_from = self.rows.countFromFn orelse return null;
                 const count = switch (side) {
-                    .above => counts.above,
-                    .below => counts.below,
+                    .above => count_from(self.rows.userdata, 0) -| count_from(self.rows.userdata, range.first),
+                    .below => count_from(self.rows.userdata, range.end),
                 };
                 if (count == 0) return null;
+                const words = switch (side) {
+                    .above => self.aboveFn,
+                    .below => self.belowFn,
+                } orelse return null;
                 return try words(count, arena);
-            }
-        }.line };
-    }
+            };
+            const count_from = self.rows.countFromFn orelse return edges.lineFn(edges.userdata, side, range, .{ .above = range.first, .below = self.rows.count -| range.end }, arena);
+            const counts: Counts = .{
+                .above = count_from(self.rows.userdata, 0) -| count_from(self.rows.userdata, range.first),
+                .below = count_from(self.rows.userdata, range.end),
+            };
+            return edges.lineFn(edges.userdata, side, range, counts, arena);
+        }
 
+        fn measure(self: *const Self, building: *Building, first: u32, height: u16, keep_selected: bool) std.mem.Allocator.Error!Window {
+            const minimum = try building.height(if (keep_selected) self.selected.? else first);
+            const marker_room = height -| minimum;
+            var above: u16 = 0;
+            var below: u16 = 0;
+            var window = try building.fit(first, height);
+            while (true) {
+                var changed = false;
+                const range: Range = .{ .first = window.first, .end = window.end };
+                if (above == 0 and marker_room > above + below and try self.edgeLine(.above, range, building.arena) != null) {
+                    above = 1;
+                    changed = true;
+                }
+                if (below == 0 and marker_room > above + below and try self.edgeLine(.below, range, building.arena) != null) {
+                    below = 1;
+                    changed = true;
+                }
+                if (!changed) break;
+                window = try building.fit(first, height - above - below);
+            }
+            window.above = above;
+            window.below = below;
+            return window;
+        }
+
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            if (self.selected) |selected| std.debug.assert(selected < self.rows.count);
+            const size = ctx.max.size();
+            const previously_shown = self.shown;
+            self.shown = .{};
+            self.shown_at = &.{};
+            self.hover.targets = &.{};
+            if (size.width == 0 or size.height == 0 or self.rows.count == 0) {
+                self.last_size = null;
+                self.list.item_count = self.rows.count;
+                self.list.cursor = self.selected orelse 0;
+                if (self.rows.count == 0) self.list.scroll = .{};
+                return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = &.{} };
+            }
+            const cursor = self.selected orelse 0;
+            const changed = self.list.item_count != self.rows.count or self.list.cursor != cursor or self.last_size == null or !std.meta.eql(self.last_size.?, size);
+            self.last_size = size;
+            self.list.item_count = self.rows.count;
+            self.list.cursor = cursor;
+            var building: Building = .{ .owner = self, .arena = ctx.arena };
+            var first = @min(self.list.scroll.top, self.rows.count - 1);
+            var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
+            const keep_selected = if (self.selected) |selected| self.anchor == null and self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
+            if (keep_selected and (cursor < first or cursor - first > size.height)) first = cursor;
+            if (offset < 0) {
+                while (offset < 0 and first > 0) {
+                    first -= 1;
+                    offset += try building.height(first);
+                }
+            } else {
+                while (offset > 0 and first + 1 < self.rows.count) {
+                    offset -= try building.height(first);
+                    first += 1;
+                }
+            }
+            if (keep_selected and self.selected.? < first) first = self.selected.?;
+            var window = try self.measure(&building, first, size.height, keep_selected);
+            if (keep_selected) {
+                const selected = self.selected.?;
+                while (selected >= window.end and window.first < selected) {
+                    window = try self.measure(&building, window.first + 1, size.height, true);
+                }
+            }
+            if (self.anchor) |anchor| {
+                // Keep the captured physical row, including marker rows and mixed heights.
+                // A boundary can make the exact offset impossible; choose the closest one.
+                var best = window;
+                var best_distance: u32 = std.math.maxInt(u32);
+                var candidate = window.first;
+                var direction: i8 = 0;
+                while (true) {
+                    const measured = try self.measure(&building, candidate, size.height, false);
+                    var position: u32 = measured.above;
+                    if (candidate <= anchor.index) {
+                        for (candidate..anchor.index) |index| position += try building.height(@intCast(index));
+                    } else {
+                        position = 0;
+                    }
+                    const distance: u32 = if (candidate > anchor.index) std.math.maxInt(u32) else if (position > anchor.row) position - anchor.row else anchor.row - position;
+                    if (distance < best_distance) {
+                        best = measured;
+                        best_distance = distance;
+                    }
+                    if (distance == 0) break;
+                    const next_direction: i8 = if (candidate > anchor.index or position < anchor.row) -1 else 1;
+                    if (direction != 0 and direction != next_direction) break;
+                    direction = next_direction;
+                    if (direction < 0) {
+                        if (candidate == 0) break;
+                        candidate -= 1;
+                    } else {
+                        if (candidate >= anchor.index) break;
+                        candidate += 1;
+                    }
+                }
+                window = best;
+            } else while (window.end == self.rows.count and window.first > 0) {
+                const previous = try self.measure(&building, window.first - 1, size.height, keep_selected);
+                if (previous.end != self.rows.count) break;
+                window = previous;
+            }
+            self.list.scroll = .{ .top = window.first, .has_more = window.end < self.rows.count };
+            self.shown = .{ .first = window.first, .end = window.end };
+            const above_rows = window.above;
+            const below_rows = window.below;
+            const content = try ctx.arena.alloc(vxfw.SubSurface, window.end - window.first);
+            const spans = try ctx.arena.alloc(Span, content.len);
+            var hover_targets: std.ArrayList(Hover.Rect) = .empty;
+            var y: u16 = 0;
+            for (content, spans, window.first..) |*child, *span, index| {
+                const row = try building.at(@intCast(index));
+                const target = row.row.?.target;
+                const regions = row.row.?.regions;
+                const rect: Hover.Rect = .{ .row = y + above_rows, .width = size.width, .height = @intCast(row.row.?.lines.len) };
+                if ((target != null or regions.len != 0) and self.on_press != null) {
+                    if (target != null) {
+                        try hover_targets.append(ctx.arena, rect);
+                        row.hovered = if (self.hover.contains(rect)) .{ .start = 0, .end = size.width } else null;
+                    } else for (regions) |region| {
+                        if (region.start >= size.width) continue;
+                        const region_rect: Hover.Rect = .{ .row = rect.row, .col = region.start, .width = @min(region.end, size.width) - region.start, .height = rect.height };
+                        try hover_targets.append(ctx.arena, region_rect);
+                        if (self.hover.contains(region_rect)) row.hovered = .{ .start = @min(region.tint_start orelse region.start, size.width), .end = @min(region.tint_end orelse region.end, size.width) };
+                    }
+                }
+                const drawn = try row.widget().draw(ctx);
+                child.* = .{ .origin = .{ .row = y, .col = 0 }, .surface = drawn };
+                span.* = .{ .row = y + above_rows, .height = drawn.size.height, .target = target, .alternate_target = row.row.?.alternate_target, .regions = regions };
+                y += drawn.size.height;
+            }
+            var surface: vxfw.Surface = .{ .widget = self.list.widget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };
+            self.shown_at = spans;
+            self.hover.targets = hover_targets.items;
+            if (above_rows + below_rows > 0) {
+                const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + above_rows + below_rows);
+                children[0] = .{ .origin = .{ .row = above_rows, .col = 0 }, .surface = surface };
+                if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.above, self.shown, ctx.arena)) orelse &.{}) };
+                if (below_rows > 0) children[children.len - 1] = .{ .origin = .{ .row = above_rows + window.height, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.below, self.shown, ctx.arena)) orelse &.{}) };
+                surface = .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+            }
+            surface.size = size;
+            surface.widget = self.widget();
+            return surface;
+        }
+
+        fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: Line) std.mem.Allocator.Error!vxfw.Surface {
+            var line = words;
+            if (self.indicator_style) |style| {
+                const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
+                for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = if (std.meta.eql(segment.style, vaxis.Style{})) style else segment.style };
+                line = styled;
+            }
+            const label = try ctx.arena.create(vxfw.RichText);
+            label.* = .{ .text = line, .text_align = self.indicator_align, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
+            return label.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = 1 }));
+        }
+    };
+}
+
+const TestList = List(u32);
+const TestLine = TestList.Line;
+const TestRow = TestList.Row;
+const testHovering = TestList.hovering;
+const TestRegion = TestList.Region;
+
+const Testing = struct {
     fn context(arena: std.mem.Allocator, height: u16) vxfw.DrawContext {
         return .{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = 20, .height = height }, .cell_size = .{} };
     }
 
-    fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+    fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!TestLine {
         return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "below {d}", .{count}) }});
     }
 
-    const mixed = [_]Row{
+    const mixed = [_]TestRow{
         .{ .lines = &.{&.{.{ .text = "Heading" }}} },
         .{ .lines = &.{ &.{.{ .text = "One" }}, &.{.{ .text = "detail" }} }, .target = 11 },
         .{ .lines = &.{&.{.{ .text = "Gap" }}} },
@@ -482,10 +491,10 @@ const Testing = struct {
 test "List builds only visible rows once even with a below line and a distant selection" {
     const Counted = struct {
         built: usize = 0,
-        fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row {
+        fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!TestRow {
             const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
             self.built += 1;
-            const lines = try arena.alloc(Line, 1);
+            const lines = try arena.alloc(TestLine, 1);
             lines[0] = try arena.dupe(vaxis.Segment, &.{.{ .text = if (index % 2 == 0) "even" else "odd" }});
             return .{ .lines = lines, .target = @intCast(index) };
         }
@@ -494,7 +503,7 @@ test "List builds only visible rows once even with a below line and a distant se
         }
     };
     var counted: Counted = .{};
-    var list: Self = .{ .rows = .{ .userdata = &counted, .count = 10_000, .rowFn = Counted.row, .countFromFn = Counted.count }, .selected = 9_000 };
+    var list: TestList = .{ .rows = .{ .userdata = &counted, .count = 10_000, .rowFn = Counted.row, .countFromFn = Counted.count }, .selected = 9_000 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 5);
@@ -503,15 +512,15 @@ test "List builds only visible rows once even with a below line and a distant se
     try std.testing.expectEqual(@as(u32, 9_005), list.shown.end);
     try std.testing.expectEqualStrings("e", surface.children[surface.children.len - 1].surface.readCell(0, 0).char.grapheme);
     counted.built = 0;
-    list.edges = Testing.counted(null, Testing.below);
+    list.belowFn = Testing.below;
     const below = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 5), counted.built);
     try Testing.expectBelow(below, 996);
 }
 
 test "List keeps both selected lines visible at small heights and leaves every key to the caller" {
-    const rows: []const Row = &Testing.mixed;
-    var list: Self = .{ .rows = .of(&rows), .selected = 3, .edges = Testing.counted(null, Testing.below) };
+    const rows: []const TestRow = &Testing.mixed;
+    var list: TestList = .{ .rows = .of(&rows), .selected = 3, .belowFn = Testing.below };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 5);
@@ -534,8 +543,8 @@ test "List keeps both selected lines visible at small heights and leaves every k
 }
 
 test "List below counts fully hidden selectable rows and disappears at the end" {
-    const rows: []const Row = &Testing.mixed;
-    var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(null, Testing.below) };
+    const rows: []const TestRow = &Testing.mixed;
+    var list: TestList = .{ .rows = .of(&rows), .belowFn = Testing.below };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 5);
@@ -546,7 +555,7 @@ test "List below counts fully hidden selectable rows and disappears at the end" 
     try Testing.expectSelected(end, "F", 1);
     try std.testing.expectEqual(@as(u32, 5), list.shown.end);
     try std.testing.expectEqualStrings("F", end.children[end.children.len - 1].surface.readCell(0, 0).char.grapheme);
-    const heading_tail: []const Row = &.{ Testing.mixed[4], Testing.mixed[0], Testing.mixed[0] };
+    const heading_tail: []const TestRow = &.{ Testing.mixed[4], Testing.mixed[0], Testing.mixed[0] };
     list.rows = .of(&heading_tail);
     list.selected = 0;
     const tail = try list.widget().draw(ctx.withConstraints(.{}, .{ .width = 20, .height = 1 }));
@@ -556,9 +565,9 @@ test "List below counts fully hidden selectable rows and disappears at the end" 
 
 test "List presses use drawn targets on either line but never headings or the below line" {
     var rows_data = Testing.mixed;
-    const rows: []const Row = &rows_data;
+    const rows: []const TestRow = &rows_data;
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(null, Testing.below), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var list: TestList = .{ .rows = .of(&rows), .belowFn = Testing.below, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try list.widget().draw(Testing.context(arena.allocator(), 5));
@@ -582,8 +591,8 @@ test "List presses use drawn targets on either line but never headings or the be
 }
 
 test "List zero and tiny sizes retain selection and clear stale press spans" {
-    const rows: []const Row = &Testing.mixed;
-    var list: Self = .{ .rows = .of(&rows), .selected = 3, .edges = Testing.counted(null, Testing.below) };
+    const rows: []const TestRow = &Testing.mixed;
+    var list: TestList = .{ .rows = .of(&rows), .selected = 3, .belowFn = Testing.below };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 5);
@@ -609,10 +618,10 @@ test "List zero and tiny sizes retain selection and clear stale press spans" {
 test "List retains frame text and styles when source rows change before child redraw" {
     var text = "Before".*;
     var segments = [_]vaxis.Segment{.{ .text = &text, .style = .{ .fg = .{ .index = 1 }, .bold = true } }};
-    var lines = [_]Line{&segments};
-    var rows_data = [_]Row{.{ .lines = &lines, .target = 9 }};
-    const rows: []const Row = &rows_data;
-    var list: Self = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
+    var lines = [_]TestLine{&segments};
+    var rows_data = [_]TestRow{.{ .lines = &lines, .target = 9 }};
+    const rows: []const TestRow = &rows_data;
+    var list: TestList = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 2);
@@ -630,9 +639,9 @@ test "List retains frame text and styles when source rows change before child re
 }
 
 test "List wheel scrolls without changing selection and presses match the visible two-line row" {
-    const rows: []const Row = &Testing.mixed;
+    const rows: []const TestRow = &Testing.mixed;
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(null, Testing.below), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var list: TestList = .{ .rows = .of(&rows), .belowFn = Testing.below, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 4);
@@ -662,12 +671,12 @@ test "List wheel scrolls without changing selection and presses match the visibl
 }
 
 test "List preserves each segment foreground while selecting every line and blank cell" {
-    const rows: []const Row = &.{.{ .lines = &.{
+    const rows: []const TestRow = &.{.{ .lines = &.{
         &.{ .{ .text = "!", .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .text = " name", .style = .{ .fg = .{ .index = 3 }, .dim = true } } },
         &.{.{ .text = "detail", .style = .{ .fg = .{ .index = 4 }, .dim = true } }},
         &.{},
     }, .target = 1 }};
-    var list: Self = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
+    var list: TestList = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 3);
@@ -683,8 +692,8 @@ test "List preserves each segment foreground while selecting every line and blan
         try std.testing.expectEqual(vaxis.Color{ .index = 2 }, cell.style.bg);
         try std.testing.expect(!cell.style.dim);
     }
-    try std.testing.expect(!hovering(.{ .dim = true }, .{}).dim);
-    try std.testing.expect(hovering(.{ .dim = true }, .{}).ul_style == .off);
+    try std.testing.expect(!testHovering(.{ .dim = true }, .{}).dim);
+    try std.testing.expect(testHovering(.{ .dim = true }, .{}).ul_style == .off);
     list.selection_style = .{ .reverse = true };
     const plain = try list.widget().draw(ctx);
     for (plain.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.reverse);
@@ -692,11 +701,11 @@ test "List preserves each segment foreground while selecting every line and blan
 
 test "List updates its row count through exhausted resizes without building rows" {
     const Source = struct {
-        fn row(_: *const anyopaque, _: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+        fn row(_: *const anyopaque, _: usize, _: std.mem.Allocator) std.mem.Allocator.Error!TestRow {
             return error.OutOfMemory;
         }
     };
-    var list: Self = .{};
+    var list: TestList = .{};
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 0);
@@ -712,8 +721,8 @@ test "List updates its row count through exhausted resizes without building rows
 
 test "List both markers count rows and preserve selection at viewport edges" {
     const Source = struct {
-        fn row(_: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row {
-            const lines = try arena.alloc(Line, 1);
+        fn row(_: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!TestRow {
+            const lines = try arena.alloc(TestLine, 1);
             lines[0] = try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "{c}", .{@as(u8, @intCast(index)) + 'A'}) }});
             return .{ .lines = lines, .target = if (index == 0) null else @intCast(index) };
         }
@@ -721,10 +730,10 @@ test "List both markers count rows and preserve selection at viewport edges" {
             const total: *const u32 = @ptrCast(@alignCast(raw));
             return total.* -| @max(1, first);
         }
-        fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+        fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!TestLine {
             return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
         }
-        fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+        fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!TestLine {
             return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) }});
         }
         fn marker(surface: vxfw.Surface, y: i17, text: []const u8) !void {
@@ -757,11 +766,12 @@ test "List both markers count rows and preserve selection at viewport edges" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var pressed: Testing.Pressed = .{};
-        var list: Self = .{
+        var list: TestList = .{
             .rows = .{ .userdata = &case.count, .count = case.count, .rowFn = Source.row, .countFromFn = Source.count },
             .selected = case.selected,
             .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed },
-            .edges = Testing.counted(Source.above, Source.below),
+            .aboveFn = Source.above,
+            .belowFn = Source.below,
             .indicator_align = .center,
             .indicator_style = .{ .fg = .{ .index = 8 } },
         };
@@ -797,10 +807,10 @@ test "List both markers count rows and preserve selection at viewport edges" {
 }
 
 test "List both markers yield to two-line selections through navigation and resizes" {
-    const rows: []const Row = &Testing.mixed;
+    const rows: []const TestRow = &Testing.mixed;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(Testing.below, Testing.below) };
+    var list: TestList = .{ .rows = .of(&rows), .aboveFn = Testing.below, .belowFn = Testing.below };
     for (2..11) |height| {
         const ctx = Testing.context(arena.allocator(), @intCast(height));
         for ([_]u32{ 1, 3, 4, 3, 1 }) |selected| {
@@ -820,21 +830,21 @@ test "List both markers yield to two-line selections through navigation and resi
 
 test "List every two-line scroll offset shows whole rows and accounts for every Session" {
     const Words = struct {
-        fn above(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+        fn above(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!TestLine {
             return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count}) }});
         }
-        fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+        fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!TestLine {
             return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count}) }});
         }
     };
-    var data: [12]Row = @splat(.{ .lines = &.{ &.{.{ .text = "first" }}, &.{.{ .text = "second" }} }, .target = 0 });
+    var data: [12]TestRow = @splat(.{ .lines = &.{ &.{.{ .text = "first" }}, &.{.{ .text = "second" }} }, .target = 0 });
     for (&data, 0..) |*row, index| row.target = @intCast(index);
-    const rows: []const Row = &data;
+    const rows: []const TestRow = &data;
     for ([_]u16{ 46, 140 }) |width| for ([_]u16{ 4, 5, 6, 7, 21, 22, 30, 40 }) |height| for (0..data.len * 2) |offset| for ([_]?u32{ null, 0, 6, 11 }) |selected| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
-        var list: Self = .{ .rows = .of(&rows), .selected = selected, .edges = Testing.counted(Words.above, Words.below) };
+        var list: TestList = .{ .rows = .of(&rows), .selected = selected, .aboveFn = Words.above, .belowFn = Words.below };
         const ctx = Testing.context(alloc, height).withConstraints(.{}, .{ .width = width, .height = height });
         list.list.item_count = @intCast(rows.len);
         list.list.cursor = selected orelse 0;
@@ -889,7 +899,7 @@ test "List every two-line scroll offset shows whole rows and accounts for every 
 }
 
 test "List mixed-height rows scroll in both directions and reach EOF without partial rows" {
-    const data: [9]Row = .{
+    const data: [9]TestRow = .{
         .{ .lines = &.{&.{.{ .text = "one" }}}, .target = 0 },
         .{ .lines = &.{ &.{.{ .text = "two" }}, &.{} }, .target = 1 },
         .{ .lines = &.{ &.{.{ .text = "four" }}, &.{}, &.{}, &.{} }, .target = 2 },
@@ -900,11 +910,11 @@ test "List mixed-height rows scroll in both directions and reach EOF without par
         .{ .lines = &.{ &.{.{ .text = "two" }}, &.{} }, .target = 7 },
         .{ .lines = &.{ &.{.{ .text = "four" }}, &.{}, &.{}, &.{} }, .target = 8 },
     };
-    const rows: []const Row = &data;
+    const rows: []const TestRow = &data;
     for ([_]u16{ 46, 140 }) |width| for ([_]u16{ 6, 7, 8, 9, 10 }) |height| for (data, 0..) |row, index| for (0..row.lines.len) |offset| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(Testing.below, Testing.below) };
+        var list: TestList = .{ .rows = .of(&rows), .aboveFn = Testing.below, .belowFn = Testing.below };
         list.list.wheel_scroll = 1;
         const ctx = Testing.context(arena.allocator(), height).withConstraints(.{}, .{ .width = width, .height = height });
         list.last_size = ctx.max.size();
@@ -953,24 +963,20 @@ test "List mixed-height rows scroll in both directions and reach EOF without par
 }
 
 test "List wheel reaches every Session from either end regardless of selection markers or spacer" {
-    var data: [9]Row = @splat(.{ .lines = &.{ &.{.{ .text = "Session" }}, &.{.{ .text = "detail" }} } });
+    var data: [9]TestRow = @splat(.{ .lines = &.{ &.{.{ .text = "Session" }}, &.{.{ .text = "detail" }} } });
     for (data[1..], 0..) |*row, index| row.target = @intCast(index);
     data[0] = .{ .lines = &.{&.{}} };
     for ([_]bool{ false, true }) |spacer| for (0..4) |markers| for ([_]u16{ 6, 7, 8, 11, 24 }) |height| for ([_]u8{ 1, 2, 3 }) |step| for (0..9) |choice| for ([_]bool{ false, true }) |up| {
-        const rows: []const Row = if (spacer) &data else data[1..];
+        const rows: []const TestRow = if (spacer) &data else data[1..];
         const selected: ?u32 = if (choice == 0) null else @intCast(choice - 1 + @intFromBool(spacer));
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const ctx = Testing.context(arena.allocator(), height);
-        var list: Self = .{
+        var list: TestList = .{
             .rows = .of(&rows),
             .selected = selected,
-            .edges = switch (markers) {
-                0 => null,
-                1 => Testing.counted(Testing.below, null),
-                2 => Testing.counted(null, Testing.below),
-                else => Testing.counted(Testing.below, Testing.below),
-            },
+            .aboveFn = if (markers & 1 != 0) Testing.below else null,
+            .belowFn = if (markers & 2 != 0) Testing.below else null,
         };
         list.last_size = ctx.max.size();
         list.list.item_count = @intCast(rows.len);
@@ -1015,8 +1021,8 @@ test "List wheel reaches every Session from either end regardless of selection m
 }
 
 test "List hides a row taller than the viewport instead of painting a partial selection" {
-    const rows: []const Row = &.{Testing.mixed[1]};
-    var list: Self = .{ .rows = .of(&rows), .selected = 0, .edges = Testing.counted(Testing.below, Testing.below) };
+    const rows: []const TestRow = &.{Testing.mixed[1]};
+    var list: TestList = .{ .rows = .of(&rows), .selected = 0, .aboveFn = Testing.below, .belowFn = Testing.below };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try list.widget().draw(Testing.context(arena.allocator(), 1));
@@ -1026,9 +1032,9 @@ test "List hides a row taller than the viewport instead of painting a partial se
 }
 
 test "List hover paints only complete clickable rows without moving selection and clears on leave" {
-    const rows: []const Row = &Testing.mixed;
+    const rows: []const TestRow = &Testing.mixed;
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .selected = 4, .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var list: TestList = .{ .rows = .of(&rows), .selected = 4, .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 9);
@@ -1088,19 +1094,19 @@ test "List hover paints only complete clickable rows without moving selection an
 }
 
 test "List column actions override row targets and region-only rows clip hover and clicks" {
-    const rows: []const Row = &.{
+    const rows: []const TestRow = &.{
         .{ .lines = &.{&.{.{ .text = "first controls" }}}, .target = 10, .regions = &.{.{ .start = 4, .end = 7, .target = 20 }} },
         .{ .lines = &.{&.{.{ .text = "second controls" }}}, .regions = &.{.{ .start = 4, .end = 30, .target = 30 }} },
         .{ .lines = &.{&.{.{ .text = "below" }}}, .regions = &.{.{ .start = 0, .end = 3, .target = 40 }} },
     };
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed }, .edges = Testing.counted(null, Testing.below) };
+    var list: TestList = .{ .rows = .of(&rows), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed }, .belowFn = Testing.below };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const draw_ctx = Testing.context(arena.allocator(), 2);
     const first = try list.widget().draw(draw_ctx);
     try Testing.expectBelow(first, 2);
-    list.edges = null;
+    list.belowFn = null;
     _ = try list.widget().draw(Testing.context(arena.allocator(), 3));
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&ctx, .mouse_enter);
@@ -1155,9 +1161,9 @@ test "Hover leave never reads targets from a frame that may be freed" {
 }
 
 test "List markers never acquire whole-row hover or press targets" {
-    const rows: []const Row = &.{ Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1] };
+    const rows: []const TestRow = &.{ Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1], Testing.mixed[1] };
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .edges = Testing.counted(Testing.below, Testing.below), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var list: TestList = .{ .rows = .of(&rows), .aboveFn = Testing.below, .belowFn = Testing.below, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 4);
@@ -1179,13 +1185,13 @@ test "List markers never acquire whole-row hover or press targets" {
 }
 
 test "List selected regions retain focus while other regions hover and whitespace stays inert" {
-    const ranges = [_]Region{ .{ .start = 1, .end = 4, .target = 11 }, .{ .start = 7, .end = 10, .target = 22 } };
+    const ranges = [_]TestRegion{ .{ .start = 1, .end = 4, .target = 11 }, .{ .start = 7, .end = 10, .target = 22 } };
     for ([_]u16{ 0, 1, 2, 4, 7, 9, 10, 20 }) |width| for ([_]?usize{ null, 0, 1 }) |focus| for ([_]i16{ -1, 0, 1, 3, 4, 6, 7, 9, 10, 19, 20 }) |pointer| {
         var regions = ranges;
         for (&regions, 0..) |*region, index| region.selected = focus == index;
-        const rows: []const Row = &.{.{ .lines = &.{&.{.{ .text = " one   two", .style = .{ .fg = .{ .index = 3 } } }}}, .regions = &regions }};
+        const rows: []const TestRow = &.{.{ .lines = &.{&.{.{ .text = " one   two", .style = .{ .fg = .{ .index = 3 } } }}}, .regions = &regions }};
         var pressed: Testing.Pressed = .{};
-        var list: Self = .{ .rows = .of(&rows), .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+        var list: TestList = .{ .rows = .of(&rows), .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const draw_ctx = Testing.context(arena.allocator(), 1).withConstraints(.{}, .{ .width = width, .height = 1 });
@@ -1217,12 +1223,11 @@ test "List selected regions retain focus while other regions hover and whitespac
         if (hovered != null) try std.testing.expectEqual(vaxis.Mouse.Shape.default, events.cmds.items[events.cmds.items.len - 1].set_mouse_shape);
     };
 }
-
-test "List anchors mixed-height rows at the nearest attainable physical offset" {
-    const three: []const Line = &.{ &.{.{ .text = "one" }}, &.{.{ .text = "two" }}, &.{.{ .text = "three" }} };
-    const rows: [10]Row = @splat(.{ .lines = three });
-    const all: []const Row = &rows;
-    var list: Self = .{ .rows = .of(&all), .anchor = .{ .index = 5, .row = 4 } };
+test "SUI-107 List anchors mixed-height rows at the nearest attainable physical offset" {
+    const three: []const TestLine = &.{ &.{.{ .text = "one" }}, &.{.{ .text = "two" }}, &.{.{ .text = "three" }} };
+    const rows: [10]TestRow = @splat(.{ .lines = three });
+    const all: []const TestRow = &rows;
+    var list: TestList = .{ .rows = .of(&all), .anchor = .{ .index = 5, .row = 4 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 12 }, .cell_size = .{} };

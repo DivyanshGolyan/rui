@@ -31,7 +31,7 @@ class CatalogDiagnosticsTest(unittest.TestCase):
 
         def start(args, **kwargs):
             log = Path(args[4])
-            enabled = "--test-models-dev-url" in args
+            enabled = any(str(arg).startswith("models.catalogUrl=") for arg in args)
             log.write_bytes(early if enabled else b"")
             host = SimpleNamespace(log=log, enabled=enabled, returncode=None)
             host.poll = lambda: 1 if exited else host.returncode

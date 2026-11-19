@@ -10,6 +10,7 @@ import threading
 
 import model_fixture as fixture
 import codex_fixture
+from terminal_screen import split_pane_row
 from host_process import dispose_all, screen_fixture_root, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, close_pty, open_pty, spawn
 from terminal_screen import ScreenCapture
@@ -71,7 +72,8 @@ class Screen:
 
 class World:
 
-    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1, host_factory=None):
+    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1, host_factory=None,
+                 host_options=(), store_setup=None):
         self.root = self.endpoint = self.host = None
         try:
             self.root = screen_fixture_root(f"rui-overview-{prefix}.")
@@ -83,11 +85,13 @@ class World:
             self.workspace.mkdir()
             self.env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
             self.env.update(HOME=str(self.home), TERM="xterm-256color", COLORTERM="truecolor")
+            if store_setup is not None:
+                store_setup(self)
             self.endpoint = fixture.SuccessEndpoint([], responses_by_input or {})
             threading.Thread(target=self.endpoint.serve_forever, daemon=True).start()
             start_host = host_factory or fixture.start_host
             self.host = start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
-                                   active_capacity=active_capacity)
+                                   *host_options, active_capacity=active_capacity)
             self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
         except BaseException:
             self.close()
@@ -122,16 +126,17 @@ class World:
                             stdin=slave, stdout=slave, stderr=slave)
             screen = Screen(process, master, columns, rows)
             if columns >= 100 and not args:
-                launched = screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                                       and "Type a task" in frame and "enter open" not in frame
+                launched = screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                                       and "What shall we work on?" in frame and "enter open" not in frame
                                        and screen.capture.draft("", 2),
                                        "the wide launch chat beside the list")
-                assert "│" in launched, launched
+                assert any(split_pane_row(row)[1] for row in launched.splitlines()), launched
                 if not keep_launch:
                     screen.keys(b"\x1b")
             if not keep_launch:
-                screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                            and "Type a task" not in frame and "│" not in frame,
+                screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                            and "What shall we work on?" not in frame
+                            and not any(split_pane_row(row)[1] for row in frame.splitlines()),
                             "the full overview and its pinned rows")
             yield screen
             if process.poll() is None:

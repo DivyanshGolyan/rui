@@ -1045,7 +1045,7 @@ def consent_boundary_cases(state):
                 os.write(master, b"\x03")
             else:
                 os.write(master, human.ALLOW)
-                human.read_terminal(master, "Allowed." if case == "allow" else "■ Write consent effect marker · denied")
+                human.read_terminal(master, "Allowed." if case == "allow" else "▪ Write consent effect marker · denied")
                 assert len(set(records.glob("*.json")) - before) == 1, "the fresh choice was not captured once"
                 os.write(master, b"\x03")
             output, errors = human.terminal_exit(caller, master)

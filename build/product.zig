@@ -2,7 +2,70 @@ const std = @import("std");
 const Translator = @import("translate_c").Translator;
 const darwin = @import("darwin.zig");
 
+pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled: bool) void {
+    const options = b.addOptions();
+    options.addOption(bool, "test_pauses", enabled);
+    const statements = rsqlTable(b);
+    options.addOption([]const u8, "rsql_inputs", statements.inputs);
+    options.addOption(bool, "rsql_collect", statements.collect);
+    compile.root_module.addOptions("build_options", options);
+}
+
+/// The files the comptime statement checks and schema rendering read: rsql.zig, schema.zig and their
+/// direct imports. Their contents fingerprint the generated table (src/store/rsql_table.zig): an edit
+/// to any of them makes every statement and schema value miss until tests/ci/rsql_table.py regenerates it.
+pub const rsql_table_inputs = [_][]const u8{
+    "src/store/rsql.zig",       "src/store/schema.zig",                 "src/provider_name.zig", "src/change_ring.zig",
+    "src/session_settings.zig", "src/store_path.zig",                   "src/store_id.zig",      "src/tool_name.zig",
+    "src/bounded.zig",          "src/tool_record.zig",                  "src/prefix_seal.zig",   "src/retry_policy.zig",
+    "src/turn_policy.zig",      "src/store/domain/model_admission.zig", "src/store/sqlite.zig",  "src/store/mysql_literal.zig",
+    "src/outcome_code.zig",
+};
+
+/// The Store format number declared in src/store/schema.zig, read as text: importing schema.zig
+/// into the build script would compile its whole comptime schema there.
+pub fn schemaVersion(b: *std.Build) u32 {
+    const source = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/store/schema.zig" }), b.allocator, .limited(64 * 1024 * 1024)) catch
+        std.debug.panic("cannot read src/store/schema.zig", .{});
+    const prefix = "\npub const schema_version: u32 = ";
+    const start = (std.mem.indexOf(u8, source, prefix) orelse std.debug.panic("src/store/schema.zig declares no schema_version", .{})) + prefix.len;
+    const end = std.mem.indexOfScalarPos(u8, source, start, ';') orelse std.debug.panic("src/store/schema.zig: unterminated schema_version", .{});
+    return std.fmt.parseInt(u32, source[start..end], 10) catch std.debug.panic("src/store/schema.zig: schema_version is not a number", .{});
+}
+
+const RsqlTable = struct { inputs: []const u8, collect: bool };
+var rsql_table: ?RsqlTable = null;
+
+fn rsqlTable(b: *std.Build) RsqlTable {
+    if (rsql_table) |known| return known;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (rsql_table_inputs) |path| {
+        const contents = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, path }), b.allocator, .limited(64 * 1024 * 1024)) catch
+            std.debug.panic("cannot read statement table input {s}", .{path});
+        hash.update(path);
+        hash.update(&.{0});
+        hash.update(contents);
+        hash.update(&.{0});
+    }
+    const digest = hash.finalResult();
+    const inputs = b.fmt("{x}", .{digest[0..16]});
+    const table = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/store/rsql_table.zig" }), b.allocator, .limited(64 * 1024 * 1024)) catch "";
+    if (std.mem.indexOf(u8, table, b.fmt("pub const inputs = \"{s}\";", .{inputs})) == null)
+        std.log.warn("src/store/rsql_table.zig was generated from other inputs, so every Store statement compiles on the slow comptime path; run python3 tests/ci/rsql_table.py generate", .{});
+    rsql_table = .{
+        .inputs = inputs,
+        .collect = b.option(bool, "rsql-collect", "Build Store statements on the comptime path and export them for tests/ci/rsql_table.py") orelse false,
+    };
+    return rsql_table.?;
+}
+
+/// Whether this is a collect build (-Drsql-collect=true), which exports every Store statement.
+pub fn rsqlCollect(b: *std.Build) bool {
+    return rsqlTable(b).collect;
+}
+
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
+    configurePauses(b, compile, true);
     configureSqlite(b, compile);
     configureYaml(b, compile);
     configureBashPlatform(b, compile);
@@ -25,7 +88,11 @@ pub fn addRui(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b));
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false);
+}
+
+pub fn addPauseRui(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, pinned_transport: ?PinnedTransport) *std.Build.Step.Compile {
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), true);
 }
 
 /// Integration products share the qualified PR backend; production builds keep Zig's default.
@@ -37,7 +104,15 @@ pub fn addIntegrationRui(
     pr_ci: bool,
     identity: BuildIdentity,
 ) *std.Build.Step.Compile {
-    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity);
+    return withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci);
+}
+
+/// The pause-enabled integration product, on the same PR backend as the other integration products.
+pub fn addPauseIntegrationRui(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, pinned_transport: ?PinnedTransport, pr_ci: bool) *std.Build.Step.Compile {
+    return withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci);
+}
+
+fn withPrBackend(executable: *std.Build.Step.Compile, pr_ci: bool) *std.Build.Step.Compile {
     if (pr_ci) executable.use_llvm = false;
     return executable;
 }
@@ -60,6 +135,7 @@ fn addRuiWithIdentity(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
     identity: BuildIdentity,
+    test_pauses: bool,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
@@ -69,6 +145,7 @@ fn addRuiWithIdentity(
             .optimize = optimize,
         }),
     });
+    configurePauses(b, executable, test_pauses);
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
     configureYaml(b, executable);
@@ -147,7 +224,8 @@ fn configureTransportWithIdentity(
     const optimize = compile.root_module.optimize.?;
     const url = addUrl(b);
     compile.root_module.addImport("url", url);
-    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url) orelse return;
+    const os = useOs(b, compile.root_module);
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url, os) orelse return;
     compile.root_module.addImport("tls_client", tls_client);
     compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
@@ -160,12 +238,36 @@ pub fn addUrl(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/url.zig") });
 }
 
+/// The platform owner (`src/os/os.zig`). A file belongs to a single module,
+/// so every module of one compile shares one instance.
+pub fn addOs(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/os/os.zig") });
+}
+
+/// `module`'s "os" import, added on first use.
+pub fn useOs(b: *std.Build, module: *std.Build.Module) *std.Build.Module {
+    if (module.import_table.get("os")) |os| return os;
+    const os = addOs(b);
+    module.addImport("os", os);
+    return os;
+}
+
+/// The platform owner as the root of its own test binary.
+pub fn addOsRoot(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const module = addOs(b);
+    module.resolved_target = target;
+    module.optimize = .ReleaseSafe;
+    module.link_libc = true;
+    return module;
+}
+
 pub fn addTlsClient(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
     url: *std.Build.Module,
+    os: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -175,6 +277,7 @@ pub fn addTlsClient(
         .link_libc = true,
     });
     module.addImport("url", url);
+    module.addImport("os", os);
     const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
@@ -206,6 +309,7 @@ pub fn addH2(
         .link_libc = true,
     });
     module.addImport("url", tls_client.import_table.get("url").?);
+    module.addImport("os", tls_client.import_table.get("os").?);
     module.addImport("test_poll", test_poll);
     module.addImport("tls_client", tls_client);
     const bindings = addBindings(b, module, "h2_c",
@@ -261,42 +365,59 @@ fn transportEnabled(target: std.Build.ResolvedTarget) bool {
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
 }
 
-pub fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const module = compile.root_module;
-    const yaml = b.dependency("yaml", .{});
-    if (module.root_source_file != null) {
-        const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
-        yaml_bindings.addIncludePath(yaml.path("include"));
+const CComponent = enum { sqlite, yaml };
+const CMemo = struct {
+    owner: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    component: CComponent,
+    library: *std.Build.Step.Compile,
+};
+var c_memo: std.ArrayList(CMemo) = .empty;
+
+fn componentLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, component: CComponent) *std.Build.Step.Compile {
+    for (c_memo.items) |entry| {
+        if (entry.owner == b and entry.target.query.eql(target.query) and entry.optimize == optimize and entry.component == component) return entry.library;
     }
-    module.addIncludePath(yaml.path("include"));
-    module.addIncludePath(yaml.path("src"));
-    module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
-    module.addCMacro("YAML_VERSION_MAJOR", "0");
-    module.addCMacro("YAML_VERSION_MINOR", "2");
-    module.addCMacro("YAML_VERSION_PATCH", "5");
-    for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
-        // api.c uses POSIX strdup; expose its declaration in strict C99 only
-        // for these dependency sources, never the consumer's other C files.
-        module.addCSourceFile(.{
-            .file = yaml.path(b.fmt("src/{s}", .{source})),
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
-        });
+    const library = b.addLibrary(.{
+        .name = switch (component) {
+            .sqlite => "rui-sqlite",
+            .yaml => "rui-yaml",
+        },
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    const module = library.root_module;
+    switch (component) {
+        .sqlite => {
+            const sqlite = b.dependency("sqlite", .{});
+            module.addIncludePath(sqlite.path("."));
+            sqliteMacros(module);
+            module.addCSourceFile(.{ .file = sqlite.path("sqlite3.c"), .flags = &.{ "-std=c99", "-fno-strict-aliasing" } });
+        },
+        .yaml => {
+            const yaml = b.dependency("yaml", .{});
+            module.addIncludePath(yaml.path("include"));
+            module.addIncludePath(yaml.path("src"));
+            module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
+            module.addCMacro("YAML_VERSION_MAJOR", "0");
+            module.addCMacro("YAML_VERSION_MINOR", "2");
+            module.addCMacro("YAML_VERSION_PATCH", "5");
+            for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
+                // api.c uses POSIX strdup, exposed only for the dependency sources.
+                module.addCSourceFile(.{ .file = yaml.path(b.fmt("src/{s}", .{source})), .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" } });
+            }
+        },
     }
+    c_memo.append(b.allocator, .{ .owner = b, .target = target, .optimize = optimize, .component = component, .library = library }) catch @panic("OOM");
+    return library;
 }
 
-fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const sqlite = b.dependency("sqlite", .{});
-    const module = compile.root_module;
-    if (module.root_source_file != null) {
-        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
-        bindings.addIncludePath(sqlite.path("."));
-    }
-    module.link_libc = true;
-    module.addIncludePath(sqlite.path("."));
-    module.addCSourceFile(.{
-        .file = sqlite.path("sqlite3.c"),
-        .flags = &.{ "-std=c99", "-fno-strict-aliasing" },
-    });
+pub fn yamlLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    return componentLibrary(b, target, optimize, .yaml);
+}
+
+fn sqliteMacros(module: *std.Build.Module) void {
     module.addCMacro("SQLITE_THREADSAFE", "1");
     module.addCMacro("SQLITE_DEFAULT_PAGE_SIZE", "4096");
     module.addCMacro("SQLITE_MAX_DEFAULT_PAGE_SIZE", "4096");
@@ -315,6 +436,30 @@ fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("SQLITE_DEFAULT_PCACHE_INITSZ", "0");
     module.addCMacro("SQLITE_USE_URI", "0");
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
+}
+
+fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const yaml = b.dependency("yaml", .{});
+    if (module.root_source_file != null) {
+        const bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
+        bindings.addIncludePath(yaml.path("include"));
+    }
+    module.addIncludePath(yaml.path("include"));
+    module.addIncludePath(yaml.path("src"));
+    module.linkLibrary(yamlLibrary(b, module.resolved_target.?, module.optimize.?));
+}
+
+fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const sqlite = b.dependency("sqlite", .{});
+    const module = compile.root_module;
+    if (module.root_source_file != null) {
+        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
+        bindings.addIncludePath(sqlite.path("."));
+    }
+    module.link_libc = true;
+    module.addIncludePath(sqlite.path("."));
+    module.linkLibrary(componentLibrary(b, module.resolved_target.?, module.optimize.?, .sqlite));
 }
 
 fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
@@ -363,6 +508,7 @@ fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, heade
 }
 
 pub fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
+    _ = useOs(b, module);
     _ = addBindings(b, module, "posix",
         \\#undef _FORTIFY_SOURCE
         \\#include <unistd.h>
@@ -393,6 +539,7 @@ pub fn addSqliteShell(
         }),
     });
     configureSqlite(b, executable);
+    sqliteMacros(executable.root_module);
     executable.root_module.addCSourceFile(.{
         .file = sqlite.path("shell.c"),
         .flags = &.{"-std=gnu99"},

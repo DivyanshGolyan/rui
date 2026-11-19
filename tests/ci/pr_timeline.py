@@ -24,19 +24,18 @@ at the last creation before opening; missing creation/fork history is unknown.
 Adjacent durations are signed minutes: stages can occur out of the listed order,
 and a missing endpoint stays blank rather than bridging to a different stage.
 
-Red-main minutes read main_build.py's record instead of judging runs again:
-main is red while a "Main build red" issue (the ci-red label and
-main_build.MARKER in its body) is open: from its creation, through its own
+Red-main minutes read the issues that record a red main instead of judging
+runs again: main is red while a `main-red` issue scheduled Promote filed
+(report_issue.py, one per cause, open until its fix closes it) or a
+"Main build red" issue the retired main build filed (the ci-red label and
+RED_MAIN_MARKER in its body) is open: from its creation, through its own
 closed and reopened events in time order, and still red now while one is open.
 Main is red while any such issue is open, so red_main returns the union of
 every issue's open spans (overlapping or touching spans merged, still-open
 spans ending at the report time); two issues open at once count each minute
-once.
-main_build.py alone decides red and green (a stale rerun of an older SHA
-changes nothing; the build job, not the whole run, is the result), and a
-closed stretch counts green even when the issue is later reopened, so this
-report agrees with that issue's open/closed history by construction. Intervals split at UTC midnight
-and today's end at report time. The record starts with #1430's merge
+once. A closed stretch counts green even when the issue is later reopened, so
+this report agrees with those issues' open/closed history by construction.
+Intervals split at UTC midnight and today's end at report time. The record starts with #1430's merge
 (RED_MAIN_KNOWN_FROM, 2026-11-13T11:56:38Z): a day that starts before it is
 unknown, never zero red minutes.
 """
@@ -51,12 +50,16 @@ import sys
 from urllib.parse import quote, urlencode, urlsplit
 
 from conflict_alert import gh, github, pages
-from main_build import MARKER as RED_MAIN_MARKER, TITLE as RED_MAIN_TITLE
 from report_issue import LABEL as CI_RED_LABEL
 
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
 RED_MAIN_KNOWN_FROM = "2026-11-13T11:56:38Z"
+# The retired main build's one issue (main_build.py until the qualification tier replaced it).
+RED_MAIN_MARKER = "<!-- main-build-red -->"
+RED_MAIN_TITLE = "Main build red"
+# Scheduled Promote's per-cause issues (promote.yml, qualification-tier.yml).
+RED_MAIN_LABEL = "main-red"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")
 SUMMARY = re.compile(r"<!--\s*codex-review-state:v1\s+(.*?)\s*-->", re.S)
@@ -255,7 +258,8 @@ def containing_release(api, pr, releases):
 def red_main(api, now):
     spans = []
     for row in pages(api, f"repos/{REPO}/issues?state=all&labels={quote(CI_RED_LABEL)}"):
-        if "pull_request" in row or RED_MAIN_MARKER not in (row.get("body") or ""):
+        labelled = RED_MAIN_LABEL in {label["name"] for label in row.get("labels") or ()}
+        if "pull_request" in row or not (labelled or RED_MAIN_MARKER in (row.get("body") or "")):
             continue
         opened = utc(row["created_at"])
         events = pages(api, f"repos/{REPO}/issues/{row['number']}/events?")
@@ -323,7 +327,7 @@ def main():
         until = datetime.now(timezone.utc).isoformat()
         red = red_main(github, until)
         report = {"since": since, "as_of": utc(until), "release_source": "releases API published_at + REST compare ancestry",
-                  "red_main_source": f"open/closed {RED_MAIN_TITLE!r} issues from main_build.py, "
+                  "red_main_source": f"open/closed {RED_MAIN_LABEL!r} and {RED_MAIN_TITLE!r} issues, "
                                      f"recorded from {RED_MAIN_KNOWN_FROM}; earlier days are unknown",
                   "prs": rows, "days": daily(rows, since, until, red)}
     except (subprocess.CalledProcessError, ValueError, KeyError) as error:

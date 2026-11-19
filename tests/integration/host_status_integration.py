@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import fcntl
 import http.server
 import json
 import os
@@ -87,7 +86,7 @@ def prove_fragmented_request():
 
 def start(store, capacity, *options):
     return start_ready_process(
-        [RUI, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(capacity), *options],
+        [RUI, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(capacity), "--set", "models.catalogUrl=http://127.0.0.1:1/api.json", *options],
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
@@ -109,11 +108,9 @@ def raw_info(sock, store, instance=None, *, kind="host_info", route="host-info",
 
 
 def wait_for_descriptors(pid, expected=None, timeout=5):
-    directory = pathlib.Path(f"/proc/{pid}/fd")
-
     def snapshot():
         try:
-            return {entry.name: os.readlink(entry) for entry in directory.iterdir()}
+            return {entry.name: os.readlink(entry) for entry in os_semantics.descriptor_links(pid)}
         except FileNotFoundError:
             return None
     return wait_for(snapshot, f"descriptors {expected}", timeout=timeout, interval=.01,
@@ -232,7 +229,7 @@ def protected_saturation(root):
         assert release[0]["run"] == pending["run"] and int(release[0]["sequence"]) > int(pending["sequence"]), release
         assert status(store) == "unavailable"
         with (store / "host.lock").open("rb") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert os_semantics.try_lock(lock), "the retired Host still held its Store lease"
         print("protected discovery passed: ten ordinary + incomplete discovery, competing ready, exact stop, unhanded peer retirement, correlated release and lease reuse")
     finally:
         for stream in held:
@@ -511,7 +508,7 @@ def main():
         stale.unlink()
 
         with (store / "host.lock").open("w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert os_semantics.try_lock(lock), "an unowned Store's lease was already held"
             assert status(store) == "owned_unavailable"
             assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
             for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\n\r\n{"):
@@ -644,7 +641,7 @@ def main():
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            os_semantics.release_lock(lock)
         assert status(store) == "unavailable"
 
         store.chmod(0o755)

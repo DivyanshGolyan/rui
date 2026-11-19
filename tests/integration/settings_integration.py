@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import json
+import itertools
+
+import codex_fixture
 import pathlib
 import os
 import selectors
@@ -9,11 +12,15 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import host_process
+import model_fixture as model
 import os_semantics
 from preset_creation_cases import preset_creation
+from empty_creation_cases import empty_creation
+from preferences_bridge_cases import preferences_bridge
 from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
@@ -165,19 +172,16 @@ def flag_start_failures(root):
     credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
     absent = {"RUI_OPENAI_KEY_FILE": str(root / "absent")}
     openai = ["--set", 'providers={"openai":{}}']
+    fixture_openai = ["--set", f"providers.openai.endpoint={endpoint}"]
     unchanged = [
-        (["--test-openai-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
-        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, {}, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, absent, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
+        (fixture_openai, {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
         (openai, {}, 6, "sign_in_required", NO_KEY),
         (openai, {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"chatgpt":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--test-codex-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2, "invocation_invalid", ""),
         (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
          {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
@@ -195,7 +199,6 @@ def flag_start_failures(root):
         unchanged.append((flags, {}, 2, "host_option_retired", ""))
     leaf = [
         (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
-        (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),
         (["--set", 'providers={"bogus":{}}'], {}, "providers.bogus: unknown provider"),
         (["--set", "tools.bash.timeoutMs=0"], {}, "tools.bash.timeoutMs: integer is outside its bounds"),
@@ -228,6 +231,171 @@ def flag_start_failures(root):
         assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
 
 
+def missing_key_refusal(result, *, leaf, door, store, receipts):
+    message = "providers.openai.key: credential source is missing, unreadable, insecure or invalid"
+    invalid = f"rui: the Host did not start: {message} [settings_invalid]\n"
+    if leaf:
+        expected_out = json.dumps({"rui_start_error": {"code": "settings_invalid", "message": message}}, separators=(",", ":")) + "\n"
+        expected_err = f"rui: these settings would not start a Host: {message} [settings_invalid]\n" if door == "check" else invalid
+        assert (result.returncode, result.stdout, result.stderr) == (2 if door == "check" else 1, expected_out, expected_err), result
+    else:
+        # Caller prose is owned by caller_error, not restated in this fixture.
+        # Compare its entire executed receipt across matrix cells after removing
+        # only the per-cell Store name, and anchor the typed failure codes.
+        assert result.returncode == (6 if door == "check" else 1) and not result.stdout, result
+        assert NO_KEY in result.stderr and "[sign_in_required]\n" in result.stderr, result
+        if door == "start":
+            assert result.stderr.endswith("[internal_unexpected]\n"), result
+        else:
+            assert result.stderr.endswith("[sign_in_required]\n"), result
+        receipt = result.stderr.replace(str(store), "<store>")
+        assert receipt == receipts.setdefault(door, receipt), result
+
+
+def credential_location_matrix():
+    # Sign-in admission records the path but deliberately reads it at dispatch,
+    # whereas OpenAI reads its key during admission. Status is client-only.
+    with tempfile.TemporaryDirectory(prefix="cl-") as temporary:
+        root = pathlib.Path(temporary).resolve()
+        receipts = {}
+        for kind, leaf, variable, present in itertools.product(("openai", "codex"), (False, True), (False, True), (False, True)):
+            case = root / f"{kind}-{int(leaf)}{int(variable)}{int(present)}"
+            case.mkdir(mode=0o700)
+            home = case / "home"
+            config = home / ".config" / "rui"
+            config.mkdir(mode=0o700, parents=True)
+            default = config / ("openai.key" if kind == "openai" else "codex.json")
+            named = case / "named"
+            explicit = case / "explicit"
+            chosen = explicit if leaf else named if variable else default
+            client = named if variable else default
+            if present:
+                if kind == "openai":
+                    chosen.write_text("sk-credential-matrix\n")
+                    chosen.chmod(0o600)
+                else:
+                    codex_fixture.credentials(chosen)
+            env = {**os.environ, "HOME": str(home)}
+            for name in ("RUI_OPENAI_KEY_FILE", "RUI_CODEX_CREDENTIAL_FILE", "RUI_CHATGPT_CREDENTIAL_FILE"):
+                env.pop(name, None)
+            if variable:
+                env["RUI_OPENAI_KEY_FILE" if kind == "openai" else "RUI_CODEX_CREDENTIAL_FILE"] = str(named)
+            status = subprocess.run([RUI, "auth", "status"], env=env, capture_output=True, text=True, timeout=30)
+            assert status.returncode == 0, (case, status)
+            expected_client = present and client == chosen
+            if kind == "openai":
+                line = "OpenAI API key: saved locally (remote acceptance not checked)." if expected_client else "OpenAI API key: missing."
+            else:
+                line = "ChatGPT (device code): signed in (remote acceptance not checked)." if expected_client else "ChatGPT: not signed in;"
+            assert line in status.stdout, (case, line, status.stdout, status.stderr)
+            store = case / "store"
+            with host_process.short_interface_directory() as runtime:
+                placement = subprocess.run([RUI, "host", "set", "--store", str(store), "interface.dir", str(runtime)], env=env, capture_output=True, text=True, timeout=30)
+                assert placement.returncode == 0, (case, placement)
+                flags = ["--store", str(store), "--set", f'providers={{"{kind}":{{}}}}']
+                if leaf:
+                    setting = "providers.openai.key=file:" if kind == "openai" else "providers.codex.credentialFile="
+                    flags += ["--set", setting + str(explicit)]
+                check = subprocess.run([RUI, "host", "settings", "--check", *flags], env=env, capture_output=True, text=True, timeout=30)
+                should_start = kind == "codex" or present
+                if should_start:
+                    assert check.returncode == 0, (case, check)
+                else:
+                    missing_key_refusal(check, leaf=leaf, door="check", store=store, receipts=receipts)
+                started = subprocess.run([RUI, "host", "start", *flags], env=env, capture_output=True, text=True, timeout=30)
+                try:
+                    if should_start:
+                        assert started.returncode == 0, (case, started)
+                        info = host_info(runtime / "rui.sock", str(store))
+                        assert kind in info["capabilities"]["providers"], (case, info)
+                        host_stop(runtime / "rui.sock", str(store), info["instance"])
+                    else:
+                        missing_key_refusal(started, leaf=leaf, door="start", store=store, receipts=receipts)
+                finally:
+                    if (runtime / "rui.sock").exists():
+                        from host_launch_fixture import forced_crash_cleanup
+                        forced_crash_cleanup(store)
+        print("credential location process matrix: client status, settings check and Host start")
+
+
+def signin_dispatch_matrix():
+    """Admission seals a path; actual file access happens at model dispatch."""
+    class Capture(model.SuccessHandler):
+        def do_POST(self):
+            self.server.auth.append(self.headers.get("Authorization"))
+            super().do_POST()
+
+    reply = model.sse_answer("matrix-response", "matrix-reasoning", "matrix-message", "matrix answer")[0]
+    endpoint = model.SuccessEndpoint([reply] * 8)
+    endpoint.RequestHandlerClass = Capture
+    endpoint.auth = []
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="rui-signin-dispatch-") as temporary:
+            root = pathlib.Path(temporary).resolve()
+            for leaf, variable, present in itertools.product((False, True), repeat=3):
+                case = root / f"{int(leaf)}{int(variable)}{int(present)}"
+                case.mkdir(mode=0o700)
+                home = case / "home"
+                config = home / ".config" / "rui"
+                config.mkdir(mode=0o700, parents=True)
+                default, named, explicit = config / "codex.json", case / "named", case / "explicit"
+                chosen = explicit if leaf else named if variable else default
+                # A wrong location either cannot authenticate (chosen present)
+                # or can authenticate (chosen absent), making fallback observable.
+                for other in {default, named, explicit} - {chosen}:
+                    codex_fixture.credentials(other, state="refresh_pending" if present else "ready")
+                if present:
+                    codex_fixture.credentials(chosen)
+                env = {**os.environ, "HOME": str(home)}
+                env.pop("RUI_CODEX_CREDENTIAL_FILE", None)
+                if variable:
+                    env["RUI_CODEX_CREDENTIAL_FILE"] = str(named)
+                store = case / "store"
+                args = [RUI, "host", "serve", "--store", store, "--set", 'providers={"codex":{}}',
+                        "--set", f"providers.codex.endpoint=http://127.0.0.1:{endpoint.server_port}/responses"]
+                if leaf:
+                    args += ["--set", f"providers.codex.credentialFile={explicit}"]
+                host = None
+                count = len(endpoint.requests)
+                try:
+                    host, _ = host_process.start_ready_process(args, env=env, isolate_providers=False)
+                    session = model.configure(case, store, "configure", None, "gpt-6-sol")
+                    model.message(case, store, "dispatch", session, "Credential location witness")
+                    observed = model.wait_for(lambda: model.observe(store, "dispatch").get("result"), "credential dispatch result")
+                    if present:
+                        assert observed["status"] == "completed", (case, observed)
+                        assert model.read_result(store, "dispatch") == b"matrix answer", case
+                        assert len(endpoint.requests) == count + 1, case
+                        assert endpoint.auth[-1] == "Bearer " + codex_fixture.ACCESS, (case, endpoint.auth)
+                    else:
+                        assert observed["code"] == "provider_authentication_backend_failed", (case, observed)
+                        assert len(endpoint.requests) == count, case
+                finally:
+                    if host is not None:
+                        model.stop_host(host)
+        print("sign-in dispatch matrix: selected file is read at dispatch")
+    finally:
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
+def token_endpoint_refusals(root):
+    """All Host admission doors name a forbidden token target before serving."""
+    for door in ("serve", "start", "check"):
+        directory = root / ("bad-token-" + door)
+        command = [RUI, "host", "settings", "--check"] if door == "check" else [RUI, "host", door]
+        command += ["--store", str(directory), "--set", "providers.chatgpt.endpoint=http://127.0.0.1:9/responses",
+                    "--set", "providers.chatgpt.credentialFile=/tmp/fixture-signin.json",
+                    "--set", "providers.chatgpt.tokenEndpoint=https://other.example/token"]
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0, (door, result)
+        assert "providers.chatgpt.tokenEndpoint" in result.stdout + result.stderr, (door, result)
+        assert not (directory / "rui.sock").exists(), (door, result)
+
+
 def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
@@ -244,12 +412,14 @@ def main(network, ci):
     info = host_info(sock, str(store))
     assert info["active_capacity"] == "2", info
     assert info["capabilities"]["providers"]["openai"] == "key_file", info
-    if os_semantics.PROC_FS:
-        for name in ("cmdline", "environ"):
-            assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
+    for name, data in (os_semantics.launch_records(host.pid) or {}).items():
+        assert b"sk-launch-test" not in data, name
 
     source_modes(root, good)
     flag_start_failures(root)
+    token_endpoint_refusals(root)
+    credential_location_matrix()
+    signin_dispatch_matrix()
 
     other = root / "other"
     other.mkdir(mode=0o700)
@@ -303,7 +473,7 @@ def main(network, ci):
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
-              "session": "", "preset": "review", "configuration": {"label": None}}
+              "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
     created = post(sock, "configure", create)
     assert created["answer"]["status"] == "accepted", created
     session = created["answer"]["session"]
@@ -311,6 +481,7 @@ def main(network, ci):
     assert replayed["answer"]["replayed"] is True and replayed["answer"]["session"] == session, replayed
     saved = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session", "store": str(store), "session": session})["session"]
     assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+    assert saved["workspace"] == str(root), saved
     assert saved["compaction_trigger_override"] == "100000", saved
     assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
     unknown = post(sock, "configure", dict(create, key="preset:unknown", preset="missing"))
@@ -321,12 +492,19 @@ def main(network, ci):
     assert host.wait(timeout=30) == 0, output(host)
 
     preset_creation(RUI, root / "cli-presets", good["store"], os.environ)
+    empty_creation(RUI, root / "empty-creation", good["store"], os.environ)
+
+    for sparse in ({name: value for name, value in preset.items() if name != "effort"}, dict(preset, tools=["bash"])):
+        accepted = launch(frame(dict(good, presets={"review": sparse})))
+        wait_for_host(sock, store, accepted)
+        host_process.close_stdin(accepted)
+        assert accepted.wait(timeout=30) == 0, output(accepted)
 
     for presets in [
         {"Bad": preset},
         {"a" * 64: dict(preset, **{"\x01" * 64: None})},
-        {"review": {name: value for name, value in preset.items() if name != "effort"}},
-        {"review": dict(preset, tools=["bash"])},
+        {"review": dict(preset, effort=[])},
+        {"review": dict(preset, tools=[None])},
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))), expected_exit=2)
         assert refused["code"] == "settings_invalid", refused
@@ -383,6 +561,7 @@ def main(network, ci):
     held.close()
     silent.close()
     sdk_tool_set(root, good, network, ci)
+    preferences_bridge(RUI, root / "preferences-bridge", {"sqlite": {"dir": str(root / "preferences-store")}}, os.environ)
     print(f"settings document: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four document refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 

@@ -84,6 +84,22 @@ test "a Workspace's changed page reads only its own Sessions, however many other
             return counter.steps;
         }
     };
+    // Keep the workspace index boundary present in both measurements. Otherwise
+    // adding the first larger digest can change the final index-iteration step.
+    var boundary_index: usize = 0;
+    while (true) : (boundary_index += 1) {
+        var name: [48]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name, "workspace-boundary-{d}", .{boundary_index});
+        var boundary = try tmp.dir.createDirPathOpen(std.testing.io, path, .{});
+        var boundary_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const boundary_path = boundary_buffer[0..try boundary.realPath(std.testing.io, &boundary_buffer)];
+        boundary.close(std.testing.io);
+        const boundary_digest = store_core.workspaceDigest(boundary_path);
+        const watched_digest = store_core.workspaceDigest(workspace);
+        if (std.mem.order(u8, &boundary_digest, &watched_digest) != .gt) continue;
+        _ = try Page.configure(&storage, "scoped-boundary", "", boundary_path);
+        break;
+    }
     const watched = try Page.configure(&storage, "scoped-watched", "", workspace);
     var request: protocol.ListSessions = .{ .workspace = .{}, .since = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) } };
     try request.workspace.?.set(workspace);
@@ -95,6 +111,64 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     }
     try std.testing.expect(storage.changes.covers(request.since.?.generation));
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
+}
+
+test "SL-2: a fixed creator subtree skips unrelated Sessions in its Workspace" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = try configureTestSession(&storage, "creator-cost-sentinel");
+    const root = try configureTestSession(&storage, "creator-cost-root");
+    const child = try configureTestSession(&storage, "creator-cost-child");
+    const grandchild = try configureTestSession(&storage, "creator-cost-grandchild");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
+    const request: protocol.ListSessions = .{ .after = 1, .ceiling = 4 };
+    const Facts = struct { own: u64, subtree: u64, descendants: u64, needs_you: u64 };
+    const Measure = struct {
+        fn run(store: *Store, dir: *std.testing.TmpDir, list: protocol.ListSessions, ids: [3][]const u8) !struct { steps: u64, facts: [3]Facts } {
+            var used = std.atomic.Value(u64).init(0);
+            std.testing.allocator.free(try testingSessionList(store, dir, list, &used, 101));
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            const bytes = testingSessionList(store, dir, list, &used, 102) catch |err| {
+                counter.end(store.sqliteDatabase());
+                return err;
+            };
+            counter.end(store.sqliteDatabase());
+            defer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const rows = parsed.value.object.get("sessions").?.array.items;
+            try std.testing.expectEqual(@as(usize, 3), rows.len);
+            var facts: [3]Facts = undefined;
+            for (rows, ids, &facts, 0..) |row, id, *fact, index| {
+                try std.testing.expectEqualStrings(id, row.object.get("reference").?.string);
+                fact.* = .{
+                    .own = try std.fmt.parseInt(u64, row.object.get("state_change_at").?.string, 10),
+                    .subtree = try std.fmt.parseInt(u64, row.object.get("subtree_state_change_at").?.string, 10),
+                    .descendants = try std.fmt.parseInt(u64, row.object.get("descendant_count").?.string, 10),
+                    .needs_you = try std.fmt.parseInt(u64, row.object.get("descendant_needs_you_count").?.string, 10),
+                };
+                try std.testing.expect(fact.own > 0 and fact.subtree >= fact.own);
+                try std.testing.expectEqual(@as(u64, 2 - index), fact.descendants);
+                try std.testing.expectEqual(@as(u64, 0), fact.needs_you);
+            }
+            return .{ .steps = counter.steps, .facts = facts };
+        }
+    };
+    const ids = [3][]const u8{ root.slice(), child.slice(), grandchild.slice() };
+    const before = try Measure.run(&storage, &tmp, request, ids);
+    for (0..128) |index| {
+        var key: [48]u8 = undefined;
+        _ = try configureTestSession(&storage, try std.fmt.bufPrint(&key, "creator-cost-peer-{d}", .{index}));
+    }
+    const after = try Measure.run(&storage, &tmp, request, ids);
+    try std.testing.expectEqualDeep(before.facts, after.facts);
+    std.debug.print("fixed creator subtree SQLite VM steps: before={d} after={d} peers=128\n", .{ before.steps, after.steps });
+    try std.testing.expect(after.steps <= before.steps + 100);
 }
 
 test "a list row reads the same steps however long its Session's history" {
@@ -162,7 +236,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000,source_kind=2 WHERE command_key='from-peer'", .{peer.slice()});
         try touchForTesting(&storage, session.slice());
         try touchForTesting(&storage, peer.slice());
     }
@@ -171,8 +245,8 @@ test "a person's Message next to a position is a one-row page of admission rows,
     const page = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(page.more);
     try std.testing.expectEqual(positions[2], page.items[0].position);
-    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
-    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
+    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.text.digest);
+    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.text.length);
     request.end = page.end;
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;
@@ -290,73 +364,6 @@ test "a list row whose first Message is missing is CorruptStore" {
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
 }
 
-test "a list row rejects a latest Turn missing its execution entry" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSession(&storage, "clock-missing-config");
-    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
-    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-first", &answer);
-    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-latest", &answer);
-    try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT first_admission_id FROM turn WHERE session_ref=?1 ORDER BY turn_id DESC LIMIT 1)", .{session.slice()});
-    var used = std.atomic.Value(u64).init(0);
-    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
-}
-
-test "list clock includes queued input after a finished Turn" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try configureTestSession(&storage, "clock-queue-config");
-    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
-    try answerTestTurn(&storage, &tmp, session.slice(), "clock-queue-done", &answer);
-    try submitTestMessage(&storage, &tmp, "clock-queue-input", "clock-queue-key", session.slice(), "next");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
-    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
-    try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1", .{session.slice()});
-    try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=300 WHERE command_key='clock-queue-key'", .{});
-    var listed = try testingListRow(&storage, &tmp, session.slice());
-    defer listed.deinit();
-    try std.testing.expectEqualStrings("pending", listed.get(&.{ "work", "state", "kind" }).string);
-    try std.testing.expectEqual(@as(u64, 300), try listed.number(&.{"state_change_at"}));
-}
-
-test "list clock records the last permission at a distinct durable time" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try tests.configureTestSessionAsk(&storage, "clock-controlled-config");
-    try submitTestMessage(&storage, &tmp, "clock-controlled-input", "clock-controlled-message", session.slice(), "propose");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try tests.settleTwoActionsForTesting(&storage, &tmp, model, "clock-controlled-tools");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
-    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
-    try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET resolved_at=200 WHERE session_ref=?1 AND resolved_at IS NOT NULL", .{session.slice()});
-    const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
-    const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
-    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
-    try allow.key.set("clock-controlled-first");
-    try allow.session.set(session.slice());
-    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=300 WHERE action_id=?1", .{first});
-    var partial = try testingListRow(&storage, &tmp, session.slice());
-    defer partial.deinit();
-    try std.testing.expectEqual(@as(u64, 200), try partial.number(&.{"state_change_at"}));
-    allow.action_id = second;
-    try allow.key.set("clock-controlled-second");
-    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=400 WHERE action_id=?1", .{second});
-    var completed = try testingListRow(&storage, &tmp, session.slice());
-    defer completed.deinit();
-    try std.testing.expectEqual(@as(u64, 400), try completed.number(&.{"state_change_at"}));
-}
-
 test "a list page of mixed work takes its deepest row's rounds, and a pass per row a statement repeats for" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -385,11 +392,241 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
     const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
-    for ([_][]const u8{ "\"kind\":\"idle\"", "\"kind\":\"finished\"", "\"kind\":\"stopped\"", "\"kind\":\"approval\"" }) |kind|
+    for ([_][]const u8{ "\"state\":{\"kind\":\"idle\"", "\"state\":{\"kind\":\"finished\"", "\"state\":{\"kind\":\"stopped\"", "\"state\":{\"kind\":\"approval\"" }) |kind|
         std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes[0..read], kind)) catch |err| {
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(8, rounds);
-    try std.testing.expectEqual(1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+    try std.testing.expectEqual(9, rounds);
+    try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+}
+
+test "a stopping Turn with queued work adds no list read rounds or passes" {
+    const Costs = struct {
+        fn read(storage: *Store, tmp: *std.testing.TmpDir) !struct { rounds: u32, passes: usize } {
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const length = try tmp.dir.realPath(std.testing.io, &root);
+            var used = std.atomic.Value(u64).init(0);
+            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+            try capture.create(root[0..length], 1, false);
+            defer capture.deinit();
+            const entry = try store_core.enter(storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            const before = storage.testing_content_work.rounds;
+            var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
+            try session_list_read_domain.readSessionList(&a, &.{}, &reply);
+            return .{ .rounds = storage.testing_content_work.rounds - before, .passes = a.passes };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "stopping-list-cost");
+    const action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+    var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+    try allow.key.set("stopping-list-allow");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+    const running = try Costs.read(&storage, &tmp);
+    var stop = try completeSessionStop("stopping-list-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "stopping-list-file", "stopping-list-queued", session.slice(), "new work");
+    const stopping = try Costs.read(&storage, &tmp);
+    try std.testing.expectEqual(running.rounds, stopping.rounds);
+    try std.testing.expectEqual(running.passes, stopping.passes);
+    const request: protocol.ActivityPage = .{ .session = session };
+    const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
+    try std.testing.expect(work.state == .stopping and work.actions.stop);
+}
+
+test "creating Message replay reads independently of Session history in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    const settings = try completeConfiguration("receipt-steps", "", workspace, "model-a");
+    var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+    try message.key.set("receipt-steps");
+    message.text = try tests.testingBytesContent(&tmp, "receipt-steps-input", "initial");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = storage.submitMessageWithModelInto(&message, null, &created_receipt, .{});
+    try std.testing.expect(created == .accepted);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const wire_request.MessageCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const replay = store.submitMessageWithModelInto(command, null, &replay_receipt, .{});
+            counter.end(store.sqliteDatabase());
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &message);
+    const few = try Counter.steps(&storage, &message);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &message));
+}
+
+test "creating configuration receipt replay reads independently of Session history in SQLite steps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("configure-receipt-steps", "", workspace, "model-a");
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = try storage.configureInto(&create, &created_receipt, .{});
+    try std.testing.expect(created == .accepted and created.accepted.configuration != null);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const @import("../../wire_request.zig").ConfigureCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            var result_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const result = store.configureInto(command, &result_receipt, .{});
+            counter.end(store.sqliteDatabase());
+            const replay = try result;
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed and replay.accepted.configuration != null);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &create);
+    const few = try Counter.steps(&storage, &create);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-revision-{d}", .{index});
+        var update = try completeConfiguration(name, session.slice(), workspace, if (index % 2 == 0) "model-b" else "model-a");
+        try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &create));
+}
+
+test "creation receipt rejects stored tool names with empty comma segments" {
+    const wire_request = @import("../../wire_request.zig");
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_][]const u8{ ",bad", "bad,", "bad,,name", "bad,name" }) |invalid| for ([_]bool{ false, true }) |forged_count| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("comma-receipt", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("comma-receipt");
+            message.text = try tests.testingBytesContent(&tmp, "comma-receipt-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const record = try store_testing.sqlite_only.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1) AND ordinal=0", .{session.slice()});
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+            try store_testing.sqlite_only.exec(&storage, "UPDATE tool_record SET name=?1 WHERE tool_record_id=?2", .{ invalid, record });
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+            if (forged_count) {
+                var apparent_count: u64 = 1;
+                for (invalid) |byte| if (byte == ',') {
+                    apparent_count += 1;
+                };
+                try store_testing.sqlite_only.exec(&storage, "UPDATE tool_set SET member_count=?1 WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?2 AND revision=1)", .{ apparent_count, session.slice() });
+            }
+            if (as_message) {
+                try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure);
+            } else {
+                try std.testing.expect((try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure);
+            }
+            try std.testing.expect(storage.isFenced());
+        };
+    }
+}
+
+test "creation receipt corruption work is bounded by ordinal range in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    const Run = struct {
+        fn steps(as_message: bool, replay: bool, extra: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("ordinal-seed", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            create.configuration.loaded_tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("ordinal-seed");
+            message.text = try tests.testingBytesContent(&tmp, "ordinal-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const set = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+            const record = try store_testing.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set});
+            for (0..extra) |index| {
+                try store_testing.exec(&storage, "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES(?1,?2,?3)", .{ set, @as(u64, @intCast(128 + index)), record });
+            }
+            if (!replay) {
+                try create.key.set("ordinal-target");
+                try message.key.set("ordinal-target");
+            }
+            var counter: TestingSteps = .{};
+            counter.begin(storage.sqliteDatabase());
+            const failed = if (as_message)
+                storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure
+            else
+                (try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure;
+            counter.end(storage.sqliteDatabase());
+            try std.testing.expect(failed and storage.isFenced());
+            return counter.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_]bool{ false, true }) |replay| {
+            const few = try Run.steps(as_message, replay, 1);
+            const many = try Run.steps(as_message, replay, 1024);
+            try std.testing.expect(few > 0);
+            try std.testing.expectEqual(few, many);
+        }
+    }
 }

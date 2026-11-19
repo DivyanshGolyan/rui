@@ -20,7 +20,7 @@ class Handler(fixture.http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(request)
-        session = fixture.instructions_session(request["instructions"])
+        session = fixture.instructions_session(fixture.request_system_prompt(request))
         assert re.fullmatch("[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
         if session == self.server.receiver:
             for item in request["input"]:
@@ -64,7 +64,7 @@ def main():
         home.mkdir()
         workspace.mkdir()
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
         endpoint.workspace = workspace
         endpoint.senders = []

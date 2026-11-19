@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations, host_environment_violations, credential_location_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -136,6 +136,33 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
         self.assertNotIn('src/host_settings.zig', paths)
         self.assertNotIn('src/h2/Engine.zig', paths)
         self.assertNotIn('clients/ts/src/settings.ts', paths)
+
+    def test_host_environment_allowlist_and_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            path = root / "src/providers.zig"
+            path.write_text('fn f(environ: Env) void { _ = environ.get("HOME"); }\n')
+            self.assertEqual(host_environment_violations(root), [])
+            path.write_text(path.read_text() + 'fn x(environ: Env) void { _ = environ.get("RUI_X"); }\n')
+            self.assertIn('src/providers.zig:2:', host_environment_violations(root)[0])
+
+    def test_credential_location_is_the_only_variable_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            provider = root / "src/providers.zig"
+            for name in ("RUI_OPENAI_KEY_FILE", "RUI_CODEX_CREDENTIAL_FILE", "RUI_CHATGPT_CREDENTIAL_FILE"):
+                provider.write_text(f'fn f(environ: Env) void {{ _ = environ.get("{name}"); }}\n')
+                self.assertTrue(host_environment_violations(root))
+                self.assertTrue(credential_location_violations(root))
+            provider.write_text('const loc = @import("credential_location.zig");\n')
+            self.assertIn("import not allowed", credential_location_violations(root)[0])
+            provider.unlink()
+            (root / "src/host_start.zig").write_text('const loc = @import("credential_location.zig");\n')
+            self.assertEqual(credential_location_violations(root), [])
+            (root / "src/credential_location.zig").write_text('const n = "RUI_OPENAI_KEY_FILE";\n')
+            self.assertEqual(credential_location_violations(root), [])
 
     def test_real_file_mutation_is_red_then_reverted(self):
         with tempfile.TemporaryDirectory() as directory:

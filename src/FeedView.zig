@@ -16,6 +16,9 @@ const PendingText = @import("TerminalText.zig");
 window: *Window,
 anchor: *Feed,
 tail: ?vxfw.Widget = null,
+welcome: bool = false,
+welcome_unicode: bool = true,
+welcome_quiet: vaxis.Style = .{},
 pending: ?struct { text: []const u8, note: ?[]const u8 = null } = null,
 message_note: ?resident.MessageNote = null,
 latest_ending: ?resident.LatestEnding = null,
@@ -228,7 +231,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
     self.paintRow(cells, line);
-    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = line.offset }).spot(col));
+    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), line) }).spot(col));
 }
 
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
@@ -431,13 +434,26 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const note_height: u16 = if (pending_note) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
     const pending_height = @as(u32, body_height) + note_height;
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
-    const gap: u16 = if (pending != null and tail != null and tail.?.size.height != 0) 1 else 0;
+    const last = if (self.window.count == 0) null else self.window.entries[self.window.count - 1];
+    const canonical_message = if (last) |entry| self.window.document.endsUserMessage(entry.offset + entry.length) else false;
+    const gap: u16 = if ((pending != null or canonical_message) and tail != null and tail.?.size.height != 0) 1 else 0;
     self.window.tail_rows = @as(u32, pending_height) + gap + (if (tail) |child| child.size.height else 0);
     const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
     const visible = self.anchor.visible(entries, self.size.height);
     var screen: vaxis.Screen = .{ .width = self.size.width, .height = self.size.height, .width_method = self.method, .buf = surface.buffer };
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = screen.height, .screen = &screen };
     try self.window.drawWith(visible, win, self.colour, self.style, self.colours, self.presentation(), ctx.arena);
+    if (self.welcome and self.window.count == 0 and self.pending == null and self.size.height >= 2) {
+        const title = "rui";
+        const subtitle = if (self.welcome_unicode) "cotton · light enough to carry far" else "cotton - light enough to carry far";
+        const row = self.size.height / 3;
+        _ = win.print(&.{.{ .text = title, .style = self.style }}, .{ .row_offset = row, .col_offset = (self.size.width -| @as(u16, title.len)) / 2, .wrap = .none });
+        if (row + 1 < self.size.height) {
+            const subtitle_width = @import("display_text.zig").width(subtitle, .{ .viewport = self.method });
+            _ = win.print(&.{.{ .text = subtitle, .style = self.welcome_quiet }}, .{ .row_offset = row + 1, .col_offset = @intCast((self.size.width -| subtitle_width) / 2), .wrap = .none });
+        }
+    }
+
     var first: ?resident.Point = null;
     if (visible.first < self.window.count) {
         const entry = self.window.entries[visible.first];
@@ -495,10 +511,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             for (0..self.size.height) |row| {
                 const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
-                (Row{ .document = &self.window.document, .cells = cells, .line = position.offset }).covered(range, columns);
-                for (cells, columns) |*cell, selected| if (selected) {
-                    cell.style.reverse = true;
-                };
+                (Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), position) }).covered(range, columns);
+                selecting.highlight(cells, columns);
             }
         }
     }
@@ -562,7 +576,7 @@ fn testCell(surface: vxfw.Surface, row: usize, col: usize) []const u8 {
     return surface.buffer[row * surface.size.width + col].char.grapheme;
 }
 
-test "FeedView bottom alignment and scroll round trip include the activity tail away from end" {
+fn activityScrollRoundTrip() !void {
     const window = try testWindow();
     defer std.testing.allocator.destroy(window);
     try window.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\na\nb\n" } }});
@@ -630,7 +644,7 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     try prepared.prepare();
     const first_mark = prepared.collapsed(0, prepared.text().len).last.?;
     const first = std.mem.indexOf(u8, prepared.text(), "┄").?;
-    const a: View.Collapsed = .{ .source = .activity, .position = 11, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) }, .row = true };
+    const a: View.Collapsed = .{ .source = .activity, .position = 11, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
     var b = a;
     b.position = 12;
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{ .{ .offset = first, .target = a }, .{ .offset = first_mark, .target = b } } }});
@@ -731,7 +745,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    const words = "× Model reply unreadable\n";
+    const words = "× The model's reply didn't come through\n";
     const older = "ctrl+r retries elsewhere\n";
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = .{ .bytes = older }, .tight = true },
@@ -744,7 +758,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
-    const shown = older ++ "× Model reply unreadable · ctrl+r retries\n";
+    const shown = older ++ "× The model's reply didn't come through · ctrl+r retries\n";
     const start = std.mem.lastIndexOf(u8, shown, "ctrl+r retries").?;
     var expected: viewport.Sized(256, true) = .{ .sidenotes = true, .quotes = true };
     try expected.append(shown);
@@ -783,7 +797,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
@@ -793,7 +807,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
     _ = try testFrame(&view, arena.allocator(), 80, 4);
-    const at: Cell = .{ .row = 3, .col = 27 };
+    const at: Cell = .{ .row = 3, .col = 42 };
     const Cases = enum { drag_same, drag_away_back, release_elsewhere, leave, held, unkeyed, other_ending, hidden_press, disabled, no_press };
     for (std.enums.values(Cases)) |case| {
         view.retry_actionable = case != .disabled;
@@ -824,7 +838,7 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) } };
@@ -835,8 +849,8 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     _ = try testFrame(&view, arena.allocator(), 80, 4);
     for (std.enums.values(vaxis.Mouse.Button)) |button| {
         clicks.count = 0;
-        try retryMouse(&view, &ctx, .{ .row = 3, .col = 27 }, .press);
-        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 27, .button = button, .mods = .{}, .type = .release } });
+        try retryMouse(&view, &ctx, .{ .row = 3, .col = 42 }, .press);
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 42, .button = button, .mods = .{}, .type = .release } });
         try std.testing.expectEqual(@as(usize, @intFromBool(button == .left or button == .none)), clicks.count);
         try std.testing.expect(view.retry_press == null);
     }
@@ -849,7 +863,7 @@ test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earli
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\n");
     try prepared.prepare();
     const aggregate = prepared.collapsed(0, prepared.length).last.?;
-    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = target }} }});
     var anchor: Feed = .{};
     var view: Self = .{ .window = window, .anchor = &anchor };
@@ -888,7 +902,7 @@ test "FeedView tool rows and retry chips hover only their painted targets withou
     try heading.prepare();
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&heading), .tight = true },
-        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" }, .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" }, .tight = true },
     });
     var anchor: Feed = .{};
     var actions: Actions = .{};
@@ -996,7 +1010,7 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
     var prepared: viewport.Sized(1024, true) = .{};
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\nplain " ++ Text.link_open ++ Text.session_link ++ "k7m2qx" ++ Text.link_end ++ "Review this plan" ++ Text.link_close ++ " end\n");
     try prepared.prepare();
-    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = message }} }});
     var anchor: Feed = .{};
     var actions: Actions = .{};
@@ -1235,7 +1249,7 @@ fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
     try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
 }
 
-test "FeedView optimistic multiline band and attached note stay inside the viewport with or without colour" {
+fn optimisticBand() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
@@ -1245,11 +1259,20 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
         defer arena.deinit();
         const frame = try testFrame(&view, arena.allocator(), width, 6);
         try std.testing.expectEqual(@as(usize, width) * 6, frame.buffer.len);
-        try std.testing.expectEqual(@as(u32, 3), window.tail_rows);
-        try std.testing.expectEqualStrings("›", testCell(frame, 3, 0));
-        try std.testing.expectEqualStrings("s", testCell(frame, 4, 2));
+        try std.testing.expectEqual(@as(u32, 5), window.tail_rows);
+        try std.testing.expectEqualStrings("›", testCell(frame, 2, 2));
+        try std.testing.expectEqualStrings("s", testCell(frame, 3, 4));
         try std.testing.expectEqualStrings("N", testCell(frame, 5, 2));
-        for (3..5) |row| for (0..width) |col| try std.testing.expectEqual(if (colour) view.colours.user_band else view.style.bg, frame.readCell(col, row).style.bg);
+        for (2..4) |row| for (0..width) |col| {
+            const cell = frame.readCell(col, row);
+            try std.testing.expectEqual(if (colour) view.colours.user_band else view.style.bg, cell.style.bg);
+            try std.testing.expectEqual(!colour, cell.style.reverse);
+        };
+        for ([_]u16{ 1, 4 }) |row| {
+            const cell = frame.readCell(0, row);
+            try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cell.style.bg) else try std.testing.expect(cell.style.reverse);
+        }
         try std.testing.expectEqual(view.style.bg, frame.readCell(2, 5).style.bg);
         try std.testing.expectEqual(if (colour) view.colours.quiet else view.style.fg, frame.readCell(2, 5).style.fg);
         try std.testing.expectEqual(@as(usize, 0), window.count);
@@ -1257,7 +1280,7 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
     };
 }
 
-test "FeedView maximum original and escaped preview remain bounded and scroll without oversized surfaces" {
+fn boundedPreview() !void {
     const bytes = try std.testing.allocator.alloc(u8, SessionInput.capacity);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0x1b);
@@ -1299,7 +1322,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try testFrame(&view, arena.allocator(), width, 6);
-        try std.testing.expectEqualStrings("›", testCell(first, 4, 0));
+        try std.testing.expectEqualStrings("›", testCell(first, 3, 2));
         try std.testing.expectEqualStrings("N", testCell(first, 5, 2));
         try std.testing.expectEqual(@as(usize, 1), window.count);
         try std.testing.expectEqual(@as(u32, 0), window.tail_rows);
@@ -1308,7 +1331,99 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         try std.testing.expectEqualDeep(first.buffer, repeated.buffer);
         view.message_note.?.key = @splat('B');
         const other = try testFrame(&view, arena.allocator(), width, 6);
-        try std.testing.expectEqualStrings("›", testCell(other, 5, 0));
+        try std.testing.expectEqualStrings("›", testCell(other, 4, 2));
         try std.testing.expectEqualStrings(original, window.document.text());
     }
+}
+
+test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var short: viewport.Sized(512, true) = .{};
+        try short.append(PendingText.user_message_on ++ "› short\n" ++ PendingText.user_message_off);
+        try short.prepare();
+        var long: viewport.Sized(512, true) = .{};
+        try long.append(PendingText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try long.append("x");
+        try long.append("\n" ++ PendingText.user_message_off);
+        try long.prepare();
+        try window.append(&.{
+            .{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&short) },
+            .{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&long) },
+        });
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 10);
+        var first: ?u16 = null;
+        var second: ?u16 = null;
+        for (0..frame.size.height) |row| {
+            if (std.mem.eql(u8, testCell(frame, row, 2), "›")) {
+                if (first == null) first = @intCast(row) else if (second == null) second = @intCast(row) else return error.TestUnexpectedResult;
+            }
+        }
+        const first_row = first orelse return error.TestUnexpectedResult;
+        const second_row = second orelse return error.TestUnexpectedResult;
+        try std.testing.expect(second_row >= first_row + 4);
+        const gap_row = second_row - 2;
+        for (0..width) |column| {
+            const gap = frame.readCell(@intCast(column), gap_row);
+            try std.testing.expectEqualStrings(" ", gap.char.grapheme);
+            try std.testing.expectEqual(view.style.bg, gap.style.bg);
+            try std.testing.expect(!gap.style.reverse);
+            for ([_]u16{ gap_row - 1, gap_row + 1 }) |row| {
+                const padding = frame.readCell(@intCast(column), row);
+                try std.testing.expectEqualStrings(" ", padding.char.grapheme);
+                if (colour) try std.testing.expectEqual(view.colours.user_band, padding.style.bg) else try std.testing.expect(padding.style.reverse);
+            }
+        }
+    };
+}
+
+fn activityGap() !void {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |kind| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        if (kind == 1 or kind == 2 or kind == 4) {
+            var document: viewport.Sized(128, true) = .{};
+            try document.append(if (kind == 1 or kind == 4) PendingText.user_message_on ++ "› hello\n" ++ PendingText.user_message_off else "assistant\n");
+            try document.prepare();
+            try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        }
+        const activity: vxfw.Text = .{ .text = "Thinking" };
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } }, .tail = if (kind >= 3) null else activity.widget(), .pending = if (kind == 0 or kind == 5) .{ .text = "hello" } else null };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 8);
+        const gap: u32 = if (kind == 0 or kind == 1) 1 else 0;
+        try std.testing.expectEqual(@as(u32, if (kind == 0 or kind == 5) 3 else 0) + gap + @as(u32, if (kind >= 3) 0 else 1), window.tail_rows);
+        if (gap != 0) {
+            try std.testing.expectEqual(@as(usize, 1), frame.children.len);
+            const row: usize = @intCast(frame.children[0].origin.row - 1);
+            const cap = frame.readCell(0, row - 1);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cap.style.bg) else try std.testing.expect(cap.style.reverse);
+            for (0..width) |column| {
+                const cell = frame.readCell(column, row);
+                try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+                try std.testing.expectEqual(view.style.bg, cell.style.bg);
+                try std.testing.expect(!cell.style.reverse);
+            }
+        }
+        _ = try testFrame(&view, arena.allocator(), width, 2);
+    };
+}
+
+pub fn testActivityTail() !void {
+    try activityScrollRoundTrip();
+    try activityGap();
+}
+
+pub fn testMessageLayout() !void {
+    try optimisticBand();
+    try boundedPreview();
+    try viewport.testMessageLayout();
 }

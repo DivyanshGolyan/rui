@@ -24,14 +24,14 @@ fn Screen(comptime Body: type) type {
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
         host: ?vxfw.Widget = null,
-        content_gutter: bool = false,
+        content_gutter: u16 = 0,
         marker: ?vxfw.Widget = null,
-        overlay: ?vxfw.Widget = null,
-        overlay_reserves_space: bool = false,
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
-        pub const Part = enum { whole, list };
+        pub const Part = enum { whole, list, input_host };
+
+        const empty: vxfw.Text = .{ .text = "" };
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -51,11 +51,6 @@ fn Screen(comptime Body: type) type {
             try self.on_event(self.userdata, ctx, value);
         }
 
-        fn closeOverlay(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            try self.on_event(self.userdata, ctx, .{ .key_press = .{ .codepoint = @import("vaxis").Key.escape } });
-        }
-
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
             return self.drawPart(ctx, .whole);
@@ -65,13 +60,14 @@ fn Screen(comptime Body: type) type {
             const own = switch (part) {
                 .whole => self.widget(),
                 .list => self.listWidget(),
+                .input_host => self.widget(),
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
+            lower_children[0] = .{ .widget = if (part == .input_host) empty.widget() else self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker, .style = self.style };
@@ -82,51 +78,34 @@ fn Screen(comptime Body: type) type {
                 lower_children[count] = .{ .widget = tail };
                 count += 1;
             };
-            if (part != .list) if (self.host) |host| {
+            if (part == .whole) if (self.host) |host| {
                 lower_children[count] = .{ .widget = host };
                 count += 1;
             };
             lower.* = .{ .children = lower_children[0..count] };
-            const feed: vxfw.Widget = if (self.content_gutter) gutter: {
+            const feed: vxfw.Widget = if (self.content_gutter > 0) gutter: {
                 const padding = try ctx.arena.create(vxfw.Padding);
-                padding.* = .{ .child = lower.widget(), .padding = .{ .left = 1 } };
+                padding.* = .{ .child = lower.widget(), .padding = .{ .left = self.content_gutter } };
                 break :gutter padding.widget();
             } else lower.widget();
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (self.header) |header| {
+            if (part != .input_host) if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            }
+            };
             upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
-            const overlay = if (part == .list) null else self.overlay;
-            const reserved: ?*ReservedPanel = if (self.overlay_reserves_space and overlay != null) reserve: {
-                const slot = try ctx.arena.create(ReservedPanel);
-                slot.* = .{ .child = overlay.? };
-                break :reserve slot;
-            } else null;
             const column = try ctx.arena.create(Stack);
-            const column_children = try ctx.arena.alloc(Stack.Child, if (part == .list) 1 else if (reserved != null) 3 else 2);
+            const column_children = try ctx.arena.alloc(Stack.Child, if (part == .list) 1 else 2);
             column_children[0] = .{ .widget = upper.widget(), .sizing = .fill };
-            if (reserved) |slot| column_children[1] = .{ .widget = slot.spaceWidget() };
-            const input_index = column_children.len - 1;
-            if (part != .list) column_children[input_index] = .{ .widget = self.input };
+            if (part != .list) column_children[1] = .{ .widget = self.input };
             column.* = .{ .children = column_children };
             var base = try column.widget().draw(ctx);
-            try groundBase(ctx, &base, self.style, if (reserved) |slot| slot.spaceWidget() else null);
-            const panels = try ctx.arena.alloc(Layer.Panel, if (overlay != null) 1 else 0);
-            if (overlay) |shown| panels[0] = .{
-                .child = if (reserved) |slot| slot.shownWidget() else shown,
-                .bottom = @intCast(base.children[input_index].origin.row),
-                .top = if (reserved != null) @intCast(base.children[1].origin.row) else if (part == .whole and self.header != null and base.children[input_index].origin.row > 0) base.children[0].surface.children[0].surface.size.height else 0,
-                .style = self.style,
-                .userdata = self,
-                .on_close = closeOverlay,
-            };
+            try groundBase(ctx, &base, self.style, null);
             const layer = try ctx.arena.create(Layer);
-            layer.* = .{ .base = column.widget(), .panels = panels };
+            layer.* = .{ .base = column.widget() };
             var surface = try layer.drawAbove(ctx, base);
             surface.widget = own;
             return surface;
@@ -189,30 +168,6 @@ const Ground = struct {
     }
 };
 
-const ReservedPanel = struct {
-    child: vxfw.Widget,
-    drawn: vxfw.Surface = undefined,
-
-    fn spaceWidget(self: *ReservedPanel) vxfw.Widget {
-        return .{ .userdata = self, .drawFn = space };
-    }
-
-    fn shownWidget(self: *ReservedPanel) vxfw.Widget {
-        return .{ .userdata = self, .drawFn = shown };
-    }
-
-    fn space(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *ReservedPanel = @ptrCast(@alignCast(raw));
-        self.drawn = try self.child.draw(ctx);
-        return .{ .widget = self.spaceWidget(), .size = self.drawn.size, .buffer = &.{}, .children = &.{} };
-    }
-
-    fn shown(raw: *anyopaque, _: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *ReservedPanel = @ptrCast(@alignCast(raw));
-        return self.drawn;
-    }
-};
-
 const Marker = struct {
     child: vxfw.Widget,
     style: @import("vaxis").Style,
@@ -254,9 +209,7 @@ test "App screens compose content input facts status and an overlay without owni
     var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
     var facade: Content = .{ .shown = transcript.widget() };
     var session: Session = .{ .content = &facade, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
-    const overlay: vxfw.Text = .{ .text = "Commands" };
-    overview.overlay = overlay.widget();
-    session.overlay = overlay.widget();
+
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var event_context: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -264,10 +217,9 @@ test "App screens compose content input facts status and an overlay without owni
         try screen.handleEvent(&event_context, .tick);
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const drawn = try screen.draw(ctx);
-        try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
+        try std.testing.expectEqual(@as(usize, 1), drawn.children.len);
         const column = drawn.children[0].surface;
         try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 19), drawn.children[1].origin.row);
         try std.testing.expect(column.children[1].surface.widget.eql(input.widget()));
         for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
             const tiny = try screen.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
@@ -285,7 +237,7 @@ test "App screens compose content input facts status and an overlay without owni
     session.marker = marker.widget();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     const active = try session.widget().draw(ctx);
-    try std.testing.expectEqual(@as(usize, 2), active.children.len);
+    try std.testing.expectEqual(@as(usize, 1), active.children.len);
     const column = active.children[0].surface;
     const upper = column.children[0].surface;
     const lower = upper.children[1];
@@ -297,7 +249,6 @@ test "App screens compose content input facts status and an overlay without owni
     try std.testing.expectEqual(@as(u8, 1), marker_row.surface.children[0].z_index);
     try std.testing.expectEqual(@as(u16, 16), lower.surface.children[0].surface.size.height);
     try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
-    try std.testing.expectEqual(@as(u8, 2), active.children[1].z_index);
     session.tail = null;
     const browsing = try session.widget().draw(ctx);
     const browsing_lower = browsing.children[0].surface.children[0].surface.children[1];
@@ -342,7 +293,7 @@ test "App screens render the original composition with painted marker rows" {
         screen.header = if (flags & 1 != 0) header.widget() else null;
         screen.tail = if (flags & 2 != 0) tail.widget() else null;
         screen.marker = if (flags & 4 != 0) marker.widget() else null;
-        screen.overlay = if (flags & 8 != 0) overlay.widget() else null;
+        input.panel = if (flags & 8 != 0) .{ .inline_panel = overlay.widget() } else null;
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const surface = try screen.widget().draw(ctx);
         try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
@@ -350,7 +301,7 @@ test "App screens render the original composition with painted marker rows" {
         @memset(terminal.buf, .{});
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal };
         try surface.render(window, input.composer.widget());
-        if (screen.marker != null and screen.overlay == null and width > 0 and height > 0) {
+        if (screen.marker != null and input.panel == null and width > 0 and height > 0) {
             const upper = surface.children[0].surface.children[0].surface;
             const lower = upper.children[upper.children.len - 1];
             const row = lower.surface.children[1];
@@ -368,7 +319,7 @@ test "App screens render the original composition with painted marker rows" {
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    try std.testing.expectEqual(@as(u64, 9710008619075226950), hash.final());
+    try std.testing.expectEqual(@as(u64, 17161666746937587859), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {
@@ -453,90 +404,34 @@ test "App screens update layout state through exhausted resizes for every option
     };
 }
 
-test "App screens reserve one measured natural panel before feed without shrinking input" {
+test "SUI-35 App screens retain one pane of cells in the cell arena" {
+    const vaxis = @import("vaxis");
     const Body = struct {
-        draws: usize = 0,
-        offered: vxfw.Size = .{},
+        short: bool = false,
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = draw };
         }
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            self.draws += 1;
-            self.offered = ctx.max.size();
-            return vxfw.Surface.init(ctx.cell_arena, self.widget(), self.offered);
-        }
-        fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
-    };
-    const Panel = struct {
-        rows: u16 = 1,
-        draws: usize = 0,
-        fn widget(self: *@This()) vxfw.Widget {
-            return .{ .userdata = self, .drawFn = draw };
-        }
-        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.draws += 1;
-            return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @min(self.rows, ctx.max.height.?) });
-        }
-    };
-    var bytes = "kept\ndraft".*;
-    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
-    var input: InputArea = .{ .composer = .{ .editor = &editor }, .status = null };
-    var body: Body = .{};
-    var panel: Panel = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .userdata = &body, .on_event = Body.event, .overlay_reserves_space = true };
-    for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 2, 4, 7, 18, 30, 40 }) |height| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
-        screen.overlay = null;
-        const before = try screen.widget().draw(ctx);
-        const ordinary_input = before.children[0].surface.children[1];
-        for ([_]u16{ 1, 4, 50 }) |rows| {
-            panel.rows = rows;
-            panel.draws = 0;
-            body.draws = 0;
-            screen.overlay = panel.widget();
-            const hosted = try screen.widget().draw(ctx);
-            const base = hosted.children[0].surface;
-            const feed = base.children[0];
-            const slot = base.children[1];
-            const composer = base.children[2];
-            const above = hosted.children[1];
-            try std.testing.expectEqual(@as(usize, 1), panel.draws);
-            try std.testing.expectEqual(@as(usize, 1), body.draws);
-            try std.testing.expectEqualDeep(ordinary_input.surface.size, composer.surface.size);
-            try std.testing.expectEqualDeep(ordinary_input.origin, composer.origin);
-            try std.testing.expectEqual(@min(rows, height - composer.surface.size.height), slot.surface.size.height);
-            try std.testing.expectEqual(body.offered.height, feed.surface.size.height);
-            try std.testing.expectEqual(@as(u16, height), body.offered.height + above.surface.size.height + composer.surface.size.height);
-            try std.testing.expectEqual(feed.surface.size.height, above.origin.row);
-            try std.testing.expectEqual(slot.origin.row, above.origin.row);
-            try std.testing.expectEqual(slot.surface.size.height, above.surface.size.height);
-            try std.testing.expectEqual(composer.origin.row, above.origin.row + above.surface.size.height);
-            try std.testing.expect(above.surface.children[0].surface.widget.eql(panel.widget()));
-            try std.testing.expectEqualStrings("kept\ndraft", editor.text());
-            try std.testing.expectEqual(@as(usize, 4), editor.cursor());
-        }
-    };
-}
-
-test "App screens allocate cells once for a covered pane and its gutter" {
-    const Body = struct {
-        fn widget(self: *@This()) vxfw.Widget {
-            return .{ .userdata = self, .drawFn = draw };
-        }
-        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+            const size = ctx.max.size();
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = if (self.short) size.width / 2 else size.width, .height = if (self.short) size.height / 2 else size.height });
             @memset(surface.buffer, .{ .char = .{ .grapheme = "c", .width = 1 } });
             return surface;
         }
         fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
-        fn cells(surface: vxfw.Surface) usize {
+        fn cells(surface: vxfw.Surface, storage: []const u8) !usize {
+            const start = @intFromPtr(storage.ptr);
+            const end = start + storage.len;
+            if (surface.buffer.len > 0) {
+                const ptr = @intFromPtr(surface.buffer.ptr);
+                try std.testing.expect(ptr >= start and ptr + std.mem.sliceAsBytes(surface.buffer).len <= end);
+            }
+            if (surface.children.len > 0) {
+                const ptr = @intFromPtr(surface.children.ptr);
+                try std.testing.expect(ptr < start or ptr >= end);
+            }
             var count = surface.buffer.len;
-            for (surface.children) |child| count += cells(child.surface);
+            for (surface.children) |child| count += try cells(child.surface, storage);
             return count;
         }
     };
@@ -544,83 +439,62 @@ test "App screens allocate cells once for a covered pane and its gutter" {
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 0);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var body: Body = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
-    for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
+    for ([_]bool{ false, true }) |short| for ([_]u16{ 0, 1, 2 }) |gutter| for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
+        body.short = short;
+        screen.content_gutter = gutter;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const drawn = try screen.drawPart(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} }, part);
-        try std.testing.expectEqual(@as(usize, width) * height, Body.cells(drawn));
-        try std.testing.expectEqual(@as(usize, 0), drawn.buffer.len);
+        // Allow temporary draw allocations as well as the cells retained in the frame.
+        const storage = try std.testing.allocator.alignedAlloc(u8, .of(vaxis.Cell), 65536 + 4 * @as(usize, width) * height * @sizeOf(vaxis.Cell));
+        defer std.testing.allocator.free(storage);
+        var cell_arena: std.heap.FixedBufferAllocator = .init(storage);
+        const widget = if (part == .whole) screen.widget() else screen.listWidget();
+        const drawn = try widget.draw(.{ .arena = arena.allocator(), .cell_arena = cell_arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(usize, width) * height, try Body.cells(drawn, storage));
     };
 }
 
-test "App screens ground gutter short rows and empty space without changing hit targets" {
+test "SUI-32 App screens ground uncovered content and preserve content hit targets" {
     const vaxis = @import("vaxis");
-    const style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 7 } };
-    const painted: vaxis.Cell = .{ .char = .{ .grapheme = "x", .width = 1 }, .style = .{ .bg = .{ .index = 2 } } };
-    const text: vxfw.Text = .{ .text = "" };
-    const Handler = struct {
+    const Body = struct {
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = draw, .eventHandler = event };
+        }
         fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const size = ctx.max.size();
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = size.width / 2, .height = size.height / 2 });
+            @memset(surface.buffer, .{ .char = .{ .grapheme = "x", .width = 1 }, .style = .{ .bg = .{ .index = 2 } } });
+            return surface;
+        }
     };
-    var hit_widget = text.widget();
-    hit_widget.eventHandler = Handler.event;
-    for ([_]u16{ 1, 2, 7, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for (0..3) |mode| {
+    const style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 7 } };
+    const empty: vxfw.Text = .{ .text = "" };
+    var body: Body = .{};
+    var screen: Screen(Body) = .{ .content = &body, .input = empty.widget(), .userdata = &body, .on_event = Body.event, .style = style };
+    for ([_]u16{ 0, 1, 2 }) |gutter| for ([_]u16{ 1, 2, 7, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
-        const row_width: u16 = if (mode == 0) 0 else width / 2;
-        const body_height: u16 = if (mode == 2) 0 else (height - 1) / 2;
-        const ctx: vxfw.DrawContext = .{ .arena = alloc, .cell_arena = alloc, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
-        const row = try vxfw.Surface.init(ctx.cell_arena, hit_widget, .{ .width = row_width, .height = 1 });
-        @memset(row.buffer, painted);
-        const body = try vxfw.Surface.init(ctx.cell_arena, hit_widget, .{ .width = width - 1, .height = body_height });
-        @memset(body.buffer, painted);
-        const children = try alloc.dupe(vxfw.SubSurface, &.{
-            .{ .origin = .{ .row = 1, .col = 1 }, .surface = body },
-            .{ .origin = .{ .row = 0, .col = 0 }, .surface = row },
-        });
-        var base: vxfw.Surface = .{ .widget = hit_widget, .size = .{ .width = width, .height = height }, .buffer = &.{}, .children = children };
-        var before: std.ArrayList(vxfw.HitResult) = .empty;
-        try base.hitTest(alloc, &before, .{ .row = height - 1, .col = 0 });
-        try groundBase(ctx, &base, style, null);
-        var after: std.ArrayList(vxfw.HitResult) = .empty;
-        try base.hitTest(alloc, &after, .{ .row = height - 1, .col = 0 });
-        try std.testing.expectEqualDeep(before.items, after.items);
+        screen.content_gutter = gutter;
+        const frame = try screen.listWidget().draw(.{ .arena = alloc, .cell_arena = alloc, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var terminal: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = try alloc.alloc(vaxis.Cell, @as(usize, width) * height) };
         @memset(terminal.buf, .{});
-        try base.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal }, text.widget());
+        try frame.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal }, empty.widget());
+        const left = @min(gutter, width);
         for (0..height) |y| for (0..width) |x| {
-            const covered = (y == 0 and x < row_width) or (y >= 1 and y < 1 + body_height and x >= 1);
-            const expected: vaxis.Cell = if (covered) painted else .{ .style = style };
+            const covered = x >= left and x < left + (width - left) / 2 and y < height / 2;
+            const expected: vaxis.Cell = if (covered) .{ .char = .{ .grapheme = "x", .width = 1 }, .style = .{ .bg = .{ .index = 2 } } } else .{ .style = style };
             try std.testing.expectEqualDeep(expected, terminal.readCell(@intCast(x), @intCast(y)).?);
+            var hits: std.ArrayList(vxfw.HitResult) = .empty;
+            try frame.hitTest(alloc, &hits, .{ .row = @intCast(y), .col = @intCast(x) });
+            var body_hit = false;
+            for (hits.items) |hit| if (hit.widget.eql(body.widget())) {
+                body_hit = true;
+            };
+            try std.testing.expectEqual(covered, body_hit);
         };
     };
-}
-
-test "App screens allocate uncovered ground strips only in cell_arena" {
-    const vaxis = @import("vaxis");
-    const text: vxfw.Text = .{ .text = "" };
-    var cell_storage: [4096]u8 align(@alignOf(vaxis.Cell)) = undefined;
-    var cells: std.heap.FixedBufferAllocator = .init(&cell_storage);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = cells.allocator(), .min = .{}, .max = .{ .width = 8, .height = 4 }, .cell_size = .{} };
-    const body = try vxfw.Surface.init(ctx.cell_arena, text.widget(), .{ .width = 6, .height = 2 });
-    const children = try ctx.arena.dupe(vxfw.SubSurface, &.{.{ .origin = .{ .row = 1, .col = 1 }, .surface = body }});
-    var base: vxfw.Surface = .{ .widget = text.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = children };
-    try groundBase(ctx, &base, .{}, null);
-    try std.testing.expectEqual(@as(usize, 0), base.buffer.len);
-    try std.testing.expectEqual(@as(usize, 5), base.children.len);
-    const start = @intFromPtr(cell_storage[0..].ptr);
-    const end = start + cell_storage.len;
-    const metadata = @intFromPtr(base.children.ptr);
-    try std.testing.expect(metadata < start or metadata >= end);
-    var count: usize = 0;
-    for (base.children) |child| {
-        const ptr = @intFromPtr(child.surface.buffer.ptr);
-        try std.testing.expect(ptr >= start and ptr + std.mem.sliceAsBytes(child.surface.buffer).len <= end);
-        count += child.surface.buffer.len;
-    }
-    try std.testing.expectEqual(@as(usize, 32), count);
-    try std.testing.expectEqual(count * @sizeOf(vaxis.Cell), cells.end_index);
 }

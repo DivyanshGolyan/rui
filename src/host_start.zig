@@ -1,5 +1,8 @@
+const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const hs = @import("host_settings.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
+const transfer = @import("host_launch_transfer.zig");
 const cli_args = @import("cli_args.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
@@ -156,6 +159,8 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
         try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
         document = try parse(gpa, bytes, failure);
     }
+    var automatic_buffer: AutomaticBuffer = undefined;
+    const automatic_set: []const protocol.Provider = if (!document.object.contains("providers")) automaticProviders(init, &automatic_buffer) else &.{};
     if (value) |given| {
         try input(init, settings, path, given, failure);
         const all = try complete(gpa, settings, failure);
@@ -172,7 +177,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
                 }
             }
         }
-        try put(gpa, &document, path, admitted);
+        try editProviders(gpa, &document, path, admitted, automatic_set);
     } else {
         const all = try complete(gpa, settings, failure);
         if (lookup(all, path)) |existing| {
@@ -190,12 +195,13 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
             };
             try assign(settings, init.gpa, path, sample, failure);
         }
-        remove(&document, path);
+        try editProviders(gpa, &document, path, null, automatic_set);
     }
     const bytes = try encoded(gpa, document);
     if (bytes.len > hs.max_document_bytes) return invalid(failure, "settings", "saved document exceeds the document byte bound");
     settings.deinit();
     try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+    try detachedPaths(settings, failure);
     return bytes;
 }
 
@@ -266,10 +272,9 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             const automatic = !document.object.contains("providers");
             if (ctx.key == .existing) {
                 if (automatic) {
-                    var entry = try defaultApiEntry(ctx.init) orelse return error.ConnectionSuperseded;
+                    var entry: hs.ProviderEntry(.api_key) = .{};
                     try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, &entry);
                 } else {
-                    try explicitBaseUrl(ctx.init, settings, &failure);
                     const entry = if (settings.providers.entries.openai) |*entry| entry else return error.ConnectionSuperseded;
                     try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, entry);
                 }
@@ -278,7 +283,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             const key_bytes = switch (ctx.key) {
                 .provided => |value| value,
                 .existing => existing: {
-                    try resolveProviders(ctx.init, settings, .{}, &failure);
+                    try resolveProviders(ctx.init, settings, &failure);
                     const entry = settings.providers.entries.openai orelse return error.ApiKeyMissing;
                     if (!api_key.valid(entry.key.value())) return error.ApiKeyMissing;
                     break :existing try ctx.gpa.dupe(u8, entry.key.value());
@@ -288,9 +293,9 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             try assign(settings, ctx.init.gpa, "providers.openai.key", try std.fmt.allocPrint(ctx.gpa, "file:{s}", .{ctx.key_file}), &failure);
             try assign(settings, ctx.init.gpa, "providers.openai.unauthenticated", "false", &failure);
             const all = try complete(ctx.gpa, settings, &failure);
-            if (!document.object.contains("providers")) {
-                try put(ctx.gpa, &document, "providers", lookup(all, "providers").?);
-            } else try put(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?);
+            var automatic_buffer: AutomaticBuffer = undefined;
+            const automatic_set: []const protocol.Provider = if (automatic) automaticProviders(ctx.init, &automatic_buffer) else &.{};
+            try editProviders(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?, automatic_set);
             const bytes = try encoded(ctx.gpa, document);
             if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
             settings.deinit();
@@ -410,7 +415,7 @@ fn matchConnectionSource(init: std.process.Init, expected: *const ConnectionInfo
 fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !void {
     if (key.source != .default) return;
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
+    const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
     key.source = .{ .file = .{} };
     try key.source.file.text.set(path);
 }
@@ -422,9 +427,8 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
     defer settings.deinit();
     var problem: cli_args.Refusal = undefined;
     const parsed = try cli_args.Command.host_serve.definition().parse(&.{}, init.arena.allocator(), &problem);
-    var fixtures: providers.Fixtures = .{};
     var failure: start_report.Failure = undefined;
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     var result: ConnectionInfo = .{};
     try result.endpoint.set(if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*value| value.slice() else openai_endpoint else openai_endpoint);
     if (settings.providers.entries.openai) |*entry| {
@@ -434,7 +438,7 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
             result.key_source = entry.key.source;
         }
     } else return result;
-    resolveProviders(init, settings, fixtures, &failure) catch {
+    resolveProviders(init, settings, &failure) catch {
         result.readiness = .credential_error;
         return result;
     };
@@ -460,66 +464,65 @@ pub fn listPaths(out: *std.Io.Writer) !void {
     for (hs.leaves) |leaf| try out.print("{s}\t{s}\t{s}\t{s}\n", .{ leaf.pattern, leaf.kind, leaf.default, leaf.doc });
 }
 
-fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
-    try assign(settings, init.gpa, "providers", "{}", failure);
+const AutomaticBuffer = [std.enums.values(protocol.Provider).len]protocol.Provider;
+
+/// The providers a Host with no saved `providers` object serves automatically: each one whose credential is usable.
+fn automaticProviders(init: std.process.Init, buffer: *AutomaticBuffer) []const protocol.Provider {
+    var count: usize = 0;
     inline for (std.enums.values(protocol.Provider)) |provider| {
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const usable = switch (comptime provider.facts().credential) {
             .sign_in => if (comptime provider.facts().model_list == .catalog) true else usable: {
-                const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch break :usable false;
+                const path = credential_location.default(init.environ_map, provider, &path_buffer) catch break :usable false;
                 const status = codex_auth.localStatus(path, codex_auth.nowSeconds(init.io)) catch break :usable false;
                 break :usable status == .configured or status == .renewal_due;
             },
             .api_key => usable: {
-                const path = api_key.path(init.environ_map, &path_buffer) catch break :usable false;
+                const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch break :usable false;
                 break :usable api_key.present(path) catch false;
             },
         };
-        if (usable) serve: {
-            const at = "providers." ++ @tagName(provider);
-            if (comptime provider.facts().credential == .api_key) {
-                @field(settings.providers.entries, @tagName(provider)) = try defaultApiEntry(init) orelse break :serve;
-                break :serve;
-            }
-            try assign(settings, init.gpa, at, "{}", failure);
+        if (usable) {
+            buffer[count] = provider;
+            count += 1;
         }
     }
+    return buffer[0..count];
 }
 
-fn defaultApiEntry(init: std.process.Init) !?hs.ProviderEntry(.api_key) {
-    var entry: hs.ProviderEntry(.api_key) = .{};
-    if (init.environ_map.get(providers.openai_base_url_variable)) |base| {
-        const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
-            if (err != error.InvalidBaseUrl) return err;
-            stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; this Host starts without {s}.\n", .{protocol.Provider.openai.shown()});
-            return null;
-        };
-        defer init.gpa.free(endpoint);
-        entry.endpoint = .{};
-        try entry.endpoint.?.text.set(endpoint);
+fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    var buffer: AutomaticBuffer = undefined;
+    const automatic = automaticProviders(init, &buffer);
+    try assign(settings, init.gpa, "providers", "{}", failure);
+    inline for (std.enums.values(protocol.Provider)) |provider| {
+        if (std.mem.indexOfScalar(protocol.Provider, automatic, provider) != null) try assign(settings, init.gpa, "providers." ++ @tagName(provider), "{}", failure);
     }
-    return entry;
 }
 
-fn explicitBaseUrl(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
-    const entry = settings.providers.entries.openai orelse return;
-    if (entry.endpoint != null) return;
-    const base = init.environ_map.get(providers.openai_base_url_variable) orelse return;
-    const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
-        if (err == error.InvalidBaseUrl) stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; the Host did not start.\n", .{});
-        return err;
-    };
-    defer init.gpa.free(endpoint);
-    try text(settings, init.gpa, "providers.openai.endpoint", endpoint, failure);
+/// Owner of a saved-document provider edit. A `providers.NAME...` assignment or unset on a document with no
+/// `providers` object first materializes the automatic set, so the edit changes only that provider. An unset
+/// of anything else under `providers` on such a document changes nothing. Assigning `providers` itself, or
+/// editing a document that already has `providers`, is a plain exact put or remove.
+fn editProviders(gpa: std.mem.Allocator, document: *std.json.Value, path: []const u8, value: ?std.json.Value, automatic: []const protocol.Provider) !void {
+    if (std.mem.startsWith(u8, path, "providers.") and !document.object.contains("providers")) {
+        const name = path["providers.".len..];
+        const leaf = std.mem.indexOfScalar(u8, name, '.') == null;
+        if (value == null and !(leaf and automaticNamed(automatic, name))) return;
+        var set: std.json.Value = .{ .object = .{} };
+        for (automatic) |provider| try set.object.put(gpa, try gpa.dupe(u8, @tagName(provider)), .{ .object = .{} });
+        try put(gpa, document, "providers", set);
+    }
+    if (value) |given| try put(gpa, document, path, given) else remove(document, path);
 }
 
-pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
-    if (parsed.get("test-chatgpt-fixture-endpoint") != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
-    if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null) return error.FixtureCredentialPathRequired;
+fn automaticNamed(automatic: []const protocol.Provider, name: []const u8) bool {
+    for (automatic) |provider| if (std.mem.eql(u8, @tagName(provider), name)) return true;
+    return false;
+}
+
+pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
     const intent = try readSources(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
     try finishSources(init, settings, intent, failure);
-    try fixtureInputs(init, parsed, settings, fixtures, failure);
 }
 
 /// One placement owner for serving, starting and directory-based client lookup.
@@ -539,26 +542,6 @@ fn testHostDir(tmp: *std.testing.TmpDir, buffer: *[std.Io.Dir.max_path_bytes]u8)
     var host = try tmp.dir.createDirPathOpen(std.testing.io, "host-dir", .{ .permissions = .fromMode(0o700) });
     defer host.close(std.testing.io);
     return buffer[0..try host.realPath(std.testing.io, buffer)];
-}
-
-fn fixtureInputs(init: std.process.Init, parsed: *const cli_args.Parsed, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    const gpa = init.gpa;
-    if (parsed.get("test-openai-fixture-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.openai.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.openai.unauthenticated", "true", failure);
-        fixtures.openai = true;
-    }
-    if (parsed.get("test-codex-fixture-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.codex.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.codex.unauthenticated", "true", failure);
-        fixtures.codex = true;
-    }
-    if (parsed.get("test-chatgpt-fixture-endpoint")) |endpoint| {
-        const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
-        try text(settings, gpa, "providers.chatgpt.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.chatgpt.unauthenticated", "true", failure);
-        fixtures.chatgpt_token_endpoint = try std.fmt.allocPrint(init.arena.allocator(), "{s}/oauth/token", .{base});
-    }
 }
 
 fn invalid(failure: *start_report.Failure, comptime path: []const u8, comptime reason: []const u8) error{SettingsInvalid} {
@@ -623,19 +606,23 @@ fn readExact(io: std.Io, file: std.Io.File, buffer: []u8) !void {
     }
 }
 
-pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
+pub const Attempt = start_report.Attempt;
+
+pub noinline fn report(io: std.Io, attempt: Attempt, failure: *const start_report.Failure) void {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
     std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
-    const sentence = std.fmt.bufPrint(&buffer, "rui: the Host did not start: {f} [{s}]\n", .{ std.zig.fmtString(failure.message.slice()), @tagName(failure.code) }) catch unreachable;
+    var writer = std.Io.Writer.fixed(&buffer);
+    @import("host_launch.zig").writeSentence(&writer, attempt, failure) catch unreachable;
+    const sentence = writer.buffered();
     std.Io.File.stderr().writeStreamingAll(io, sentence) catch {};
 }
 
-pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !hs.Prepared {
     var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (settings.store == .mysql and settings.interface.dir.anchored)
         try anchorPlacement(init, settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], failure);
     hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
-    try resolveProviders(init, settings, fixtures, failure);
+    try resolveProviders(init, settings, failure);
     if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.values[0..settings.tools.mcp.len]) |*name, *server| {
         resolve(init, &server.bearer_token) catch |err| {
@@ -646,11 +633,11 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: provide
     return hs.seal(settings, failure);
 }
 
-pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
-                .api_key => if (!entry.unauthenticated.value or fixtures.openai) {
+                .api_key => if (!entry.unauthenticated.value) {
                     if (entry.key.source == .default) {
                         try defaultKeySource(init, &entry.key);
                         resolve(init, &entry.key) catch |err| {
@@ -659,10 +646,10 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
                         };
                     } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
                 },
-                .sign_in => if (!entry.unauthenticated.value or (provider == .codex and fixtures.codex) or (provider == .chatgpt and fixtures.chatgpt_token_endpoint != null)) {
+                .sign_in => if (!entry.unauthenticated.value) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
+                        const path = credential_location.default(init.environ_map, provider, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.credential_file = .{};
                         try entry.credential_file.?.text.set(path);
                     }
@@ -733,21 +720,20 @@ pub const Admission = enum { foreground, detached };
 /// placement admission, without rebasing a running Host's argv. Both doors
 /// finish provider selection and resolve before the caller's proxy precondition
 /// and `admitSelected` anchor/seal. No Store or Host is opened here.
-pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: Admission) !void {
+pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure, admission: Admission) !void {
     switch (admission) {
-        .foreground => try fillAt(init, parsed, dir, settings, fixtures, failure),
+        .foreground => try fillAt(init, parsed, dir, settings, failure),
         .detached => {
             const intent = try readStart(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
             try finishSources(init, settings, intent, failure);
-            try fixtureInputs(init, parsed, settings, fixtures, failure);
         },
     }
-    try resolveProviders(init, settings, fixtures.*, failure);
+    try resolveProviders(init, settings, failure);
 }
 
-pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !hs.Prepared {
     try anchorPlacement(init, settings, dir, failure);
-    return prepare(init, settings, fixtures, failure);
+    return prepare(init, settings, failure);
 }
 
 fn parseForTest(gpa: std.mem.Allocator, args: []const []const u8) !cli_args.Parsed {
@@ -757,6 +743,33 @@ fn parseForTest(gpa: std.mem.Allocator, args: []const []const u8) !cli_args.Pars
 
 fn initForTest(arena: *std.heap.ArenaAllocator, env: *std.process.Environ.Map) std.process.Init {
     return .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = env, .preopens = .empty };
+}
+
+test "sign-in leaf overrides environment location before dispatch" {
+    inline for (.{ .codex, .chatgpt }) |provider| {
+        for ([_]bool{ false, true }) |leaf| {
+            for ([_]bool{ false, true }) |named| {
+                var environment: std.process.Environ.Map = .init(std.testing.allocator);
+                defer environment.deinit();
+                try environment.put("HOME", "/home/fixture");
+                if (named) try environment.put(credential_location.variable(provider), "/named/credential");
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const init = initForTest(&arena, &environment);
+                const settings = try std.testing.allocator.create(hs.Settings);
+                defer std.testing.allocator.destroy(settings);
+                settings.* = .{};
+                defer settings.deinit();
+                var failure: start_report.Failure = undefined;
+                try hs.apply(settings, arena.allocator(), "{\"providers\":{}}", .file, checkPreset, &failure);
+                try assign(settings, arena.allocator(), "providers." ++ @tagName(provider), "{}", &failure);
+                if (leaf) try assign(settings, arena.allocator(), "providers." ++ @tagName(provider) ++ ".credentialFile", "/explicit/credential", &failure);
+                try resolveProviders(init, settings, &failure);
+                const expected = if (leaf) "/explicit/credential" else if (named) "/named/credential" else "/home/fixture/.config/rui/" ++ @tagName(provider) ++ ".json";
+                try std.testing.expectEqualStrings(expected, @field(settings.providers.entries, @tagName(provider)).?.credential_file.?.slice());
+            }
+        }
+    }
 }
 
 test "Host start resolves environment private file and saved credential sources" {
@@ -774,7 +787,7 @@ test "Host start resolves environment private file and saved credential sources"
     var failure: start_report.Failure = undefined;
     try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checkPreset, &failure);
     try assign(settings, gpa, "providers.openai.key", "env:HOST_START_TEST_\xff", &failure);
-    _ = try prepare(init, settings, .{}, &failure);
+    _ = try prepare(init, settings, &failure);
     try std.testing.expectEqualStrings("env-key", settings.providers.entries.openai.?.key.value());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -785,21 +798,21 @@ test "Host start resolves environment private file and saved credential sources"
     const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/openai.key", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
     try api_key.install(path, "file-key");
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
-    try environment.put(api_key.path_variable, path);
+    try environment.put(credential_location.variable(.openai), path);
     try environment.put("RUI_CODEX_CREDENTIAL_FILE", "/tmp/./codex-\xff.json");
     try environment.put("RUI_CHATGPT_CREDENTIAL_FILE", "/tmp/./chatgpt-\xff.json");
     try assign(settings, arena.allocator(), "providers.codex", "{}", &failure);
     try assign(settings, arena.allocator(), "providers.chatgpt", "{}", &failure);
-    _ = try prepare(init, settings, .{}, &failure);
+    _ = try prepare(init, settings, &failure);
     try std.testing.expectEqualStrings("file-key", settings.providers.entries.openai.?.key.value());
     try std.testing.expectEqualStrings(path, settings.providers.entries.openai.?.key.source.file.slice());
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
     try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
-    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
+    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, &failure));
     try assign(settings, arena.allocator(), "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{path}), &failure);
-    try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, .{}, &failure));
+    try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, &failure));
     try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), "providers.openai.key:"));
 }
 
@@ -914,8 +927,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "never-print-this") == null);
     try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}},\"execution\":{\"activeCapacity\":3},\"interface\":{\"lifetime\":\"stdin\"}}" });
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path, "--set", "tools.bash.timeoutMs=99", "--set", "execution.activeCapacity=4", "--set", "providers.codex={}" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &failure);
+    try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &failure);
     try std.testing.expectEqual(@as(u64, 99), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqual(@as(usize, 4), settings.execution.active_capacity.value);
     try std.testing.expectEqual(hs.Interface.Lifetime.stdin, settings.interface.lifetime.value);
@@ -924,7 +936,57 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try std.testing.expectError(error.SettingsInvalid, readDocument(init, path, settings, &failure));
 }
 
-test "Host start pipe file and assignment admissions report every code on both streams even if one refuses" {
+test "Host start pipe file and assignment admissions retain source values" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
+    defer private.close(init.io);
+    const document = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}}}";
+    try private.writeFile(init.io, .{ .sub_path = "host.json", .data = document });
+    try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{root[0..try private.realPath(init.io, &root)]});
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    for ([_]enum { pipe, file, assignments }{ .pipe, .file, .assignments }) |source| {
+        settings.* = .{};
+        defer settings.deinit();
+        var admission_failure: start_report.Failure = undefined;
+        switch (source) {
+            .pipe => {
+                var bytes: [4 + document.len]u8 = undefined;
+                std.mem.writeInt(u32, bytes[0..4], document.len, .big);
+                @memcpy(bytes[4..], document);
+                var fds: [2]std.posix.fd_t = undefined;
+                if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+                const reader: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+                defer reader.close(init.io);
+                const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+                defer writer.close(init.io);
+                try writer.writeStreamingAll(init.io, &bytes);
+                try readPipe(init, reader, settings, &admission_failure);
+            },
+            .file => {
+                const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path });
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &admission_failure);
+            },
+            .assignments => {
+                const parsed = try parseForTest(arena.allocator(), &.{ "--set", "tools.bash.timeoutMs=17" });
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &admission_failure);
+            },
+        }
+        try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
+    }
+}
+
+test "CLI-26 Host refusal presentation" {
     const Probe = struct {
         var output: [2][4096]u8 = undefined;
         var used: [2]usize = .{ 0, 0 };
@@ -953,80 +1015,37 @@ test "Host start pipe file and assignment admissions report every code on both s
     var vtable = std.testing.io.vtable.*;
     vtable.operate = Probe.operate;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    const gpa = std.testing.allocator;
-    var environment: std.process.Environ.Map = .init(gpa);
-    defer environment.deinit();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const init = initForTest(&arena, &environment);
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
-    defer private.close(init.io);
-    const document = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}}}";
-    try private.writeFile(init.io, .{ .sub_path = "host.json", .data = document });
-    try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{root[0..try private.realPath(init.io, &root)]});
-    const settings = try gpa.create(hs.Settings);
-    defer gpa.destroy(settings);
-    for ([_]enum { pipe, file, assignments }{ .pipe, .file, .assignments }) |source| {
-        settings.* = .{};
-        defer settings.deinit();
-        var admission_failure: start_report.Failure = undefined;
-        var fixtures: providers.Fixtures = .{};
-        switch (source) {
-            .pipe => {
-                var bytes: [4 + document.len]u8 = undefined;
-                std.mem.writeInt(u32, bytes[0..4], document.len, .big);
-                @memcpy(bytes[4..], document);
-                var fds: [2]std.posix.fd_t = undefined;
-                if (std.c.pipe(&fds) != 0) return error.PipeFailed;
-                const reader: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
-                defer reader.close(init.io);
-                const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
-                defer writer.close(init.io);
-                try writer.writeStreamingAll(init.io, &bytes);
-                try readPipe(init, reader, settings, &admission_failure);
-            },
-            .file => {
-                const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path });
-                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
-            },
-            .assignments => {
-                const parsed = try parseForTest(arena.allocator(), &.{ "--set", "tools.bash.timeoutMs=17" });
-                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
-            },
-        }
-        try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
-        const Message = struct { raw: []const u8, json: []const u8, sentence: []const u8 };
-        inline for ([_]Message{
-            .{ .raw = "message", .json = "\"message\"", .sentence = "message" },
-            .{ .raw = "line\n\r\t\x1b", .json = "\"line\\n\\r\\t\\u001b\"", .sentence = "line\\n\\r\\t\\x1b" },
-            .{ .raw = "literal\\n\\x1b\"", .json = "\"literal\\\\n\\\\x1b\\\"\"", .sentence = "literal\\\\n\\\\x1b\\\"" },
-            .{ .raw = "\u{0085}\u{2028}\u{2029}\u{feff}", .json = "\"\u{0085}\u{2028}\u{2029}\u{feff}\"", .sentence = "\\xc2\\x85\\xe2\\x80\\xa8\\xe2\\x80\\xa9\\xef\\xbb\\xbf" },
-        }) |message| {
-            inline for (comptime std.meta.tags(start_report.StartError)) |code| {
-                for ([_]?usize{ null, 0, 1 }) |refused| {
+    const Message = struct { raw: []const u8, json: []const u8, sentence: []const u8 };
+    inline for ([_]Message{
+        .{ .raw = "message", .json = "\"message\"", .sentence = "message" },
+        .{ .raw = "line\n\r\t\x1b", .json = "\"line\\n\\r\\t\\u001b\"", .sentence = "line\\n\\r\\t\\x1b" },
+        .{ .raw = "literal\\n\\x1b\"", .json = "\"literal\\\\n\\\\x1b\\\"\"", .sentence = "literal\\\\n\\\\x1b\\\"" },
+        .{ .raw = "\u{0085}\u{2028}\u{2029}\u{feff}", .json = "\"\u{0085}\u{2028}\u{2029}\u{feff}\"", .sentence = "\\xc2\\x85\\xe2\\x80\\xa8\\xe2\\x80\\xa9\\xef\\xbb\\xbf" },
+    }) |message| {
+        inline for (comptime std.meta.tags(start_report.StartError)) |code| {
+            for ([_]?usize{ null, 0, 1 }) |refused| {
+                Probe.used = .{ 0, 0 };
+                Probe.attempted = .{ false, false };
+                Probe.refused = refused;
+                const failure: start_report.Failure = .init(code, message.raw);
+                for (std.enums.values(Attempt)) |attempt| {
                     Probe.used = .{ 0, 0 };
                     Probe.attempted = .{ false, false };
-                    Probe.refused = refused;
-                    const failure: start_report.Failure = .init(code, message.raw);
-                    report(io, &failure);
-                    try std.testing.expect(Probe.attempted[0] and Probe.attempted[1]);
+                    report(io, attempt, &failure);
+                    try std.testing.expect(Probe.attempted[0]);
+                    try std.testing.expect(Probe.attempted[1]);
                     if (refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
-                    if (refused != 1) try std.testing.expectEqualStrings("rui: the Host did not start: " ++ message.sentence ++ " [" ++ @tagName(code) ++ "]\n", Probe.output[1][0..Probe.used[1]]);
+                    const prefix = switch (attempt) {
+                        .start => "the Host did not start",
+                        .save => "the setting was not saved",
+                        .check => "these settings would not start a Host",
+                    };
+                    var expected: [4096]u8 = undefined;
+                    const sentence = try std.fmt.bufPrint(&expected, "rui: {s}: {s} [{s}]\n", .{ prefix, message.sentence, @tagName(code) });
+                    if (refused != 1) try std.testing.expectEqualStrings(sentence, Probe.output[1][0..Probe.used[1]]);
                 }
             }
         }
-        try std.testing.expectError(error.SettingsInvalid, hs.apply(settings, gpa, "{\"bad\\n\\u001b\":\"never-print-this-value\"}", .pipe, checkPreset, &admission_failure));
-        Probe.used = .{ 0, 0 };
-        Probe.attempted = .{ false, false };
-        Probe.refused = null;
-        report(io, &admission_failure);
-        try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"bad\\n\\u001b: unknown setting\"}}\n", Probe.output[0][0..Probe.used[0]]);
-        try std.testing.expectEqualStrings("rui: the Host did not start: bad\\n\\x1b: unknown setting [settings_invalid]\n", Probe.output[1][0..Probe.used[1]]);
     }
 }
 
@@ -1040,6 +1059,56 @@ fn expectJsonEqual(expected: std.json.Value, actual: std.json.Value) !void {
     const b = try encoded(std.testing.allocator, actual);
     defer std.testing.allocator.free(b);
     try std.testing.expectEqualStrings(a, b);
+}
+
+test "SH-47 saved path admission" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const cases = [_]struct { path: []const u8, reason: []const u8 }{
+        .{ .path = "store.sqlite.dir", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "providers.codex.credentialFile", .reason = "must be an absolute path" },
+        .{ .path = "providers.chatgpt.credentialFile", .reason = "must be an absolute path" },
+        .{ .path = "network.caFile", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "tools.bash.path", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "interface.dir", .reason = "must be an absolute path" },
+    };
+    var schema_paths: usize = 0;
+    for (hs.leaves) |leaf| {
+        if (!std.mem.eql(u8, leaf.kind, "path")) continue;
+        schema_paths += 1;
+        var present = false;
+        for (cases) |case| if (std.mem.eql(u8, leaf.pattern, case.path)) {
+            present = true;
+            break;
+        };
+        try std.testing.expect(present);
+    }
+    try std.testing.expectEqual(cases.len, schema_paths);
+    for (cases, 0..) |case, index| {
+        const name = try std.fmt.allocPrint(arena.allocator(), "path-{d}", .{index});
+        var host = try tmp.dir.createDirPathOpen(init.io, name, .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        var failure: start_report.Failure = undefined;
+        errdefer std.debug.print("path leaf {s}: {s}\n", .{ case.path, failure.message.slice() });
+        try savedEdit(init, dir, case.path, "/tmp/pr7c-path", &failure);
+        var before_buffer: [hs.max_document_bytes + 1]u8 = undefined;
+        const saved_path = try savedPath(init, arena.allocator(), dir);
+        const before = try arena.allocator().dupe(u8, (try credentials.readPrivate(saved_path, &before_buffer)).?);
+        try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, case.path, "relative/path", &failure));
+        try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "{s}: {s}", .{ case.path, case.reason });
+        try std.testing.expectEqualStrings(expected, failure.message.slice());
+        var after_buffer: [hs.max_document_bytes + 1]u8 = undefined;
+        try std.testing.expectEqualStrings(before, (try credentials.readPrivate(saved_path, &after_buffer)).?);
+    }
 }
 
 test "Host start every generated leaf saves shows loads and unsets to defaults" {
@@ -1077,8 +1146,7 @@ test "Host start every generated leaf saves shows loads and unsets to defaults" 
         try expectJsonEqual(lookup(canonical, path).?, lookup(json, path).?);
         effective.* = .{};
         defer effective.deinit();
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, effective, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, effective, &failure);
         const loaded = try complete(arena.allocator(), effective, &failure);
         try expectJsonEqual(lookup(canonical, path).?, lookup(loaded, path).?);
         try savedEdit(init, dir, path, null, &failure);
@@ -1124,18 +1192,17 @@ test "Host start saved input is sparse ordered private and JSON files carry OS p
     try private.writeFile(init.io, .{ .sub_path = "override.json", .data = "{\"tools\":{\"bash\":{\"timeoutMs\":18}}}" });
     try private.setFilePermissions(init.io, "override.json", .fromMode(0o600), .{});
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", document, "--set", "tools.bash.timeoutMs=19", "--set", "tools.bash.timeoutMs=20" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     try std.testing.expectEqual(@as(u64, 20), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqualStrings("/tmp/\xff", settings.tools.bash.path.slice());
-    try savedEdit(init, dir, "tools.bash.path", "{raw-path", &failure);
-    try private.writeFile(init.io, .{ .sub_path = "input.json", .data = "\"{json-path\"" });
+    try savedEdit(init, dir, "tools.bash.path", "/{raw-path", &failure);
+    try private.writeFile(init.io, .{ .sub_path = "input.json", .data = "\"/{json-path\"" });
     try savedEdit(init, dir, "tools.bash.path", at_file, &failure);
     var shown: std.Io.Writer.Allocating = .init(gpa);
     defer shown.deinit();
     try showSaved(init, dir, &shown.writer, &failure);
     const json = try parse(arena.allocator(), shown.written(), &failure);
-    try std.testing.expectEqualStrings("{json-path", lookup(json, "tools.bash.path").?.string);
+    try std.testing.expectEqualStrings("/{json-path", lookup(json, "tools.bash.path").?.string);
     try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, "tools.bash.timoutMs", "22", &failure));
     try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "tools.bash.timeoutMs") != null);
     try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, "providers.openai.key", "{\"value\":\"never-print-secret\"}", &failure));
@@ -1170,8 +1237,7 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
         settings.* = .{};
         defer settings.deinit();
         const parsed = try parseForTest(arena.allocator(), args);
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, settings, &failure);
         inline for (std.enums.values(protocol.Provider)) |provider| {
             const served = @field(settings.providers.entries, @tagName(provider)) != null;
             const wanted = switch (index) {
@@ -1183,27 +1249,137 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
             try std.testing.expectEqual(wanted, served);
         }
     }
-    try environment.put(providers.openai_base_url_variable, "https://example.test/custom/v1/");
-    for ([_][]const u8{ "providers.openai={}", "providers.openai.endpoint=https://named.test/responses" }, [_][]const u8{ "https://example.test/custom/v1/responses", "https://named.test/responses" }) |assignment, endpoint| {
-        settings.* = .{};
-        defer settings.deinit();
-        const parsed = try parseForTest(arena.allocator(), &.{ "--set", assignment });
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
-        try std.testing.expectEqualStrings(endpoint, settings.providers.entries.openai.?.endpoint.?.slice());
-    }
-    _ = environment.swapRemove(providers.openai_base_url_variable);
     settings.* = .{};
     defer settings.deinit();
     const parsed = try parseForTest(arena.allocator(), &.{ "--store", dir, "--set", "store.mysql.url=env:MYSQL_TEST_URL" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
     try anchorPlacement(init, settings, dir, &failure);
     var runtime: [platform.max_socket_path_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(try platform.defaultMysqlInterface(dir, &runtime), settings.interface.dir.slice());
     try selectStore(init, settings, dir, false, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
+}
+
+test "Host start saved edits below providers materialize the automatic set and only providers replaces it" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try private.realPath(init.io, &root)];
+    // With HOME holding no sign-in, the automatic set is codex alone.
+    const Start = enum { automatic, explicit };
+    const Change = enum { endpoint, whole, unset };
+    const cases = [_]struct { start: Start, change: Change, served: []const []const u8 }{
+        .{ .start = .automatic, .change = .endpoint, .served = &.{ "codex", "openai" } },
+        .{ .start = .automatic, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .automatic, .change = .unset, .served = &.{} },
+        .{ .start = .explicit, .change = .endpoint, .served = &.{ "codex", "chatgpt", "openai" } },
+        .{ .start = .explicit, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .explicit, .change = .unset, .served = &.{"chatgpt"} },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("providers edit case {s} {s}\n", .{ @tagName(case.start), @tagName(case.change) });
+        try private.writeFile(init.io, .{ .sub_path = "host.json", .data = switch (case.start) {
+            .automatic => "{}",
+            .explicit => "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}",
+        } });
+        try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        var failure: start_report.Failure = undefined;
+        switch (case.change) {
+            .endpoint => try savedEdit(init, dir, "providers.openai.endpoint", "https://example.test/v1", &failure),
+            .whole => try savedEdit(init, dir, "providers", "{\"chatgpt\":{}}", &failure),
+            .unset => try savedEdit(init, dir, "providers.codex", null, &failure),
+        }
+        const bytes = try private.readFileAlloc(init.io, "host.json", arena.allocator(), .limited(hs.max_document_bytes));
+        const json = try parse(arena.allocator(), bytes, &failure);
+        const providers_object = lookup(json, "providers").?;
+        try std.testing.expectEqual(case.served.len, providers_object.object.count());
+        for (case.served) |name| try std.testing.expect(providers_object.object.contains(name));
+    }
+}
+
+test "Host start saved provider edits have one owner over the automatic set" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const Start = enum { automatic, explicit };
+    const Edit = enum { set_endpoint, set_whole, unset_codex, unset_openai, unset_codex_endpoint };
+    // Index 0 is the automatic set [codex]; index 1 is [codex, chatgpt, openai]. Null means no providers object.
+    const Row = struct { start: Start, edit: Edit, expected: [2]?[]const u8 };
+    const rows = [_]Row{
+        .{ .start = .automatic, .edit = .set_endpoint, .expected = .{ "{\"codex\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}", "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}" } },
+        .{ .start = .automatic, .edit = .set_whole, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_codex, .expected = .{ "{}", "{\"openai\":{},\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_openai, .expected = .{ null, "{\"codex\":{},\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_codex_endpoint, .expected = .{ null, null } },
+        .{ .start = .explicit, .edit = .set_endpoint, .expected = .{ "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}", "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}" } },
+        .{ .start = .explicit, .edit = .set_whole, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_codex, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_openai, .expected = .{ "{\"codex\":{},\"chatgpt\":{}}", "{\"codex\":{},\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_codex_endpoint, .expected = .{ "{\"codex\":{},\"chatgpt\":{}}", "{\"codex\":{},\"chatgpt\":{}}" } },
+    };
+    const sets = [_][]const protocol.Provider{ &.{.codex}, &.{ .codex, .chatgpt, .openai } };
+    for (rows) |row| {
+        for (sets, 0..) |automatic, index| {
+            errdefer std.debug.print("providers edit {s} {s} automatic set {d}\n", .{ @tagName(row.start), @tagName(row.edit), index });
+            var failure: start_report.Failure = undefined;
+            var document = try parse(arena.allocator(), switch (row.start) {
+                .automatic => "{}",
+                .explicit => "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}",
+            }, &failure);
+            const whole = try parse(arena.allocator(), "{\"chatgpt\":{}}", &failure);
+            const endpoint: std.json.Value = .{ .string = "https://example.test/v1" };
+            switch (row.edit) {
+                .set_endpoint => try editProviders(arena.allocator(), &document, "providers.openai.endpoint", endpoint, automatic),
+                .set_whole => try editProviders(arena.allocator(), &document, "providers", whole, automatic),
+                .unset_codex => try editProviders(arena.allocator(), &document, "providers.codex", null, automatic),
+                .unset_openai => try editProviders(arena.allocator(), &document, "providers.openai", null, automatic),
+                .unset_codex_endpoint => try editProviders(arena.allocator(), &document, "providers.codex.endpoint", null, automatic),
+            }
+            if (row.expected[index]) |expected| {
+                const providers_object = lookup(document, "providers").?;
+                try std.testing.expectEqualStrings(expected, try encoded(arena.allocator(), providers_object));
+            } else try std.testing.expect(lookup(document, "providers") == null);
+        }
+    }
+}
+
+test "Host start saved openai edit carries a usable key into the saved automatic set" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try private.realPath(init.io, &root)];
+    var key_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const key_file = try std.fmt.bufPrint(&key_root, "{s}/openai.key", .{dir});
+    try api_key.install(key_file, "sk-synthetic-usable-key");
+    try environment.put(credential_location.variable(.openai), key_file);
+    try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{}" });
+    try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    var failure: start_report.Failure = undefined;
+    try savedEdit(init, dir, "providers.openai.endpoint", "https://example.test/v1", &failure);
+    const bytes = try private.readFileAlloc(init.io, "host.json", arena.allocator(), .limited(hs.max_document_bytes));
+    const json = try parse(arena.allocator(), bytes, &failure);
+    const providers_object = lookup(json, "providers").?;
+    try std.testing.expectEqual(@as(usize, 2), providers_object.object.count());
+    try std.testing.expect(providers_object.object.contains("codex") and providers_object.object.contains("openai"));
 }
 
 test "Host start reads a previous release's retired flags as the settings those flags filled" {
@@ -1243,8 +1419,7 @@ test "Host start reads a previous release's retired flags as the settings those 
         const translated = try serve_grammar.currentArguments(arena.allocator(), case.args);
         const replayed_args = try std.mem.concat(arena.allocator(), []const u8, &.{ &.{ "--set", serve_grammar.previousProviders(false, false).? }, translated });
         const parsed = try parseForTest(arena.allocator(), replayed_args);
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, replayed, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, replayed, &failure);
         const expected = try gpa.create(hs.Settings);
         defer gpa.destroy(expected);
         expected.* = .{};
@@ -1323,13 +1498,15 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     try showSaved(init, dir, &shown.writer, &failure);
     var json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers.openai") != null);
-    try std.testing.expect(lookup(json, "providers.codex") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
+    // Unsetting openai on the materialized automatic set removes only openai; codex stays.
     try savedEdit(init, dir, "providers.openai", null, &failure);
     shown.clearRetainingCapacity();
     try showSaved(init, dir, &shown.writer, &failure);
     json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers") != null);
-    inline for (std.enums.values(protocol.Provider)) |provider| try std.testing.expect(lookup(json, "providers." ++ @tagName(provider)) == null);
+    try std.testing.expect(lookup(json, "providers.openai") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
     try savedEdit(init, dir, "store.mysql.url", "env:MYSQL_TEST_URL", &failure);
     try savedEdit(init, dir, "store.mysql.url", null, &failure);
     shown.clearRetainingCapacity();
@@ -1340,9 +1517,9 @@ test "Host start unset retains exact provider sets and selected Store arms" {
 }
 
 const HostLaunchResult = @import("host_launch.zig").Result;
-extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
+extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, settings_read: c_int, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
-pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
+pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{}, frozen: ?[]const u8 = null };
 
 /// Finish a running Host's semantic sources, not a child launch plan. Older
 /// releases had flag-fill provider policy; prefix that baseline BEFORE explicit
@@ -1373,7 +1550,7 @@ pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sour
 pub const Ops = struct {
     context: ?*anyopaque = null,
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) @import("protocol_reply.zig").HostStatus = nativeObserve,
-    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, *c_int, *c_int, *c_int, *c_ulonglong) c_int = nativeLaunch,
+    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, c_int, *c_int, *c_int, *c_int, *c_ulonglong) c_int = nativeLaunch,
     verify: *const fn (?*anyopaque, std.Io, *const platform.Paths, c_int, u64, []const u8, ?i128, *@import("protocol_reply.zig").HostInfoFacts) bool = nativeVerify,
     read: *const fn (?*anyopaque, c_int, []u8) isize = nativeRead,
     now: *const fn (?*anyopaque, std.Io) i96 = nativeNow,
@@ -1382,8 +1559,8 @@ pub const Ops = struct {
     fn nativeObserve(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, until: ?i128) @import("protocol_reply.zig").HostStatus {
         return @import("client.zig").hostStatusAt(io, paths, until);
     }
-    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
-        return rui_launch_detached_reported(executable, argv, argc, startup_read, report_read, pid, started);
+    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, settings_read: c_int, startup_read: *c_int, report_read: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+        return rui_launch_detached_reported(executable, argv, argc, settings_read, startup_read, report_read, pid, started);
     }
     fn nativeVerify(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, pid: c_int, started: u64, executable: []const u8, until: ?i128, facts: *@import("protocol_reply.zig").HostInfoFacts) bool {
         if (pid <= 0 or started == 0) return false;
@@ -1397,7 +1574,7 @@ pub const Ops = struct {
         return true;
     }
     fn nativeRead(_: ?*anyopaque, fd: c_int, bytes: []u8) isize {
-        return std.c.read(fd, bytes.ptr, bytes.len);
+        return transfer.Ops.nativeRead(null, fd, bytes);
     }
     fn nativeNow(_: ?*anyopaque, io: std.Io) i96 {
         return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
@@ -1424,9 +1601,10 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
-pub const ProviderIntent = enum { automatic, explicit };
+pub const ProviderIntent = settings_handoff.ProviderIntent;
 
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    try refuseRetiredEnvironment(init.environ_map, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
@@ -1446,11 +1624,23 @@ pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Setting
     return intent;
 }
 
-pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
-    switch (intent) {
-        .automatic => try defaultProviders(init, settings, failure),
-        .explicit => try explicitBaseUrl(init, settings, failure),
+const RetiredVariable = struct { name: []const u8, replacement: []const u8 };
+const retired_environment = [_]RetiredVariable{
+    .{ .name = "RUI_OPENAI_BASE_URL", .replacement = "providers.openai.endpoint" },
+    .{ .name = "RUI_TEST_MODELS_DEV_URL", .replacement = "models.catalogUrl" },
+};
+
+fn refuseRetiredEnvironment(environ: *const std.process.Environ.Map, failure: *start_report.Failure) error{SettingsInvalid}!void {
+    inline for (retired_environment) |retired| {
+        if (environ.get(retired.name) != null) {
+            failure.* = .init(.settings_invalid, retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)");
+            return error.SettingsInvalid;
+        }
     }
+}
+
+pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
+    if (intent == .automatic) try defaultProviders(init, settings, failure);
 }
 
 pub const Cwd = struct {
@@ -1516,7 +1706,16 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
     }
     const intent = try readSources(init, request, settings, failure);
+    try detachedValue(settings, failure);
+    return intent;
+}
+
+fn detachedValue(settings: *const hs.Settings, failure: *start_report.Failure) !void {
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
+    try detachedPaths(settings, failure);
+}
+
+fn detachedPaths(settings: *const hs.Settings, failure: *start_report.Failure) !void {
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
         var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
@@ -1524,7 +1723,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         failure.* = .init(.settings_invalid, message);
         return error.SettingsInvalid;
     }
-    return intent;
+    return;
 }
 
 const relative = "a Host started in / has no base for a relative path; give an absolute path";
@@ -1600,6 +1799,35 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     _ = try readStart(init, request, settings, failure);
 }
 
+/// Retain this caller-owned unresolved allocation through route selection and
+/// freezing. Full --check may resolve it only AFTER the source-only frame exists.
+pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !settings_handoff.Owned {
+    const intent = try readStart(init, request, settings, failure);
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const directory = try platform.canonicalStoreDestination(init.io, request.dir, &canonical);
+    return settings_handoff.freeze(init.gpa, directory, settings, intent, failure);
+}
+
+pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const directory = try platform.canonicalStoreDestination(init.io, selected, &canonical);
+    const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
+    try detachedValue(settings, failure);
+    try anchorPlacement(init, settings, directory, failure);
+    return intent;
+}
+
+pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    try refuseRetiredEnvironment(init.environ_map, failure);
+    const intent = try decodeStart(init, bytes, selected, settings, failure);
+    try finishDetached(init, settings, intent, failure);
+}
+
+pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
+    try finishSources(init, settings, intent, failure);
+    try resolveProviders(init, settings, failure);
+}
+
 /// One detached source/placement owner for spawn and settings --check. Keep
 /// provider finishing/resolution out of this read-only phase: attachment and
 /// saved connection editing do not eagerly need another provider's login.
@@ -1634,11 +1862,25 @@ fn readStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, fai
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
     const selected = typed.dir;
     const io = init.io;
+    const settings = init.gpa.create(hs.Settings) catch |err| return launchFailure(result, .setup, err, null);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
+    if (typed.frozen) |bytes| {
+        _ = decodeStart(init, bytes, selected, settings, &reach_failure) catch |err| {
+            launchFailure(result, .child_refused, err, null);
+            result.outcome.failed.refusal = reach_failure;
+            result.outcome.failed.cause.refusal_code = reach_failure.code;
+            return;
+        };
+    }
     const selection = platform.resolveClientSelection(selected);
-    const resolved: ?platform.Paths = (if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
+    var resolved: ?platform.Paths = (if (typed.frozen != null) platform.placementPaths(io, settings) else if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
         error.FileNotFound, error.SettingsInvalid => null,
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
+    if (typed.frozen) |bytes| if (resolved) |*paths| paths.host_directory.set((settings_handoff.inspect(bytes) catch unreachable).directory) catch unreachable;
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(@import("protocol_reply.zig").HostStatus, .unavailable)) {
         .ready => |ready| return launchReady(result, ready, &resolved.?, true),
         .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, null),
@@ -1650,10 +1892,11 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer anchoring.deinit();
     var cwd: Cwd = .{ .io = io };
-    var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
+    var frozen: ?settings_handoff.Owned = null;
+    defer if (frozen) |*owned_frame| owned_frame.deinit(init.gpa);
     const admitted: anyerror!Spawn = admit: {
         const anchored = anchorTyped(anchoring.allocator(), &cwd, typed, &reach_failure) catch |err| break :admit err;
-        checkStart(init, anchored, &reach_failure) catch |err| break :admit err;
+        if (typed.frozen == null) frozen = freezeStart(init, anchored, settings, &reach_failure) catch |err| break :admit err;
         break :admit anchored;
     };
     const request = admitted catch |err| {
@@ -1663,25 +1906,31 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.outcome.failed.cause.refusal_code = reach_failure.code;
         return;
     };
-    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
+    const frame_bytes = typed.frozen orelse frozen.?.bytes;
+    const admitted_directory = (settings_handoff.inspect(frame_bytes) catch unreachable).directory;
+    // Placement and the selected directory come from the same retained intake,
+    // before creating a directory or publishing a child. Never select again
+    // from saved sources (or the original directory alias) after freezing.
+    var paths = platform.placementPaths(io, settings) catch |err| return launchFailure(result, .store_access, err, null);
+    paths.host_directory.set(admitted_directory) catch unreachable;
+    @import("upgrade_process.zig").waitForTestGate(init.gpa, io, init.environ_map.get("RUI_TEST_HOST_AFTER_FREEZE_GATE"), null, .fromSeconds(300)) catch |err| return launchFailure(result, .interrupted, err, null);
+    var dir = std.Io.Dir.cwd().createDirPathOpen(io, admitted_directory, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
-    const paths = resolved orelse (savedPlacement(io, selected) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
     executable_buffer[length] = 0;
     const gpa = std.heap.c_allocator;
     const first: usize = if (request.settings_file == null) 5 else 7;
-    const argc = first + 2 * request.assignments.len;
+    const provenance_argc = first + 2 * request.assignments.len;
+    const argc = provenance_argc + 2;
     const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(argv);
     argv[0] = @ptrCast(&executable_buffer);
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
-    var host_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
-    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
+    const directory = gpa.dupeSentinel(u8, admitted_directory, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
     const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.selector()) else null;
@@ -1702,11 +1951,18 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
+    argv[provenance_argc] = "--" ++ settings_handoff.input_option;
+    argv[provenance_argc + 1] = "5";
+    var input_pipe = transfer.Pipe.init() catch |err| return launchFailure(result, .setup, err, paths.selector());
+    defer input_pipe.close();
+    var delivery: transfer.Transfer = .{ .input = input_pipe.writer, .bytes = frame_bytes };
+    input_pipe.writer = -1;
+    defer delivery.deinit();
     var startup_read: c_int = -1;
     var report_read: c_int = -1;
     var launched_pid: c_int = 0;
     var launched_started: c_ulonglong = 0;
-    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, &startup_read, &report_read, &launched_pid, &launched_started);
+    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, input_pipe.reader, &startup_read, &report_read, &launched_pid, &launched_started);
     defer if (report_read >= 0) {
         _ = std.c.close(report_read);
     };
@@ -1721,11 +1977,17 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.outcome.failed.os_error = launched;
         return;
     }
+    _ = std.c.close(input_pipe.reader);
+    input_pipe.reader = -1;
     result.wait = .init(ops.now(ops.context, io));
     while (!result.wait.?.expired(ops.now(ops.context, io))) {
-        if (refusal == null and report_len < report_bytes.len) {
-            const read = ops.read(ops.context, report_read, report_bytes[report_len..]);
-            if (read > 0) report_len += @intCast(read);
+        const moved = delivery.step(.{ .context = ops.context, .read = ops.read }, .{
+            .{ .fd = startup_read, .buffer = result.startup_bytes[result.startup_len..] },
+            .{ .fd = report_read, .buffer = if (refusal == null) report_bytes[report_len..] else &.{} },
+        }) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+        result.startup_len += moved.counts[0];
+        report_len += moved.counts[1];
+        if (refusal == null and report_len <= report_bytes.len) {
             var lines = std.mem.splitScalar(u8, report_bytes[0..report_len], '\n');
             var offset: usize = 0;
             while (lines.next()) |line_bytes| {
@@ -1738,8 +2000,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 offset = end;
             }
         }
-        const count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
-        if (count > 0) result.startup_len += @intCast(count);
+        const startup_closed = moved.closed[0];
         const now = ops.now(ops.context, io);
         result.wait.?.observe(result.startup(), now);
         const until: i128 = result.wait.?.until(now);
@@ -1749,7 +2010,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         const full = result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len;
         // A losing child can exit before the winner is ready. EOF ends that
         // child, not the caller's existing opportunity to adopt a ready owner.
-        if ((!contended and (refusal != null or count == 0)) or full) {
+        if ((!contended and (refusal != null or startup_closed)) or full) {
             if (observed != .ready) {
                 if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
                 if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
@@ -1765,7 +2026,6 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 result.wait.?.observe(result.startup(), ops.now(ops.context, io));
                 const lost = refusal != null and refusal.?.code == .store_locked;
                 if (lost) result.startup_len = 0;
-                if (std.mem.indexOf(u8, result.startup(), @import("host_launch.zig").invalid_base_url) != null) result.warning = .invalid_openai_base_url;
                 var facts = ready;
                 const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
                 return launchReady(result, facts, &paths, !exact);
@@ -1773,7 +2033,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
             .unavailable, .owned_unavailable => {
-                if (contended and count == 0) {
+                if (contended and startup_closed) {
                     // Reuse the acknowledged interposition owner: a fixture
                     // can hold the former premature-refusal transition.
                     const remaining = @max(0, until - ops.now(ops.context, io));
@@ -1782,7 +2042,8 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             },
         }
         const remaining = until - ops.now(ops.context, io);
-        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+        if (delivery.input >= 0 and moved.progressed) continue;
+        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, (if (delivery.input >= 0) @as(i128, 1) else 100) * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
     if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());
@@ -2033,8 +2294,7 @@ test "Host start placement agrees across Store interface and every door without 
                 .client => try savedPlacement(init.io, dir),
                 .serve => result: {
                     const parsed = try parseForTest(arena.allocator(), &.{});
-                    var fixtures: providers.Fixtures = .{};
-                    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+                    try fillAt(init, &parsed, dir, settings, &failure);
                     try anchorPlacement(init, settings, dir, &failure);
                     break :result try platform.placementPaths(init.io, settings);
                 },
@@ -2133,7 +2393,7 @@ test "Host start guided connection isolates two Stores preserves providers and f
     var key: api_key.Key = .{};
     defer key.wipe();
     var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expect(try api_key.read(try api_key.path(&environment, &key_path), &key));
+    try std.testing.expect(try api_key.read(try credential_location.default(&environment, .openai, &key_path), &key));
     try std.testing.expectEqualStrings("global-key-kept", key.slice());
     try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("first-private-key", key.slice());
@@ -2143,8 +2403,7 @@ test "Host start guided connection isolates two Stores preserves providers and f
     settings.* = .{};
     defer settings.deinit();
     const parsed = try parseForTest(a, &.{});
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, first_dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, first_dir, settings, &failure);
     try std.testing.expect(settings.providers.entries.codex != null and settings.providers.entries.chatgpt != null);
     try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
     try std.testing.expect(!settings.providers.entries.openai.?.unauthenticated.value);
@@ -2211,7 +2470,8 @@ test "Host start guided connection materializes automatic routes and reuses the 
     try std.testing.expect(try api_key.read(second.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("from-environment", key.slice());
     var browser_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const browser = try provider_login.credentialPath(init, .chatgpt, &browser_path, true);
+    try provider_login.createConfigDirectory(init.io, home);
+    const browser = try credential_location.default(init.environ_map, .chatgpt, &browser_path);
     const record = try init.gpa.create(credentials.Record);
     defer init.gpa.destroy(record);
     record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
@@ -2312,7 +2572,7 @@ test "Host start guided connection distinguishes key sync settings sync and reta
             }
         }
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
+        try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &key_path)));
     }
 }
 
@@ -2363,7 +2623,7 @@ test "Host start guided reuse refuses source-only and auth-only supersession bef
         defer key.wipe();
         try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
         try std.testing.expectEqualStrings("first-key", key.slice());
-        try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key));
+        try std.testing.expect(try api_key.read(try credential_location.default(&env, .openai, &path_buffer), &key));
         try std.testing.expectEqualStrings("global-key-kept", key.slice());
         var directory = try std.Io.Dir.cwd().openDir(init.io, dir, .{ .iterate = true });
         defer directory.close(init.io);
@@ -2400,7 +2660,7 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
         const init = initForTest(&arena, &env);
         try provider_login.key(init, "global-key-kept");
         var key_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const key_path = try api_key.path(&env, &key_path_buffer);
+        const key_path = try credential_location.default(&env, .openai, &key_path_buffer);
         const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
         var failure: start_report.Failure = undefined;
         try savedEdit(init, dir, "providers", "{\"openai\":{}}", &failure);
@@ -2450,7 +2710,7 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
     }
 }
 
-test "Host start guided reuse admits equivalent automatic omitted endpoint env base and default file sources" {
+test "Host start guided reuse admits equivalent automatic omitted endpoint and default file sources" {
     const Source = enum { automatic, omitted_endpoint, explicit_file };
     const Gate = struct {
         fn yes() bool {
@@ -2465,7 +2725,6 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint env b
         var env: std.process.Environ.Map = .init(std.testing.allocator);
         defer env.deinit();
         try env.put("HOME", home);
-        try env.put(providers.openai_base_url_variable, "https://effective.example/v1");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const init = initForTest(&arena, &env);
@@ -2475,10 +2734,10 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint env b
         try savedEdit(init, dir, if (source == .automatic) "execution.activeCapacity" else "providers", if (source == .automatic) "7" else "{\"openai\":{}}", &failure);
         const admitted = try inspectConnection(init, dir);
         try std.testing.expect(admitted.reusable());
-        try std.testing.expectEqualStrings("https://effective.example/v1/responses", admitted.endpoint.slice());
+        try std.testing.expectEqualStrings(providers.endpoint(.openai), admitted.endpoint.slice());
         if (source == .explicit_file) {
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try api_key.path(&env, &path_buffer)}), &failure);
+            try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try credential_location.default(&env, .openai, &path_buffer)}), &failure);
         }
         const saved_connection = try saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.yes);
         try std.testing.expect(saved_connection == .saved);
@@ -2578,15 +2837,14 @@ test "Host detached check shares source admission then resolves and seals withou
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
-        var fixtures: providers.Fixtures = .{};
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "--set", "providers={}" });
         try args.appendSlice(gpa, case.args);
         const parsed = try parseForTest(arena.allocator(), args.items);
         const admitted: anyerror!void = admit: {
-            intake(init, &parsed, dir, settings, &fixtures, &failure, door) catch |err| break :admit err;
-            _ = admitSelected(init, dir, settings, fixtures, &failure) catch |err| break :admit err;
+            intake(init, &parsed, dir, settings, &failure, door) catch |err| break :admit err;
+            _ = admitSelected(init, dir, settings, &failure) catch |err| break :admit err;
         };
         if (if (door == .foreground) case.foreground else case.detached) {
             try admitted;
@@ -2603,10 +2861,9 @@ test "Host detached check shares source admission then resolves and seals withou
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    var fixtures: providers.Fixtures = .{};
     const parsed = try parseForTest(arena.allocator(), &.{});
-    try intake(init, &parsed, dir, settings, &fixtures, &failure, .detached);
-    _ = try admitSelected(init, dir, settings, fixtures, &failure);
+    try intake(init, &parsed, dir, settings, &failure, .detached);
+    _ = try admitSelected(init, dir, settings, &failure);
     try std.testing.expectEqual(.mysql, std.meta.activeTag(settings.store));
 }
 
@@ -2662,11 +2919,49 @@ test "Host restart sources preserve previous and current release provider semant
         defer gpa.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
-        var fixtures: @import("providers.zig").Fixtures = .{};
         var failure: @import("start_report.zig").Failure = undefined;
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, settings, &failure);
         try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
+    }
+}
+
+test "retired endpoint environment is refused by each admission before effects" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    const Door = enum { serve, start, check };
+    inline for (retired_environment) |retired| {
+        for ([_]bool{ false, true }) |present| for (std.enums.values(Door)) |door| {
+            var environment: std.process.Environ.Map = .init(gpa);
+            defer environment.deinit();
+            if (present) try environment.put(retired.name, "");
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const init = initForTest(&arena, &environment);
+            const settings = try gpa.create(hs.Settings);
+            defer gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            const parsed = try parseForTest(arena.allocator(), &.{ "--set", "providers={}" });
+            const outcome = switch (door) {
+                .serve => intake(init, &parsed, dir, settings, &failure, .foreground),
+                .start => checkStart(init, .{ .dir = dir, .assignments = &.{"providers={}"} }, &failure),
+                .check => intake(init, &parsed, dir, settings, &failure, .detached),
+            };
+            if (present) {
+                try std.testing.expectError(error.SettingsInvalid, outcome);
+                try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+                try std.testing.expectEqualStrings(retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)", failure.message.slice());
+            } else try outcome;
+            var host = try tmp.dir.openDir(init.io, "host-dir", .{ .iterate = true });
+            defer host.close(init.io);
+            var entries = host.iterate();
+            try std.testing.expectEqual(null, try entries.next(init.io));
+        };
     }
 }

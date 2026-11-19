@@ -174,7 +174,7 @@ test "each transition that lets a Turn continue without input makes it selectabl
                                 const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
                                 try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
                                 if (path == .settled) {
-                                    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+                                    try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
                                 } else {
                                     try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                                 }
@@ -316,10 +316,13 @@ test "production turn preserves skipped continuation preference through actual S
                         self.failure = err;
                         return error.Fence;
                     };
-                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
                 }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
+                }
+                pub fn publishRetryCrossings(_: *@This(), _: u64, _: u64) error{Fence}!turn.DeadlineRead {
+                    unreachable;
                 }
                 pub fn unixMilliseconds(_: *const @This()) ?u64 {
                     return null;
@@ -342,6 +345,13 @@ test "production turn preserves skipped continuation preference through actual S
                     return .admitted;
                 }
                 pub fn turnsPaused(_: *@This()) bool {
+                    return false;
+                }
+                // Store admissions finish synchronously in this context.
+                pub fn pendingModelAdmission(_: *const @This()) ?turn.PendingModelAdmission {
+                    return null;
+                }
+                pub fn advanceModelAdmission(_: *@This()) bool {
                     return false;
                 }
                 pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
@@ -568,7 +578,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const action = (try WorkParity.bash(&storage)).?;
             try WorkParity.idle(&storage);
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
             try std.testing.expect((try WorkParity.bash(&storage)) == null);
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const joined = (try WorkParity.model(&storage, .open_turn_message)).?;

@@ -194,6 +194,7 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{},
 selection_style: vaxis.Style = .{ .reverse = true },
 unicode: bool = true,
+caps: @import("overview_view.zig").Caps = .{},
 form: ?pages.Mapped(Form) = null,
 issue: ?[]const u8 = null,
 paste: Paste = .none,
@@ -811,7 +812,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os/os.zig").linkOpener(init_.environ_map) orelse {
+            const command = @import("os").linkOpener(init_.environ_map) orelse {
                 self.issue = "No browser opener is available. Open the displayed URL manually.";
                 return;
             };
@@ -935,7 +936,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 const Button = struct { label: []const u8, control: core.Control, action: ?core.Action };
 fn button(buttons: *std.ArrayList(Button), alloc: std.mem.Allocator, label: []const u8, control: core.Control, action: ?core.Action) !void {
-    try buttons.append(alloc, .{ .label = try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
+    try buttons.append(alloc, .{ .label = if (std.mem.eql(u8, label, "Close")) try alloc.dupe(u8, label) else try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
 }
 const Row = struct { label: []const u8, value: []const u8 = "", control: ?core.Control = null, action: ?core.Action = null, caret: ?u16 = null };
 fn append(rows: *std.ArrayList(Row), alloc: std.mem.Allocator, label: []const u8, value: []const u8, control: ?core.Control, action: ?core.Action) !void {
@@ -973,7 +974,7 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     return writer.written();
 }
 fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
-    const value_width = width -| Panel.value_column;
+    const value_width = Panel.valueWidth(width);
     const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
     try append(rows, ctx.arena, label, first, control, action);
     var at = first.len;
@@ -996,7 +997,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var code_field: ?usize = null;
     const a = ctx.arena;
     const title: []const u8 = switch (self.state.page) {
-        .account => "Sign in to Rui",
+        .account => "Welcome to Rui",
         .method => "ChatGPT account",
         .api => "Connect with an API key",
         .browser => "Continue in your browser",
@@ -1042,8 +1043,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .api => {
             if (self.form) |mapped| {
                 const form = mapped.value;
-                const field_width = width -| Panel.value_column -| 1;
-                try append(&rows, a, "Scope", "Selected Host. New Sessions here only.", null, null);
+                const field_width = Panel.valueWidth(width) -| 1;
+                try append(&rows, a, "Scope", "Selected Host. New chats here only.", null, null);
                 try appendEditor(&rows, ctx, if (form.endpointEdit() == .unchanged and !std.mem.endsWith(u8, form.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL", &form.base, .base, field_width, "HTTPS base URL");
                 try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
                 try appendEditor(&rows, ctx, "Model ID", &form.model, .model, field_width, "Required for custom services");
@@ -1054,7 +1055,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
         .browser => {
             try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) browser_link else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
-            const mask = try a.alloc(u8, @min(browser_typed, width -| Panel.value_column -| 1));
+            const mask = try a.alloc(u8, @min(browser_typed, Panel.valueWidth(width) -| 1));
             @memset(mask, '*');
             try append(&rows, a, "Paste callback", if (browser_typed != 0) mask else if (browser_stray) "Not the sign-in address. Paste again." else if (browser_checking) "Checking address..." else "Paste final browser address, then Enter", .callback, .callback);
             try button(&buttons, a, "Open browser", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
@@ -1083,7 +1084,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
         .pending => {
             try append(&rows, a, "Saved", "The serving Host may still use old settings.", null, null);
-            try append(&rows, a, "Warning", "Pause interrupts ALL Sessions on this Store.", null, null);
+            try append(&rows, a, "Warning", "Pause interrupts ALL chats on this Store.", null, null);
             const pause_command = try hostCommand(a, "pause", self.target.slice());
             const start_command = try hostCommand(a, "start", self.target.slice());
             try appendWrapped(&rows, ctx, "Copy pause cmd", pause_command, .pause_command, .{ .command = pause_command }, width);
@@ -1095,7 +1096,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Return", .close, .close);
         },
         .connected => {
-            try append(&rows, a, "Connected", "This terminal is configured for new Sessions.", null, null);
+            try append(&rows, a, "Connected", "This terminal is configured for new chats.", null, null);
             try button(&buttons, a, "Close", .close, .close);
         },
     }
@@ -1120,16 +1121,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     var footer_surface: ?vxfw.Surface = null;
-    if (width > 6) {
+    if (width > 6 and self.state.page == .device) {
         const footer = try a.create(vxfw.Text);
-        footer.* = .{ .text = if (self.state.page == .device) "Tab / Shift-Tab move. Enter chooses.\nC copies code. Esc back." else "Tab / Shift-Tab move. Enter chooses. Esc back.", .style = self.quiet, .width_basis = .parent };
+        footer.* = .{ .text = "C copies code. Esc back.", .style = self.quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
         if (natural.size.height + 3 <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
+    var rule_caps = self.caps;
+    rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
-        .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
+        .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
         .unicode = self.unicode,
         .fields = fields,
         .actions = labels,
@@ -1140,7 +1143,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .rule_style = self.quiet,
+        .rule = @import("widget_style.zig").line(rule_caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));
@@ -1156,7 +1159,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (footer_surface) |surface| parts[parts.len - 1] = .{ .origin = .{ .row = @intCast(panel_surface.size.height), .col = 3 }, .surface = surface };
     child.children = parts;
     self.scroll = panel.scroll;
-    if (code_field) |index| if (panel.fieldRow(index) != null and code.len != 0 and ctx.stringWidth(code.slice()) <= width -| Panel.value_column) {
+    if (code_field) |index| if (panel.fieldRow(index) != null and code.len != 0 and ctx.stringWidth(code.slice()) <= Panel.valueWidth(width)) {
         self.drawn.copy = code;
     };
     var hits: std.ArrayList(Hit) = .empty;
@@ -1165,14 +1168,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const field = target_.index < rows.items.len;
         const action_ = if (field) rows.items[target_.index].action else buttons.items[target_.index - rows.items.len].action;
         if (field) if (rows.items[target_.index].caret) |caret| {
-            if (target_.index == selected and width > Panel.value_column) child.cursor = .{ .row = target_.row, .col = @min(width - 1, Panel.value_column + caret) };
+            if (target_.index == selected and Panel.valueWidth(width) > 0) child.cursor = .{ .row = target_.row, .col = @min(Panel.valueEnd(width) - 1, Panel.value_column + caret) };
         };
         if (action_) |action| {
             if (action == .copy and self.drawn.copy == null) continue;
             if (target_.index == selected) focused_visible = true;
             if (action == .open and field) {
                 const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.style, action.open);
-                for (@min(Panel.value_column, width)..width) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
+                for (@min(Panel.value_column, Panel.valueEnd(width))..Panel.valueEnd(width)) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
             }
             try hits.append(a, .{ .row = @intCast(origin.row + target_.row), .start = @intCast(origin.col + target_.start), .end = @intCast(origin.col + target_.end), .action = action });
         }
@@ -1313,6 +1316,12 @@ const BrowserRig = struct {
 
     fn strayed(page: *Self) bool {
         return browserField(page, "stray");
+    }
+
+    fn deviceCode(page: *Self) bool {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        return page.code.len != 0;
     }
 
     fn port(self: *BrowserRig) ![]const u8 {
@@ -1621,11 +1630,11 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
         const text = try testingText(account, ctx.alloc);
         try std.testing.expectEqual(@as(usize, 3), page.drawn.hits.len);
         try std.testing.expect(std.mem.indexOf(u8, text, "Choose account") == null and std.mem.indexOf(u8, text, "Navigation") == null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Choose an account.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") != null);
-        try std.testing.expectEqual(@as(usize, 2), account.children[0].surface.children.len);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Sign in to begin.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") == null);
+        try std.testing.expectEqual(@as(usize, 1), account.children[0].surface.children.len);
         const button_hit = page.drawn.hits[2];
         try std.testing.expect(button_hit.action == .close and button_hit.row > page.drawn.hits[1].row + 1);
-        try std.testing.expectEqualStrings("[", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
+        try std.testing.expectEqualStrings("C", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
         try testingSend(&page, &ctx, "\t\t\r", width, 30);
         try std.testing.expectEqual(@as(usize, 1), owner.closed);
         _ = try testingDraw(&page, ctx.alloc, width, 30);
@@ -1643,7 +1652,7 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
             .{ .page = .{ .saving = .key }, .labels = &.{"[ Back ]"}, .controls = &.{.back} },
             .{ .page = .{ .failed = .{ .failure = .expired, .retry = .device } }, .labels = &.{ "[ Retry ]", "[ Back ]" }, .controls = &.{ .retry, .back } },
             .{ .page = .pending, .labels = &.{ "[ Recheck ]", "[ Back ]", "[ Return ]" }, .controls = &.{ .recheck, .back, .close } },
-            .{ .page = .connected, .labels = &.{"[ Close ]"}, .controls = &.{.close} },
+            .{ .page = .connected, .labels = &.{"Close"}, .controls = &.{.close} },
         };
         for (cases) |case| {
             page.state.page = case.page;
@@ -1756,6 +1765,12 @@ test "Sign-in exact drawn device code copies only explicitly and never after cli
         const frame = try testingDraw(&page, ctx.alloc, width, height);
         if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
     };
+    for ([_]u16{ 27, 28, 29, 30, 31 }) |width| {
+        page.state.focus = .copy_code;
+        const frame = try testingDraw(&page, ctx.alloc, width, 30);
+        try std.testing.expectEqual(width >= 30, page.drawn.copy != null);
+        if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
+    }
     _ = try testingDraw(&page, ctx.alloc, 90, 28);
     const old = page.drawn.copy.?;
     page.state.attempt += 1;
@@ -1814,6 +1829,66 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
     try std.testing.expectEqual(reported, report.written().len);
 }
 
+test "SUI-7 Sign-in Escape cancels waiting browser and device journeys and returns to the method frame" {
+    for ([_]core.Method{ .browser, .device }) |method| {
+        var rig: BrowserRig = undefined;
+        try rig.open();
+        defer rig.close();
+        try rig.send("\r");
+        if (method == .device) try rig.send("\t");
+        try rig.send("\r");
+        if (method == .browser) {
+            try rig.wait(BrowserRig.linked);
+            try rig.send("\x1b[200~not-the-address\x1b[201~\r");
+            try rig.wait(BrowserRig.strayed);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Not the sign-in address. Paste again.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "not-the-address") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Change method ]") != null);
+        } else {
+            try rig.wait(BrowserRig.deviceCode);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "BDL9-KI88H") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Copy code ]") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "C copies code") != null);
+        }
+        try rig.page.widget().handleEvent(&rig.ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+        try std.testing.expect(rig.page.state.page == .stopping);
+        try rig.wait(testingCompleted);
+        try rig.page.advance(&rig.ctx);
+        try std.testing.expect(rig.page.task.thread == null and rig.page.state.page == .method);
+        const returned = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+        try std.testing.expect(std.mem.indexOf(u8, try testingText(returned, rig.ctx.alloc), "ChatGPT account") != null);
+        for ([_][]const u8{ ".config/rui/preferences", ".config/rui/codex.json", ".config/rui/chatgpt.json", ".config/rui/requests" }) |path|
+            try std.testing.expectError(error.FileNotFound, rig.tmp.dir.access(std.testing.io, path, .{}));
+    }
+}
+
+test "SUI-6 Sign-in ignores account typing and Escape returns from API key to welcome" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var page: Self = .{};
+    defer page.closeForm();
+    try testingSend(&page, &ctx, "hello", 90, 28);
+    try std.testing.expect(page.state.page == .account and page.state.focus == .chatgpt and page.task.thread == null);
+    try testingSend(&page, &ctx, "\x1b[C", 90, 28);
+    try std.testing.expectEqual(core.Control.api_key, page.state.focus);
+    try testingSend(&page, &ctx, "\r", 90, 28);
+    try std.testing.expect(page.state.page == .api);
+    const api = try testingDraw(&page, ctx.alloc, 90, 28);
+    try std.testing.expect(std.mem.indexOf(u8, try testingText(api, ctx.alloc), "Connect with an API key") != null);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(page.state.page == .account and page.task.thread == null);
+    const welcome = try testingDraw(&page, ctx.alloc, 90, 28);
+    const text = try testingText(welcome, ctx.alloc);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Welcome to Rui") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "hello") == null);
+}
+
 test "Sign-in both OAuth methods retry published Host failures without authenticating again" {
     for ([_]core.Method{ .browser, .device }) |method| for ([_]bool{ false, true }) |activation_error| for ([_]bool{ false, true }) |defaults_failed| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1846,7 +1921,7 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
 }
 
 test "Sign-in whole joined receipt survives screen settlement and departure reports exactly once" {
-    const Case = enum { refused, os_launch, timeout, warning, pending, activation_error };
+    const Case = enum { refused, os_launch, timeout, success, pending, activation_error };
     const Worker = struct {
         fn finish(_: *anyopaque, _: *ClientTask) !void {}
     };
@@ -1863,7 +1938,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => .failed(.os_launch, error.HostLaunchFailed),
             .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
             .activation_error => null,
-            .warning, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } }, .warning = .invalid_openai_base_url },
+            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } } },
         };
         answer.pending = case == .pending;
         if (answer.launch) |*launch| {
@@ -1909,17 +1984,16 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => error.HostLaunchFailed,
             .timeout, .activation_error => error.HostReadinessUnconfirmed,
             .pending => error.ConnectionNotActive,
-            .warning => null,
+            .success => null,
         };
         if (expected) |err| try std.testing.expectError(err, ended) else try ended;
         const text = report.written();
         try std.testing.expectEqual(defaults_failed, std.mem.indexOf(u8, text, "UnsupportedPreferencesVersion") != null);
         switch (case) {
-            .refused, .timeout, .warning, .pending => try std.testing.expect(std.mem.indexOf(u8, text, "retained child transcript") != null),
+            .refused, .timeout, .success, .pending => try std.testing.expect(std.mem.indexOf(u8, text, "retained child transcript") != null),
             .os_launch => try std.testing.expect(std.mem.indexOf(u8, text, "OS error 13") != null),
             .activation_error => try std.testing.expect(std.mem.indexOf(u8, text, "HostReadinessUnconfirmed") != null),
         }
-        if (case == .warning or case == .pending) try std.testing.expect(std.mem.indexOf(u8, text, host_launch.invalid_base_url) != null);
         try std.testing.expect(page.task.thread == null and page.form == null and page.outcome == null);
         const count = text.len;
         try page.stopTo(&report.writer);
@@ -2041,7 +2115,6 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         try rig.env.put("LATER", @tagName(later));
         var answer = try testingActivation(page.init.?);
         answer.launch = .failed(.child_refused, error.HostStartupFailed);
-        answer.launch.?.warning = .invalid_openai_base_url;
         const marker = "first attempt diagnostic marker\n";
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
@@ -2077,7 +2150,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
         try std.testing.expectError(error.UnsupportedPreferencesVersion, page.stopTo(&report.writer));
         const text = report.written();
-        for ([_][]const u8{ marker, "UnsupportedPreferencesVersion", host_launch.invalid_base_url, "/synthetic owned/.openai-retained.key", "InjectedCredentialWriteFailure", "AccessDenied" }) |needle| {
+        for ([_][]const u8{ marker, "UnsupportedPreferencesVersion", "/synthetic owned/.openai-retained.key", "InjectedCredentialWriteFailure", "AccessDenied" }) |needle| {
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, needle));
         }
         try std.testing.expect(page.receipts == null and page.outcome == null);
@@ -2130,7 +2203,7 @@ test "Sign-in receipt admission retains old metadata on quota create and append 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), "LoginExpired"));
 }
 
-test "Sign-in native departure fully acknowledged successful warning remains successful after create cap or append refusal" {
+test "Sign-in native departure fully acknowledged successful launch remains successful after create cap or append refusal" {
     const Refusal = enum { create, cap, append };
     const Hooks = struct {
         fn unavailable(_: std.process.Init) !std.Io.File {
@@ -2138,7 +2211,6 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         }
     };
     const marker = "successful operation diagnostic marker\n";
-    const warning = host_launch.invalid_base_url ++ "; this Host starts without OpenAI.\n";
     for (std.enums.values(Refusal)) |refusal| {
         var rig: BrowserRig = undefined;
         try rig.open();
@@ -2146,7 +2218,7 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         const page = &rig.page;
         defer page.deinit();
         var answer = try testingActivation(page.init.?);
-        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } } };
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
         const outcome: Outcome = .{ .published = .{ .defaults = {}, .activation = answer } };
@@ -2169,7 +2241,7 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
                     break;
                 };
                 committed += 1;
-                try std.testing.expect(committed <= max_deferred_bytes / (warning.len + marker.len));
+                try std.testing.expect(committed <= max_deferred_bytes / marker.len);
                 page.outcome = outcome;
             },
             .append => {
@@ -2185,9 +2257,9 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         const fd: ?std.posix.fd_t = if (page.receipts) |kept| kept.file.handle else null;
         if (page.receipts) |kept| try std.testing.expect(kept.first_failure == null and kept.reported == 0);
         var expected: std.Io.Writer.Allocating = .init(rig.arena.allocator());
-        for (0..committed) |_| try expected.writer.writeAll(warning ++ marker);
+        for (0..committed) |_| try expected.writer.writeAll(marker);
         try expected.writer.print("Replacement sign-in was not started: previous report could not be retained ({s}).\n", .{@errorName(cause)});
-        try expected.writer.writeAll(warning ++ marker);
+        try expected.writer.writeAll(marker);
         const output = try rig.tmp.dir.createFile(page.init.?.io, "native-departure", .{ .read = true });
         defer output.close(page.init.?.io);
         const saved_stderr = std.c.dup(2);

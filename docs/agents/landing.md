@@ -10,33 +10,31 @@ A PR description has a [Goal](../../CODING_STANDARDS.md#goal), a Summary, the Ev
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
-Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
-Selected CI and the opener's `@codex review` request start together on the published candidate.
-Use `python3 tests/ci/open_pr.py ready` for an older draft once its published head matches the clean committed checkout.
-New PRs need no draft conversion, so the same unchanged candidate does not run heavy checks twice merely to become ready.
+Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work, opens it as a draft and requests `@codex review`.
+A draft runs only the plan job, so Codex rounds do not start, then cancel, the selected suite.
+Codex reviews a draft only on request: after each fix push, comment `@codex review` again.
+Once Codex is clean on the published head, run `python3 tests/ci/open_pr.py ready`; selected CI then runs once on that head, and the PR merges when it is green.
+Two PRs may open ready with `open_pr.py open --ready`, so CI runs beside review: a fix for a red `main`, and a PR other open PRs are waiting on.
 Codex is clean when its latest `codex-review-state:v1` summary names the reviewed head and reports no unresolved findings.
 A "no major issues" receipt alone is not clean, and an earlier review thread stays open until its author resolves it.
 After a fix push, resolve each earlier thread that the fix answered.
-Keep clean Codex evidence through unchanged semantics as permitted below; request `@codex review` when a production or operational change invalidates it.
+Keep clean Codex evidence through unchanged semantics as permitted below; a production or operational change invalidates it and needs `@codex review` again (Codex reviews a ready PR automatically on each push).
 A fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
 Documentation-only edits that preserve the reviewed contract also reuse the clean review, with the semantic comparison recorded in the PR.
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers.
-Every UI PR embeds actual-implementation screenshots or a screen recording in its description before it is merge-ready.
+Every UI PR provides actual-implementation screenshots or a screen recording before it is merge-ready.
 Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) and the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states for the changed screens.
-Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N [--ssh HOST]` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
+Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
 The comparison loads both default recipes from their pinned HEAD/BASE revisions; a newer or dirty checkout cannot change them. Explicit `--scenario` intentionally overrides both. A selected state absent from BASE is new with only an after capture.
-The publisher selects changed/new PNGs and GIFs, attaches them through `gh pr edit --attach` under `## Screens` with head/base/sizes/surface facts and state/size alt text, and verifies the embeds by reading the body back. `--all` includes unchanged pairs.
-The upload machine requires gh **2.104.0+**, a classic PAT or gh OAuth token, and repository push access. The command fails clearly if those are missing, and reads back partial uploads before refusing them; inspect the body before retrying.
-Cloud threads use `$V publish DIR --pr N --ssh rui-box`, after `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` establishes the SSH alias if needed. The same upload worker runs on the box, using its credentials, after staging only selected media in a fresh directory that is removed afterward. Omit `--ssh` when running on the box itself.
-Cloud writes filter image embeds and the proxy blocks the CLI's GraphQL lookup. **After images have been attached, every later body edit must run on the box too**: copy the file there, then `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Writing the body from a container through REST, open_pr.py or MCP would break its images again.
-Open the PR to obtain its number, then publish before the next push. `Require PR Shape` runs on opened/synchronize/reopened/ready_for_review; body edits do not trigger it. If the opening run failed before upload, manually rerun the failed jobs after publishing; PR Shape reads the current body, falling back to the event payload if that read fails.
-The check accepts a line that, after leading whitespace, starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. The publisher emits each attachment on its own labelled line. Inline-code examples, reference images, non-attachments images, bare URLs and repository page links do not pass. A change that provably draws nothing different may instead carry `No screen change: <nonempty reason>` on its own line.
+The publisher selects changed/new PNGs and GIFs (`--all` includes unchanged pairs), checks the PR head, pushes the media and manifests to `pr-screens`, and dispatches a workflow to post a sticky screens comment. Selected media must total at most 20 MB; the command needs repository push access and permission to dispatch the workflow.
+Open the PR to obtain its number, then publish the frames. Screens are required by `admission` for merge; the build and tests run without them. After posting, the workflow attempts to rerun a failed `admission` job for that head.
+Admission accepts a GitHub Actions sticky screens comment with the current head SHA and at least one image. It also accepts a body line that, after leading whitespace, starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other hosts, bare URLs and repository page links do not pass. A change that provably draws nothing different may instead carry `No screen change: <nonempty reason>` on its own line.
 It derives UI paths from Overview's production import closure minus Host dependencies and test owners, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
 For interaction changes, show the sequence with a recording or labelled before/after screenshots. State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
 Show before/after PNGs to the person who requested the work in your own conversation when possible. Humans with browsers may still upload images or videos as `github.com/user-attachments` media.
-A comment, local path or CI artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
+A local path or CI artifact pointer alone does not meet the evidence requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
@@ -81,8 +79,13 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 The pre-push hook re-runs the last CI red as described in [local feedback evidence](../../CODING_STANDARDS.md#evidence).
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
-The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
-The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
+
+`main` is red while an open `main-red` issue says so.
+PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, bisects each failed step to the commit that broke it and files one `main-red` issue per cause, naming that commit.
+The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
+When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.
+A verdict that the red did not reproduce at HEAD, or already failed at the batch's base, names no commit; triage it as below.
+While `main` is red, Promote can still publish an earlier commit with a green `main-qualified` record (`-f sha=qualified`).
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
@@ -98,7 +101,9 @@ A reopened issue keeps its label; change it if the next fix finds another cause.
 ## Promote
 
 Promotion publishes a release and advances `stable`; merging never does.
-Promote without asking once the merged batch holds the fixes users are waiting for, and at least before each working day: `gh workflow run promote.yml --ref main`.
+Promote publishes a green main HEAD every three hours when main has moved past `stable`, and publishes a commit a [scheduled promotion](../verification/release.md#scheduled-promotion) already qualified in minutes; it qualifies main HEAD itself, as below, only when no green record of that commit still holds its archives.
+Dispatch a promotion by hand without asking once the merged batch holds a fix users are waiting for and the next tick is too late: `gh workflow run promote.yml --ref main`, or `-f sha=qualified` for the newest green commit while main HEAD is red.
+A dispatch waits behind a running promotion, and a scheduled tick replaces it while it waits ([Scheduled promotion](../verification/release.md#scheduled-promotion)).
 Whoever dispatches a promotion watches it to the end and reports the result unprompted.
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.

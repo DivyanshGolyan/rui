@@ -176,7 +176,7 @@ const FailingList = struct {
     pub const list = session_report.FullList.turns;
     pub const kept_rows = 0;
 
-    pub fn values(_: *reads_domain.ReadAccess, _: *const S.Row) error{}!session_report.FullRow {
+    pub fn values(_: *reads_domain.ReadAccess, _: *const S.Row, _: anytype) error{}!session_report.FullRow {
         unreachable;
     }
 };
@@ -306,22 +306,48 @@ test "Full history refuses content whose bytes no longer match their digest" {
 test "Full history takes a round per chunk" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSessionAsk(&storage, "history-rounds-config");
-            const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
-            try answerTestTurn(&storage, &tmp, session.slice(), "history-rounds", &answer);
-            var rounds: u32 = 0;
-            const content_before = storage.testing_content_work.content_rounds;
-            std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), &rounds));
-            try std.testing.expectEqual(@as(u32, 1 + 5), rounds);
-            const content_rounds: u16 = switch (case.engine) {
-                .sqlite, .mysql => 2,
+            const populations = [_]struct { operations: usize, rounds: u32 }{
+                .{ .operations = 1, .rounds = 6 },
+                .{ .operations = 4, .rounds = 8 },
+                .{ .operations = 5, .rounds = 11 },
             };
-            try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
+            const offers = [_][]const []const u8{ &.{"bash"}, &.{}, &.{"find_tools"}, &.{ "bash", "find_tools" }, &.{"web_search"} };
+            for (populations) |population| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "history-rounds-config");
+                const answer = [_]TestingAnswerPart{.{ .encoded = "hello", .decoded = "hello" }};
+                inline for (0..offers.len) |index| {
+                    if (index < population.operations) {
+                        if (index != 0) {
+                            var update: wire_request.ConfigureCommand = .{};
+                            update.session = session;
+                            try update.key.set(std.fmt.comptimePrint("history-tools-{d}", .{index}));
+                            update.configuration.tools = try .of(offers[index]);
+                            try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                        }
+                        try answerTestTurn(&storage, &tmp, session.slice(), std.fmt.comptimePrint("history-rounds-{d}", .{index}), &answer);
+                    }
+                }
+                var rounds: u32 = 0;
+                const content_before = storage.testing_content_work.content_rounds;
+                const bytes = try testingFullHistory(&storage, &tmp, session.slice(), &rounds);
+                defer std.testing.allocator.free(bytes);
+                const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer report.deinit();
+                const operations = report.value.object.get("full").?.object.get("model_operations").?.array.items;
+                try std.testing.expectEqual(population.operations, operations.len);
+                for (operations, offers[0..population.operations]) |operation, expected| {
+                    const names = operation.object.get("offered_tools").?.array.items;
+                    try std.testing.expectEqual(expected.len, names.len);
+                    for (expected, names) |name, actual| try std.testing.expectEqualStrings(name, actual.string);
+                }
+                try std.testing.expectEqual(population.rounds, rounds);
+                try std.testing.expectEqual(@as(u16, @intCast(2 * population.operations)), storage.testing_content_work.content_rounds - content_before);
+            }
         }
     }.run);
 }
@@ -524,8 +550,8 @@ test "Full Message projection work does not multiply Messages by stops, in round
             const session = try configureTestSession(&storage, "full-scale-config");
             for (1..message_count + 1) |index| {
                 var key: [32]u8 = undefined;
-                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                    "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
+                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position,source_kind) " ++
+                    "VALUES(?1,?2,?3,1,NULL,1,?4,1)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
             }
             const last_command = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0) FROM core_command", .{});
             for (1..stop_count + 1) |index| {

@@ -41,7 +41,7 @@ test "content reader owns the bounded result-delivery window" {
                 session.slice(),
                 &text,
             );
-            const reference = (try store_testing.observeCommandForTesting(&storage, "window-message")).kind.message.?.content;
+            const reference = (try store_testing.observeCommandForTesting(&storage, "window-message")).kind.message.?.content.text;
             var reader: ContentReader = undefined;
             reader.open(try storage.openContent(reference));
             defer reader.close();

@@ -1,3 +1,4 @@
+const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -19,6 +20,8 @@ fn recordExit(status: caller_exit.Status) void {
 }
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
+const cli_invocation = @import("cli_invocation.zig");
+const store_target = @import("store_target.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -33,10 +36,13 @@ const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const host_start = @import("host_start.zig");
 const host_settings = @import("host_settings.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
+const launch_transfer = @import("host_launch_transfer.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
+const defaults_report = @import("defaults_report.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
 const model_capability = @import("model_capability.zig");
@@ -103,86 +109,86 @@ fn run(init: std.process.Init) !void {
     const args = try allocator.alloc([]const u8, raw_args.len);
     defer allocator.free(args);
     for (raw_args, args) |raw, *arg| arg.* = raw;
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--host-coordinator")) {
-        return @import("host_coordinator.zig").run(init, allocator);
-    }
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
-    }
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "upgrade")) return runUpgrade(init, args[2..]);
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "--publish-install")) return publishInstall(init, args[2..]);
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var output: std.Io.Writer.Allocating = .init(allocator);
-        defer output.deinit();
-        try advice.write(&output.writer, &observed, home);
-        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var line: [16]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
-        const schema = @import("store.zig");
-        var output: [128]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
-    }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (cli_args.retired(args[1])) |replacement| {
-        const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.InvalidInvocation;
-    }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
-        return printHelp(init.io, .{ .resource = resource });
-    }
-    const command = cli_args.find(resource, args[2]) orelse {
-        var operation: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
-            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.InvalidInvocation;
-        };
-        stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.InvalidInvocation;
-    };
-    const definition = command.definition();
-    failure_held.resource = @tagName(resource);
-    failure_held.operation = definition.name;
-    var problem: cli_args.Refusal = undefined;
-    const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch {
-        reportParseProblem(problem, @tagName(resource), definition.name, null);
-        return error.InvalidInvocation;
-    };
-    if (parsed.help) return printHelp(init.io, .{ .command = definition });
-    if (parsed.missing()) |group| {
-        reportMissing(resource, definition, group) catch {};
-        return error.InvalidInvocation;
-    }
-    validateFreshInvocation(init.io, &parsed, &problem) catch |err| {
-        switch (err) {
-            error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => {
-                reportParseProblem(problem, @tagName(resource), definition.name, null);
-                return error.InvalidInvocation;
+    var facts: cli_invocation.Facts = .{ .args = args };
+    while (true) switch (cli_invocation.next(facts, init.arena.allocator())) {
+        .host_coordinator => return @import("host_coordinator.zig").run(init, allocator),
+        .root_help => return std.Io.File.stdout().writeStreamingAll(init.io, usage_text),
+        .version => return std.Io.File.stdout().writeStreamingAll(init.io, version_text),
+        .upgrade => |tail| return runUpgrade(init, tail),
+        .publish_install => |tail| return publishInstall(init, tail),
+        .installation => |kind| switch (kind) {
+            .path => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var output: std.Io.Writer.Allocating = .init(allocator);
+                defer output.deinit();
+                try advice.write(&output.writer, &observed, home);
+                return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
             },
-            else => return err,
-        }
+            .state => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var line: [16]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
+            },
+            .facts => {
+                const schema = @import("store.zig");
+                var output: [128]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
+            },
+        },
+        .new_session => |tail| return @call(.never_inline, newSession, .{ init, tail }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err,
+        .resource_help => |resource| return printHelp(init.io, .{ .resource = resource }),
+        .command_help => |definition| {
+            failure_held.resource = @tagName(definition.resource);
+            failure_held.operation = definition.name;
+            return printHelp(init.io, .{ .command = definition });
+        },
+        .refused => |refused| {
+            switch (refused) {
+                .syntax => |syntax| {
+                    failure_held.resource = @tagName(syntax.resource);
+                    failure_held.operation = syntax.operation;
+                },
+                .missing => |missing| {
+                    failure_held.resource = @tagName(missing.resource);
+                    failure_held.operation = missing.definition.name;
+                },
+                else => {},
+            }
+            var buffer: [4096]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            cli_invocation.writeRefusal(&writer, refused) catch unreachable;
+            stderr.diagnosticBytes(writer.buffered());
+            return error.InvalidInvocation;
+        },
+        .stat_record => |record| {
+            failure_held.resource = @tagName(record.resource);
+            failure_held.operation = record.operation;
+            _ = std.Io.Dir.cwd().statFile(init.io, record.path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    facts.record_exists = false;
+                    continue;
+                },
+                else => return err,
+            };
+            facts.record_exists = true;
+        },
+        .dispatch => |route| {
+            failure_held.resource = @tagName(route.parsed.definition.resource);
+            failure_held.operation = route.parsed.definition.name;
+            dispatch(init, route.command, &route.parsed, args) catch |err| {
+                if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
+                return err;
+            };
+            try postCommandHold(init);
+            return;
+        },
     };
-    dispatch(init, command, &parsed, args) catch |err| {
-        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        return err;
-    };
-    try postCommandHold(init);
 }
 
 fn reportedByOwner(err: anyerror) bool {
@@ -223,32 +229,8 @@ fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
 noinline fn reportParseProblem(problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    var held = problem.held(resource, operation);
-    held.unchanged = unchanged;
-    caller_error.writeLine(&writer, problem.code, held) catch unreachable;
+    cli_invocation.writeParseProblem(&writer, problem, resource, operation, unchanged) catch unreachable;
     stderr.diagnosticBytes(writer.buffered());
-}
-
-noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
-    var buffer: [1024]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-    try definition.writeGroup(&writer, group);
-    reportParseProblem(.{ .code = .option_required, .token = writer.buffered(), .option = false, .accepted = .{ .grammar = writer.buffered() } }, @tagName(resource), definition.name, null);
-    return error.InvalidArguments;
-}
-
-fn validateFreshInvocation(io: std.Io, parsed: *const cli_args.Parsed, refusal: *cli_args.Refusal) !void {
-    if (!try existingCapture(io, parsed)) try parsed.validateValues(refusal);
-}
-
-fn existingCapture(io: std.Io, parsed: *const cli_args.Parsed) !bool {
-    if (!parsed.definition.mutation or std.mem.eql(u8, parsed.definition.name, "recover")) return false;
-    const record = parsed.get("record") orelse return false;
-    _ = std.Io.Dir.cwd().statFile(io, record, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
@@ -281,6 +263,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
+        .session_list_parts => try readPublicParts(init, parsed, .message, false),
+        .session_read_part => try readPublicParts(init, parsed, .message, true),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
         .request_wait => try waitRequest(init, parsed),
@@ -289,11 +273,15 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_list => try requests(init),
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
+        .action_stop => try requestActionStop(init, parsed),
+        .action_publish => try publishAction(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
+        .action_list_parts => try readPublicParts(init, parsed, .action, false),
+        .action_read_part => try readPublicParts(init, parsed, .action, true),
         .store_schema => {
             if (!std.mem.eql(u8, parsed.get("engine").?, "mysql")) return error.InvalidArguments;
             const store_schema = @import("store.zig");
@@ -347,14 +335,14 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
     if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
-fn credentialPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8, create: bool) ![]const u8 {
-    return provider_login.credentialPath(init, provider, buffer, create) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime provider_login.credentialVariable(provider) ++ " names it");
+fn signInPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8) ![]const u8 {
+    return credential_location.default(init.environ_map, provider, buffer) catch |err| {
+        if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime credential_location.variable(provider) ++ " names it");
         return err;
     };
 }
 
-const SetupReader = enum { command_line, conversation, overview };
+const SetupReader = defaults_report.Reader;
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupReader) !void {
     const home = init.environ_map.get("HOME") orelse {
@@ -383,198 +371,76 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
-    // Preferences live in HOME, so a saved Store redirects every Workspace.
+    // F3: take the Host and account snapshots before writing any report bytes.
+    const report_host: defaults_report.Host = if (available_store) |*paths| switch (client.hostStatusAt(init.io, paths, null)) {
+        .ready => |current| .{ .ready = current.capabilities },
+        .unavailable => .unavailable,
+        .owned_unavailable => .owned_unavailable,
+        .incompatible => .incompatible,
+        .access_failure => .access_failure,
+    } else .store_unavailable;
+    var shown: codex_auth.Shown = undefined;
+    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const facts: defaults_report.Facts = .{
+        .changed = changed,
+        .values = values,
+        .store = prospective_store,
+        .saved_store = values.store.len != 0,
+        .store_available = available_store != null,
+        .readiness = &readiness,
+        .host = report_host,
+        .account = account,
+        .reader = reader,
+        .names = signInNames(),
+        .defaults = .{ .permission_mode = product_defaults.permission_mode, .recommended_model = product_defaults.recommended_model },
+    };
     if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
-        notice.writeAll("rui: saved ") catch break :notice;
-        TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
-        notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
+        defaults_report.writeStoreNotice(&notice, &facts) catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     }
-    if (reader == .command_line) return writeDefaultsJson(init.io, .{
-        .changed = changed,
-        .store = prospective_store,
-        .saved_store = values.store.len != 0,
-        .available_store = if (available_store) |*paths| paths.selector() else null,
-        .provider = if (values.provider.len != 0) values.provider.slice() else null,
-        .model = if (values.model.len != 0) values.model.slice() else null,
-        .notifications = values.notifications,
-        .reasoning_effort = values.reasoning_effort,
-        .permission_mode = values.permission_mode,
-        .readiness = &readiness,
-    });
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
-    if (reader == .conversation and changed and available_store != null and nextSessionReady(&values, &readiness)) return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
-    try writeSafeText(init.io, prospective_store orelse "unavailable");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
-    if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
-    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) providerShown(values.provider.slice()) else "not selected");
-    try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
-    try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
-    try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
-    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    var note_buffer: [128]u8 = undefined;
-    try writeSignIns(init, &readiness);
-    const selectable = model_capability.capabilities(&readiness);
-    const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
-        const advice: []const u8 = switch (err) {
-            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-        };
-        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
-        break :blk null;
-    };
-    if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; ChatGPT login: `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
-        .selected => |selected| {
-            const login_command = if (std.meta.stringToEnum(protocol.Provider, selected.provider)) |provider| provider.login() else null;
-            const note: []const u8 = switch (selected.readiness) {
-                .configured => "local credential configured; remote acceptance not checked",
-                .renewal_due => "local credential usable; renewal due at dispatch; remote acceptance not checked",
-                .missing => if (login_command) |command| try std.fmt.bufPrint(&note_buffer, "credential missing; run `{s}`. No fallback", .{command}) else "credential missing. No fallback",
-                .refresh_required => "credential refresh required; login may be required. No fallback",
-                .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
-            };
-            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ providerShown(selected.provider), selected.model, note });
-            try std.Io.File.stdout().writeStreamingAll(init.io, line);
-        },
-    };
-    var host_line: [512]u8 = undefined;
-    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatusAt(init.io, &paths, null)) {
-        .ready => |current| hostProvidersLine(current.capabilities.providers, &host_line),
-        .unavailable => "Host: unavailable; setup does not start it.\n",
-        .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
-        .incompatible => "Host: incompatible; inspect before submitting work.\n",
-        .access_failure => "Host: access failure; inspect Store permissions.\n",
-    } else "Host: unavailable; selected Store unavailable.\n";
-    try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+    if (defaults_report.wantsJson(&facts)) return writeDefaultsJson(init.io, &facts);
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try defaults_report.writeText(&output.interface, &facts);
+    try output.flush();
 }
 
-fn providerShown(saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return saved;
-    return provider.shown();
-}
-
-fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
-    const stdout = std.Io.File.stdout();
-    const chatgpt = chatgptLines(readiness.get(.chatgpt), readiness.get(.codex));
-    var line: [1024]u8 = undefined;
-    switch (chatgpt.plan) {
-        .none => {},
-        .account => try stdout.writeStreamingAll(init.io, planSignInLine(init, &line)),
-        .text => |text| try stdout.writeStreamingAll(init.io, text),
-    }
-    if (chatgpt.device) |text| try stdout.writeStreamingAll(init.io, text);
-    try stdout.writeStreamingAll(init.io, switch (readiness.get(.openai)) {
-        .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
-        .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
-    });
-}
-
-const ChatgptLines = struct {
-    plan: union(enum) {
-        none,
-        account,
-        text: []const u8,
-    },
-    device: ?[]const u8,
-};
-
-fn chatgptLines(plan: provider_selection.Readiness, device: provider_selection.Readiness) ChatgptLines {
-    const plan_login = comptime protocol.Provider.chatgpt.login().?;
-    const device_login = comptime protocol.Provider.codex.login().?;
-    return .{
-        .plan = switch (plan) {
-            .configured, .renewal_due => .account,
-            .missing => if (device == .missing) .{ .text = "ChatGPT: not signed in; sign in with `" ++ plan_login ++ "` (add --device-code to use a code instead of the browser).\n" } else .none,
-            .refresh_required => .{ .text = "ChatGPT: a renewal did not finish; sign in again with `" ++ plan_login ++ "`.\n" },
-            .credential_error => .{ .text = "ChatGPT: error reading private Rui credential; inspect it before use.\n" },
-        },
-        .device = switch (device) {
-            .missing => null,
-            .configured => "ChatGPT (device code): signed in (remote acceptance not checked).\n",
-            .renewal_due => "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n",
-            .refresh_required => "ChatGPT (device code): a renewal did not finish; sign in again with `" ++ device_login ++ "`.\n",
-            .credential_error => "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n",
-        },
-    };
-}
-
-test "auth status says each ChatGPT way in that exists, and how to sign in when neither does" {
-    const Readiness = provider_selection.Readiness;
-    const signed_in = "account";
-    const plan_renew = "ChatGPT: a renewal did not finish; sign in again with `rui auth login chatgpt`.\n";
-    const plan_error = "ChatGPT: error reading private Rui credential; inspect it before use.\n";
-    const neither = "ChatGPT: not signed in; sign in with `rui auth login chatgpt` (add --device-code to use a code instead of the browser).\n";
-    const device_on = "ChatGPT (device code): signed in (remote acceptance not checked).\n";
-    const device_due = "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n";
-    const device_renew = "ChatGPT (device code): a renewal did not finish; sign in again with `rui auth login chatgpt --device-code`.\n";
-    const device_error = "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n";
-    const cases = [_]struct { Readiness, Readiness, ?[]const u8, ?[]const u8 }{
-        .{ .configured, .configured, signed_in, device_on },
-        .{ .configured, .renewal_due, signed_in, device_due },
-        .{ .configured, .missing, signed_in, null },
-        .{ .configured, .refresh_required, signed_in, device_renew },
-        .{ .configured, .credential_error, signed_in, device_error },
-        .{ .renewal_due, .configured, signed_in, device_on },
-        .{ .renewal_due, .renewal_due, signed_in, device_due },
-        .{ .renewal_due, .missing, signed_in, null },
-        .{ .renewal_due, .refresh_required, signed_in, device_renew },
-        .{ .renewal_due, .credential_error, signed_in, device_error },
-        .{ .missing, .configured, null, device_on },
-        .{ .missing, .renewal_due, null, device_due },
-        .{ .missing, .missing, neither, null },
-        .{ .missing, .refresh_required, null, device_renew },
-        .{ .missing, .credential_error, null, device_error },
-        .{ .refresh_required, .configured, plan_renew, device_on },
-        .{ .refresh_required, .renewal_due, plan_renew, device_due },
-        .{ .refresh_required, .missing, plan_renew, null },
-        .{ .refresh_required, .refresh_required, plan_renew, device_renew },
-        .{ .refresh_required, .credential_error, plan_renew, device_error },
-        .{ .credential_error, .configured, plan_error, device_on },
-        .{ .credential_error, .renewal_due, plan_error, device_due },
-        .{ .credential_error, .missing, plan_error, null },
-        .{ .credential_error, .refresh_required, plan_error, device_renew },
-        .{ .credential_error, .credential_error, plan_error, device_error },
-    };
-    const states = std.enums.values(Readiness).len;
-    try std.testing.expectEqual(states * states, cases.len);
-    for (cases) |case| {
-        const said = chatgptLines(case[0], case[1]);
-        const plan: ?[]const u8 = switch (said.plan) {
-            .none => null,
-            .account => signed_in,
-            .text => |text| text,
-        };
-        if (case[2]) |expected| try std.testing.expectEqualStrings(expected, plan.?) else try std.testing.expectEqual(@as(?[]const u8, null), plan);
-        if (case[3]) |expected| try std.testing.expectEqualStrings(expected, said.device.?) else try std.testing.expectEqual(@as(?[]const u8, null), said.device);
-        inline for (.{ plan, said.device }) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
-    }
-}
-
-fn planSignInLine(init: std.process.Init, buffer: []u8) []const u8 {
-    const plain = "ChatGPT: signed in (remote acceptance not checked).\n";
+fn accountDetails(init: std.process.Init, shown: *codex_auth.Shown) ?defaults_report.Account {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = credentialPath(init, .chatgpt, &path_buffer, false) catch return plain;
-    var shown: codex_auth.Shown = undefined;
-    codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), &shown) catch return plain;
-    if (!shown.status.usable()) return plain;
-    var writer = std.Io.Writer.fixed(buffer);
-    writer.writeAll("ChatGPT: signed in") catch return plain;
-    if (shown.email.len != 0) writer.print(" as {s}", .{shown.email.slice()}) catch return plain;
+    const path = signInPath(init, .chatgpt, &path_buffer) catch return null;
+    codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), shown) catch return null;
+    if (!shown.status.usable()) return null;
+    var result: defaults_report.Account = .{ .email = shown.email.slice() };
     if (shown.expires_at > 0) {
         const day = (std.time.epoch.EpochSeconds{ .secs = @intCast(shown.expires_at) }).getEpochDay();
         const year_day = day.calculateYearDay();
         const month_day = year_day.calculateMonthDay();
         const seconds = @as(u64, @intCast(shown.expires_at)) % std.time.s_per_day;
-        writer.print("; access token expires {d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC and renews by itself", .{ year_day.year, month_day.month.numeric(), month_day.day_index + 1, seconds / 3600, seconds % 3600 / 60 }) catch return plain;
+        result.expiry = .{ .year = @intCast(year_day.year), .month = @intCast(month_day.month.numeric()), .day = @intCast(month_day.day_index + 1), .hour = @intCast(seconds / 3600), .minute = @intCast(seconds % 3600 / 60) };
     }
-    writer.writeAll(" (remote acceptance not checked).\n") catch return plain;
-    return writer.buffered();
+    return result;
+}
+
+/// The provider table's names and sign-in commands, handed to the report core.
+fn signInNames() defaults_report.Names {
+    var names: defaults_report.Names = .{ .shown = undefined, .login = undefined, .choices = comptime joinedProviders("|") };
+    for (std.enums.values(protocol.Provider)) |provider| {
+        names.shown[@backingInt(provider)] = provider.shown();
+        names.login[@backingInt(provider)] = provider.login() orelse "";
+    }
+    return names;
+}
+
+fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
+    var shown: codex_auth.Shown = undefined;
+    const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    var buffer: [1024]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    const names = signInNames();
+    try defaults_report.writeSignIns(&output.interface, readiness, account, &names);
+    try output.flush();
 }
 
 fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
@@ -586,7 +452,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish) catch |err| return switch (err) {
-        error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime provider_login.credentialVariable(.chatgpt) ++ " names the credential"),
+        error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime credential_location.variable(.chatgpt) ++ " names the credential"),
         else => err,
     };
     const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
@@ -672,9 +538,9 @@ fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[
     }
     const issuer = try planIssuer(init, fixture_endpoint);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const browser_path = provider_login.credentialPath(init, .chatgpt, &browser_buffer, false) catch null;
+    const browser_path = credential_location.default(init.environ_map, .chatgpt, &browser_buffer) catch null;
     var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const device_path = provider_login.credentialPath(init, .codex, &device_buffer, false) catch null;
+    const device_path = credential_location.default(init.environ_map, .codex, &device_buffer) catch null;
     const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
     if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
     if (receipt.browser) |line| stderr.diagnosticBytes(line);
@@ -723,7 +589,7 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
 
 fn unlocated(comptime way: []const u8, comptime provider: protocol.Provider) []const u8 {
     return "rui: could not end the ChatGPT " ++ way ++ " sign-in: Rui could not find its credential. Set " ++
-        comptime provider_login.credentialVariable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+        comptime credential_location.variable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
 }
 
 test "logout says how it left each ChatGPT login, and fails while either may remain" {
@@ -736,8 +602,8 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     const unconfirmed_browser = "Rui: Signed out of ChatGPT in the browser: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
     const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
-    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
-    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set RUI_CODEX_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set " ++ comptime credential_location.variable(.chatgpt) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set " ++ comptime credential_location.variable(.codex) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
     const B = chatgpt_plan_login.Browser;
     const D = chatgpt_plan_login.DeviceCode;
     const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
@@ -800,30 +666,11 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
 
 fn planIssuer(init: std.process.Init, fixture_endpoint: ?[]const u8) !chatgpt_plan_login.Issuer {
     const endpoint = fixture_endpoint orelse return .openai;
-    if (init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
+    if (init.environ_map.get(credential_location.variable(.chatgpt)) == null) return error.FixtureCredentialPathRequired;
     const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
     if (!std.mem.startsWith(u8, base, "http://127.0.0.1:")) return error.InvalidArguments;
     return .{ .fixture = base };
 }
-
-fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
-    const selectable = model_capability.capabilities(readiness);
-    const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
-    return selection == .selected and selection.selected.readiness.usable();
-}
-
-const DefaultsFacts = struct {
-    changed: bool,
-    store: ?[]const u8,
-    saved_store: bool,
-    available_store: ?[]const u8,
-    provider: ?[]const u8,
-    model: ?[]const u8,
-    notifications: bool,
-    reasoning_effort: ?model_capability.ReasoningEffort,
-    permission_mode: ?cli_value.PermissionMode,
-    readiness: *const provider_selection.Readinesses,
-};
 
 fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort") {
     if (std.mem.eql(u8, text, "default")) return .clear;
@@ -833,45 +680,10 @@ fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort"
     } };
 }
 
-fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
+fn writeDefaultsJson(io: std.Io, facts: *const defaults_report.Facts) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    try writer.print("{{\"version\":\"{s}\",\"type\":\"defaults\",\"changed\":{},\"store\":", .{ protocol.wire_version, facts.changed });
-    try std.json.Stringify.value(facts.store, .{}, writer);
-    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"provider\":", .{ if (facts.saved_store) "saved" else "home", facts.available_store != null });
-    try std.json.Stringify.value(facts.provider, .{}, writer);
-    try writer.writeAll(",\"model\":");
-    try std.json.Stringify.value(facts.model, .{}, writer);
-    try writer.print(",\"notifications\":{}", .{facts.notifications});
-    try writer.writeAll(",\"reasoning_effort\":");
-    try std.json.Stringify.value(if (facts.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
-    try writer.writeAll(",\"permission_mode\":");
-    try std.json.Stringify.value(if (facts.permission_mode) |mode| @tagName(mode) else null, .{}, writer);
-    try writer.writeAll(",\"local_credentials\":{");
-    for (std.enums.values(protocol.Provider), 0..) |provider, index|
-        try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
-    try writer.writeAll("},\"next_session\":");
-    if (provider_selection.resolve(&model_capability.capabilities(facts.readiness), null, null, facts.provider, facts.model)) |choice| switch (choice) {
-        .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
-        .selected => |selected| {
-            try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
-            try std.json.Stringify.value(selected.model, .{}, writer);
-            try writer.print(",\"local_credential\":\"{s}\"}}", .{@tagName(selected.readiness)});
-        },
-    } else |err| try writer.print("{{\"status\":\"{s}\"}}", .{switch (err) {
-        error.UnsupportedSelectionProvider => "unsupported_provider",
-        error.UnsupportedSelectionModel => "unsupported_model",
-    }});
-    try writer.writeAll(",\"host\":");
-    if (facts.available_store) |store| switch (client.hostStatus(io, store)) {
-        .ready => |ready| {
-            try writer.writeAll("{\"status\":\"ready\",\"capabilities\":");
-            try std.json.Stringify.value(ready.capabilities, .{}, writer);
-            try writer.writeByte('}');
-        },
-        else => |status| try writer.print("{{\"status\":\"{s}\"}}", .{@tagName(status)}),
-    } else try writer.writeAll("{\"status\":\"store_unavailable\"}");
-    try writer.writeAll("}\n");
+    try defaults_report.writeJson(writer, facts);
     try output.finish();
 }
 
@@ -922,11 +734,18 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     try upgrade.writeCheck(&output.interface, &checked);
     try output.flush();
-    if (checking) return;
-    if (!upgrade.canInstall(&checked)) {
-        recordExit(.environment);
-        return error.Reported;
-    }
+    const upgrade_run = @import("upgrade_run.zig");
+    var resumed = checked.facts(if (checking) .check else .install);
+    resumed.resumed = true;
+    if (upgrade_run.next(resumed) == .end) switch (upgrade_run.exit(resumed)) {
+        .done => return,
+        .not_installable => {
+            recordExit(.environment);
+            return error.Reported;
+        },
+        // A failed check or install returns its error before this point.
+        .check_failed, .install_failed, .restart_failed => unreachable,
+    };
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
@@ -937,6 +756,8 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
+    try upgrade.writeInstalling(&output.interface, &checked);
+    try output.flush();
     var result = upgrade.install(init, allocator, &checked, null, null, &cleanup, &download) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         upgradeDownload(err, &download);
@@ -946,7 +767,12 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     defer result.deinit(allocator);
     try upgrade.writeResult(&output.interface, &result);
     try output.flush();
-    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
+    switch (upgrade_run.exit(result.facts(&checked))) {
+        .done => {},
+        .restart_failed => return error.HostRestartFailed,
+        // A failed check or install returns its error before publication.
+        .check_failed, .not_installable, .install_failed => unreachable,
+    }
 }
 
 noinline fn upgradeDownload(err: anyerror, download: *const @import("upgrade.zig").Download) void {
@@ -984,21 +810,38 @@ fn homeRequired(comptime _: []const u8) error{HomeUnavailable} {
 const plain_caller = "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...";
 
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
-    if (explicit) |path| return rememberStore(init, path, false);
-    if (init.environ_map.get("RUI_STORE")) |path| {
-        const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
-        const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
-        if (path.len == 0 or handle.len == 0 or !protocol.validSessionId(address)) return error.InvalidRuiAddress;
-        return rememberStore(init, path, true);
-    }
-    if (init.environ_map.get("RUI_ADDRESS") != null or init.environ_map.get("RUI_SENDER_HANDLE") != null) return error.InvalidRuiAddress;
-    const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
-    const defaults = preferences.load(home) catch |err| return preferenceFailure(err);
-    if (defaults.store.len != 0) {
-        @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
-        return rememberStore(init, buffer[0..defaults.store.len], true);
-    }
-    return rememberStore(init, try preferences.defaultStore(home, buffer), false);
+    const home = init.environ_map.get("HOME");
+    var saved: ?store_target.SavedStore = null;
+    while (true) switch (store_target.next(.{
+        .explicit = explicit,
+        .env_store = init.environ_map.get("RUI_STORE"),
+        .env_address = init.environ_map.get("RUI_ADDRESS"),
+        .env_handle = init.environ_map.get("RUI_SENDER_HANDLE"),
+        .home = home,
+        .saved = saved,
+    })) {
+        .load_saved => saved = savedStore(home.?, buffer),
+        .selected => |selected| {
+            const path = switch (selected.path) {
+                .given => |given| given,
+                .home_default => try preferences.defaultStore(home.?, buffer),
+            };
+            return rememberStore(init, path, selected.must_exist);
+        },
+        .refused => |refused| return switch (refused) {
+            .invalid_address => error.InvalidRuiAddress,
+            .home_required => homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store"),
+            .preferences => |err| preferenceFailure(err),
+        },
+    };
+}
+
+/// The saved default's Store, copied into `buffer` because the loaded defaults are local.
+fn savedStore(home: []const u8, buffer: []u8) store_target.SavedStore {
+    const defaults = preferences.load(home) catch |err| return .{ .failed = err };
+    if (defaults.store.len == 0) return .none;
+    @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
+    return .{ .path = buffer[0..defaults.store.len] };
 }
 
 fn rememberStore(init: std.process.Init, path: []const u8, require_existing: bool) ![]const u8 {
@@ -1079,6 +922,10 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var failure: start_report.Failure = undefined;
+    if (parsed.has(settings_handoff.input_option) or (parsed.has(settings_handoff.check_option) and !parsed.has("check"))) {
+        failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
+        return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, .invalid);
+    }
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
     if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
     if (command == .host_settings and parsed.has("check")) {
@@ -1086,8 +933,16 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         defer std.heap.c_allocator.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
-        var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
+        if (parsed.has(settings_handoff.check_option)) {
+            var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
+                if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, .check, &failure, .invalid);
+                return err;
+            };
+            defer frozen.deinit(init.gpa);
+            settings.deinit();
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached, .check);
+            try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached, .check);
         return;
     }
     const result = if (command == .host_settings)
@@ -1095,7 +950,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     else
         host_start.savedEdit(init, selected, parsed.positional.?, if (command == .host_set) parsed.positional_tail.? else null, &failure);
     result catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -1104,6 +959,20 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) {
+        if (parsed.get(settings_handoff.input_option)) |descriptor| {
+            var failure: start_report.Failure = undefined;
+            const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+            if (fd != 0) {
+                failure = .init(.settings_invalid, "private starter input must be its anonymous stdin descriptor");
+                return writeRefusal(init.io, &failure, .invalid);
+            }
+            var frozen = launch_transfer.readHandoff(init.gpa, init.io, fd) catch {
+                failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
+                return writeRefusal(init.io, &failure, .invalid);
+            };
+            defer frozen.deinit(init.gpa);
+            return startHostRequest(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set"), .frozen = frozen.bytes }, false, .{});
+        }
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
@@ -1232,11 +1101,15 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
 }
 
 fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
+    _ = readiness; // Credential defaults belong to the child intake owner.
+    return startHostRequest(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, quiet, ops);
+}
+
+fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    _ = readiness; // Credential defaults belong to the child intake owner.
-    host_start.spawn(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
-    try reportHostLaunch(init.io, &result, quiet, assignments.len != 0 or settings_file != null, progress.shown);
+    host_start.spawn(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    try reportHostLaunch(init.io, &result, quiet, request.assignments.len != 0 or request.settings_file != null, progress.shown);
 }
 
 const launchFailure = host_start.launchFailure;
@@ -1247,7 +1120,7 @@ fn startHost(init: std.process.Init, selected: []const u8, assignments: []const 
 }
 
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
-    if (result.outcome == .failed and result.wait == null) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, .invalid);
+    if (result.outcome == .failed) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, if (result.wait == null) .invalid else caller_exit.knownError(result.outcome.failed.cause.err));
     var bytes: [host_launch.max_report_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try host_launch.writeDiagnostics(result, &writer, shown);
@@ -1412,8 +1285,8 @@ fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
 }
 
 fn openAiKeyPath(init: std.process.Init, buffer: []u8) ![]const u8 {
-    return api_key.path(init.environ_map, buffer) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the OpenAI key is HOME/.config/rui/openai.key unless " ++ api_key.path_variable ++ " names it");
+    return credential_location.default(init.environ_map, .openai, buffer) catch |err| {
+        if (err == error.HomeRequired) return homeRequired("the OpenAI key is HOME/.config/rui/openai.key unless " ++ credential_location.variable(.openai) ++ " names it");
         return err;
     };
 }
@@ -1890,7 +1763,7 @@ test "relaunch replacement failure retains departure and deletes the handoff wit
     var bytes: [4096]u8 = undefined;
     const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
     try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
-    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Your chats keep working while you are away.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
     try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }
@@ -2004,10 +1877,7 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
 }
 
-const invalid_base_url = host_launch.invalid_base_url;
-
 const provider_labels = joinedProviders(", ");
-const provider_choices = joinedProviders("|");
 
 fn joinedProviders(comptime separator: []const u8) []const u8 {
     comptime var text: []const u8 = "";
@@ -2026,7 +1896,7 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     switch (provider) {
         inline .codex, .chatgpt => |sign_in| {
-            const path = try credentialPath(init, sign_in, &path_buffer, false);
+            const path = try signInPath(init, sign_in, &path_buffer);
             return switch (try codex_auth.localStatus(path, codex_auth.nowSeconds(init.io))) {
                 .missing => .missing,
                 .configured => .configured,
@@ -2034,42 +1904,7 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
                 .refresh_required => .refresh_required,
             };
         },
-        .openai => return if (try api_key.present(try api_key.path(init.environ_map, &path_buffer))) .configured else .missing,
-    }
-}
-
-fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
-    if (!protocol.servesModel(routes)) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
-    var line = std.Io.Writer.fixed(buffer);
-    line.writeAll("Host: serves") catch unreachable;
-    var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) != .unserved) {
-        line.print("{s} {s}", .{ if (first) "" else ",", provider.shown() }) catch unreachable;
-        first = false;
-    };
-    line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
-        if (provider.login()) |command|
-            line.print("; to add {s}, stop and restart it after `{s}`", .{ provider.shown(), command }) catch unreachable
-        else
-            line.print("; {s} needs a sign-in this terminal cannot make yet", .{provider.shown()}) catch unreachable;
-    };
-    line.writeAll(".\n") catch unreachable;
-    return line.buffered();
-}
-
-test "the Host line names a login only for an unserved provider that has one" {
-    var buffer: [512]u8 = undefined;
-    const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
-    try std.testing.expectEqualStrings("Host: serves ChatGPT (device code) (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &buffer));
-    inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
-        var routes = protocol.routesAll(.endpoint);
-        @field(routes, @tagName(unserved)) = .unserved;
-        const said = hostProvidersLine(routes, &buffer);
-        if (unserved.login()) |command|
-            try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
-        else
-            try std.testing.expect(std.mem.indexOf(u8, said, "rui auth login") == null and std.mem.indexOf(u8, said, "cannot make yet") != null);
+        .openai => return if (try api_key.present(try credential_location.default(init.environ_map, .openai, &path_buffer))) .configured else .missing,
     }
 }
 
@@ -2079,31 +1914,54 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer std.heap.c_allocator.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    var tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
+    var tuning = try server.Tuning.fromOptions(parsed);
     tuning.home = init.environ_map.get("HOME");
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+    const prepared = if (parsed.get(settings_handoff.input_option)) |descriptor| frozen: {
+        const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+        if (fd != settings_handoff.child_descriptor) {
+            preparation_failure = .init(.settings_invalid, "private child input is not its reserved launch descriptor");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        }
+        var frozen = launch_transfer.readHandoff(init.gpa, io, fd) catch {
+            preparation_failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        };
+        defer frozen.deinit(init.gpa);
+        tuning.admitted_directory = selected;
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
 /// then Store selection and preparation. Refusals are reported here.
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
+
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission, attempt: host_start.Attempt) !host_settings.Prepared {
+    const intake = switch (source) {
+        .layered => |parsed| host_start.intake(init, parsed, selected, settings, failure, admission),
+        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, failure),
+    };
+    intake catch |err| {
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
-    const served = providers.fromSettings(settings, fixtures.*);
+    return finishHostAdmission(init, selected, settings, failure, attempt);
+}
+
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
+    const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
-    return host_start.admitSelected(init, selected, settings, fixtures.*, failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+    return host_start.admitSelected(init, selected, settings, failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -2215,8 +2073,12 @@ test "public Host starter preserves every typed refusal before and after waiting
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    return writeAttemptRefusal(io, .start, failure, status);
+}
+
+fn writeAttemptRefusal(io: std.Io, attempt: host_start.Attempt, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
     recordExit(status);
-    host_start.report(io, failure);
+    host_start.report(io, attempt, failure);
     return error.Reported;
 }
 
@@ -2282,8 +2144,8 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     }
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
-    input.tools = parsed.get("tools");
-    input.loaded_tools = parsed.get("loaded-tools");
+    input.tools = if (parsed.get("tools")) |text| .{ .cli = text } else null;
+    input.loaded_tools = if (parsed.get("loaded-tools")) |text| .{ .cli = text } else null;
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
@@ -2294,7 +2156,6 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var compaction_buffer: [20]u8 = undefined;
     if (input.session == .create and !input.preset.present) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
@@ -2311,13 +2172,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             input.model = .{ .present = true, .value = binding.model.slice() };
             if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
-        input.completeCreation(
-            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
-            input.model.value,
-            saved_effort,
-            snapshot.defaults.permission_mode,
-            &compaction_buffer,
-        );
+        input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -2344,19 +2199,6 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
-    var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and !input.preset.present and input.resetsToDefault()) {
-        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        var current_provider: protocol.Provider = undefined;
-        {
-            var discard: std.Io.Writer.Discarding = .init(&.{});
-            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
-            defer observed.file.close(io);
-            try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
-            current_provider = observed.current.settings.provider.value;
-        }
-        input.completeReset(current_provider, current_model.slice(), &compaction_buffer);
-    }
 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
@@ -2416,6 +2258,27 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    var iterator = parsed.ordered();
+    var count: usize = 0;
+    while (iterator.next()) |_| {
+        count += 1;
+        if (count > @import("input_parts.zig").max_parts) return error.TooManyInputParts;
+    }
+    if (count != 0) {
+        const operands = try init.arena.allocator().alloc(client.MessageOperand, count);
+        iterator = parsed.ordered();
+        var n: usize = 0;
+        while (iterator.next()) |item| : (n += 1) {
+            operands[n] = if (std.mem.eql(u8, item.name, "text"))
+                .{ .text = item.value }
+            else if (std.mem.eql(u8, item.name, "text-file"))
+                .{ .text_file = item.value }
+            else
+                .{ .image = item.value };
+        }
+        input.operands = operands;
+    }
+
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
@@ -2450,9 +2313,15 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
+    const admitted = (try reply.answer).result.accepted.message.configuration orelse return error.InvalidResponse;
+    const receipt = configuration.?.receipt.observed(
+        @tagName(admitted.provider),
+        admitted.model.slice(),
+        if (admitted.reasoning_effort) |effort| @tagName(effort) else null,
+    );
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    writeMutationJson(writer, reply, configuration.?.receipt) catch |err| return output.failure(err);
+    writeMutationJson(writer, reply, receipt) catch |err| return output.failure(err);
     writer.writeByte('\n') catch |err| return output.failure(err);
     try output.finish();
 }
@@ -2555,7 +2424,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2563,6 +2432,8 @@ test "chat info inspection takes Session facts from Current and detects changes"
     taken[0].archive_state = .active;
     taken[1].archive_state = .active;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
+    try std.testing.expectEqualStrings("bash find_tools lookup none", taken[0].tools.names.slice());
+    try std.testing.expectEqualStrings("find_tools none", taken[0].loaded_tools.names.slice());
     try std.testing.expectEqualStrings("lane four", taken[0].label.slice());
     try std.testing.expectEqualStrings("/home/d/w", taken[0].workspace.slice());
     try std.testing.expectEqualStrings("gpt-6.1-sol", taken[0].model.slice());
@@ -2574,6 +2445,9 @@ test "chat info inspection takes Session facts from Current and detects changes"
     try listed.writePositionalAll(io, "kept", 0);
     try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
+    taken[0].loaded_tools = try .of(&.{"find_tools"});
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    taken[0].loaded_tools = taken[1].loaded_tools;
     taken[0].work.recent_count = 0;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
@@ -2598,8 +2472,9 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
         .ask => .ask,
         .bypass => .bypass,
     };
-    taken.tools = settings.tools.set;
-    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.tools = settings.tools.names;
+    taken.loaded_tools = settings.loaded_tools.names;
+    taken.instructions = settings.instructions.value.identity().length != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
     taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
@@ -2690,8 +2565,8 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
 }
 
 pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const input = try infoConfiguration(destination, reference, edit, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
     const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
     var step: ?client.Step = .store;
     return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
@@ -2701,25 +2576,29 @@ pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destin
     };
 }
 
-const info_tools_bytes = blk: {
-    var count: usize = "none".len;
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool)) |tool| count += @tagName(tool).len + 1;
-    break :blk count;
+const InfoTools = struct {
+    allowed: [protocol.max_tools][]const u8,
+    loaded: [protocol.max_tools][]const u8,
+
+    fn names(buffer: *[protocol.max_tools][]const u8, field: *const protocol.ToolsField) []const []const u8 {
+        var iterator = field.iterator();
+        var count: usize = 0;
+        while (iterator.next()) |name| {
+            buffer[count] = name;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
 };
 
-fn infoConfiguration(store: []const u8, session: []const u8, edit: ChatInfo.Edit, tools_buffer: *[info_tools_bytes]u8) !configure_input.ConfigureInput {
+fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatInfo.Edit, tools_buffer: *InfoTools) !configure_input.ConfigureInput {
     var input: configure_input.ConfigureInput = .{ .store = store, .session = .{ .named = session } };
-    switch (edit) {
+    switch (edit.*) {
         .effort => |effort| input.reasoning_effort = .{ .present = true, .value = if (effort) |level| @tagName(level) else null },
         .permission => |permission| input.permission_mode = .{ .present = true, .value = @tagName(permission) },
-        .tools => |tools| {
-            var out = std.Io.Writer.fixed(tools_buffer);
-            var selected = tools.iterator();
-            while (selected.next()) |tool| {
-                if (out.buffered().len != 0) try out.writeByte(',');
-                try out.writeAll(@tagName(tool));
-            }
-            input.tools = if (out.buffered().len == 0) "none" else out.buffered();
+        .tools => |*tools| {
+            input.tools = .{ .names = InfoTools.names(&tools_buffer.allowed, &tools.allowed) };
+            input.loaded_tools = .{ .names = InfoTools.names(&tools_buffer.loaded, &tools.loaded) };
         },
         .model => |model| {
             try admitModel(model);
@@ -3091,7 +2970,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             return err;
         };
         for (page.rows[0..page.count]) |*row| {
-            if (!overview_view.rules.get(row.work.state).stoppable) continue;
+            if (!row.work.actions.stop) continue;
             const session = row.reference.slice();
             asked += 1;
             stderr.diagnostic("rui: stopping {s}\n", .{session});
@@ -3138,13 +3017,50 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     try writeMutationReply(io, reply, presentation, replay);
 }
 
+fn publishAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
+    const store = init.environ_map.get("RUI_STORE") orelse return error.InvalidRuiAddress;
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
+    if (handle.len != 32) return error.InvalidRuiAddress;
+    try client.validatePeer(store, address, handle);
+    var bytes: [protocol.max_action_value_bytes + 1]u8 = undefined;
+    var len: usize = 0;
+    while (len < bytes.len) {
+        const n = std.Io.File.stdin().readStreaming(init.io, &.{bytes[len..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        len += n;
+    }
+    if (len > protocol.max_action_value_bytes) {
+        stderr.diagnostic("rui: action publish refused: too_large\n", .{});
+        return error.CallerFailure;
+    }
+    if (!std.unicode.utf8ValidateSlice(bytes[0..len])) return error.InvalidUtf8;
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = (client.Requests{ .io = init.io }).publishAction(store, handle, parsed.get("key").?, bytes[0..len], &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, store, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |failure| {
+            try writeCommandReply(init.io, failure, .stderr);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
 fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     var output: JsonOutput = undefined;
     var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
-    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
+    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, (try parsed.number(u64, "after")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
     switch (reply) {
         .report => {
             try sink.writer.writeByte('\n');
@@ -3167,6 +3083,19 @@ fn backgroundAction(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureActionBackground(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
+fn requestActionStop(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input: client.ActionStopInput = .{
+        .store = try selectedStore(init, parsed.get("store"), &selected_buffer),
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
+    };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionStop(init.io, input, target);
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
@@ -3331,6 +3260,61 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             try writeCommandReply(io, command_reply, .stdout);
             return error.HostInvocationFailed;
         },
+    }
+}
+
+/// `list-parts` prints the owner's certified part list once it decodes whole;
+/// `read-part` streams one part's exact bytes, checked against that list.
+/// Either writes nothing to stdout when it fails.
+fn readPublicParts(init: std.process.Init, parsed: *const cli_args.Parsed, kind: protocol.content_value.Owner.Kind, read_part: bool) !void {
+    const io = init.io;
+    const session = parsed.get("session").?;
+    const owner: protocol.content_value.Owner = switch (kind) {
+        .message => .{ .message = (try parsed.number(u64, "admission")).? },
+        .action => .{ .action = (try parsed.number(u64, "action")).? },
+    };
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    const caller: client.Requests = .{ .io = io };
+    const file = try renderScratch(init);
+    defer file.close(io);
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = caller.readPublicParts(store, session, owner, file, &reply_buffer) catch |err| return readTransportFailure(io, store, err);
+    const list = switch (try protocol_reply.PublicPartsReply.decode(io, file, reply, .{ .session = session, .owner = owner })) {
+        .list => |list| list,
+        .failure => |failure| {
+            try writeReadFailure(io, failure, session, .stderr);
+            return readFailureError(failure);
+        },
+    };
+    if (!read_part) {
+        var output: JsonOutput = undefined;
+        const writer = output.init(io, .stdout);
+        var file_reader = file.reader(io, &.{});
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var body = file_reader.interface.limited(.limited64(list.bytes), &input);
+        _ = try body.interface.streamRemaining(writer);
+        try writer.writeByte('\n');
+        return output.finish();
+    }
+    const ordinal = (try parsed.number(u32, "part")).?;
+    if (ordinal >= list.count) {
+        // The certified list has no such part: report it as the Host's part read would.
+        var missing: protocol_reply.ReadFailure = .{ .status = 409, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try missing.diagnostic.type.set(@tagName(protocol.ErrorType.parts_unavailable));
+        try missing.diagnostic.code.set("ContentNotFound");
+        try writeReadFailure(io, missing, session, .stderr);
+        return readFailureError(missing);
+    }
+    const iterator = try init.gpa.create(protocol_reply.PartIterator);
+    defer init.gpa.destroy(iterator);
+    try list.iterator(iterator);
+    const part = while (try iterator.next()) |part| {
+        if (part.ordinal == ordinal) break part;
+    } else return error.InvalidResponse;
+    if (caller.readPublicPartContent(store, session, owner, part, std.Io.File.stdout()) catch |err| return readTransportFailure(io, store, err)) |failure| {
+        try writeReadFailure(io, failure, session, .stderr);
+        return readFailureError(failure);
     }
 }
 
@@ -3556,8 +3540,9 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
         .action_background => "background",
+        .action_stop => "stop",
     };
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3626,6 +3611,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print("target Action: {d}\n", .{action}),
+        .action_stop => |action| try writer.print("target Action: {d}\n", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3656,6 +3642,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
+        .action_stop => |position| {
+            if (position) |p| try writer.print("Resolution position: {d}\n", .{p});
+        },
         .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
         .model_interruption, .permission_decision => {},
     };
@@ -3668,6 +3657,7 @@ const StartConfiguration = struct {
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
+    saved_effort: ?model_capability.ReasoningEffort = null,
 
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
@@ -3676,10 +3666,38 @@ const StartConfiguration = struct {
             .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
-            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
+            .effort_source = if (effort_flag) .flag else .model_default,
+            .saved_effort = saved_effort,
         };
     }
+
+    fn observed(self: StartConfiguration, provider: []const u8, model: []const u8, effort: ?[]const u8) StartConfiguration {
+        var result = self;
+        result.provider = if (self.parent == null) provider else null;
+        result.model = model;
+        result.reasoning_effort = effort;
+        if (self.effort_source != .flag) result.effort_source = if (self.saved_effort != null and effort != null and std.mem.eql(u8, @tagName(self.saved_effort.?), effort.?)) .saved else .model_default;
+        return result;
+    }
 };
+
+fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_receipt.zig").Configuration) !void {
+    try writer.writeAll(",\"configuration\":{\"provider\":");
+    try std.json.Stringify.value(@tagName(config.provider), .{}, writer);
+    try writer.writeAll(",\"model\":");
+    try std.json.Stringify.value(config.model.slice(), .{}, writer);
+    try writer.writeAll(",\"reasoning_effort\":");
+    try std.json.Stringify.value(if (config.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
+    try writer.writeAll(",\"workspace\":");
+    try std.json.Stringify.value(config.workspace.slice(), .{}, writer);
+    try writer.writeAll(",\"tools\":");
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }).writeJson(writer);
+    try writer.writeAll(",\"loaded_tools\":");
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }).writeJson(writer);
+    try writer.print(",\"permission_mode\":\"{s}\",\"compaction_trigger\":", .{@tagName(config.permission_mode)});
+    if (config.compaction_trigger) |trigger| try writer.print("\"{d}\"", .{trigger}) else try writer.writeAll("null");
+    try writer.writeByte('}');
+}
 
 fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, configuration: ?StartConfiguration) !void {
     try writer.writeAll("{\"context\":");
@@ -3693,7 +3711,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
         if (value.parent != null) {
-            try std.json.Stringify.value(value, .{}, writer);
+            try std.json.Stringify.value(.{ .provider = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
         } else {
             try std.json.Stringify.value(.{
                 .provider = value.provider,
@@ -3707,6 +3725,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
+        .action_stop => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3727,14 +3746,19 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_stop) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_stop});
     if (reply.target == .action_background) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_background});
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
             .configure => |value| {
                 try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created });
                 if (value.skills) |status| try writer.print(",\"skills\":\"{s}\"", .{@tagName(status)});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
             },
-            .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
+            .message => |value| {
+                try writer.print(",\"admission\":\"{d}\"", .{value.admission});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
+            },
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
                 if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
@@ -3742,6 +3766,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
+            .action_stop => |position| {
+                try writer.writeAll(",\"resolution_position\":");
+                if (position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+            },
             .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
             .model_interruption, .permission_decision => {},
         },
@@ -3752,9 +3780,12 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .conflict => try writer.writeAll(",\"code\":\"idempotency_key_conflict\""),
     }
     try writer.writeByte('}');
-    if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
-        try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
+    if (answer.input) |input| {
+        try writer.writeAll(",\"input\":");
+        switch (input) {
+            .accepted => |value| try (protocol.MessageInputJson{ .value = value }).writeJson(writer),
+            .rejected => |receipt| try receipt.writeJson(writer),
+        }
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
@@ -3762,7 +3793,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     try writer.writeByte('}');
 }
 
-test "session start configuration reports resolved effort and its source" {
+fn checkStartEffortSources() !void {
     const Case = struct {
         model: []const u8 = "gpt-6.1-sol",
         override: ?[]const u8 = "low",
@@ -3795,7 +3826,8 @@ test "session start configuration reports resolved effort and its source" {
         }, case.flag, case.saved);
         try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
-        try std.testing.expectEqual(case.source, value.effort_source);
+        const observed = value.observed("openai", case.model, case.effort);
+        try std.testing.expectEqual(case.source, observed.effort_source);
         if (case.effort) |effort| {
             try std.testing.expect(value.reasoning_effort != null);
             try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
@@ -3803,34 +3835,79 @@ test "session start configuration reports resolved effort and its source" {
     }
 }
 
-test "session start mutation receipt adds configuration without changing send" {
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
-    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "", .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } });
-    try reply.context.store.set("/store");
-    try reply.context.key.set("handle");
-    reply.context.kind = .message;
-    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"handle\",\"kind\":\"message\"}";
-    const tail = ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
-    var buffer: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    const attached = StartConfiguration.resolve(.{
+fn checkStartHostSettings() !void {
+    const requested = StartConfiguration.resolve(.{
         .store = "/store",
         .session = .create,
-        .parent = .{ .present = true, .value = "09azvw" },
-        .model = .{ .present = true, .value = "unlisted-model" },
-        .reasoning_effort = .{ .present = true, .value = "low" },
+        .provider = .{ .present = true, .value = "openai" },
+        .model = .{ .present = true, .value = "model-requested" },
     }, false, null);
-    try std.testing.expect(attached.provider == null);
-    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
-    try writeMutationJson(&writer, reply, attached);
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    reply.target.message.creates_session = false;
-    try writeMutationJson(&writer, reply, null);
-    try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+    try std.testing.expect(requested.reasoning_effort == null);
+    const report = requested.observed("codex", "model-served", "high");
+    try std.testing.expectEqualStrings("codex", report.provider.?);
+    try std.testing.expectEqualStrings("model-served", report.model);
+    try std.testing.expectEqualStrings("high", report.reasoning_effort.?);
+    try std.testing.expectEqual(requested.effort_source, report.effort_source);
+    var saved = requested;
+    saved.saved_effort = .max;
+    try std.testing.expectEqual(.model_default, saved.observed("codex", "model-served", "high").effort_source);
+    try std.testing.expectEqual(.saved, saved.observed("codex", "model-served", "max").effort_source);
+    saved.effort_source = .flag;
+    try std.testing.expectEqual(.flag, saved.observed("codex", "model-served", "high").effort_source);
+    try std.testing.expect(report.observed("codex", "no-effort", null).reasoning_effort == null);
+    var attached = requested;
+    attached.parent = "k7m2qx";
+    const attached_report = attached.observed("codex", "model-served", "high");
+    try std.testing.expect(attached_report.provider == null);
+    try std.testing.expectEqualStrings("k7m2qx", attached_report.parent.?);
+}
+
+test "CLI-6 start_receipt_configuration" {
+    try checkStartEffortSources();
+    try checkStartHostSettings();
+
+    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"" ++ config ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "", target);
+    const requested = StartConfiguration.resolve(.{ .store = "/store", .session = .create }, false, .high);
+    const observed = requested.observed("codex", "gpt-5.5", "high");
+    var bytes: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeMutationJson(&writer, reply, observed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const receipt = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("codex", receipt.get("provider").?.string);
+    try std.testing.expectEqualStrings("gpt-5.5", receipt.get("model").?.string);
+    try std.testing.expectEqualStrings("high", receipt.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
+}
+
+test "ADM-30 Message mutation JSON renders accepted parts with their owner and rejected receipts without one" {
+    const wire_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\"";
+    const accepted = ",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
+    const rejected = ",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
+    const input = ",\"input\":{\"type\":\"parts\",\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"";
+    const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 12, .digest = @splat(0xaa), .form = .parts } };
+    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"receipt\",\"kind\":\"message\"}";
+    for ([_][]const u8{
+        accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue,
+        rejected ++ input ++ "}",
+    }) |expected| {
+        var body: [1024]u8 = undefined;
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"execution\":{{\"status\":\"queued\"}}}}", .{ wire_prefix, expected });
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", target);
+        try reply.context.store.set("/store");
+        try reply.context.key.set("receipt");
+        reply.context.kind = .message;
+        var output: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try writeMutationJson(&writer, reply, null);
+        const expected_json = try std.fmt.bufPrint(&body, "{s}{s}}}", .{ context, expected });
+        try std.testing.expectEqualStrings(expected_json, writer.buffered());
+    }
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -3851,17 +3928,17 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
     const failed_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
-    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
+    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
     const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
-        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
+        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: false\n",
         "Rui: Configured.\n",
     };
     const failed_expected = [_][]const u8{
@@ -4306,45 +4383,8 @@ fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
-test "existing explicit captures bypass fresh option choices while new captures refuse" {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const record = try std.fmt.bufPrint(&record_buffer, "{s}/saved.json", .{directory});
-    var refusal: cli_args.Refusal = undefined;
-    const parsed = try cli_args.Command.session_configure.definition().parseSyntax(&.{ "--record", record, "--key", "k", "--permission-mode", "historical-mode" }, std.testing.allocator, &refusal);
-    try std.testing.expectError(error.InvalidOptionValue, validateFreshInvocation(io, &parsed, &refusal));
-    try std.testing.expectEqual(.choice_unsupported, refusal.code);
-    const file = try tmp.dir.createFile(io, "saved.json", .{});
-    defer file.close(io);
-    try file.writeStreamingAll(io, "capture-owner-validates-this");
-    try validateFreshInvocation(io, &parsed, &refusal);
-    try std.testing.expectEqualStrings("historical-mode", parsed.get("permission-mode").?);
-}
-
-test "fresh instruction validation renders both source and stdin conflict refusals" {
-    const Case = struct { args: []const []const u8, code: caller_error.Code, expected: []const u8 };
-    const cases = [_]Case{
-        .{ .args = &.{ "--instructions", "file" }, .code = .instructions_source, .expected = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
-        .{ .args = &.{ "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .expected = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
-    };
-    for (cases) |case| {
-        var refusal: cli_args.Refusal = undefined;
-        const parsed = try cli_args.Command.session_configure.definition().parseSyntax(case.args, std.testing.allocator, &refusal);
-        if (validateFreshInvocation(std.Io.Threaded.global_single_threaded.io(), &parsed, &refusal)) |_| return error.ExpectedRefusal else |_| {}
-        try std.testing.expectEqual(case.code, refusal.code);
-        var storage: [1024]u8 = undefined;
-        var out = std.Io.Writer.fixed(&storage);
-        try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
-        try std.testing.expectEqualStrings(case.expected, out.buffered());
-    }
-}
-
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
+    const Scenario = enum { success, os_error, refusal, timeout, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     observations: usize = 0,
@@ -4392,7 +4432,7 @@ const LaunchFixture = struct {
         if (self.scenario == .incompatible) return .incompatible;
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
-            .success, .invalid_url, .missing_key, .competitor, .migration_final => true,
+            .success, .missing_key, .competitor, .migration_final => true,
             .competitor_pending => self.reads >= 2,
             .migration_success => self.reads >= 21,
             .migration_both => self.reads >= 2,
@@ -4406,7 +4446,7 @@ const LaunchFixture = struct {
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
     }
-    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, _: c_int, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
         pid.* = 42;
         started.* = 12;
         const self = cast(raw);
@@ -4417,6 +4457,7 @@ const LaunchFixture = struct {
         std.debug.assert(std.mem.eql(u8, std.mem.span(argv[3].?), "--store"));
         var at: usize = 5;
         while (at < argc) : (at += 2) {
+            if (std.mem.eql(u8, std.mem.span(argv[at].?), "--" ++ settings_handoff.input_option)) continue;
             std.debug.assert(std.mem.eql(u8, std.mem.span(argv[at].?), "--set"));
             self.assignments += 1;
             if (self.expected_assignment) |expected| self.assignments_match = self.assignments_match and std.mem.eql(u8, expected, std.mem.span(argv[at + 1].?));
@@ -4433,7 +4474,7 @@ const LaunchFixture = struct {
         const self = cast(raw);
         if (fd == self.report_fd) {
             self.report_reads += 1;
-            if (self.delay_refusal) return -1;
+            if (self.delay_refusal) return -@as(isize, @backingInt(std.posix.E.AGAIN));
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
                 .competitor, .competitor_pending, .competitor_absent, .competitor_died => .init(.store_locked, "another Host owns this Store"),
@@ -4448,7 +4489,7 @@ const LaunchFixture = struct {
             return 0;
         }
         self.reads += 1;
-        if (self.delay_refusal and self.scenario == .competitor) return -1;
+        if (self.delay_refusal and self.scenario == .competitor) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         switch (self.scenario) {
             .migration_success, .migration_timeout, .migration_both, .migration_eof, .migration_final => {
                 const text: []const u8 = switch (self.scenario) {
@@ -4456,11 +4497,11 @@ const LaunchFixture = struct {
                         1 => "rui: backing up and migrating [store_",
                         2 => "migrating]\n",
                         20 => migrated,
-                        else => return -1,
+                        else => return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     },
-                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -1,
+                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     .migration_eof => if (self.reads == 1) migrating else return 0,
-                    .migration_final => if (self.reads == 2) migrating else return -1,
+                    .migration_final => if (self.reads == 2) migrating else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     else => unreachable,
                 };
                 if (self.scenario != .migration_final) self.migration_announced = self.reads >= (if (self.scenario == .migration_success or self.scenario == .migration_timeout) @as(usize, 2) else 1);
@@ -4470,18 +4511,17 @@ const LaunchFixture = struct {
             },
             else => {},
         }
-        if (self.scenario == .timeout or self.scenario == .interrupted) return -1; // EAGAIN, not EOF.
+        if (self.scenario == .timeout or self.scenario == .interrupted) return -@as(isize, @backingInt(std.posix.E.AGAIN)); // EAGAIN, not EOF.
         if (self.scenario == .closed) return 0;
         if (self.scenario == .full and self.reads == 1) {
             @memset(bytes, 'x');
             return @intCast(bytes.len);
         }
-        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -1;
+        if (self.reads == 1 and (self.scenario == .success or self.scenario == .missing_key)) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",
             .competitor, .competitor_pending, .competitor_absent, .competitor_died => if (self.reads == 1) competitor else "",
-            .invalid_url => if (self.reads == 2) invalid_base_url ++ "; this Host starts without OpenAI.\n" else "",
             .success, .missing_key => if (self.reads == 2) note else "",
             else => "",
         };
@@ -4522,7 +4562,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .os_error, .kind = .os_launch, .err = error.HostLaunchFailed, .words = "could not start", .terminal = "OS error 13" },
         .{ .scenario = .refusal, .kind = .store_format, .err = error.HostStartupFailed, .words = "needs a compatible Rui", .terminal = LaunchFixture.refusal },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed, .words = "start timed out", .terminal = "readiness unconfirmed after 10 seconds" },
-        .{ .scenario = .invalid_url, .success = true, .words = "OpenAI URL invalid", .terminal = invalid_base_url },
         .{ .scenario = .missing_key, .success = true, .terminal = LaunchFixture.note },
         .{ .scenario = .already_ready, .success = true },
         .{ .scenario = .closed, .kind = .child_closed, .err = error.HostStartupFailed, .words = "quit on start", .terminal = "Child closed its startup channel" },
@@ -4548,7 +4587,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
         errdefer std.debug.print("scenario={s} caller={s}\n", .{ @tagName(case.scenario), @tagName(surface) });
         var environment = std.process.Environ.Map.init(std.testing.allocator);
         defer environment.deinit();
-        if (case.scenario == .invalid_url or case.scenario == .missing_key or case.scenario == .already_ready) try environment.put(providers.openai_base_url_variable, "http://invalid.example");
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var init: std.process.Init = undefined;
@@ -4645,7 +4683,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
             if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
             if (fixture.migrated_deadline != null) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrated_tag));
             if (case.scenario == .competitor or case.scenario == .competitor_pending) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
-            if (case.scenario == .already_ready or case.scenario == .missing_key) try std.testing.expect(std.mem.indexOf(u8, text, invalid_base_url) == null);
         } else {
             try std.testing.expectEqual(@as(usize, 0), out_length);
             try std.testing.expectEqual(@as(usize, 0), diagnostic_length);
@@ -4722,7 +4759,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --model, --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a model, a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing model, Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;
@@ -4833,7 +4870,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
         .{ .err = error.InvalidModel, .code = .model_id_malformed, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.InteractiveTerminalRequired, .code = .terminal_required, .exit = 2, .phrase = "terminal input and output with cursor addressing" },
-        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Pipe or redirect a nonempty Message" },
+        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Provide nonempty Message text or an image" },
         .{ .err = error.EnvironmentTooLarge, .code = .environment_too_large, .exit = 2, .phrase = "Unset or shorten the largest variables" },
         .{ .err = error.Unexpected, .code = .internal_unexpected, .exit = 1, .phrase = "report this code with the command" },
         .{ .err = error.CrossStorePeerSend, .code = .internal_unexpected, .exit = 1, .phrase = "internal fault" },
@@ -5126,31 +5163,39 @@ test "archive mutation presentation preserves requested intent and pending settl
 }
 
 test "chat info edits produce sparse typed Session configuration without slash parsing" {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const effort = try infoConfiguration("/store", "k7m2qx", .{ .effort = .high }, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const effort = try infoConfiguration("/store", "k7m2qx", &.{ .effort = .high }, &tools_buffer);
     try std.testing.expectEqualStrings("/store", effort.store);
     try std.testing.expectEqualStrings("k7m2qx", effort.session.named);
     try std.testing.expect(effort.reasoning_effort.present);
     try std.testing.expectEqualStrings("high", effort.reasoning_effort.value.?);
-    const reset = try infoConfiguration("/store", "k7m2qx", .{ .effort = null }, &tools_buffer);
+    const reset = try infoConfiguration("/store", "k7m2qx", &.{ .effort = null }, &tools_buffer);
     try std.testing.expect(reset.reasoning_effort.present and reset.reasoning_effort.value == null);
     for ([_]@FieldType(status_page.Session, "permission"){ .ask, .bypass }) |mode| {
-        const permission = try infoConfiguration("/store", "k7m2qx", .{ .permission = mode }, &tools_buffer);
+        const permission = try infoConfiguration("/store", "k7m2qx", &.{ .permission = mode }, &tools_buffer);
         try std.testing.expect(permission.permission_mode.present);
         try std.testing.expectEqualStrings(@tagName(mode), permission.permission_mode.value);
         try std.testing.expect(!permission.model.present and !permission.provider.present and !permission.workspace.present and !permission.label.present and !permission.reasoning_effort.present);
     }
-    const none = try infoConfiguration("/store", "k7m2qx", .{ .tools = .{} }, &tools_buffer);
-    try std.testing.expectEqualStrings("none", none.tools.?);
-    const selected = try infoConfiguration("/store", "k7m2qx", .{ .tools = .initMany(&.{ .bash, .skill, .web_search }) }, &tools_buffer);
-    try std.testing.expectEqualStrings("bash,skill,web_search", selected.tools.?);
-    const model = try infoConfiguration("/store", "k7m2qx", .{ .model = "future-chat" }, &tools_buffer);
+    const none = try infoConfiguration("/store", "k7m2qx", &.{ .tools = .{} }, &tools_buffer);
+    try std.testing.expectEqual(@as(usize, 0), none.tools.?.names.len);
+    try std.testing.expectEqual(@as(usize, 0), none.loaded_tools.?.names.len);
+    const selected_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try protocol.ToolsField.of(&.{ "bash", "skill", "web_search" }) } };
+    const selected = try infoConfiguration("/store", "k7m2qx", &selected_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("bash", selected.tools.?.names[0]);
+    try std.testing.expectEqualStrings("skill", selected.tools.?.names[1]);
+    try std.testing.expectEqualStrings("web_search", selected.tools.?.names[2]);
+    const mcp_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try .of(&.{"none"}), .loaded = try .of(&.{"none"}) } };
+    const mcp = try infoConfiguration("/store", "k7m2qx", &mcp_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("none", mcp.tools.?.names[0]);
+    try std.testing.expectEqualStrings("none", mcp.loaded_tools.?.names[0]);
+    const model = try infoConfiguration("/store", "k7m2qx", &.{ .model = "future-chat" }, &tools_buffer);
     try std.testing.expect(model.model.present and !model.provider.present);
     try std.testing.expectEqualStrings("future-chat", model.model.value);
-    const label = try infoConfiguration("/store", "k7m2qx", .{ .label = "lane \"four\"" }, &tools_buffer);
+    const label = try infoConfiguration("/store", "k7m2qx", &.{ .label = "lane \"four\"" }, &tools_buffer);
     try std.testing.expect(label.label.present);
     try std.testing.expectEqualStrings("lane \"four\"", label.label.value.?);
-    const clear = try infoConfiguration("/store", "k7m2qx", .{ .label = "" }, &tools_buffer);
+    const clear = try infoConfiguration("/store", "k7m2qx", &.{ .label = "" }, &tools_buffer);
     try std.testing.expect(clear.label.present and clear.label.value == null);
 }
 
@@ -5185,12 +5230,10 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         terminal: []const u8,
         words: []const u8,
         retry: bool = true,
-        warning: bool = false,
     };
     const cases = [_]Case{
         .{ .scenario = .refusal, .kind = .store_format, .terminal = LaunchFixture.refusal, .words = "Host needs a compatible Rui", .retry = false },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .terminal = "do not kill or reclaim an uncertain owner", .words = "Host start timed out" },
-        .{ .scenario = .invalid_url, .provider = .codex, .terminal = invalid_base_url, .words = "OpenAI URL invalid", .retry = false, .warning = true },
         .{ .scenario = .already_ready, .openai = false, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
         .{ .scenario = .incompatible, .kind = .incompatible, .terminal = "does not speak this rui's protocol", .words = "Host different Rui version", .retry = false },
     };
@@ -5208,7 +5251,6 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         var environment: std.process.Environ.Map = .init(std.testing.allocator);
         defer environment.deinit();
         try environment.put("HOME", home);
-        if (case.warning) try environment.put(providers.openai_base_url_variable, "http://invalid.example");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const argv = [_][*:0]const u8{"rui"};
@@ -5229,7 +5271,6 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         try std.testing.expectEqual(true, activation.launch != null);
         const launch = &activation.launch.?;
         try std.testing.expectEqual(case.kind == null, launch.outcome == .ready);
-        try std.testing.expectEqual(case.warning, launch.warning != null);
         if (case.kind) |kind| {
             try std.testing.expectEqual(kind, launch.outcome.failed.cause.kind);
             if (kind != .incompatible) try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
@@ -5322,7 +5363,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         }
         if (case.delayed) try std.testing.expect(fixture.report_reads != 0);
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
+        try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &key_path)));
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(init.io, ".config/rui/preferences", .{}));
     }
 }
@@ -5366,7 +5407,8 @@ test "Host launch chosen usable bindings attach before startup document admissio
             try provider_login.key(init, "fixture-global-key");
         } else {
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const path = try provider_login.credentialPath(init, provider, &path_buffer, true);
+            try provider_login.createConfigDirectory(init.io, home);
+            const path = try credential_location.default(init.environ_map, provider, &path_buffer);
             const record = try init.gpa.create(codex_credentials.Record);
             defer init.gpa.destroy(record);
             record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
@@ -5449,7 +5491,7 @@ test "Host launch scoped readiness still discovers selected private keys and req
     const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
     _ = try host_start.saveConnection(init, store, .{ .base = "https://custom.example/v1" }, .{ .provided = "only-scoped-key" }, "custom-model", Gate.yes);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expect(!try api_key.present(try api_key.path(&environment, &path_buffer)));
+    try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &path_buffer)));
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     var fixture: LaunchFixture = .{ .scenario = .already_ready };

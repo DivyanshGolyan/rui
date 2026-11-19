@@ -377,7 +377,7 @@
         },
         {
           "mouse": {
-            "at": "+ New Session",
+            "at": "+ New chat",
             "do": "move"
           },
           "repaint": false
@@ -475,8 +475,8 @@
             "gpt-6.1-sol"
           ],
           "absent": [
-            "+ New Session",
-            "Sessions  Archived",
+            "+ New chat",
+            "Chats  Archived",
             "Opening"
           ]
         }
@@ -497,8 +497,8 @@
                 "gpt-6.1-sol"
               ],
               "absent": [
-                "+ New Session",
-                "Sessions  Archived",
+                "+ New chat",
+                "Chats  Archived",
                 "Opening"
               ]
             }
@@ -538,8 +538,8 @@
             "gpt-6.1-sol"
           ],
           "absent": [
-            "+ New Session",
-            "Sessions  Archived",
+            "+ New chat",
+            "Chats  Archived",
             "Opening"
           ]
         }
@@ -971,7 +971,7 @@
         }
       ],
       "expect": [
-        "Sessions",
+        "Chats",
         "↓",
         "needs you",
         "Alt-?"
@@ -979,7 +979,7 @@
       "comparison": {
         "before": {
           "expect": [
-            "Sessions"
+            "Chats"
           ]
         }
       },
@@ -997,7 +997,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Sessions"
+          "wait": "Chats"
         },
         {
           "keys": [
@@ -1031,7 +1031,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Sessions"
+          "wait": "Chats"
         },
         {
           "keys": [
@@ -1070,8 +1070,8 @@
           ],
           "expect_regex": [],
           "absent": [
-            "+ New Session",
-            "Sessions  Archived",
+            "+ New chat",
+            "Chats  Archived",
             "Opening"
           ]
         }
@@ -1118,7 +1118,7 @@
         }
       ],
       "expect": [
-        "Sessions",
+        "Chats",
         "needs you",
         "Alt-?"
       ],
@@ -1128,7 +1128,7 @@
       "comparison": {
         "before": {
           "expect": [
-            "Sessions"
+            "Chats"
           ],
           "expect_regex": []
         }
@@ -1146,7 +1146,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Sessions"
+          "wait": "Chats"
         },
         {
           "keys": [
@@ -1183,7 +1183,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Sessions"
+          "wait": "Chats"
         },
         {
           "keys": [
@@ -1222,8 +1222,8 @@
           ],
           "expect_regex": [],
           "absent": [
-            "+ New Session",
-            "Sessions  Archived",
+            "+ New chat",
+            "Chats  Archived",
             "Opening"
           ]
         }

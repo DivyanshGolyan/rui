@@ -1,6 +1,13 @@
 test {
+    _ = @import("testing/pause.zig");
     _ = @import("InputCapture.zig");
+    _ = @import("image_intake.zig");
+    _ = @import("image_file_source.zig");
+    _ = @import("read_image_arguments.zig");
+    _ = @import("os/read_image_file.zig");
+    _ = @import("server_read_image.zig");
     _ = @import("host_start.zig");
+    _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
@@ -26,6 +33,7 @@ test {
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
     _ = @import("GroupedList.zig");
+    _ = @import("GroupedList_press_tests.zig");
     _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");
@@ -67,10 +75,8 @@ test {
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
-    _ = @import("os/os.zig");
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
-    _ = @import("os/socket.zig");
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("preset_settings_test.zig");
@@ -80,6 +86,9 @@ test {
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");
     _ = @import("mcp/result_text.zig");
+    _ = @import("mcp/result_text_golden_test.zig");
+    _ = @import("tool_result.zig");
+    _ = @import("tool_settle.zig");
     _ = @import("mcp/Running.zig");
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");
@@ -89,6 +98,7 @@ test {
     _ = @import("protocol.zig");
     _ = @import("wire_request.zig");
     _ = @import("session_skills.zig");
+    _ = @import("creation_receipt_wire.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
@@ -107,7 +117,6 @@ test {
     _ = @import("server_host.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
-    _ = @import("client_defaults.zig");
     _ = @import("client.zig");
     _ = @import("execution.zig");
     _ = @import("bash.zig");
@@ -147,6 +156,7 @@ test {
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
+    _ = @import("value_reads.zig");
     _ = @import("session_view_store_tests.zig");
     _ = @import("ClientTask.zig");
 }

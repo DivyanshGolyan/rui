@@ -9,7 +9,7 @@ const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
-const os = @import("../os/os.zig");
+const os = @import("os");
 const change_ring = @import("../change_ring.zig");
 const dialect = @import("mysql_dialect_check.zig");
 var mutex: std.Io.Mutex = .init;
@@ -35,7 +35,6 @@ fn connection() !*wire.Connection {
         opened = true;
         for (schema.mysql_session) |sql| try run(sql);
         try run("SET SESSION sql_log_bin=0");
-        try run("SET SESSION cte_max_recursion_depth=1000000");
     }
     return &root;
 }
@@ -170,10 +169,7 @@ fn send(comptime sql: []const u8, fixture_args: anytype) !void {
     inline for (fixture_args, 0..) |value, index| {
         args[index] = if (@TypeOf(value) == testing.Blob) .{ .bytes = value.bytes } else value;
     }
-    const template = comptime switch (rsql.mysqlRendering(sql)) {
-        .rendered => |value| value,
-        .refused => |message| @compileError(message),
-    };
+    const template = comptime rsql.sentTemplate(sql);
     const Args = @TypeOf(args);
     const served = protocol.routesAll(.endpoint);
     const bound: literal.Bound = .{ .now = 0, .served = &served };
@@ -690,6 +686,19 @@ fn openLive(storage: *Store, tmp: *std.testing.TmpDir) !void {
     try open(storage, tmp, std.testing.io, .{});
 }
 
+test "store.mysql owned connection permits every legal creator depth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const owned = &storage.engine.mysql.state.connection;
+    try owned.query("SELECT @@session.cte_max_recursion_depth AS value");
+    try std.testing.expectEqual(schema.mysql_recursive_limit, try readU64(owned));
+    try owned.query("WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<1001) SELECT max(value) AS value FROM sequence");
+    try std.testing.expectEqual(@as(u64, 1001), try readU64(owned));
+}
+
 fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     const mysql = &storage.engine.mysql;
     try mysql.bind(S, &args, 0);
@@ -700,7 +709,7 @@ fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     return changed;
 }
 
-fn handlerReads(storage: *Store) !u64 {
+pub fn handlerReads(storage: *Store) !u64 {
     const source = &storage.engine.mysql.state.connection;
     try source.query("SHOW SESSION STATUS LIKE 'Handler_read%'");
     const Row = struct { name: protocol.Bounded(64), value: protocol.Bounded(32) };
@@ -743,9 +752,9 @@ test "store.mysql obligation reconciliation reads stay flat in completed Turn hi
             const seed = try std.fmt.bufPrint(&buffer, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_at,outcome_position,outcome_content_id) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,100000+value,100000+value,1,'completed',1,1,1 FROM sequence;" ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
-                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,CONCAT('frontier-history-',value),1,100000+value,100000+value,1 FROM sequence", .{ 2 * history, history, child.slice(), parent.slice(), 2 * history, history, child.slice(), parent.slice() });
+                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,CONCAT('frontier-history-',value),1,100000+value,100000+value,1,1 FROM sequence", .{ 2 * history, history, child.slice(), parent.slice(), 2 * history, history, child.slice(), parent.slice() });
             try rawExec(&storage, "SET SESSION foreign_key_checks=0");
             {
                 defer rawExec(&storage, "SET SESSION foreign_key_checks=1") catch @panic("foreign keys stayed off");
@@ -1789,7 +1798,7 @@ const LinuxMemory = struct {
     }
 
     fn read() !LinuxMemory {
-        const file = try std.Io.Dir.cwd().openFile(std.testing.io, "/proc/self/smaps_rollup", .{});
+        const file = try std.Io.Dir.cwd().openFile(std.testing.io, os.memory_rollup_path, .{});
         defer file.close(std.testing.io);
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;

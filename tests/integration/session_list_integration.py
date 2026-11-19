@@ -43,7 +43,7 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([binary, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1', "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
+        process, fields = start_ready_process([binary, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1', "--set", "models.catalogUrl=http://127.0.0.1:1/api.json", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]
@@ -102,7 +102,8 @@ def main():
             assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
             assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row
             assert row["work"] == {"state": {"kind": "idle", "since": row["created_at"]}, "turn": None, "operation": None,
-                "first_action": None}, row
+                "first_action": None, "attention": None, "group": "done",
+                "actions": {"stop": False, "interrupt": None, "decide": None}}, row
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
             assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]
@@ -154,7 +155,16 @@ def main():
             last_line_field_bytes = len(', "last_line": null'.encode())
             read_version_bytes = sum(len(', "read_version": ' + json.dumps(row["read_version"]))
                                      for row in after_growth[1]["sessions"])
-            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes + creator_field_bytes) + read_version_bytes
+            derived_work_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row["work"][name]))
+                                     for row in after_growth[1]["sessions"] for name in ("attention", "group", "actions"))
+            rollup_names = ("state_change_at", "subtree_state_change_at", "descendant_count", "descendant_needs_you_count")
+            for row in after_growth[1]["sessions"]:
+                assert all(isinstance(row[name], str) and row[name].isdecimal() for name in rollup_names), row
+                assert row["subtree_state_change_at"] == row["state_change_at"], row
+                assert row["descendant_count"] == row["descendant_needs_you_count"] == "0", row
+            rollup_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row[name]))
+                               for row in after_growth[1]["sessions"] for name in rollup_names)
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes + creator_field_bytes) + read_version_bytes + derived_work_bytes + rollup_bytes
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

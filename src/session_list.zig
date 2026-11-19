@@ -8,6 +8,7 @@ const change_ring = @import("change_ring.zig");
 const cli_value = @import("cli_value.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
+const content_value = @import("content_value.zig");
 
 pub const session_list_page_size: usize = 8;
 pub const max_last_line_bytes = 200;
@@ -51,6 +52,9 @@ pub const Row = struct {
     label: ?[]const u8,
     created_at: u64,
     state_change_at: u64,
+    subtree_state_change_at: u64,
+    descendant_count: u64,
+    descendant_needs_you_count: u64,
     revision: u64,
     end: u64,
     first_message: ?FirstMessage,
@@ -77,8 +81,7 @@ pub const FirstMessage = struct {
     admission: u64,
     admitted_at: u64,
     sender: ?Bounded(session_id.max_reference_bytes),
-    length: u64,
-    digest: [32]u8,
+    content: content_value.Value,
 };
 
 pub const Peers = struct { from_person_at: ?u64 };

@@ -144,6 +144,13 @@ pub const TestingPage = struct {
         };
     }
 
+    pub fn nextMessagePart(self: *TestingPage) !?historical_domain.HistoricalInputPart {
+        while (true) return self.page.nextMessagePart() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
     pub fn nextToolResult(self: *TestingPage) !?historical_domain.HistoricalToolResult {
         while (true) return self.page.nextToolResult() catch |err| {
             try self.answer(err);
@@ -328,6 +335,41 @@ pub const Case = struct {
     rerun: bool = false,
 };
 
+pub const ReadWork = struct {
+    storage: *Store = undefined,
+    engine: Engine = undefined,
+    before: u64 = 0,
+    steps: u64 = 0,
+
+    pub fn begin(self: *ReadWork, case: *const Case, storage: *Store) !void {
+        self.* = .{ .storage = storage, .engine = case.engine };
+        switch (self.engine) {
+            .sqlite => sqlite.c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, self),
+            .mysql => self.before = try mysql_testing.handlerReads(storage),
+        }
+    }
+
+    pub fn finish(self: *ReadWork) !u64 {
+        return switch (self.engine) {
+            .sqlite => blk: {
+                self.cancel();
+                break :blk self.steps;
+            },
+            .mysql => (try mysql_testing.handlerReads(self.storage)) - self.before,
+        };
+    }
+
+    pub fn cancel(self: *ReadWork) void {
+        if (self.engine == .sqlite) sqlite.c.sqlite3_progress_handler(self.storage.sqliteDatabase(), 0, null, null);
+    }
+
+    fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *ReadWork = @ptrCast(@alignCast(context.?));
+        self.steps += 1;
+        return 0;
+    }
+};
+
 pub const EngineName = required_engines.EngineName;
 pub const parseRequiredEngines = required_engines.parse;
 
@@ -488,6 +530,12 @@ fn dropCompoundContentUpgradeShape(storage: *Store) !void {
 }
 
 fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_value", .{}));
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "DROP TABLE action_value");
+    } else {
+        try sqlite.exec(storage.sqliteDatabase(), "DROP TABLE action_value");
+    }
     try dropCompoundContentUpgradeShape(storage);
     @setEvalBranchQuota(200_000);
     const Native = struct {
@@ -497,6 +545,47 @@ fn dropFinalInputUpgradeShape(storage: *Store) !void {
         }
     };
     if (storage.engine == .mysql) {
+        const child_fk = " FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='conversation_entry' AND COLUMN_NAME='source_kind' AND REFERENCED_TABLE_NAME='message_admission'";
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`')" ++ child_fk ++ ")");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='conversation_entry' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_kind',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "ALTER TABLE conversation_entry DROP INDEX conversation_entry_activity_user, DROP INDEX conversation_entry_activity_assistant");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE conversation_entry DROP INDEX `',REPLACE(INDEX_NAME,'`','``'),'`') FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='conversation_entry' GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)='source_admission_id,source_kind')");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "ALTER TABLE conversation_entry DROP COLUMN source_kind");
+        try Native.exec(storage, "ALTER TABLE message_admission DROP INDEX message_admission_activity");
+        try Native.exec(storage, "SET @rui_input_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP INDEX `',REPLACE(INDEX_NAME,'`','``'),'`') FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='message_admission' AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)='admission_id,source_kind')");
+        try Native.exec(storage, "PREPARE rui_input FROM @rui_input_ddl");
+        try Native.exec(storage, "EXECUTE rui_input");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_input");
+        try Native.exec(storage, "SET @rui_input_ddl=NULL");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        try Native.exec(storage, "ALTER TABLE conversation_entry RENAME TO upgrade_conversation_entry");
+        try Native.exec(storage, @import("schema.zig").migrations[59 - @import("schema.zig").migration_baseline].sqlite[2]);
+        try Native.exec(storage, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM upgrade_conversation_entry");
+        try Native.exec(storage, "DROP TABLE upgrade_conversation_entry");
+        try Native.exec(storage, "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)");
+        try std.testing.expectEqual(@as(u64, 0), try sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "ALTER TABLE message_admission MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL THEN session_ref END) STORED");
+        const kind_checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_kind',cc.CHECK_CLAUSE)>0 LIMIT 1";
+        for (0..2) |_| {
+            try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`')" ++ kind_checks ++ ")");
+            try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");
+            try Native.exec(storage, "EXECUTE rui_final");
+            try Native.exec(storage, "DEALLOCATE PREPARE rui_final");
+        }
+        try Native.exec(storage, "ALTER TABLE message_admission DROP COLUMN source_kind");
         const checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_action_id',cc.CHECK_CLAUSE)>0";
         try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`')" ++ checks ++ ")");
         try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");
@@ -541,9 +630,11 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin WHERE command_key IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_kind NOT IN (1,2)", .{}));
     // Reject unrepresentable compound values before any dialect starts DDL.
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content WHERE form<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content_part", .{}));
@@ -558,7 +649,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
             try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
         }
         try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ background_fk));
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'"));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9'"));
         inline for (checks) |check| {
             try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
             try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
@@ -571,6 +662,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
         try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
     }
+    try Native.exec(storage, "DROP TABLE action_stop_command");
     try Native.exec(storage, "DROP TABLE action_stop");
     try dropFinalInputUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE action_control_command");
@@ -631,12 +723,14 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
         try Native.exec(storage, "SET @rui_creator_ddl=NULL");
     }
+    // Format 84's creator index covers creator_ref, so it goes before the column.
+    try Native.exec(storage, if (storage.engine == .mysql) "DROP INDEX session_creator ON session" else "DROP INDEX session_creator");
     try Native.exec(storage, "ALTER TABLE session DROP COLUMN creator_ref");
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
-        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9')");
         try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
         try Native.exec(storage, "EXECUTE rui_pin_kind");
         try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
@@ -681,57 +775,6 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
     }
 }
 
-pub const fixture_sqlite_words = [_][]const u8{
-    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
-    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
-};
-
-pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
-
-pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
-    comptime {
-        @setEvalBranchQuota(1000 * text.len + 10000);
-        if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| return message;
-        var index: usize = 0;
-        var previous: []const u8 = "";
-        while (index < text.len) {
-            if (text[index] == '\'') {
-                index += 1;
-                while (index < text.len) : (index += 1) {
-                    if (text[index] != '\'') continue;
-                    if (index + 1 < text.len and text[index + 1] == '\'') {
-                        index += 1;
-                        continue;
-                    }
-                    break;
-                }
-                index += 1;
-                previous = "";
-                continue;
-            }
-            if (!isWordByte(text[index])) {
-                if (!std.ascii.isWhitespace(text[index])) previous = "";
-                index += 1;
-                continue;
-            }
-            var end = index;
-            while (end < text.len and isWordByte(text[end])) end += 1;
-            const word = text[index..end];
-            index = end;
-            for (fixture_sqlite_words) |sqlite_word| {
-                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            for (fixture_sqlite_prefixes) |prefix| {
-                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
-                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
-            previous = word;
-        }
-        return null;
-    }
-}
-
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
@@ -743,13 +786,9 @@ pub const expected_mysql_rows: [:0]const u8 = blk: {
     break :blk @embedFile("migration_expected_content.mysql.sql") ++ expected_rows[first..];
 };
 comptime {
-    if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
-    if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
-    if (fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
-}
-
-fn isWordByte(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
+    if (rsql.fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
 }
 
 pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
@@ -771,13 +810,7 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
 };
 
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
-    if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
-    if (comptime rsql.fixtureError(text)) |message| @compileError("fixture: " ++ message ++ ": " ++ text);
-    switch (comptime rsql.mysqlRendering(text)) {
-        .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
-        .rendered => {},
-    }
-    mysql_dialect_check.shadowPrepareFixture(text);
+    mysql_dialect_check.shadowPrepareFixture(comptime rsql.fixtureTemplate(text));
     return text;
 }
 
@@ -871,7 +904,7 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
 pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
-    if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
+    if (comptime rsql.fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
     if (storage.engine == .mysql) return mysql_testing.exec(storage, "UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")", .{});
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }
@@ -1042,6 +1075,77 @@ pub fn submitTestMessage(
 
 pub const TestingAnswerPart = struct { encoded: []const u8, decoded: []const u8 };
 
+pub const MessagePart = struct {
+    bytes: []const u8,
+    kind: @import("../InputCapture.zig").Incoming = .text,
+};
+
+pub fn submitTestMessageParts(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, session: []const u8, parts: []const MessagePart) !void {
+    return submitTestMessagePartsWithSkills(storage, tmp, key, session, parts, null);
+}
+
+pub fn submitTestMessagePartsWithSkills(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, session: []const u8, parts: []const MessagePart, captured: ?*const @import("domain/skills.zig").MessageCapture) !void {
+    const Capture = @import("../InputCapture.zig");
+    const custody = @import("../content_custody.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "test-message-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "test-message-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "test-message-spool");
+        try tmp.dir.deleteFile(std.testing.io, "test-message-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    var command: custody.MessageCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session);
+    const loan = try capture.seal();
+    const reply = if (captured) |skills|
+        try storage.submitMessagePartsCapturedSkillsForTesting(&command, loan, null, skills)
+    else
+        try storage.submitMessageParts(&command, loan, null, .{});
+    try std.testing.expect(reply == .accepted);
+}
+
+pub fn settleTestActionParts(storage: *Store, tmp: *std.testing.TmpDir, binding: @import("domain/action.zig").ActionAttemptBinding, parts: []const MessagePart) !void {
+    const Capture = @import("../InputCapture.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "test-action-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "test-action-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "test-action-spool");
+        try tmp.dir.deleteFile(std.testing.io, "test-action-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const reply = (try storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{})).outcome;
+    try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.Outcome.effect, reply);
+}
+
 pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
@@ -1169,7 +1273,15 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
     return settleSelectedItemsForTesting(storage, tmp, binding, items, null, answer);
 }
 
+pub fn settleItemsForTestingWithUsage(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8, usage: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, null, answer, usage);
+}
+
 pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, selected, answer, null);
+}
+
+fn settleSelectedItemsAndUsageForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8, usage: ?[]const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
     defer source.close(std.testing.io);
@@ -1188,6 +1300,18 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
         const record = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
         if (record.kind == .message) answer_item = ordinal;
         if (record.kind == .function_call) calls += 1;
+        offset += bytes.len;
+    }
+    if (usage) |bytes| {
+        try source.writeStreamingAll(std.testing.io, bytes);
+        try source.sync(std.testing.io);
+        try metadata.append(&.{
+            .tag = .usage,
+            .start = offset,
+            .length = bytes.len,
+            .content_digest = protocol.contentDigest(bytes),
+            .usage = try output_decode.readUsageForTesting(std.testing.io, source, offset, bytes.len),
+        });
         offset += bytes.len;
     }
     try metadata.sealForRead();

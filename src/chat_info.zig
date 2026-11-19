@@ -6,7 +6,6 @@ const Footer = @import("widgets/Footer.zig");
 const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
-const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
@@ -24,7 +23,7 @@ pub const SaveState = enum { idle, pending, saved, failed };
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
-    tools: tools.Selection,
+    tools: @import("configuration_admission.zig").ToolEdit,
     model: []const u8,
     label: []const u8,
 };
@@ -53,7 +52,7 @@ narrow: bool = false,
 session: status.Session = undefined,
 ready: bool = false,
 read_failed: bool = false,
-panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true },
+panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top_rule = false },
 fields: [6]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
@@ -179,7 +178,7 @@ fn bind(self: *Self) void {
     self.fields = .{
         .{ .label = "Effort", .value = if (!self.ready) "unavailable" else if (self.session.effort_override) if (self.session.effort) |effort| @tagName(effort) else "model default" else "model default", .tail = self.failures[0] },
         .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else if (self.session.permission == .bypass) "run without asking" else "ask first", .tail = self.failures[1] },
-        .{ .label = "Tools", .value = "", .tail = self.failures[2] },
+        .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
         .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.session.context_estimate != null },
@@ -193,17 +192,12 @@ fn bind(self: *Self) void {
     const caps = self.backend.caps(self.backend.context);
     self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
-    self.panel.ground = widget_style.of(caps, .{ .background = .bar });
+    self.panel.ground = widget_style.of(caps, .{});
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
-    self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
-    self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
-    self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
-    if (self.standalone != null) {
-        self.panel.ground = widget_style.of(caps, .{});
-        self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
-        self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    }
+    self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
+    self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
+    self.panel.rule = widget_style.line(caps, .horizontal);
     self.model_choice.show_more = self.standalone == null;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
@@ -242,7 +236,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         },
         1 => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.session.permission == .bypass) 0 else 1),
         2 => {
-            self.tool_draft = self.session.tools;
+            self.tool_draft = self.session.builtInTools();
             self.updateTools();
             self.panel.openChoice(&self.tool_labels, null);
         },
@@ -393,7 +387,13 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (input == .key_press and input.key_press.matches(vaxis.Key.enter, .{})) {
             const selected = draft.*;
             self.cancelChoice();
-            try self.save(ctx, 2, .{ .tools = selected });
+            var edit: @import("configuration_admission.zig").ToolEdit = .{};
+            edit.replaceBuiltIns(&self.session.tools, &self.session.loaded_tools, selected) catch |err| {
+                self.failures[2] = if (err == error.LoadedToolsNotAllowed) " · loaded tools aren't allowed" else " · too many tool names";
+                ctx.consumeAndRedraw();
+                return;
+            };
+            try self.save(ctx, 2, .{ .tools = edit });
             ctx.consumeAndRedraw();
             return;
         }
@@ -448,13 +448,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.bodyWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try drawBodyMode(self, ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 }), true) };
     children[1] = .{ .origin = .{ .row = children[0].surface.size.height, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = children[0].surface.size.height + 1 }, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    return drawBodyContents(raw, ctx) catch |err| switch (err) {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return drawBodyMode(self, ctx, false);
+}
+
+fn drawBodyMode(self: *Self, ctx: vxfw.DrawContext, show_title: bool) std.mem.Allocator.Error!vxfw.Surface {
+    return drawBodyContents(self, ctx, show_title) catch |err| switch (err) {
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.NoSpaceLeft => unreachable,
     };
@@ -486,30 +491,34 @@ fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 
     return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ellipsis, basename[start..] });
 }
 
-fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
-    const self: *Self = @ptrCast(@alignCast(raw));
+fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.Surface {
     self.bind();
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.bodyWidget());
     const name = try safe(ctx.arena, self.title());
-    self.panel.title = name;
+    self.panel.title = if (show_title) name else "";
+    self.panel.show_title = show_title or self.renaming or self.failures[6] != null or self.pending == 6;
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
     if (self.ready) {
         var selected = self.session.tools.iterator();
-        while (selected.next()) |tool| {
+        while (selected.next()) |tool_name| {
             if (tool_text.written().len > 0) try tool_text.writer.writeAll(", ");
-            try tool_text.writer.writeAll(if (tool == .web_search) "web search" else @tagName(tool));
+            try tool_text.writer.writeAll(if (std.mem.eql(u8, tool_name, "web_search")) "web search" else tool_name);
         }
     }
-    self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "none" else tool_text.written();
+    self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
+    const tail = try Panel.displayText(ctx.arena, self.fields[2].tail orelse "", self.panel.unicode);
+    const tool_room = Panel.valueWidth(size.width) -| @as(u16, @intCast(@min(ctx.stringWidth(tail), std.math.maxInt(u16))));
+    self.fields[2].value = (try view.fitted(ctx.arena, self.backend.caps(self.backend.context), self.fields[2].value, tool_room, .head)).bytes;
     if (self.ready) {
-        self.fields[3].value = try self.folderValue(ctx, size.width -| Panel.value_column);
+        self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
         if (self.session.context_estimate) |tokens| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
             try status.writeGrouped(&context.writer, tokens);
             try context.writer.writeAll(" of ");
-            try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
+            // Current validation requires a reported trigger whenever it reports an estimate.
+            try status.writeGrouped(&context.writer, self.session.compaction_trigger.?);
             self.fields[5].value = context.written();
         }
     }
@@ -543,8 +552,9 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const caps = self.backend.caps(self.backend.context);
     const name = try safe(ctx.arena, self.title());
     const footer: Footer = .{
-        .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), caps.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ rows · ←→ actions · tab · enter · esc close", caps.unicode),
+        .left = try Panel.displayText(ctx.arena, name, caps.unicode),
+        .right = "esc",
+        .left_inset = 1,
         .style = widget_style.of(caps, .{ .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
@@ -601,7 +611,7 @@ const Fixture = struct {
         status.sample(&self.session);
         self.session.label.set("Fix retry deadline") catch unreachable;
         self.session.effort_override = true;
-        self.session.tools = .initMany(&.{ .bash, .skill, .web_search });
+        self.session.tools = @import("command_input.zig").ToolsField.of(&.{ "bash", "skill", "web_search" }) catch unreachable;
         self.session.model.set("gpt-6.1-sol") catch unreachable;
         self.session.compaction_trigger = 244_800;
         self.session.context_estimate = 18;
@@ -703,18 +713,18 @@ test "Chat info draws standalone ground and facts at 99 and 46 columns" {
         try std.testing.expect(std.mem.indexOf(u8, text, " Fix retry deadline\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          high\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Tools           bash, skill, web search\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Allowed tools   bash, skill, web search\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Folder          ~/code/rui\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Context         18 of 244,800\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Rename     Archive     Copy last answer\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Fix retry deadline · info" else " Fix retry deadline · info") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") == null);
         std.debug.print("\nCHAT INFO {d}x12\n{s}END CHAT INFO\n", .{ width, text });
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
         const panel = drawn.children[0].surface;
-        try std.testing.expect(panel.readCell(1, 1).style.bold);
-        try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 2).style.bg);
-        try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 10).style.bg);
+        try std.testing.expect(panel.readCell(1, 0).style.bold);
+        try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 1).style.bg);
+        try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 9).style.bg);
     }
     for (0..10) |width| for (0..8) |height| {
         _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
@@ -766,15 +776,15 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, ' ');
     try std.testing.expect(!page.tool_draft.?.contains(.bash));
-    try std.testing.expect(page.session.tools.contains(.bash));
+    try std.testing.expect(page.session.tools.contains("bash"));
     try press(&page, &ctx, vaxis.Key.escape);
-    try std.testing.expect(page.session.tools.contains(.bash));
+    try std.testing.expect(page.session.tools.contains("bash"));
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, ' ');
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!fixture.edit.?.tools.contains(.bash));
-    try std.testing.expect(fixture.edit.?.tools.contains(.skill));
-    try std.testing.expect(fixture.edit.?.tools.contains(.web_search));
+    try std.testing.expect(!fixture.edit.?.tools.allowed.contains("bash"));
+    try std.testing.expect(fixture.edit.?.tools.allowed.contains("skill"));
+    try std.testing.expect(fixture.edit.?.tools.allowed.contains("web_search"));
 }
 
 test "Chat info read-only rows are skipped by arrows and never activated" {
@@ -966,8 +976,8 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try std.testing.expectEqual(@as(i17, 0), child.origin.col);
         try std.testing.expectEqual(width, child.surface.size.width);
         try std.testing.expectEqual(@as(u16, 19), surface.cursor.?.col);
-        try std.testing.expectEqual(@as(u16, 6), surface.cursor.?.row);
-        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 7 + page.panel.custom_height).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 5), surface.cursor.?.row);
+        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 6 + page.panel.custom_height).char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 20), "Filter:") == null);
     }
     try typeText(&page, &ctx, "5.5");
@@ -977,9 +987,9 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 22), screen.cursor.col);
-        try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
-        try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
-        try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
+        try std.testing.expectEqual(@as(u16, 5), screen.cursor.row);
+        try std.testing.expectEqualStrings("5", screen.readCell(19, 5).?.char.grapheme);
+        try std.testing.expectEqualStrings("C", screen.readCell(3, 6 + page.panel.custom_height).?.char.grapheme);
     }
     const id = page.model_choice.menu.entries[page.model_choice.focus.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -1007,7 +1017,7 @@ test "Chat info pasted keys never approve a field choice" {
         try page.widget().handleEvent(&ctx, .paste_end);
         try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         try std.testing.expect(page.hasChoice());
-        if (row == 2) try std.testing.expect(page.tool_draft.?.eql(page.session.tools));
+        if (row == 2) try std.testing.expect(page.tool_draft.?.eql(page.session.builtInTools()));
         page.cancelChoice();
     }
 }
@@ -1137,7 +1147,7 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             const text = try dump(&page, arena.allocator(), width, 20);
             for (text) |byte| try std.testing.expect(byte < 0x80);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
-            try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " < Fix retry deadline . info" else " Fix retry deadline . info") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
             if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
             if (state >= 3) {
                 try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") == null);
@@ -1158,7 +1168,72 @@ test "Chat info footer stays plain in both themes and widths" {
         fixture.background = background;
         const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
-        for (surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
+        for (surface.buffer, 0..) |cell, col| {
+            try std.testing.expectEqual(plain, cell.style);
+            const expected = if (col > 0 and col <= page.title().len) page.title()[col - 1] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
+            try std.testing.expectEqual(expected, cell.char.grapheme[0]);
+        }
+    };
+}
+
+test "Chat info hosted idle has no title row but rename and errors retain one" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
+        const idle = try page.bodyWidget().draw(ctx);
+        const idle_height = idle.size.height;
+        try std.testing.expectEqual(@as(u16, 0), page.panel.body.top);
+        try std.testing.expectEqual(@as(?u16, 0), page.panel.fieldRow(0));
+        try std.testing.expectEqualStrings("E", idle.readCell(3, 0).char.grapheme);
+        const standalone = try page.widget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 2, standalone.size.height);
+        try std.testing.expectEqual(@as(u16, 1), page.panel.body.top);
+        page.failures[6] = " · couldn't save";
+        const failed = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 1, failed.size.height);
+        try std.testing.expectEqual(@as(?u16, 1), page.panel.fieldRow(0));
+        page.failures[6] = null;
+        page.renaming = true;
+        const editing = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 1, editing.size.height);
+        try std.testing.expectEqual(@as(?u16, 1), page.panel.fieldRow(0));
+        page.renaming = false;
+    }
+}
+
+test "Chat info hosted tools advertise clipping at wide and narrow widths" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    fixture.session.tools = try .of(&.{
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    });
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ true, false }) |unicode| for ([_]u16{ 140, 46 }) |width| {
+        fixture.unicode = unicode;
+        const body = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 16);
+        const mark = if (unicode) "…" else ".";
+        try std.testing.expect(std.mem.endsWith(u8, page.fields[2].value, mark));
+        try std.testing.expect(std.mem.indexOf(u8, body, page.fields[2].value) != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Fix retry deadline") == null);
+        try std.testing.expectEqual(@as(usize, Panel.valueWidth(width)), page.fields[2].value.len - mark.len + (if (unicode) @as(usize, 1) else mark.len));
+        const footer = try dumpWidget(page.footerWidget(), arena.allocator(), width, 1);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "Fix retry deadline") != null);
+        try std.testing.expect(std.mem.endsWith(u8, footer, "esc\n"));
+        page.failures[2] = " · couldn't save";
+        const failed = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 16);
+        try std.testing.expect(std.mem.endsWith(u8, page.fields[2].value, mark));
+        try std.testing.expect(std.mem.indexOf(u8, failed, "couldn't save") != null);
+        page.failures[2] = null;
     };
 }
 
@@ -1180,10 +1255,12 @@ test "Chat info hosted body excludes its independent single-row footer" {
         try std.testing.expect(std.mem.indexOf(u8, body, " info") == null);
         try std.testing.expect(std.mem.indexOf(u8, body, "esc close") == null);
         try std.testing.expect(std.mem.indexOf(u8, footer, "Fix retry deadline") != null);
-        try std.testing.expect(std.mem.indexOf(u8, footer, if (unicode) " · info" else " . info") != null);
-        try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") != null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "info") == null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") == null);
+        try std.testing.expect(std.mem.endsWith(u8, footer, "esc\n"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "\n"));
-        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ body, footer }), complete);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Fix retry deadline") == null);
+        try std.testing.expect(std.mem.indexOf(u8, complete, "Fix retry deadline") != null);
         if (!unicode) for (body) |byte| try std.testing.expect(byte < 0x80);
         if (!unicode) for (footer) |byte| try std.testing.expect(byte < 0x80);
     };
@@ -1219,6 +1296,34 @@ test "Chat info Context appears only for measured estimates regardless of work o
     const unavailable = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "Context") == null);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
+}
+
+test "Chat info Context shows the Host reported threshold" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { estimate: ?u64, trigger: ?u64, value: ?[]const u8 }{
+        .{ .estimate = null, .trigger = null, .value = null },
+        .{ .estimate = null, .trigger = 244_800, .value = null },
+        .{ .estimate = 0, .trigger = 115_200, .value = "0 of 115,200" },
+        .{ .estimate = 18, .trigger = 244_800, .value = "18 of 244,800" },
+        .{ .estimate = 31_200, .trigger = 12_345, .value = "31,200 of 12,345" },
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| for (cases) |case| {
+        fixture.session.context_estimate = case.estimate;
+        fixture.session.compaction_trigger = case.trigger;
+        fixture.unicode = unicode;
+        page.refresh();
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 14);
+        try std.testing.expectEqual(case.value != null, page.fields[5].visible);
+        if (case.value) |value| {
+            try std.testing.expectEqualStrings(value, page.fields[5].value);
+            try std.testing.expect(std.mem.indexOf(u8, text, value) != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, text, "Context") == null);
+        _ = arena.reset(.retain_capacity);
+    };
 }
 
 test "Chat info hidden Context preserves action IDs failures and the blank action separator" {
@@ -1309,13 +1414,13 @@ test "Chat info Folder prefers whole components then a grapheme-aligned basename
         page.home = case.home;
         page.refresh();
         page.bind();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 19, .height = 14 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 21, .height = 14 }, .cell_size = .{} };
         const value = try page.folderValue(ctx, case.room);
         try std.testing.expectEqualStrings(case.expected, value);
         try std.testing.expect(ctx.stringWidth(value) <= case.room);
         _ = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqualStrings(case.expected, page.fields[3].value);
-        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), case.room + 19, 14);
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), case.room + 21, 14);
         if (case.expected.len > 0) try std.testing.expect(std.mem.indexOf(u8, text, case.expected) != null);
         if (!case.unicode) for (text) |byte| try std.testing.expect(byte < 0x80);
         _ = arena.reset(.retain_capacity);
@@ -1444,12 +1549,12 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         defer arena.deinit();
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
-        const base_height: u16 = if (context) 11 else 10;
+        const base_height: u16 = if (context) 9 else 8;
         const body = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height, body.size.height);
         const complete = try page.widget().draw(ctx);
-        try std.testing.expectEqual(base_height + 1, complete.size.height);
-        try std.testing.expectEqual(@as(i17, base_height), complete.children[1].origin.row);
+        try std.testing.expectEqual(base_height + 2, complete.size.height);
+        try std.testing.expectEqual(@as(i17, base_height + 1), complete.children[1].origin.row);
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.endsWith(u8, text, "   Rename     Archive     Copy last answer\n\n"));
         page.panel.selected = 4;
@@ -1457,14 +1562,14 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         const all = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 8, all.size.height);
         try std.testing.expectEqual(@as(u16, 8), page.panel.custom_height);
-        try std.testing.expectEqual(@as(u16, 6), all.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), all.cursor.?.row);
         try std.testing.expectEqual(@as(usize, 7), page.model_choice.hits.len);
         try typeText(&page, &events, "9");
         const narrowed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 1, narrowed.size.height);
         try std.testing.expectEqual(@as(u16, 1), page.panel.custom_height);
         try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
-        try std.testing.expectEqual(@as(u16, 6), narrowed.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), narrowed.cursor.?.row);
         try std.testing.expectEqual(@as(u16, 20), narrowed.cursor.?.col);
         const narrowed_text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "model-9") != null);
@@ -1493,28 +1598,28 @@ test "Chat info hover follows editable fields and action click regions without c
         try page.widget().handleEvent(&events, .mouse_enter);
         for (0..page.fields.len) |index| {
             const selectable = index != 3 and index != 5;
-            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(2 + index), .button = .none, .type = .motion, .mods = .{} };
+            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(1 + index), .button = .none, .type = .motion, .mods = .{} };
             try page.widget().handleEvent(&events, .{ .mouse = mouse });
             const drawn = try page.widget().draw(draw_ctx);
             try std.testing.expectEqual(selectable, page.panel.hover.pointing);
-            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(2 + index)).style);
+            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + index)).style);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
             try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         }
         for ([_]u16{ 3, 14, 26 }) |col| {
-            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 9, .button = .none, .type = .motion, .mods = .{} } });
+            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 8, .button = .none, .type = .motion, .mods = .{} } });
             const drawn = try page.widget().draw(draw_ctx);
-            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 9).style);
+            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 8).style);
             try std.testing.expect(page.panel.hover.pointing);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         }
         try page.widget().handleEvent(&events, .mouse_leave);
         try std.testing.expect(!page.panel.hover.pointing);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
-        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 2, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(usize, 1), page.panel.choice.?.field);
         _ = try page.widget().draw(draw_ctx);
-        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 4, .button = .left, .type = .press, .mods = .{} } });
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(@FieldType(status.Session, "permission"), .bypass), fixture.edit.?.permission);
     }
 }
@@ -1621,7 +1726,7 @@ test "Chat info standalone effort checks the actual Session effort without chang
         try std.testing.expectEqual(actual, page.panel.choice.?.current);
         for ([_]u16{ 46, 140 }) |width| {
             const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
+            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
     };
 }
@@ -1694,7 +1799,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read chat" else " · couldn't save", page.failures[index].?);
         const retained = try page.standaloneWidget().draw(draw_ctx);
         try std.testing.expectEqual(@as(u16, 2), retained.size.height);
-        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
+        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(3, 1).char.grapheme));
         fixture.fail_read = false;
         const before_read = fixture.read_calls;
         const before_save = fixture.save_calls;
@@ -1903,5 +2008,184 @@ test "Chat info contains only chat settings and never an app Memory row" {
         try std.testing.expect(std.mem.indexOf(u8, text, "Copy last answer") != null);
         try std.testing.expectEqual(@as(usize, 6), page.fields.len);
         _ = arena.reset(.retain_capacity);
+    };
+}
+
+test "Chat info allowed picker retains MCP names on no-op cancellation and built-in edits" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]enum { noop, cancel, remove_bash, add_message_agent }{ .noop, .cancel, .remove_bash, .add_message_agent }) |mode| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(&.{ "bash", "find_tools", "lookup", "none" });
+        fixture.session.loaded_tools = try .of(&.{ "find_tools", "none" });
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqualStrings("Allowed tools", page.fields[2].label);
+        try std.testing.expectEqualStrings(if (width == 140) "bash, find_tools, lookup, none" else "bash, find_tools, lookup…", page.fields[2].value);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        if (mode == .add_message_agent) {
+            try press(&page, &ctx, vaxis.Key.down);
+            try press(&page, &ctx, vaxis.Key.down);
+        }
+        if (mode != .noop) try press(&page, &ctx, ' ');
+        try press(&page, &ctx, if (mode == .cancel) vaxis.Key.escape else vaxis.Key.enter);
+        try std.testing.expectEqualStrings("bash find_tools lookup none", page.session.tools.names.slice());
+        try std.testing.expectEqualStrings("find_tools none", page.session.loaded_tools.names.slice());
+        if (mode == .cancel) {
+            try std.testing.expect(fixture.edit == null);
+        } else {
+            const expected = switch (mode) {
+                .noop => "bash find_tools lookup none",
+                .remove_bash => "find_tools lookup none",
+                .add_message_agent => "bash find_tools lookup message_agent none",
+                .cancel => unreachable,
+            };
+            try std.testing.expectEqualStrings(expected, fixture.edit.?.tools.allowed.names.slice());
+            try std.testing.expectEqualStrings("find_tools none", fixture.edit.?.tools.loaded.names.slice());
+        }
+    };
+}
+
+test "Chat info distinguishes empty allowed intent from an MCP tool named none" {
+    for ([_]bool{ false, true }) |singleton| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(if (singleton) &.{"none"} else &.{});
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqualStrings(if (singleton) "none" else "no tools", page.fields[2].value);
+    }
+}
+
+test "Chat info explains invalid loaded membership on the allowed tools row" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    fixture.session.tools = try .of(&.{"bash"});
+    fixture.session.loaded_tools = try .of(&.{"web_search"});
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    page.panel.selected = 2;
+    try press(&page, &ctx, vaxis.Key.enter);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings(" · loaded tools aren't allowed", page.failures[2].?);
+    try std.testing.expect(fixture.edit == null);
+}
+
+test "SUI-4 Chat info tools rejection reopens saved intent and accepts retry at both widths" {
+    const cases = [_]struct {
+        allowed: []const []const u8,
+        loaded: []const []const u8,
+        down: usize,
+        rejected_allowed: []const u8,
+        rejected_loaded: []const u8,
+        saved_allowed: []const u8,
+        saved_loaded: []const u8,
+    }{
+        .{ .allowed = &.{ "bash", "find_tools", "lookup" }, .loaded = &.{ "bash", "find_tools" }, .down = 1, .rejected_allowed = "bash lookup", .rejected_loaded = "bash", .saved_allowed = "bash find_tools lookup", .saved_loaded = "bash find_tools" },
+        .{ .allowed = &.{"bash"}, .loaded = &.{"bash"}, .down = 2, .rejected_allowed = "bash message_agent", .rejected_loaded = "bash", .saved_allowed = "bash", .saved_loaded = "bash" },
+        .{ .allowed = &.{}, .loaded = &.{}, .down = 0, .rejected_allowed = "bash", .rejected_loaded = "", .saved_allowed = "", .saved_loaded = "" },
+    };
+    for ([_]u16{ 140, 46 }) |width| for (cases) |case| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(case.allowed);
+        fixture.session.loaded_tools = try .of(case.loaded);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try dump(&page, arena.allocator(), width, 30);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        for (0..case.down) |_| try press(&page, &ctx, vaxis.Key.down);
+        try press(&page, &ctx, ' ');
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.rejected_allowed, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.rejected_loaded, fixture.edit.?.tools.loaded.names.slice());
+        try std.testing.expectEqual(@as(?usize, 2), page.pending);
+        fixture.state_value = .failed;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, null), page.pending);
+        try std.testing.expectEqual(@as(usize, 2), page.panel.selected);
+        try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+        const failed = try dump(&page, arena.allocator(), width, 30);
+        try std.testing.expect(std.mem.indexOf(u8, failed, "couldn't save") != null);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.hasChoice());
+        try std.testing.expectEqualStrings(case.saved_allowed, page.session.tools.names.slice());
+        try std.testing.expectEqualStrings(case.saved_loaded, page.session.loaded_tools.names.slice());
+        const saved_selection = fixture.session.builtInTools();
+        for (std.enums.values(tools.BuiltInTool)) |tool| {
+            try std.testing.expectEqual(saved_selection.contains(tool), page.tool_draft.?.contains(tool));
+        }
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 2), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.saved_allowed, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.saved_loaded, fixture.edit.?.tools.loaded.names.slice());
+        fixture.state_value = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, null), page.pending);
+        try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+    };
+}
+
+test "SUI-4 Chat info saves explicit empty restricted and singleton MCP tools" {
+    const cases = [_]struct { allowed: []const []const u8, loaded: []const []const u8, remove_bash: bool, expected: []const u8 }{
+        .{ .allowed = &.{}, .loaded = &.{}, .remove_bash = false, .expected = "" },
+        .{ .allowed = &.{"bash"}, .loaded = &.{"bash"}, .remove_bash = false, .expected = "bash" },
+        .{ .allowed = &.{ "bash", "none" }, .loaded = &.{ "bash", "none" }, .remove_bash = true, .expected = "none" },
+    };
+    for ([_]u16{ 140, 46 }) |width| for (cases) |case| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(case.allowed);
+        fixture.session.loaded_tools = try .of(case.loaded);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try dump(&page, arena.allocator(), width, 30);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        if (case.remove_bash) try press(&page, &ctx, ' ');
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.expected, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.expected, fixture.edit.?.tools.loaded.names.slice());
+    };
+}
+
+test "SUI-4 Chat info permission wording follows mode across tool sets" {
+    const sets = [_][]const []const u8{ &.{}, &.{"bash"}, &.{"web_search"}, &.{ "bash", "web_search" } };
+    for ([_]u16{ 140, 46 }) |width| for ([_]@FieldType(status.Session, "permission"){ .ask, .bypass }) |mode| for (sets) |set| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.permission = mode;
+        fixture.session.tools = try .of(set);
+        fixture.session.loaded_tools = try .of(set);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try dump(&page, arena.allocator(), width, 30);
+        try std.testing.expectEqualStrings(if (mode == .ask) "ask first" else "run without asking", page.fields[1].value);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Permissions") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (mode == .ask) "ask first" else "run without asking") != null);
+        if (mode == .ask) try std.testing.expect(std.mem.indexOf(u8, text, "without asking") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Bash runs without") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Bash commands can run without asking you") == null);
     };
 }

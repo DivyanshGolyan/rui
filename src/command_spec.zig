@@ -9,6 +9,7 @@ pub const CommandKind = enum {
     permission_decision,
     session_pin,
     action_background,
+    action_stop,
 
     pub fn route(self: CommandKind) []const u8 {
         return switch (self) {
@@ -38,8 +39,12 @@ pub const Spec = struct {
 
     pub fn replyShapes(comptime self: Spec, comptime Wire: type) type {
         const r = self.Reply(Wire);
-        return Shapes(if (@hasDecl(r, "accepted_skills"))
+        return Shapes(if (@hasDecl(r, "accepted_create"))
+            (if (@hasDecl(r, "accepted_skills")) .{ r.accepted, r.accepted_create, r.accepted_skills, r.rejected } else if (@hasDecl(r, "rejected_parts")) .{ r.accepted, r.accepted_create, r.rejected, r.rejected_parts } else .{ r.accepted, r.accepted_create, r.rejected })
+        else if (@hasDecl(r, "accepted_skills"))
             .{ r.accepted, r.accepted_skills, r.rejected }
+        else if (@hasDecl(r, "rejected_parts"))
+            .{ r.accepted, r.rejected, r.rejected_parts }
         else
             .{ r.accepted, r.rejected });
     }
@@ -103,16 +108,15 @@ fn Observation(comptime name: []const u8, comptime retained_on_rejection: bool) 
 
 const MessageObservation = struct {
     pub fn shapes(comptime Wire: type) type {
-        return Shapes(Wire.command_observation_reply.message_variants);
+        return Shapes(accepted(Wire).values ++ rejected(Wire).values);
     }
 
     pub fn accepted(comptime Wire: type) type {
-        return shapeSuffix(shapes(Wire).values, 2);
+        return Shapes(Wire.command_observation_reply.message_accepted);
     }
 
     pub fn rejected(comptime Wire: type) type {
-        const values = shapes(Wire).values;
-        return Shapes(.{ values[0], values[1] });
+        return Shapes(.{Wire.command_observation_reply.message_rejected});
     }
 };
 
@@ -126,6 +130,19 @@ const ActionObservation = struct {
         return Shapes(.{shapes(Wire).values[1]});
     }
 
+    pub fn rejected(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[0]});
+    }
+};
+
+const StopObservation = struct {
+    pub fn shapes(comptime Wire: type) type {
+        const o = Wire.command_observation_reply;
+        return Shapes(.{ o.action_target, o.action_target ++ o.action_stop });
+    }
+    pub fn accepted(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[1]});
+    }
     pub fn rejected(comptime Wire: type) type {
         return Shapes(.{shapes(Wire).values[0]});
     }
@@ -148,11 +165,6 @@ fn decoderObservationPayload(comptime payload: anytype, comptime index: usize, c
         return Shape(Wire.command_observation_reply.work ++ decoderObservationPayload(payload, index + Wire.command_observation_reply.permission_work.len, Wire).shape);
     }
     return Shape(.{payload[index]} ++ decoderObservationPayload(payload, index + 1, Wire).shape);
-}
-
-fn shapeSuffix(comptime values: anytype, comptime index: usize) type {
-    if (index == values.len) return Shapes(.{});
-    return Shapes(.{values[index]} ++ shapeSuffix(values, index + 1).values);
 }
 
 fn observationPayloadShapes(comptime payloads: anytype, comptime index: usize, comptime prefix: anytype, comptime suffix: anytype, comptime Wire: type) type {
@@ -203,6 +215,14 @@ const MessageRequest = struct {
         return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.text ++ .{S.Content} ++ r.text_tail ++ .{
+            S.Optional(r.require_model),
+        } ++ r.tail);
+    }
+    pub fn partsSchema(comptime S: type) type {
+        const r = S.Wire.message_request;
+        return Shape(r.head ++ .{S.Sender} ++ r.sender_handle ++ .{
+            S.Optional(r.configuration ++ .{S.Configuration}),
+        } ++ r.parts ++ .{S.Parts} ++ .{
             S.Optional(r.require_model),
         } ++ r.tail);
     }
@@ -291,6 +311,15 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = Request("action_background_request", null),
             .Observation = ActionObservation,
         },
+        .action_stop => .{
+            .subject_type = "action_stop",
+            .fence_message = "Action stop save",
+            .route = "/v1/control/action-stop",
+            .reply_type = "action_stop_reply",
+            .summary = "Selects one owned Action for stop, preserving an existing Resolution. Read completion with read-action. Retried by its key.",
+            .Request = Request("action_stop_request", null),
+            .Observation = StopObservation,
+        },
     };
 }
 
@@ -305,6 +334,7 @@ test "command_spec covers every kind and preserves routes and request limits" {
         .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request), "permission decision save" },
         .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all), "Session pin save" },
         .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request), "Action background save" },
+        .{ "/v1/control/action-stop", "action_stop_reply", protocol.shapeBytes(protocol.action_stop_request), "Action stop save" },
     };
     inline for (comptime std.meta.tags(CommandKind), expected, 0..) |kind, original, index| {
         const facts = comptime spec(kind);
@@ -324,6 +354,7 @@ test "command_spec resolves every subject from injected types" {
         pub const model_interruption = struct { turn: u64 };
         pub const permission_decision = struct { decision: bool };
         pub const action_background = struct { action: u64 };
+        pub const action_stop = struct { action: u64 };
     };
     const expected = .{
         []const u8,
@@ -334,6 +365,7 @@ test "command_spec resolves every subject from injected types" {
         Subjects.permission_decision,
         []const u8,
         Subjects.action_background,
+        Subjects.action_stop,
     };
     inline for (comptime std.meta.tags(CommandKind), expected) |kind, Expected| {
         try std.testing.expect(spec(kind).Subject(Subjects) == Expected);
@@ -343,11 +375,8 @@ test "command_spec resolves every subject from injected types" {
 fn mutationDecoderKinds(comptime Wire: type, comptime index: usize) type {
     const kinds = std.meta.tags(CommandKind);
     if (index == kinds.len) return Shapes(.{});
-    const r = spec(kinds[index]).Reply(Wire);
-    return Shapes((if (@hasDecl(r, "accepted_skills"))
-        .{ r.accepted, r.accepted_skills, r.rejected, r.conflict }
-    else
-        .{ r.accepted, r.rejected, r.conflict }) ++ mutationDecoderKinds(Wire, index + 1).values);
+    const facts = spec(kinds[index]);
+    return Shapes(facts.replyShapes(Wire).values ++ .{facts.Reply(Wire).conflict} ++ mutationDecoderKinds(Wire, index + 1).values);
 }
 
 pub fn mutationDecoderShapes(comptime Wire: type) type {
