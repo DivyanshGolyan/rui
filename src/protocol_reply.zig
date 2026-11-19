@@ -1682,7 +1682,7 @@ pub const SessionListPage = struct {
             .delta = wire.delta.value,
             .since = protocol.SinceToken.parse(wire.since.slice()) catch return error.InvalidSessionPage,
         };
-        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json;
+        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json.value;
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (workspace) |scope| if (!row.workspace.eql(scope)) return error.InvalidSessionPage;
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
@@ -1797,7 +1797,7 @@ pub const ArchivedWindowPage = struct {
             .more_above = next.more_above,
             .more_below = next.more_below,
         };
-        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json.value;
+        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json;
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (index != 0 and row.archive_seq >= result.rows[index - 1].archive_seq) return error.InvalidSessionPage;
             if (row.archive_seq == 0 or row.archive_seq > std.math.maxInt(i64)) return error.InvalidSessionPage;
