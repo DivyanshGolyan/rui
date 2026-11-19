@@ -1012,7 +1012,6 @@ test "Archived window equals the Archived membership over the archive's edge cas
             try std.testing.expectEqual(@as(usize, session_list.archived_window_size), head.count);
             try std.testing.expect(!head.more_above and head.more_below);
             try expectWindowMatchesWalk(&storage);
-            const anchor = head.rowsSlice()[0];
 
             // A Session with no Message: its first is absent, and it is still listed.
             const bare = try archiveFreshSession(&storage, "edge-bare");
@@ -1060,6 +1059,9 @@ test "Archived window equals the Archived membership over the archive's edge cas
             // A stale anchor: the newest Session is restored. Its key now names no Archived Session, so the page
             // above it is empty, its first and last are null, and the flag on the side it moved away from says a
             // page was there when the cursor was made. The client re-reads from head.
+            var newest: WindowVisitor = .{};
+            try readWindow(&storage, .head, &newest);
+            const anchor = newest.rowsSlice()[0];
             var restore = try archiveCommand("edge-restore-anchor", &anchor.reference, false);
             try std.testing.expect(storage.archiveSession(&restore, .{}) == .accepted);
             var stale: WindowVisitor = .{};
