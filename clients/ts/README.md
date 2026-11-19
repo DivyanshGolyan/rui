@@ -155,6 +155,21 @@ Only top-level field names become camelCase (for example `callOrdinal`); nested 
 Text-bearing kinds add `text`, or `truncated: true` when the text exceeds 16 KiB; `contentBytes` gives its byte length.
 Use `session.readContent(entry)` or `readContentBytes(entry)` for the whole text.
 
+A parts value has `entry.parts`, the certified ordered list, and no `entry.text`. Any entry that carries content can carry parts. Text parts have `text` inline, in order, while the entry's inline total stays within 16 KiB; a part past that has `truncated: true`. Image parts include their MIME type as the Host reports it, dimensions and optional name. `contentBytes` is the manifest length, not the sum of the parts. Read any part's exact bytes with `session.readPart(entry, part.ordinal)`. `readContent` and `readContentBytes` reject with `ContentIsPartsError` for a parts value, as the Host refuses it on its text route.
+
+```ts
+for await (const entry of session.listActivity()) {
+    if ("parts" in entry && entry.parts) {
+        for (const part of entry.parts) {
+            if (part.type === "text") console.log(part.text ?? `(use readPart for ${part.bytes} bytes)`);
+            else await writeFile(`image-${part.ordinal}.${part.mime === "image/png" ? "png" : "jpg"}`, await session.readPart(entry, part.ordinal));
+        }
+    } else if ("text" in entry) console.log(entry.text);
+}
+```
+
+The example uses `writeFile` from `node:fs/promises`.
+
 Following polls with backoff from 250 ms to 2 s only while the Session is busy.
 An empty page in `idle`, `finished`, `failed`, or `stopped` state with nothing queued puts the iterator to sleep **without a timer**.
 It wakes after a successful `send`, `update`, `decide`, `interrupt`, `stop`, `archive`, or `unarchive` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -216,6 +217,12 @@ export class Session {
 	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
 	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
 		return readContentBytes(this.#link, this.id, entry);
+	}
+
+	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */
+	async readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
+		if (entry.content?.type !== "parts") throw new TypeError("entry content is not parts");
+		return readPartBytes(this.#link, this.id, entry.content.owner, ordinal);
 	}
 
 	/** A Current report's summary (D12). A separate ending is not reported. */
