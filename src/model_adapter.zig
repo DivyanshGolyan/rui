@@ -235,6 +235,86 @@ test "provider interpretation preserves independently reported model evidence" {
     }
 }
 
+const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8, status: u16, provenance: []const u8, permanent: bool, code: []const u8, resets_at: ?u64, overflow: bool = false }{
+    .{
+        .file = "chatgpt-429-usage-limit.json",
+        .body = @embedFile("testing/fixtures/provider-errors/chatgpt-429-usage-limit.json"),
+        .status = 429,
+        .provenance = "field set from failed-responses diagnostics of 2026-11-17 (rui-dogfood inbox); message text reconstructed",
+        .permanent = true,
+        .code = "provider_quota",
+        .resets_at = 1_795_336_193,
+    },
+    .{
+        .file = "openai-429-insufficient-quota.json",
+        .body = @embedFile("testing/fixtures/provider-errors/openai-429-insufficient-quota.json"),
+        .status = 429,
+        .provenance = "OpenAI API documented error shape",
+        .permanent = true,
+        .code = "provider_quota",
+        .resets_at = null,
+    },
+    .{
+        .file = "openai-429-rate-limit.json",
+        .body = @embedFile("testing/fixtures/provider-errors/openai-429-rate-limit.json"),
+        .status = 429,
+        .provenance = "OpenAI API documented error shape",
+        .permanent = false,
+        .code = "provider_temporary_http_429",
+        .resets_at = null,
+    },
+    .{
+        .file = "openai-400-context-length.json",
+        .body = @embedFile("testing/fixtures/provider-errors/openai-400-context-length.json"),
+        .status = 400,
+        .provenance = "documented shape",
+        .permanent = false,
+        .code = "provider_context_overflow",
+        .resets_at = null,
+        .overflow = true,
+    },
+    .{
+        .file = "openai-500-server-error.json",
+        .body = @embedFile("testing/fixtures/provider-errors/openai-500-server-error.json"),
+        .status = 500,
+        .provenance = "documented shape",
+        .permanent = false,
+        .code = "provider_temporary_http_500",
+        .resets_at = null,
+    },
+    .{
+        .file = "chatgpt-429-usage-not-included.json",
+        .body = @embedFile("testing/fixtures/provider-errors/chatgpt-429-usage-not-included.json"),
+        .status = 429,
+        .provenance = "shape as Codex CLI parses it (error.type); message reconstructed",
+        .permanent = true,
+        .code = "provider_plan",
+        .resets_at = null,
+    },
+};
+
+test "EXR-67 recorded provider error bodies classify as their route meant" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (recorded_provider_errors) |entry| {
+        const file = try tmp.dir.createFile(std.testing.io, "recorded-provider-error", .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, entry.body);
+        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, entry.body.len, entry.status, output_decode.testingProviderFailure());
+        const decision = execution.transferDecision(.{ .transport_finished = .{
+            .disposition = if (entry.status == 400) .permanent_http else .temporary_http,
+            .http_status = entry.status,
+        } }, response);
+        const expected_kind: execution.FailureKind = if (entry.overflow) .context_overflow else if (entry.permanent) .permanent else .temporary;
+        errdefer std.debug.print("recorded provider error {s}\n", .{entry.file});
+        try std.testing.expectEqual(expected_kind, decision.fail.kind);
+        if (entry.overflow) try std.testing.expect(response == .context_overflow);
+        var actual: [96]u8 = undefined;
+        try std.testing.expectEqualStrings(entry.code, decision.fail.codeText(&actual));
+        try std.testing.expectEqual(entry.resets_at, if (decision.fail.quota) |quota| quota.resets_at else null);
+    }
+}
+
 test "provider interpretation closes failure variants without granting settlement or disposal" {
     try std.testing.expect(outputSchemaRejection(false, 19) == null);
     const schema = outputSchemaRejection(true, 19).?;

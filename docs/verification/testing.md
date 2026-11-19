@@ -53,6 +53,8 @@ A bug shows that the catalog was missing a promise or stated it too loosely.
 Its fix names the promise it broke, adds or sharpens that invariant at the right level, and extends the invariant's owner test.
 No test exists only to replay one bug.
 
+Provider wire classification is tested over recorded bodies in `src/testing/fixtures/provider-errors/`, each with its provenance; a new provider shape enters as a captured file, never a hand-written guess.
+
 ## Flake sources and their root fixes
 
 | Source | Root fix |

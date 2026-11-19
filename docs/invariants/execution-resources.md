@@ -72,6 +72,7 @@
 | EXR-63 | Host | A Session stop committed while a model request is between preparation steps cancels the Operation, sends nothing and releases its custody and scratch without fencing dispatch. | Model preparation pause, Host control, Store and fake provider | `dispatch_integration.py:main` preparation-stop case | docs/contracts/model-io.md:27 |
 | EXR-64 | Product | A Host that stops while a model request is between preparation steps sends nothing and leaves no request scratch, and restart sends the request once as the next Attempt. | Model preparation pause, Host shutdown, Store and fake provider | `dispatch_integration.py:main` preparation-shutdown case | docs/contracts/model-io.md:27 |
 | EXR-65 | Module | Each tool record retains its canonical digest with a correctly generated matching snapshot or when a stale or missing snapshot is recomputed. | Tool record public API | `EXR-65 tool identities survive matching, stale and missing digest snapshots` | src/tool_record.zig |
+| EXR-67 | Module | Each recorded provider error body classifies as its route meant: usage limits and quotas permanent with their reset, plans permanent, rate limits and server errors retried, context overflow as overflow. | Provider codec and retry policy API over recorded bodies | `EXR-67 recorded provider error bodies classify as their route meant` (`src/model_adapter.zig`, fixtures in `src/testing/fixtures/provider-errors/`) | docs/contracts/execution.md:406 |
 
 Owned elsewhere: SH-3 (storage failure fencing).
 
