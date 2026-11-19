@@ -569,7 +569,7 @@ test('publishers save after work without capping setup or shard recovery', () =>
     for (const [name, body] of Object.entries(jobs)) {
       const steps = workflowSteps(body);
       const setup = steps.findIndex(step => /uses: \.\/\.github\/actions\/setup\n/.test(step));
-      if (setup < 0 || steps[setup].includes("publish-caches: 'false'") || ['native_shard_matrix', 'native_measure'].includes(name)) continue; // TEMP exception: remove with the jobs
+      if (setup < 0 || steps[setup].includes("publish-caches: 'false'") || name === 'native_shard_matrix') continue; // TEMP exception: remove with the job
       const save = steps.findIndex(step => /save-only: 'true'/.test(step));
       const label = `${file}/${name}`;
       assert.ok(save > setup, `${label} must save after setup and work`);
@@ -912,7 +912,7 @@ test('new work deadlines derive a save window and cover recorded green durations
     for (const [name, body] of Object.entries(jobs)) {
       const steps = workflowSteps(body);
       const setupStep = steps.find(step => /uses: \.\/\.github\/actions\/setup\n/.test(step));
-      if (!setupStep || setupStep.includes("publish-caches: 'false'") || ['native_shard_matrix', 'native_measure'].includes(name)) continue; // TEMP exception: remove with the jobs
+      if (!setupStep || setupStep.includes("publish-caches: 'false'") || name === 'native_shard_matrix') continue; // TEMP exception: remove with the job
       const compile = steps.find(step => /id: compile\n/.test(step));
       assert.ok(compile, `${file}/${name} must identify the work whose outcome is saved`);
       if (name === 'linux_suites' || name === 'macos_suites') {
