@@ -855,6 +855,9 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     const saved_facts = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
         "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session_archive intent ON intent.command_key=c.command_key LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
         "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
+    const saved_facts_after = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
+        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session intent ON intent.archive_seq=c.command_seq LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
+        "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
     var before_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer before_facts.deinit();
     try writeResult(saved_facts, &before_facts.writer);
@@ -884,7 +887,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     try std.testing.expectEqualStrings(before.written(), after.written());
     var after_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after_facts.deinit();
-    try writeResult(saved_facts, &after_facts.writer);
+    try writeResult(saved_facts_after, &after_facts.writer);
     try std.testing.expectEqualStrings(before_facts.written(), after_facts.written());
     var provenance: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer provenance.deinit();

@@ -442,6 +442,7 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
 
 pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !void {
     const schema = @import("schema.zig");
+    try restoreSessionArchiveForTesting(storage);
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {
             if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
@@ -742,6 +743,49 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, step.sqlite[0]);
         try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
         for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
+    }
+}
+
+/// Format 85 has no session_archive table; archive membership lives in session.archive_seq.
+/// A fixture downgraded below format 84 needs the pre-85 table back, filled from that column.
+fn restoreSessionArchiveForTesting(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    const sqlite_create = comptime blk: {
+        for (schema.migrations[56 - schema.migration_baseline].sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE TABLE session_archive(")) break :blk sql;
+        }
+        @compileError("the archive downgrade fixture requires format 57's session_archive CREATE");
+    };
+    const mysql_create = comptime blk: {
+        for (schema.migrations[56 - schema.migration_baseline].mysql) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE TABLE session_archive(")) break :blk sql;
+        }
+        @compileError("the archive downgrade fixture requires format 57's session_archive CREATE");
+    };
+    const copy = "INSERT INTO session_archive(session_ref,command_key) SELECT s.session_ref,c.command_key FROM session s JOIN core_command c ON c.command_seq=s.archive_seq WHERE s.archive_seq IS NOT NULL";
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_archive_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='archive_seq' AND REFERENCED_TABLE_NAME='core_command')");
+        try Native.exec(storage, "PREPARE rui_archive FROM @rui_archive_ddl");
+        try Native.exec(storage, "EXECUTE rui_archive");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_archive");
+        try Native.exec(storage, "SET @rui_archive_ddl=(SELECT CONCAT('ALTER TABLE session DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('archive_seq',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_archive FROM @rui_archive_ddl");
+        try Native.exec(storage, "EXECUTE rui_archive");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_archive");
+        try Native.exec(storage, mysql_create);
+        try Native.exec(storage, copy);
+        try Native.exec(storage, "ALTER TABLE session DROP INDEX session_tab, DROP COLUMN archive_seq");
+    } else {
+        try Native.exec(storage, sqlite_create);
+        try Native.exec(storage, copy);
+        try Native.exec(storage, "DROP INDEX session_tab");
+        try Native.exec(storage, "ALTER TABLE session DROP COLUMN archive_seq");
     }
 }
 
