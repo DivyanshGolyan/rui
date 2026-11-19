@@ -349,7 +349,8 @@ AssertionError
 
     def test_new_red_invalidates_a_previously_green_receipt(self):
         receipt_path = self.directory / "receipt"
-        environ = {prepush.PUSHED: HEAD}
+        # Local checks judge this checkout's HEAD, so the pushed commit must be it.
+        environ = {prepush.PUSHED: prepush.git("rev-parse", "HEAD")}
         actual_run = subprocess.run
         commands = []
         def execute(command, **kwargs):

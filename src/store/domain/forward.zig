@@ -10,7 +10,7 @@ const insert = rsql.Write(.{
     .sql = "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) " ++
         "SELECT ?1,s.parent_ref,?2,?3,?4,NULL,0,NULL," ++
         "CASE WHEN ?3=2 AND s.session_ref=?2 AND NOT EXISTS(SELECT 1 FROM session_stop_owed WHERE child_ref=?2 AND settled=0) THEN 0 ELSE NULL END," ++
-        "CASE WHEN ?3=2 AND s.session_ref=?2 AND EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=s.parent_ref AND archived.command_key IS NOT NULL) THEN 1 ELSE 0 END FROM session s WHERE s.session_ref=?5 AND s.parent_ref IS NOT NULL " ++
+        "CASE WHEN ?3=2 AND s.session_ref=?2 AND EXISTS(SELECT 1 FROM session archived WHERE archived.session_ref=s.parent_ref AND archived.archive_seq IS NOT NULL) THEN 1 ELSE 0 END FROM session s WHERE s.session_ref=?5 AND s.parent_ref IS NOT NULL " ++
         "AND NOT EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=s.parent_ref AND f.kind=?3 AND f.source_id=?4)",
     .Args = struct { forward_id: u64, child: []const u8, kind: u8, source_id: u64, from: []const u8 },
     .expect = .{ .at_most = 1 },

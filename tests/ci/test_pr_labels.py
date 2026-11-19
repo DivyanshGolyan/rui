@@ -1,4 +1,6 @@
+import re
 import subprocess
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -84,6 +86,15 @@ class PrLabelsTest(unittest.TestCase):
             pr_labels.main()
         self.assertIn("#1", str(exit.exception.code))
         self.assertEqual(api.posted, [(f"repos/{REPO}/issues/2/labels", ["TUI"])])
+
+
+
+class PrLabelsTriggerTest(unittest.TestCase):
+    def test_pushes_do_not_relabel_a_pull_request(self):
+        # A PR's workstream comes from its body's Goal. Pushes run no label job; the body's edits do.
+        text = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-labels.yml").read_text()
+        types = re.search(r"pull_request_target:\n    types: \[(.*?)\]", text)[1].split(", ")
+        self.assertEqual(types, ["opened", "edited", "reopened"])
 
 
 if __name__ == "__main__":

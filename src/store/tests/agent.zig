@@ -779,7 +779,7 @@ test "configure parent inherits binding without a task, uses the create round bu
             const result = try storage.configure(&child, .{});
             try std.testing.expect(result == .accepted);
             if (!case.rerun) {
-                meter.stop(.configure);
+                try meter.stop(.configure);
                 const measured = meter.measured.get(.configure).?;
                 try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
                 if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);

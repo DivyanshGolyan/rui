@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 84;
+pub const schema_version: u32 = 86;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -64,6 +64,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 82, .digest = 0x367836567791809e },
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
+    .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
+    .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -833,6 +835,42 @@ pub const migrations = [_]Migration{
         .sqlite = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
         .mysql = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
     },
+    .{
+        .from = 84,
+        .sqlite = &.{
+            "ALTER TABLE session ADD COLUMN archive_seq INTEGER REFERENCES core_command(command_seq) CHECK(archive_seq IS NULL OR archive_seq>0)",
+            "UPDATE session SET archive_seq=(SELECT c.command_seq FROM session_archive a JOIN core_command c ON c.command_key=a.command_key WHERE a.session_ref=session.session_ref AND a.command_key IS NOT NULL)",
+            "CREATE INDEX session_tab ON session(archive_seq,created_seq)",
+            "DROP TABLE session_archive",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN archive_seq BIGINT AFTER creator_ref, ADD CHECK(archive_seq IS NULL OR archive_seq>0), ADD FOREIGN KEY(archive_seq) REFERENCES core_command(command_seq)",
+            "UPDATE session s JOIN session_archive a ON a.session_ref=s.session_ref JOIN core_command c ON c.command_key=a.command_key SET s.archive_seq=c.command_seq WHERE a.command_key IS NOT NULL",
+            "CREATE INDEX session_tab ON session(archive_seq,created_seq)",
+            "DROP TABLE session_archive",
+        },
+    },
+    .{
+        .from = 85,
+        .sqlite = &.{
+            "UPDATE tool_set_member SET tool_record_id=(SELECT min(keep.tool_record_id) FROM tool_record keep JOIN tool_record cur ON cur.tool_record_id=tool_set_member.tool_record_id WHERE keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id)",
+            "DELETE FROM tool_record WHERE tool_record_id NOT IN (SELECT min(tool_record_id) FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record RENAME TO tool_record_85",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record_85",
+            "DROP TABLE tool_record_85",
+        },
+        .mysql = &.{
+            "UPDATE tool_set_member member JOIN tool_record cur ON cur.tool_record_id=member.tool_record_id JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id SET member.tool_record_id=keep.keep_id",
+            "DELETE cur FROM tool_record cur JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id WHERE cur.tool_record_id<>keep.keep_id",
+            "SET @rui_read_only_ddl=NULL",
+            "SET @rui_read_only_ddl=IF((SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tool_record' AND COLUMN_NAME='read_only')=0,'DO 0',(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP INDEX name, DROP COLUMN read_only, ADD UNIQUE(name,owner,server,description_content_id,input_schema_content_id)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND cc.CHECK_CLAUSE LIKE '%read_only%'))",
+            "PREPARE rui_read_only FROM @rui_read_only_ddl",
+            "EXECUTE rui_read_only",
+            "DEALLOCATE PREPARE rui_read_only",
+            "SET @rui_read_only_ddl=NULL",
+        },
+    },
 };
 
 comptime {
@@ -1162,12 +1200,11 @@ pub const tables = [_]Table{
                 .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
-            .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "read_only", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
@@ -1257,6 +1294,7 @@ pub const tables = [_]Table{
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
             .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
+            .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .check = "archive_seq IS NULL OR archive_seq>0" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1268,6 +1306,7 @@ pub const tables = [_]Table{
             references("output_schema_content_id", "content", content_reference),
             references("parent_ref", "session", session_reference),
             references("creator_ref", "session", session_reference),
+            references("archive_seq", "core_command", &.{"command_seq"}),
         },
     },
     .{
@@ -1446,19 +1485,6 @@ pub const tables = [_]Table{
             references("command_key", "core_command", command_reference),
             references("session_ref", "session", session_reference),
             references("selected_turn_id", "turn", &.{"turn_id"}),
-        },
-        .without_rowid = true,
-    },
-    .{
-        .name = "session_archive",
-        .columns = &.{
-            .{ .name = "session_ref", .type = .{ .text = null } },
-            .{ .name = "command_key", .type = .{ .text = null }, .nullable = true },
-        },
-        .primary_key = &.{"session_ref"},
-        .foreign_keys = &.{
-            references("session_ref", "session", session_reference),
-            references("command_key", "session_stop", command_reference),
         },
         .without_rowid = true,
     },
@@ -1885,6 +1911,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
+    .{ .name = "session_tab", .table = "session", .columns = &.{ "archive_seq", "created_seq" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
@@ -3123,9 +3150,11 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
                     "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
                     "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
                     "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1))\n) STRICT, WITHOUT ROWID",
+                    "CREATE TABLE session_archive(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n command_key TEXT REFERENCES session_stop(command_key)\n) STRICT, WITHOUT ROWID",
+                    "CREATE TABLE session_archive(\n session_ref VARCHAR(6) NOT NULL,\n command_key VARCHAR(128),\n PRIMARY KEY(session_ref),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(command_key) REFERENCES session_stop(command_key)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
                 };
                 for (retired) |object| {
-                    if (dialect == .sqlite and std.mem.eql(u8, object, statement)) {
+                    if (std.mem.eql(u8, object, statement)) {
                         matched += 1;
                         break;
                     }
@@ -3242,7 +3271,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT source_id,message_delivered FROM session_forward WHERE message_delivered IS NOT NULL EXCEPT SELECT * FROM original_endings)"));
     try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_forward WHERE suppress_message=0"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_forward_message' AND sql='CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)'"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE archive_seq IS NOT NULL"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive_command"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='core_command_target_order' AND sql='CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)'"));
@@ -3255,24 +3284,24 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
-        "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
-        "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','archive-request')",
+        "UPDATE session SET archive_seq=-1 WHERE session_ref='rhvzwc'",
+        "UPDATE session SET archive_seq=999 WHERE session_ref='rhvzwc'",
         "INSERT INTO session_archive_command(command_key,archived) VALUES('missing-request',1)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
     try sqlite.exec(database, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at) VALUES('archive-request','rhvzwc',NULL,NULL,0,1)");
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='archive-request'"));
-    try sqlite.exec(database, "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','fixture-stop')");
+    try sqlite.exec(database, "UPDATE session SET archive_seq=10 WHERE session_ref='rhvzwc'");
     try sqlite.exec(database, "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',1),('restore-request',0)");
     for ([_][:0]const u8{
-        "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc',NULL)",
+        "UPDATE session SET archive_seq=0 WHERE session_ref='rhvzwc'",
         "UPDATE session_archive_command SET archived=-1 WHERE command_key='archive-request'",
         "UPDATE session_archive_command SET archived=2 WHERE command_key='archive-request'",
         "UPDATE session_archive_command SET archived=NULL WHERE command_key='archive-request'",
         "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',0)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
     try sqlite.exec(database, "UPDATE session_forward SET suppress_message=1 WHERE source_id=1");
-    try sqlite.exec(database, "UPDATE session_archive SET command_key=NULL WHERE session_ref='rhvzwc'");
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
+    try sqlite.exec(database, "UPDATE session SET archive_seq=NULL WHERE session_ref='rhvzwc'");
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='rhvzwc' AND archive_seq IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null, null);
@@ -3500,7 +3529,8 @@ test "schema 80 creator migration retains all prior session facts and backfills 
         for (tables) |table| {
             if (!std.mem.eql(u8, table.name, "session")) continue;
             for (table.columns) |column| {
-                if (std.mem.eql(u8, column.name, "creator_ref")) continue;
+                // creator_ref (80) and archive_seq (85) are added after format 79.
+                if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq")) continue;
                 if (names.len != 0) names = names ++ ",";
                 names = names ++ column.name;
             }

@@ -15,7 +15,6 @@ pub const Entry = struct {
     name: []const u8,
     description: ?[]const u8,
     input_schema: []const u8,
-    read_only: bool,
 };
 
 pub const Storage = struct {
@@ -169,7 +168,7 @@ fn add(self: *Listing, tool: reply.Tool) Error!void {
     };
     const schema = writer.buffered();
     self.arena_used += schema.len;
-    self.storage.entries[self.count] = .{ .name = name, .description = description, .input_schema = schema, .read_only = tool.read_only };
+    self.storage.entries[self.count] = .{ .name = name, .description = description, .input_schema = schema };
     self.count += 1;
 }
 
@@ -239,12 +238,10 @@ test "a listing collects tools across pages and shapes their schemas" {
     try std.testing.expectEqual(@as(usize, 2), found.len);
     try std.testing.expectEqualStrings("search", found[0].name);
     try std.testing.expectEqualStrings("Find things", found[0].description.?);
-    try std.testing.expect(found[0].read_only);
     try std.testing.expect(std.mem.indexOf(u8, found[0].input_schema, "rui_call_description") != null);
     try document.check(found[0].input_schema);
     try std.testing.expectEqualStrings("write", found[1].name);
     try std.testing.expect(found[1].description == null);
-    try std.testing.expect(!found[1].read_only);
     try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "\"cursor\":\"p2\"") != null);
 }
 

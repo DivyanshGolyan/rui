@@ -6,12 +6,8 @@ const keymap = @import("keymap.zig");
 pub fn event(editor: *Editor, input: vaxis.vxfw.Event, pasting: bool, failure: *?[]const u8) Editor.KeyOutcome {
     const outcome = editor.appEvent(keymap.every, input, pasting);
     switch (outcome) {
-        .refused => |why| {
-            failure.* = " · text couldn't be entered";
-            if (why.endsLine()) {
-                editor.release();
-            }
-        },
+        // The editor owns the lock; this only reports the refusal.
+        .refused => failure.* = " · text couldn't be entered",
         .append, .redraw, .submit => failure.* = null,
         else => {},
     }
@@ -31,7 +27,8 @@ test "Panel editor refusal domain keeps usable text and caret then edits and sub
     for (std.enums.values(Fault)) |fault| {
         errdefer std.debug.print("Panel editor recovery fault={s}\n", .{@tagName(fault)});
         var storage: [32]u8 = undefined;
-        var editor: Editor = .initText(&storage, "keptTAIL", 4);
+        var editor: Editor = .initLocked(&storage, .line_refusals_release);
+        std.debug.assert(editor.set("keptTAIL", 4) == null);
         var failure: ?[]const u8 = null;
         const spaces = @as([33]u8, @splat(' '));
         var outcome: Editor.KeyOutcome = .none;

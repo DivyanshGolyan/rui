@@ -563,6 +563,7 @@ fn freeConnection(self: *Engine) ?*Connection {
 }
 
 pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
+    std.debug.assert(self.receiver == null);
     const origin = self.endpoints[@backingInt(endpoint)].origin;
     for (self.active()) |*connection| {
         if (connection.origin != origin) continue;

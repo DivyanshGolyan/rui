@@ -116,13 +116,14 @@ class SocketTest(unittest.TestCase):
         writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
         client = PauseClient(writer, timeout=0.05)
         try:
-            writer.setblocking(False)
+            # MSG_DONTWAIT makes only these sends non-blocking. Switching the socket
+            # itself would race the client's reader thread, whose read on a
+            # non-blocking socket returns nothing and ends as EOF.
             try:
                 while True:
-                    writer.send(b"x" * 4096)
+                    writer.send(b"x" * 4096, socket.MSG_DONTWAIT)
             except BlockingIOError:
                 pass
-            writer.setblocking(True)
             started = threading.Event()
             outcome = []
             def call():

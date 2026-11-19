@@ -6295,6 +6295,78 @@
       ]
     },
     {
+      "name": "provider-unserved-night",
+      "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; the chat settles and shows the Session's own message",
+      "theme": "night",
+      "open": "Unserved night witness",
+      "cast": [
+        {
+          "label": "Unserved night witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Provider unserved witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Provider unserved witness"
+        },
+        {
+          "host": "restart",
+          "serve": [
+            "openai"
+          ]
+        },
+        {
+          "wait": "Provider unserved witness"
+        },
+        {
+          "host": "serves",
+          "serve": [
+            "openai"
+          ]
+        }
+      ],
+      "expect": [
+        "Provider unserved witness",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ]
+    },
+    {
+      "name": "signin-paste-refused-night",
+      "note": "First-run API key form after a refused bracketed paste (over the 1024-byte key limit): the key field locks and Connect is blocked",
+      "theme": "night",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {"wait": "Welcome to Rui"},
+        {"mouse": {"at": "API key", "do": "click"}},
+        {"wait": "Connect with an API key"},
+        {"text": "\u001b[200~kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\u001b[201~"},
+        {"wait": "Paste refused in API key"}
+      ],
+      "expect": [
+        "Paste refused in API key.",
+        "Press Enter or edit it to",
+        "continue.",
+        "Connect with an API key",
+        "[ Connect ]"
+      ],
+      "absent_sidebar_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ]
+    },
+    {
       "name": "chatfeed-night-empty",
       "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
       "theme": "night",

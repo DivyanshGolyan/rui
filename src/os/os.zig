@@ -135,7 +135,7 @@ test "Linux and Darwin semantics" {
     try std.testing.expect(!unsupported.supported and unsupported.read_only_directory == null);
 }
 
-test "SUI-63 browser launch selects the native route and preserves arguments through refusal" {
+test "SUI-64 browser launch selects the native route and preserves arguments through refusal" {
     if (tag != .linux and tag != .macos) return error.SkipZigTest;
     const Probe = struct {
         calls: usize = 0,

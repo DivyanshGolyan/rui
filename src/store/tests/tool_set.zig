@@ -766,7 +766,7 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const records = comptime testingHostToolRecords(&.{
-                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
                 .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
@@ -791,7 +791,7 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
             try submitTestMessage(&storage, &tmp, "stale-offer-input-two", "stale-offer-message-two", two.slice(), "two");
             const offered = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{one.slice()});
             const kept = comptime testingHostToolRecords(&.{
-                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const kept_digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
@@ -861,7 +861,6 @@ test "stop_action effective offer preserves the historical settings limit" {
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
-                        .read_only = true,
                         .description = "Read a page.",
                         .input_schema = "{\"type\":\"object\"}",
                     };
@@ -973,7 +972,6 @@ test "creation receipts retain maximum configured and loaded tools" {
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
-                        .read_only = true,
                         .description = "Read a page.",
                         .input_schema = "{\"type\":\"object\"}",
                     };

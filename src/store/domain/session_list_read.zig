@@ -16,6 +16,7 @@ const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const command_domain = @import("command.zig");
+const archive_membership = @import("archive_membership.zig");
 const configuration_domain = @import("configuration.zig");
 const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
@@ -71,7 +72,7 @@ fn runList(a: *ReadAccess) !void {
 }
 
 fn archiveFilterSql(comptime parameter: []const u8) []const u8 {
-    return " AND (" ++ parameter ++ "='all' OR ((" ++ command_domain.archive_state_sql ++ ")='archived')=(" ++ parameter ++ "='archived'))";
+    return " AND (" ++ parameter ++ "='all' OR ((" ++ archive_membership.stateSql("session") ++ ")='archived')=(" ++ parameter ++ "='archived'))";
 }
 
 const list_ceiling = rsql.Read(.{
@@ -433,7 +434,7 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
 }
 
 const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
-    command_domain.archive_state_sql ++ " AS archive_state," ++
+    archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
     last_line_columns ++ "," ++ clock_columns;

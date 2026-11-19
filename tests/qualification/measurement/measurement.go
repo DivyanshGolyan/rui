@@ -315,7 +315,37 @@ func (h *Host) StopWithExit(allowance time.Duration) (HostExit, error) {
 		status.Exited = true
 		status.Code = h.Cmd.ProcessState.ExitCode()
 	}
+	if h.Cmd.ProcessState != nil {
+		retireSocket(h.Ready["socket"], h.Ready["store"])
+	}
 	return status, errors.Join(killError, waitError, stdoutError, stderrError)
+}
+
+// retireSocket removes a reaped Host's socket and its .store hint (#1855, #1880) once the
+// socket refuses connections and the hint still names this Host's Store. Stop kills the
+// Host, which then never unlinks them; a caller that deletes the Store afterwards would
+// leave a stale socket in the runtime directory. A socket that accepts is a live Host or
+// a successor on the same path, and a hint naming another Store belongs to that Host:
+// both stay. tests/integration/runtime_leftovers.py owns the same rule for Python fixtures.
+func retireSocket(socket, store string) {
+	if socket == "" || store == "" || !strings.HasSuffix(socket, ".sock") {
+		return
+	}
+	hint := strings.TrimSuffix(socket, ".sock") + ".store"
+	named, err := os.ReadFile(hint)
+	if err != nil || string(named) != store {
+		return
+	}
+	connection, err := net.DialTimeout("unix", socket, time.Second)
+	if err == nil {
+		connection.Close()
+		return
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.ENOENT) {
+		return
+	}
+	os.Remove(socket)
+	os.Remove(hint)
 }
 
 func (h *Host) Stop(allowance time.Duration) error {
