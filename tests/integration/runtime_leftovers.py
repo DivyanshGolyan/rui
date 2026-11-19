@@ -46,14 +46,14 @@ def leftovers(directory=None):
 
 
 def answers(path):
+    """True unless the socket is provably dead: refused or absent. Any other probe failure
+    (timeout, permission, ...) cannot prove the socket dead, so it counts as live and is kept."""
     with os_semantics.unix_stream() as probe:
         probe.settimeout(1)
         try:
             probe.connect(str(path))
         except OSError as error:
-            if error.errno in (errno.ECONNREFUSED, errno.ENOENT):
-                return False
-            raise
+            return error.errno not in (errno.ECONNREFUSED, errno.ENOENT)
     return True
 
 
@@ -64,6 +64,31 @@ def remove(found):
                 owned.unlink()
             except FileNotFoundError:
                 pass
+
+
+def retire(store, directory=None):
+    """Remove the leftover sockets whose hint names `store`; return what was removed.
+
+    A fixture that kills its Host calls this once the Host is reaped, so the
+    socket and hint go before the Store is deleted. An accepting socket is a
+    live Host (or a successor on the same path) and stays.
+    """
+    directory = directory or runtime()
+    named = str(store)
+    found = []
+    try:
+        candidates = sorted(directory.glob("*.sock"))
+    except FileNotFoundError:
+        return found
+    for path in candidates:
+        try:
+            hinted = path.with_suffix(".store").read_text()
+        except (FileNotFoundError, UnicodeDecodeError):
+            continue
+        if hinted == named and not answers(path):
+            found.append((path, hinted))
+    remove(found)
+    return found
 
 
 def sweep(directory=None):
