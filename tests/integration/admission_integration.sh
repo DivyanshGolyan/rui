@@ -80,15 +80,9 @@ cleanup() {
         wait "$client_pid" 2>/dev/null || true
     fi
     # Every Host above is dead now; a SIGKILLed one leaves its socket and .store
-    # hint in the runtime directory, so retire those naming this run's Stores
-    # before the Stores go (docs/verification/testing.md, Leftover state).
-    state_real=$(cd "$state" 2>/dev/null && pwd -P || printf '%s' "$state")
-    for hint in "${RUI_TEST_LEFTOVER_RUNTIME:-/tmp/rui-$(id -u)}"/*.store; do
-        [ -f "$hint" ] || continue
-        case "$(cat "$hint" 2>/dev/null)" in
-            "$state_real"/*) rm -f "${hint%.store}.sock" "$hint" ;;
-        esac
-    done
+    # hint, so retire those naming this run's Stores before the Stores go
+    # (docs/verification/testing.md, Leftover state).
+    python3 "$root/tests/integration/runtime_leftovers.py" retire-under "$state" || true
     if [ "$result" -eq 0 ]; then
         rm -rf "$state"
     else

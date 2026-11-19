@@ -73,8 +73,18 @@ def retire(store, directory=None):
     socket and hint go before the Store is deleted. An accepting socket is a
     live Host (or a successor on the same path) and stays.
     """
-    directory = directory or runtime()
     named = str(store)
+    return _retire(lambda hinted: hinted == named, directory)
+
+
+def retire_under(root, directory=None):
+    """Like retire, for every Store under the directory `root` (a shell fixture's state)."""
+    prefix = str(root).rstrip("/") + "/"
+    return _retire(lambda hinted: hinted.startswith(prefix), directory)
+
+
+def _retire(names, directory):
+    directory = directory or runtime()
     found = []
     try:
         candidates = sorted(directory.glob("*.sock"))
@@ -85,7 +95,7 @@ def retire(store, directory=None):
             hinted = path.with_suffix(".store").read_text()
         except (FileNotFoundError, UnicodeDecodeError):
             continue
-        if hinted == named and not answers(path):
+        if names(hinted) and not answers(path):
             found.append((path, hinted))
     remove(found)
     return found
@@ -100,3 +110,11 @@ def sweep(directory=None):
 
 def describe(found):
     return "; ".join(f"{path.name} (Store {store})" for path, store in found)
+
+
+if __name__ == "__main__":
+    # Shell fixtures: python3 runtime_leftovers.py retire-under STATE_DIR
+    import sys
+    if sys.argv[1:2] != ["retire-under"] or len(sys.argv) != 3:
+        sys.exit("usage: runtime_leftovers.py retire-under STATE_DIR")
+    retire_under(sys.argv[2])

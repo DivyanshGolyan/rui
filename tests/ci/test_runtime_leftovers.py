@@ -114,6 +114,34 @@ class RuntimeLeftovers(unittest.TestCase):
             finally:
                 listening.close()
 
+    def test_retire_under_removes_refusing_sockets_for_stores_below_a_root(self):
+        # Shell fixtures retire by their state directory; a sibling sharing the prefix stays.
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            state = root / "state"
+            listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                def refusing(name, store):
+                    path = root / name
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    probe.bind(str(path))
+                    probe.close()
+                    path.with_suffix(".store").write_text(str(store))
+                    return path
+                below = refusing("below.sock", state / "format-store")
+                sibling = refusing("sibling.sock", root / "state-other" / "store")
+                accepting = root / "accepting.sock"
+                listening.bind(str(accepting))
+                listening.listen(1)
+                accepting.with_suffix(".store").write_text(str(state / "store"))
+                subprocess.run([sys.executable, str(ROOT / "tests/integration/runtime_leftovers.py"),
+                                "retire-under", str(state)], check=True,
+                               env={**os.environ, runtime_leftovers.OVERRIDE: str(root)})
+                self.assertFalse(below.exists() or below.with_suffix(".store").exists())
+                self.assertTrue(sibling.exists() and accepting.exists())
+            finally:
+                listening.close()
+
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
         # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no
         # refusal errno. Nothing proves the socket dead, so it is live and kept.
