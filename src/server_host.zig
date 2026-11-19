@@ -20,6 +20,7 @@ const provider = @import("provider.zig");
 const providers_module = @import("providers.zig");
 const turn_states_module = @import("turn_states.zig");
 const protocol = @import("protocol.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const wire_request = @import("wire_request.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
@@ -214,6 +215,8 @@ pub const Hooks = struct {
 pub const Tuning = struct {
     /// A directory already admitted together with private frozen placement.
     admitted_directory: ?[]const u8 = null,
+    /// Digest of the admitted settings frame, with `admitted_directory`.
+    settings_digest: ?settings_handoff.Digest = null,
     home: ?[]const u8 = null,
     limits: Limits = .{},
     hooks: Hooks = .{},
@@ -361,6 +364,8 @@ pub const Host = struct {
     launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
     started_at: u64 = 0,
+    /// The frozen settings frame a detached Host was started with; null for a foreground Host.
+    settings_digest: ?settings_handoff.Digest = null,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,

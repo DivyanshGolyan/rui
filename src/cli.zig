@@ -1019,6 +1019,7 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_di
                 try writer.writeAll(",\"innodb_doublewrite\":");
                 try std.json.Stringify.value(value.slice(), .{}, writer);
             }
+            if (ready.settings_digest) |value| try writer.print(",\"settings_digest\":\"{s}\"", .{&std.fmt.bytesToHex(value, .lower)});
             try writer.writeAll(",\"capabilities\":");
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
@@ -1161,13 +1162,13 @@ fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
     stderr.diagnosticBytes(notice.buffered());
 }
 
-/// The one notice that a running Host keeps its settings, and the commands that apply new ones.
-/// `rui host restart` keeps a Host already on the target build, so the remedy is pause then start.
+/// The one notice that a running Host keeps its settings, and the command that applies them.
+/// A saved change is applied by `rui host restart --all`, which restarts a Host whose saved
+/// settings changed even on the same build. `--set` assignments reuse the running Host's own
+/// flags, so they still need pause then start.
 fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8, retained: Retained) !void {
-    try writer.writeAll(switch (retained) {
-        .assignments => "rui: the running Host keeps its settings; --set assignments apply only to a new Host. ",
-        .saved => "rui: saved; the running Host keeps its old settings until a new Host starts. ",
-    });
+    if (retained == .saved) return writer.writeAll("rui: saved; the running Host keeps its old settings until it restarts. Apply them with rui host restart --all; saved work resumes.\n");
+    try writer.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. ");
     try writer.writeAll("Applying settings means pausing this Host and all its work: rui host pause --store ");
     try TerminalText.writeShellWord(writer, selector);
     try writer.writeAll(", then rui host start --store ");
@@ -1970,6 +1971,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         defer frozen.deinit(init.gpa);
         tuning.admitted_directory = selected;
+        tuning.settings_digest = settings_handoff.digest(frozen.bytes);
         break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
     } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
     var failure: ?start_report.Failure = null;

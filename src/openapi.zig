@@ -132,7 +132,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{Optional(protocol.host_info_reply.doublewrite)} ++ protocol.host_info_reply.tail}),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{ Optional(protocol.host_info_reply.doublewrite), Optional(protocol.host_info_reply.settings_digest) } ++ protocol.host_info_reply.tail}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -1954,8 +1954,11 @@ test "Host information has one schema with an omittable bounded diagnostic" {
     try std.testing.expectEqualStrings("string", diagnostic.get("type").?.string);
     try std.testing.expectEqual(@as(i64, 32), diagnostic.get("maxLength").?.integer);
     try std.testing.expectEqual(@as(i64, protocol.max_store_bytes), properties.get("store").?.object.get("maxLength").?.integer);
+    const digest_schema = properties.get("settings_digest").?.object;
+    try std.testing.expectEqualStrings("string", digest_schema.get("type").?.string);
+    try std.testing.expectEqualStrings("^[0-9a-f]{64}$", digest_schema.get("pattern").?.string);
     for (schema.object.get("required").?.array.items) |required|
-        try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string));
+        try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string) and !std.mem.eql(u8, "settings_digest", required.string));
 
     const host_reply = @import("host_reply.zig");
     const stores = [_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) };
@@ -1973,6 +1976,7 @@ test "Host information has one schema with an omittable bounded diagnostic" {
                 .paused = false,
                 .routes = protocol.routesAll(.unserved),
                 .doublewrite = doublewrite,
+                .settings_digest = null,
             }});
             var json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), response.slice(), .{});
             try std.testing.expect(conforms(document.schemas, schema, json));
@@ -1983,6 +1987,26 @@ test "Host information has one schema with an omittable bounded diagnostic" {
             try std.testing.expect(!conforms(document.schemas, schema, json));
         }
     }
+    // A detached Host's settings digest is optional, and bounded as the frame's SHA-256 hex.
+    var digested: protocol.ResponseBuffer = .{};
+    try digested.render(host_reply.renderHostInfo, .{host_reply.HostInfo{
+        .store = "/sqlite",
+        .instance = @splat(1),
+        .active_capacity = 2,
+        .intake_capacity = 100,
+        .descriptor_soft_limit = 1024,
+        .started_at = 1792918800,
+        .custody_occupied = 0,
+        .paused = false,
+        .routes = protocol.routesAll(.unserved),
+        .doublewrite = null,
+        .settings_digest = @splat(0xaa),
+    }});
+    var digested_json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), digested.slice(), .{});
+    try std.testing.expect(conforms(document.schemas, schema, digested_json));
+    try std.testing.expect(digested_json.object.contains("settings_digest"));
+    try digested_json.object.put(arena.allocator(), "settings_digest", .null);
+    try std.testing.expect(!conforms(document.schemas, schema, digested_json));
 }
 
 test "Message observation schema requires Host state and bounds recovery" {

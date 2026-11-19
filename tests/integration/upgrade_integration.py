@@ -685,6 +685,15 @@ def lifecycle_cases(root, binary, releases):
         output = c.upgrade()
         assert "already on " in output, output
         assert c.status()["instance"] == ready["instance"]
+        # A saved setting changed since the Host started restarts it even on the same build.
+        c.run("host", "set", "--store", c.store, "execution.backgroundAfterMs", "45000")
+        output = c.upgrade()
+        assert "restarted on " in output, output
+        restarted = c.status()
+        assert restarted["instance"] != ready["instance"], (ready, restarted)
+        output = c.upgrade()
+        assert "already on " in output, output
+        assert c.status()["instance"] == restarted["instance"]
 
     upgrade_journey(root, binary, releases)
 

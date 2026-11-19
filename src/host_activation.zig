@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const start_report = @import("start_report.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 
 /// Why a running Host was left as it is.
 pub const Limitation = enum {
@@ -101,6 +102,11 @@ pub const Reading = enum { unreadable, changed, same };
 /// The running Host a restart found already on the target executable.
 pub const Running = @FieldType(Outcome, "already_ready");
 
+/// A running Host on the target executable, with the settings digest it reports
+/// (`null` when it reports none, as a Host started without a frozen frame does).
+/// The same build restarts when that digest differs from the target's checked frame.
+pub const Same = struct { running: Running, settings: ?settings_handoff.Digest };
+
 /// What one Host's activation has read and done so far; `null` is not yet.
 /// The shell fills the field of the effect `next` named.
 pub const Facts = struct {
@@ -122,12 +128,12 @@ pub const Facts = struct {
     /// The target's executable resolves to the running one.
     same_executable: ?bool = null,
     /// Read only when the executable is the same.
-    current: ?union(enum) { unreadable, changed, same: Running } = null,
+    current: ?union(enum) { unreadable, changed, same: Same } = null,
     /// The target is the released build known to refuse a detached start.
     known_bad: ?bool = null,
     /// The running Host's sources were reconstructed for the target.
     sources: ?bool = null,
-    /// The target's public settings check.
+    /// The target's public settings check; `ok` carries the digest of the frame it printed.
     check: ?union(enum) {
         cancelled,
         /// It could not run or did not finish in time.
@@ -135,7 +141,7 @@ pub const Facts = struct {
         refused: start_report.Failure,
         untyped,
         bad_frame,
-        ok,
+        ok: settings_handoff.Digest,
     } = null,
     before_stop: ?Reading = null,
     snapshot: ?Reading = null,
@@ -177,20 +183,26 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
     if (managed.order == .gt) return .{ .done = .superseded };
     if (!managed.environment_parses) return .{ .done = .{ .unsupported = .configuration_unavailable } };
     if (facts.target_failed) |step| return .{ .done = .{ .target_unusable = step } };
-    if (facts.same_executable orelse return .resolve_target) return .{ .done = switch (facts.current orelse return .confirm_current) {
-        .unreadable => .{ .unconfirmed = .verifying },
-        .changed => .replacement_observed,
-        .same => |running| .{ .already_ready = running },
-    } };
+    const same = facts.same_executable orelse return .resolve_target;
+    var running: ?Same = null;
+    if (same) running = switch (facts.current orelse return .confirm_current) {
+        .unreadable => return .{ .done = .{ .unconfirmed = .verifying } },
+        .changed => return .{ .done = .replacement_observed },
+        .same => |value| value,
+    };
     if (facts.known_bad orelse return .inspect_target) return .{ .done = .{ .unsupported = .target_capability } };
     if (!(facts.sources orelse return .reconstruct_sources)) return .{ .done = .{ .unsupported = .configuration_unavailable } };
-    switch (facts.check orelse return .check_target) {
+    const checked: settings_handoff.Digest = switch (facts.check orelse return .check_target) {
         .cancelled => return .{ .done = .cancelled },
         .unavailable => return .{ .done = .{ .target_unusable = .checking } },
         .refused => |failure| return .{ .done = .{ .refused = .{ .stage = .checking, .failure = failure } } },
         .untyped, .bad_frame => return .{ .done = .{ .unsupported = .target_capability } },
-        .ok => {},
-    }
+        .ok => |digest| digest,
+    };
+    // The same build is restarted only when its saved settings changed since it started.
+    if (running) |same_host| if (same_host.settings) |settings| {
+        if (std.mem.eql(u8, &settings, &checked)) return .{ .done = .{ .already_ready = same_host.running } };
+    };
     if (cancelled and facts.before_stop == null) return .{ .done = .cancelled };
     switch (facts.before_stop orelse return .reobserve) {
         .unreadable => return .{ .done = .{ .unconfirmed = .stopping } },
@@ -591,6 +603,7 @@ const fixture = struct {
     const Start = Child(@FieldType(Facts, "start"));
     const refusal = start_report.Failure.init(.settings_invalid, "typed refusal");
     const running: Running = .{ .instance = @splat(5), .pid = 55 };
+    const digest: settings_handoff.Digest = @splat('c');
     const readings = [_]?Reading{ null, .unreadable, .changed, .same };
     const flags = [_]?bool{ null, false, true };
 
@@ -605,7 +618,7 @@ const fixture = struct {
             .same_executable = false,
             .known_bad = false,
             .sources = true,
-            .check = .ok,
+            .check = .{ .ok = digest },
             .before_stop = .same,
             .snapshot = .same,
         };
@@ -625,8 +638,16 @@ test "SH-24 a stop is asked for only after every check before it holds" {
         eligibilities[index] = .{ .managed = .{ .order = order, .environment_parses = parses } };
         index += 1;
     };
-    const checks = [_]?fixture.Check{ null, .cancelled, .unavailable, .{ .refused = fixture.refusal }, .untyped, .bad_frame, .ok };
-    const currents = [_]?fixture.Current{ null, .unreadable, .changed, .{ .same = fixture.running } };
+    const digests = [_]settings_handoff.Digest{ @splat('a'), @splat('b') };
+    const checks = [_]?fixture.Check{ null, .cancelled, .unavailable, .{ .refused = fixture.refusal }, .untyped, .bad_frame, .{ .ok = digests[0] }, .{ .ok = digests[1] } };
+    const currents = [_]?fixture.Current{
+        null,
+        .unreadable,
+        .changed,
+        .{ .same = .{ .running = fixture.running, .settings = null } },
+        .{ .same = .{ .running = fixture.running, .settings = digests[0] } },
+        .{ .same = .{ .running = fixture.running, .settings = digests[1] } },
+    };
     var stops: usize = 0;
     var count: usize = 0;
     const target_failures = [_]?TargetStep{ null, .resolving, .inspecting, .checking };
@@ -653,23 +674,27 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     if (target_failed) |step| break :expected .{ .done = .{ .target_unusable = step } };
                     // 6, 7. The target is the running executable.
                     const same = same_executable orelse break :expected .resolve_target;
-                    if (same) break :expected switch (current orelse break :expected .confirm_current) {
-                        .unreadable => .{ .done = .{ .unconfirmed = .verifying } },
-                        .changed => .{ .done = .replacement_observed },
-                        .same => .{ .done = .{ .already_ready = fixture.running } },
+                    var running_same: ?@FieldType(fixture.Current, "same") = null;
+                    if (same) running_same = switch (current orelse break :expected .confirm_current) {
+                        .unreadable => break :expected .{ .done = .{ .unconfirmed = .verifying } },
+                        .changed => break :expected .{ .done = .replacement_observed },
+                        .same => |value| value,
                     };
                     // 8. The known-bad released target.
                     if (known_bad orelse break :expected .inspect_target) break :expected .{ .done = .{ .unsupported = .target_capability } };
                     // 9. Sources the target cannot be given.
                     if (!(sources orelse break :expected .reconstruct_sources)) break :expected .{ .done = .{ .unsupported = .configuration_unavailable } };
                     // 10. The target's check.
-                    switch (check orelse break :expected .check_target) {
+                    const checked_digest: settings_handoff.Digest = switch (check orelse break :expected .check_target) {
                         .cancelled => break :expected .{ .done = .cancelled },
                         .unavailable => break :expected .{ .done = .{ .target_unusable = .checking } },
                         .refused => break :expected .{ .done = .{ .refused = .{ .stage = .checking, .failure = fixture.refusal } } },
                         .untyped, .bad_frame => break :expected .{ .done = .{ .unsupported = .target_capability } },
-                        .ok => {},
-                    }
+                        .ok => |digest| digest,
+                    };
+                    if (running_same) |value| if (value.settings) |settings| {
+                        if (std.mem.eql(u8, &settings, &checked_digest)) break :expected .{ .done = .{ .already_ready = value.running } };
+                    };
                     // 11. A caller's stop after the check.
                     if (cancelled and before_stop == null) break :expected .{ .done = .cancelled };
                     // 12. The Host re-read before the stop.
@@ -689,8 +714,19 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 const actual = next(facts, cancelled);
                 try fixture.expectEffect(expected, actual);
                 // The stop is asked for exactly when every line holds.
+                // The same build restarts unless its running settings equal the checked digest.
+                const running_settings: ?settings_handoff.Digest = if (current) |value| switch (value) {
+                    .same => |same_value| same_value.settings,
+                    else => null,
+                } else null;
+                const checked_settings: ?settings_handoff.Digest = if (check) |value| switch (value) {
+                    .ok => |digest| digest,
+                    else => null,
+                } else null;
+                const unchanged = running_settings != null and checked_settings != null and std.mem.eql(u8, &running_settings.?, &checked_settings.?);
+                const restarts = same_executable == false or (same_executable == true and current != null and current.? == .same and !unchanged);
                 const holds = eligible == .managed and eligible.managed.order != .gt and eligible.managed.environment_parses and census == .same and
-                    target_failed == null and same_executable == false and known_bad == false and sources == true and check != null and check.? == .ok and
+                    target_failed == null and restarts and known_bad == false and sources == true and check != null and check.? == .ok and
                     before_stop == .same and snapshot == .same;
                 try std.testing.expectEqual(holds, actual == .stop);
                 // Nothing before the stop is reported at a stage after it.
@@ -703,9 +739,10 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 stops += @intFromBool(holds);
                 count += 1;
             };
-    try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * 4 * 3 * 3 * checks.len * 4 * 4, count);
-    // Both orders below the target, each value of `cancelled` and of `current`.
-    try std.testing.expectEqual(2 * 2 * 4, stops);
+    try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * currents.len * 3 * 3 * checks.len * 4 * 4, count);
+    // Per order and `cancelled`: a differing executable restarts for every current (6 * 2 checks),
+    // and the same executable restarts for the running settings unequal to the checked digest (4 of 6 pairs).
+    try std.testing.expectEqual(2 * 2 * (currents.len * 2 + 4), stops);
 }
 
 test "SH-81 after the stop every ending names a stage" {

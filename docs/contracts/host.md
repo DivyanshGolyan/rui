@@ -89,7 +89,10 @@ alone cannot launch a replacement Host; a saved Host directory can.
 SQLite's database layout and wire identity remain unchanged.
 
 MySQL readiness and `host_status` also report `innodb_doublewrite`, including
-`OFF` (D200).
+`OFF` (D200). A detached Host also reports `settings_digest`, the lowercase hex
+SHA-256 of the frozen settings it started with; restart compares it with the
+target build's check, so a same-build restart happens exactly when saved
+settings changed since the Host started.
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
@@ -181,7 +184,7 @@ Bare `rui`, `host start` and `host serve` all use the product default Active Cap
 The Host setting `execution.backgroundAfterMs` defaults to 30,000 milliseconds and applies to every live Host-run Action. It is available in the settings document, generic `--set execution.backgroundAfterMs=N` assignments, and the generated TypeScript Host settings. The TUI uses those Host startup settings; its Session settings do not reconfigure a running Host.
 A running Host keeps the capacity it started with, including across Rui upgrades, until it stops and a new Host starts.
 When `host start` finds or loses a launch race to a ready Host, it still reports that Host and exits zero; settings apply only to a new Host, never reconfigure the running one, and when the command gave `--settings` or `--set`, stderr says so.
-When `host set` or `host unset` saves while a Host serves the Store, stderr says the running Host keeps its old settings; both notices give `rui host pause` then `rui host start` as the way to apply them, since `rui host restart` keeps a Host already on the target build.
+When `host set` or `host unset` saves while a Host serves the Store, stderr says the running Host keeps its old settings. The saved-settings notice names `rui host restart --all`, which restarts a Host whose saved settings changed even on the same build; `--set` assignments still need `rui host pause` then `rui host start`, since restart reuses the running Host's own `--set` flags.
 Startup raises only its own soft descriptor limit, up to the hard limit, to fit that capacity.
 It never reduces Active Capacity to fit: when even minimum intake cannot fit, startup fails before the Store lease and names the limit to raise.
 From macOS's default soft limit of 256, the default Host starts with full intake when the hard limit and OS per-process ceiling cover its full requirement.

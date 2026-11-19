@@ -22,6 +22,17 @@ pub const Owned = struct {
     }
 };
 
+/// A Host's `settings_digest`: the SHA-256 of the whole frozen frame. The wire spells it in lowercase hex.
+pub const Digest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+
+/// The digest a Host with these frozen bytes reports. Equal frames, which
+/// `freeze` makes deterministic, have equal digests.
+pub fn digest(bytes: []const u8) Digest {
+    var hash: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return hash;
+}
+
 /// Opaque custody admission for the coordinator; schema decoding stays target-local.
 pub fn accept(bytes: []const u8) error{SettingsInvalid}!void {
     _ = try inspect(bytes);
@@ -113,4 +124,27 @@ test "frozen settings handoff preserves OS-byte selector intent and file-origin 
         owned.bytes[magic.len] = 255;
         try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes));
     }
+}
+
+test "settings digest is the SHA-256 of the frame and follows its settings" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    var first = try freeze(gpa, "/host", settings, .automatic, &failure);
+    defer first.deinit(gpa);
+    var second = try freeze(gpa, "/host", settings, .automatic, &failure);
+    defer second.deinit(gpa);
+    const before = digest(first.bytes);
+    try std.testing.expectEqualSlices(u8, &before, &digest(second.bytes));
+    var expected: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(first.bytes, &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, &before);
+
+    settings.execution.background_after_ms.value += 1;
+    var changed = try freeze(gpa, "/host", settings, .automatic, &failure);
+    defer changed.deinit(gpa);
+    try std.testing.expect(!std.mem.eql(u8, &before, &digest(changed.bytes)));
 }

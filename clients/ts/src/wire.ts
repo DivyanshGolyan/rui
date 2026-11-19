@@ -1308,6 +1308,7 @@ export interface components {
             custody_occupied: components["schemas"]["Decimal"];
             paused: boolean;
             innodb_doublewrite?: string;
+            settings_digest?: string;
             capabilities: {
                 /** @constant */
                 bash: true;

@@ -413,7 +413,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                 (if (!sameHost(value, plan.observed) or (identity.generation(value.pid) catch 0) != plan.snapshot.started)
                     .changed
                 else
-                    .{ .same = .{ .instance = value.facts.instance, .pid = value.pid } })
+                    .{ .same = .{ .running = .{ .instance = value.facts.instance, .pid = value.pid }, .settings = value.facts.settings_digest } })
             else |_|
                 .unreadable,
             .inspect_target => {
@@ -447,8 +447,9 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                     (if (try refusal(private, result)) |failure| .{ .refused = failure } else .untyped)
                 else if (settings_handoff.accept(result.stdout)) |_|
                     // The frame owner validates version/framing/bounds. Lifecycle neither
-                    // decodes settings nor reconstructs the target's admitted input.
-                    .ok
+                    // decodes settings nor reconstructs the target's admitted input; it only
+                    // digests the frame a new Host would be started with.
+                    .{ .ok = settings_handoff.digest(result.stdout) }
                 else |_|
                     .bad_frame;
             },

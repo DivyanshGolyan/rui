@@ -332,6 +332,8 @@ pub const HostStatus = union(enum) {
         custody_occupied: usize,
         paused: bool,
         innodb_doublewrite: ?protocol.Bounded(32) = null,
+        /// SHA-256 of the settings frame a detached Host was started with; absent for older Hosts and foreground starts.
+        settings_digest: ?@import("host_settings_handoff.zig").Digest = null,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -483,6 +485,14 @@ fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, 
         doublewrite = .{};
         try doublewrite.?.set(value);
     }
+    var settings_digest: ?@import("host_settings_handoff.zig").Digest = null;
+    if (info.settings_digest) |value| {
+        if (value.len != 64) return error.InvalidHostInfo;
+        for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHostInfo;
+        var bytes: @import("host_settings_handoff.zig").Digest = undefined;
+        _ = std.fmt.hexToBytes(&bytes, value) catch return error.InvalidHostInfo;
+        settings_digest = bytes;
+    }
     return .{
         .store = identity,
         .instance = instance,
@@ -493,6 +503,7 @@ fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, 
         .custody_occupied = custody_occupied,
         .paused = info.paused,
         .innodb_doublewrite = doublewrite,
+        .settings_digest = settings_digest,
         .capabilities = .{
             .bash = info.capabilities.bash,
             .providers = routes: {
@@ -519,11 +530,12 @@ test "Host information parses omitted and bounded string diagnostics with one se
             .paused = false,
             .routes = protocol.routesAll(.unserved),
             .doublewrite = null,
+            .settings_digest = null,
         };
         var response: protocol.ResponseBuffer = .{};
         try response.render(host_reply.renderHostInfo, .{info});
         const omitted = try parseHostInfo(response.slice(), selector);
-        try std.testing.expect(omitted.ready.innodb_doublewrite == null);
+        try std.testing.expect(omitted.ready.innodb_doublewrite == null and omitted.ready.settings_digest == null);
         try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
         const escaped = @as([32]u8, @splat(1));
         for (0..escaped.len + 1) |len| {
@@ -540,6 +552,38 @@ test "Host information parses omitted and bounded string diagnostics with one se
         defer std.testing.allocator.free(oversized);
         try std.testing.expectError(error.ValueTooLong, parseHostInfo(oversized, selector));
     }
+}
+
+test "Host information parses the settings digest only as 64 lowercase hex characters" {
+    const host_reply = @import("host_reply.zig");
+    const digest: @import("host_settings_handoff.zig").Digest = @splat(0xaa);
+    var info: host_reply.HostInfo = .{
+        .store = "/sqlite",
+        .instance = @splat(1),
+        .active_capacity = 2,
+        .intake_capacity = 100,
+        .descriptor_soft_limit = 1024,
+        .started_at = 1792918800,
+        .custody_occupied = 0,
+        .paused = false,
+        .routes = protocol.routesAll(.unserved),
+        .doublewrite = null,
+        .settings_digest = digest,
+    };
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderHostInfo, .{info});
+    const present = try parseHostInfo(response.slice(), "/sqlite");
+    try std.testing.expectEqualSlices(u8, &digest, &present.ready.settings_digest.?);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    for ([_][]const u8{ "ABCDEF" ++ (&@as([58]u8, @splat('0'))), &@as([63]u8, @splat('a')), &@as([64]u8, @splat('g')) }) |bad| {
+        const body = try std.mem.replaceOwned(u8, std.testing.allocator, response.slice(), &hex, bad);
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(body, "/sqlite"));
+    }
+    info.settings_digest = null;
+    response.len = 0;
+    try response.render(host_reply.renderHostInfo, .{info});
+    try std.testing.expect((try parseHostInfo(response.slice(), "/sqlite")).ready.settings_digest == null);
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
