@@ -627,9 +627,11 @@ HOOK_REPOSITORY = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIR
 def other_checkout(pushed, head):
     """Why local feedback cannot speak for the pushed commits, or None.
 
-    Every check runs on this checkout's HEAD and working tree, so a push of a
-    commit that is not HEAD (another branch, or another worktree's commit),
-    and that no passing receipt covers, would be judged by the wrong tree.
+    Every check runs on this checkout's HEAD, so a push of a commit that is not
+    HEAD (another branch, or another worktree's commit), and that no passing
+    receipt covers, would be judged by the wrong commit. Pushed shas arrive
+    peeled to commits, so an annotated tag of HEAD is HEAD. Uncommitted edits
+    are outside this check; commands read the working tree by design.
     """
     others = sorted(set(pushed) - {head})
     if not others:
@@ -680,7 +682,7 @@ def main():
                     print(f"== {result['name']}: skipped: {result['skipped']}")
             raise SystemExit(0)
         # No receipt speaks for the pushed commits, so the checks below must, and they judge HEAD's tree.
-        if refusal := other_checkout(pushed, git("rev-parse", "HEAD")):
+        if refusal := other_checkout([git("rev-parse", sha + "^{commit}") for sha in pushed], git("rev-parse", "HEAD")):
             raise SystemExit(refusal)
     base = git("merge-base", "HEAD", args.base)
     paths, _ = changed_paths(base, "HEAD")
