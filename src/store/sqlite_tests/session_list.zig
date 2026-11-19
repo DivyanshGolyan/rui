@@ -393,8 +393,9 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
     const before = storage.testing_content_work.rounds;
+    var scratch: session_list_read_domain.Scratch = .{};
     var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
-    try session_list_read_domain.readSessionList(&a, &.{}, &reply);
+    try session_list_read_domain.readSessionList(&a, &.{}, &scratch, &reply);
     const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
@@ -423,8 +424,9 @@ test "a stopping Turn with queued work adds no list read rounds or passes" {
             var a: reads_domain.ReadAccess = .open(&entry);
             defer a.deinit();
             const before = storage.testing_content_work.rounds;
+            var scratch: session_list_read_domain.Scratch = .{};
             var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
-            try session_list_read_domain.readSessionList(&a, &.{}, &reply);
+            try session_list_read_domain.readSessionList(&a, &.{}, &scratch, &reply);
             return .{ .rounds = storage.testing_content_work.rounds - before, .passes = a.passes };
         }
     };

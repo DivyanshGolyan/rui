@@ -1093,20 +1093,22 @@ pub const Store = struct {
         return .{ .generation = self.commitGeneration(), .next = next };
     }
 
-    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
+    /// `pages` holds the read's page buffers. The caller allocates them before the queue runs the read, so a
+    /// failed allocation never reaches the held Store and the buffers stay off Host stacks.
+    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype, pages: *session_list_read.Scratch) !void {
         try request.validate();
         var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
-        try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, &watched });
+        try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, pages, &watched });
     }
 
     fn SessionListHeld(comptime Visitor: type) type {
         return struct {
-            fn readSessionListHeld(self: *Store, request: *const session_list.ListSessions, watched: *session_list_read.Watched(Visitor)) !void {
+            fn readSessionListHeld(self: *Store, request: *const session_list.ListSessions, pages: *session_list_read.Scratch, watched: *session_list_read.Watched(Visitor)) !void {
                 const entry = try enter(self, .none);
                 defer entry.release();
                 var access: ReadAccess = .open(&entry);
                 defer access.deinit();
-                const result = session_list_read.readSessionList(&access, request, watched);
+                const result = session_list_read.readSessionList(&access, request, pages, watched);
                 return entry.finishCapture(watched.failed, result);
             }
         };
