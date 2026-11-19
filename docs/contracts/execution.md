@@ -403,7 +403,7 @@ Malformed JSON or framing, explicit incomplete generation and contradictory comp
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted`, the two spend limits and the two `subscription_sharing_usage_*` codes a quota and `usage_not_included` a plan.
+HTTP 429 whose refusal the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec reads `error.code`, or `error.type` when the body has no code (ChatGPT's usage-limit shape), and a code always wins over a type; it names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted`, the two spend limits and the two `subscription_sharing_usage_*` codes a quota and `usage_not_included` a plan.
 Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
 A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.

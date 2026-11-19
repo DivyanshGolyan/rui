@@ -378,6 +378,8 @@ pub const ClassifyScratch = struct {
     failure: std.enums.EnumArray(Inner, Member),
     code: [json.max_text_bytes]u8 = undefined,
     code_length: u8,
+    kind: [json.max_text_bytes]u8 = undefined,
+    kind_length: u8,
     resets_at: ?u64,
     effort_parameter: bool,
     item_parameter: bool,
@@ -409,6 +411,7 @@ pub const ClassifyScratch = struct {
             .envelope = .initFill(.{}),
             .failure = .initFill(.{}),
             .code_length = 0,
+            .kind_length = 0,
             .resets_at = null,
             .effort_parameter = false,
             .item_parameter = false,
@@ -424,8 +427,14 @@ pub const ClassifyScratch = struct {
         }
         if (failure.count > 1 or !self.error_object) return;
         const code = self.failure.get(.code);
-        if (code.count == 1 and self.code_length != 0) {
-            const text = self.code[0..self.code_length];
+        const kind = self.failure.get(.type);
+        const authority: ?[]const u8 = if (code.count == 1 and self.code_length != 0)
+            self.code[0..self.code_length]
+        else if (code.count <= 1 and kind.count == 1 and self.kind_length != 0)
+            self.kind[0..self.kind_length]
+        else
+            null;
+        if (authority) |text| {
             if (std.mem.eql(u8, text, "context_length_exceeded")) {
                 found.context_overflow = true;
             } else if (refusalOf(text)) |refusal| {
@@ -434,7 +443,6 @@ pub const ClassifyScratch = struct {
             }
         }
         const named = code.count == 1 and code.is_string and code.range.length != 0;
-        const kind = self.failure.get(.type);
         found.report.code = report(if (named) code.range else if (kind.count == 1) kind.string() else null);
         found.report.message = report(message(&self.failure));
     }
@@ -472,6 +480,7 @@ pub const ClassifyScratch = struct {
             2 => if (self.inError()) if (self.inner) |inner| {
                 start(self.failure.getPtr(inner));
                 if (inner == .code) self.code_length = 0;
+                if (inner == .type) self.kind_length = 0;
                 if (inner == .resets_at) self.resets_at = null;
             },
             else => {},
@@ -503,6 +512,10 @@ pub const ClassifyScratch = struct {
                     if (inner == .code) if (reader.text()) |text| {
                         @memcpy(self.code[0..text.len], text);
                         self.code_length = @intCast(text.len);
+                    };
+                    if (inner == .type) if (reader.text()) |text| {
+                        @memcpy(self.kind[0..text.len], text);
+                        self.kind_length = @intCast(text.len);
                     };
                 },
                 .number => if (inner == .resets_at) {
@@ -2014,6 +2027,7 @@ test "classify answers the same with 0xAA or leftover scratch" {
         "{\"detail\":\"Unsupported model\"}",
         "{\"error\":{\"code\":\"cyber_policy\",\"x\":1.2.3}}",
         "{\"error\":{\"code\":\"" ++ @as([80]u8, @splat('c')) ++ "\"}}",
+        "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"pro\",\"resets_at\":1795336193,\"eligible_promo\":null,\"resets_in_seconds\":444255}}",
         "",
     };
     const same = struct {
