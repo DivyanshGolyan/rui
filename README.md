@@ -1,8 +1,9 @@
 # Rui
 
-Rui is a memory-efficient agent runtime.
-Build applications that run multiple agents without starting a separate runtime process for each one.
-Give agents work, connect your tools, and collect their results through a TypeScript client.
+Rui runs many agents from your application in one small process.
+Each agent's conversation is saved in your SQLite or MySQL database, so work picks up after a crash.
+Your application starts agents, gives them tools and reads their answers through a TypeScript client.
+The same runtime also gives you an agent in your terminal.
 
 **100 waiting agents.
 2.5 MB of private memory.**
@@ -12,11 +13,23 @@ Give agents work, connect your tools, and collect their results through a TypeSc
 Source: the [published Linux model-wait benchmark](https://divyanshgolyan.com/posts/hundred-agents/) at [Rui revision 5014980](https://github.com/DivyanshGolyan/rui/commit/50149807908283e044e3573f1b251d6a2f21e854).
 See the [data and method](docs/waiting-agent-memory.md) for measurement scope and versions.
 
+## Why Rui
+
+- **Many agents, one process.**
+  Agents spend most of their time waiting on the model.
+  In Rui a waiting agent is a few kilobytes of state in one shared process, so a hundred agents cost about as much as one.
+- **Safe across crashes.**
+  Every step is saved before Rui moves on.
+  If Rui stops in the middle of a command, it reports that the command may have run and never runs it again by itself.
+- **Lives in your database.**
+  Rui keeps its conversations in SQLite or in your application's MySQL database.
+- **Your tools.**
+  Connect MCP servers or use the built-in Bash and agent tools.
+  Agents can start other agents and collect their reports.
+
 ## Get started with TypeScript
 
 [Follow the TypeScript quickstart](docs/integrating-rui.md) to run a Session and read its answer.
-
-The client launches a child Host:
 
 ```ts
 import { Rui } from "ruicode";
@@ -32,15 +45,14 @@ const rui = await Rui.connect({
 ```
 
 Install with `npm install ruicode` on Node.js 22.6+; the package brings the matching `rui` executable for your platform.
+The client starts a Host for you.
 This example uses an OpenAI-compatible Responses API key; Host settings can also select the Codex or ChatGPT sign-in providers.
 Provider usage may incur charges.
 
 ## How it works
 
-Your application talks over a local socket to one shared Host that runs the Sessions.
-The Host shares networking and execution capacity and saves conversation state in SQLite or MySQL.
-Connect built-in tools or MCP servers, coordinate agents, and follow their activity through the client.
-For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
+Your application talks over a local socket to one shared Host that runs every Session.
+The Host shares networking and execution capacity across Sessions and saves their state in SQLite or MySQL.
 See the [Host guide](docs/host.md) for [settings](docs/host.md#save-host-settings), capacity and lifecycle.
 
 ## Try it in your terminal
@@ -57,31 +69,12 @@ curl -fsSL https://ruicode.com/install | sh
 The installer checks SHA-256 and installs in `~/.local/bin`.
 If `~/.local/bin` is not on your `PATH`, it adds it to your shell profile; open a new terminal afterwards.
 Set `RUI_NO_MODIFY_PATH=1` to leave your profile alone and follow its `PATH` instructions instead.
-See [upgrade and activation](docs/host.md#upgrade-and-activation) before updating saved work.
-
-If an older Rui cannot download its update because DNS resolution stalls, it needs an initial installer download to receive the fix. This recovery path requires a published installer with IPv4 fallback for its archive download. Run this command as the same user who installed Rui. The installer preserves Stores, credentials and earlier builds, and attempts to restart all running Hosts belonging to that user on the selected version. Save or finish work before proceeding.
-
-```sh
-(
-  set -eu
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
-  curl --disable --ipv4 -fsSL --connect-timeout 10 --max-time 300 https://ruicode.com/install -o "$installer"
-  sh "$installer"
-)
-```
-
-This recovery command downloads the current installer over IPv4 without changing your curl configuration or system DNS. The installer verifies the archive's SHA-256 digest and version before publishing it.
+See [upgrade and activation](docs/host.md#upgrade-and-activation) before updating saved work, and [update recovery](#update-recovery) if an older Rui cannot download its update.
 
 <a id="start-a-conversation"></a>
 
 Run `rui` in your project directory.
-The first run asks you to choose a ChatGPT account or an API key.
-For ChatGPT, choose browser or device-code sign-in, then press Enter.
-Browser sign-in shows a link and an explicit Open browser action; if the browser cannot reach back, paste the address it ends on or change to the device-code method.
-The separate `rui auth login chatgpt` command still opens a browser automatically; add `--device-code` to that command to sign in with a code instead.
-A code sign-in needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the code private.
-The [Host guide](docs/host.md#run-in-the-foreground) covers signing in from scripts.
+The first run asks you to choose a ChatGPT account or an API key; [Sign in](docs/using-rui.md#sign-in) covers each method.
 
 Bash runs with your full privileges, without a sandbox, and defaults to running without approval (`bypass`).
 [Approval settings](docs/using-rui.md#approve-bash-commands) apply per Session and do not automatically propagate to agents it starts.
@@ -98,3 +91,24 @@ Rui is in development.
 - <a id="build-from-source"></a>[Development and source builds](docs/development.md), including contribution setup and provider-free examples.
 - <a id="learn-more"></a>[Architecture](ARCHITECTURE.md), [Verification](VERIFICATION.md), and [Research](research/README.md).
 - [Store format reset](docs/store-reset.md), [contributing rules](AGENTS.md), and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Update recovery
+
+If an older Rui cannot download its update because DNS resolution stalls, it needs an initial installer download to receive the fix.
+This recovery path requires a published installer with IPv4 fallback for its archive download.
+Run this command as the same user who installed Rui.
+The installer preserves Stores, credentials and earlier builds, and attempts to restart all running Hosts belonging to that user on the selected version.
+Save or finish work before proceeding.
+
+```sh
+(
+  set -eu
+  installer=$(mktemp)
+  trap 'rm -f "$installer"' EXIT
+  curl --disable --ipv4 -fsSL --connect-timeout 10 --max-time 300 https://ruicode.com/install -o "$installer"
+  sh "$installer"
+)
+```
+
+This recovery command downloads the current installer over IPv4 without changing your curl configuration or system DNS.
+The installer verifies the archive's SHA-256 digest and version before publishing it.

@@ -3,6 +3,15 @@
 This page covers the interactive `rui` client: its commands, input, screen, Sessions, models and context compaction.
 For a first conversation, see [Start a conversation](../README.md#start-a-conversation).
 
+## Sign in
+
+The first run of `rui` asks you to choose a ChatGPT account or an API key.
+For ChatGPT, choose browser or device-code sign-in, then press Enter.
+Browser sign-in shows a link and an explicit Open browser action; if the browser cannot reach back, paste the address it ends on or change to the device-code method.
+The separate `rui auth login chatgpt` command still opens a browser automatically; add `--device-code` to that command to sign in with a code instead.
+A code sign-in needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the code private.
+The [Host guide](host.md#run-in-the-foreground) covers signing in from scripts.
+
 ## Keys
 
 Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select the last **Keys** row and press Enter.
