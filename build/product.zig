@@ -59,6 +59,11 @@ fn rsqlTable(b: *std.Build) RsqlTable {
     return rsql_table.?;
 }
 
+/// Whether this is a collect build (-Drsql-collect=true), which exports every Store statement.
+pub fn rsqlCollect(b: *std.Build) bool {
+    return rsqlTable(b).collect;
+}
+
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
     configurePauses(b, compile, true);
     configureSqlite(b, compile);
