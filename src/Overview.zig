@@ -4433,11 +4433,11 @@ test "overview Archived window effect runs one job and its reply becomes the win
             last = cursor;
             page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
             page.rows[0] = .{
-                .reference = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable,
+                .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable },
                 .archive_seq = 42,
                 .stopped_at = test_now_s,
                 .label = null,
-                .first = .{ .admission = 4, .line = protocol.Bounded(session_list.max_last_line_bytes).from("Archived line") catch unreachable },
+                .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = .{ .value = protocol.Bounded(session_list.max_first_line_bytes).from("Archived line") catch unreachable } },
             };
             return null;
         }
@@ -4483,7 +4483,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
             page.* = .{ .count = 0 };
             if (Listing.archive_state != .archived) return null;
             page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
-            page.rows[0] = .{ .reference = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .admission = 4, .line = null } };
+            page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = null } };
             return null;
         }
     };

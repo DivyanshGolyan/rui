@@ -1682,7 +1682,7 @@ pub const SessionListPage = struct {
             .delta = wire.delta.value,
             .since = protocol.SinceToken.parse(wire.since.slice()) catch return error.InvalidSessionPage,
         };
-        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json.value;
+        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json;
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (workspace) |scope| if (!row.workspace.eql(scope)) return error.InvalidSessionPage;
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
@@ -1750,37 +1750,10 @@ pub const SessionListPage = struct {
 
 /// One Archived window page (`delta` "window"): slim rows, newest archive first, with the page's edge keys.
 pub const ArchivedWindowPage = struct {
-    pub const Row = struct {
-        reference: protocol.Bounded(protocol.max_session_bytes),
-        archive_seq: u64,
-        stopped_at: u64,
-        label: ?protocol.Bounded(protocol.max_label_bytes),
-        first: ?struct { admission: u64, line: ?protocol.Bounded(session_list.max_last_line_bytes) },
-    };
+    /// One slim row: the same decoder the wire shape is tested through (`ArchivedRowRead`).
+    pub const Row = ArchivedRowRead;
 
-    const JsonRow = struct {
-        value: Row,
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonRow {
-            const Wire = struct {
-                reference: JsonString(protocol.max_session_bytes),
-                archive_seq: JsonString(20),
-                stopped_at: JsonString(20),
-                label: ?JsonString(protocol.max_label_bytes),
-                first: ?struct { admission: JsonString(20), line: ?JsonString(session_list.max_last_line_bytes) },
-            };
-            const wire = try std.json.innerParse(Wire, allocator, source, options);
-            if (!protocol.validSessionId(wire.reference.slice())) return error.InvalidCharacter;
-            if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
-            return .{ .value = .{
-                .reference = wire.reference.value,
-                .archive_seq = try ActivityPage.id(wire.archive_seq, false),
-                .stopped_at = try ActivityPage.id(wire.stopped_at, true),
-                .label = if (wire.label) |label| label.value else null,
-                .first = if (wire.first) |first| .{ .admission = try ActivityPage.id(first.admission, false), .line = if (first.line) |line| line.value else null } else null,
-            } };
-        }
-    };
+    const Rows = JsonArray(ArchivedRowRead, session_list.archived_window_size);
 
     rows: [session_list.archived_window_size]Row = undefined,
     count: usize = 0,
@@ -1793,7 +1766,6 @@ pub const ArchivedWindowPage = struct {
     /// Reads the reply to `window` and refuses anything the Host could not have answered for that cursor.
     pub fn read(io: std.Io, file: std.Io.File, bytes: u64, cursor: session_list.ArchivedCursor) !ArchivedWindowPage {
         if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
-        const Rows = JsonArray(JsonRow, session_list.archived_window_size);
         const Wire = struct {
             version: JsonString(8),
             type: JsonString(32),
@@ -2281,7 +2253,7 @@ pub const ArchivedRowRead = struct {
         position: u64,
         admission: u64,
         content: content_value.Value,
-        line: ?JsonString(session_list.max_last_line_bytes),
+        line: ?JsonString(session_list.max_first_line_bytes),
     };
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
@@ -2290,7 +2262,7 @@ pub const ArchivedRowRead = struct {
             archive_seq: JsonString(20),
             stopped_at: JsonString(20),
             label: ?JsonString(protocol.max_label_bytes),
-            first: ?struct { position: JsonString(20), admission: JsonString(20), content: JsonContentValue, line: ?JsonString(session_list.max_last_line_bytes) },
+            first: ?struct { position: JsonString(20), admission: JsonString(20), content: JsonContentValue, line: ?JsonString(session_list.max_first_line_bytes) },
         };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         if (!protocol.validSessionId(wire.reference.slice())) return error.InvalidCharacter;

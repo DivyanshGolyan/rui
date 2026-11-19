@@ -180,8 +180,8 @@ pub const First = struct {
     admission: u64,
 
     sender: ?Reference,
-    /// The Message's value, whose first display line names an unlabelled Session. Null for an Archived
-    /// window row, which carries its line inline (or is a parts Message the window does not read).
+    /// The Message's value, whose first display line names an unlabelled Session. An Archived window row
+    /// carries it too: a parts-form row with no inline line reads its line through this value.
     content: ?content_value.Value,
     /// The inline first display line of an Archived window row; null otherwise.
     line: ?[]const u8 = null,
@@ -259,10 +259,10 @@ pub const Listed = struct {
             .label = if (row.label) |*text| text.slice() else null,
             .state = .{ .stopped = .{ .since = row.stopped_at, .cause = .stop } },
             .first = if (row.first) |*first| .{
-                .position = 0,
+                .position = first.position,
                 .admission = first.admission,
                 .sender = null,
-                .content = null,
+                .content = first.content,
                 .line = if (first.line) |*line| line.slice() else null,
             } else null,
         };
@@ -1918,6 +1918,9 @@ fn archivedAnswer(state: *State, answer: ArchivedAnswer, effects: *Effects) erro
         state.archived.failed = true;
         return;
     };
+    // A page with no rows (no first or last key) off the head is a restored or stale anchor: re-read the
+    // head in a new epoch rather than trust the flags beside it (inspection.md, Archived window).
+    if (page.rows.len == 0 and answer.read.from != .head) return restartArchivedAtHead(state, effects);
     try placeArchived(state, answer.read, page);
     // Only rows the window now holds are visible in the Archived view, so only they read a line.
     try readFirstLines(state, effects);
@@ -1963,6 +1966,15 @@ fn reanchorArchived(state: *State, effects: *Effects) error{OutOfMemory}!void {
     state.archived.failed = false;
     state.archived.inflight = true;
     effects.add(.{ .read_archived = .{ .from = .{ .below = first +| 1 }, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
+}
+
+/// Re-reads the Archived window from the head in a new epoch. The head answer replaces every held archived
+/// row the Host does not name, so a stale window cannot survive a re-anchor.
+fn restartArchivedAtHead(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    state.archived.epoch +%= 1;
+    state.archived.failed = false;
+    state.archived.inflight = true;
+    effects.add(.{ .read_archived = .{ .from = .head, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
 }
 
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
@@ -5268,6 +5280,103 @@ test "archived window reads the line of a window row that has none, once, and dr
     try std.testing.expectEqual(FirstLineRead.unread, moved.find("w00009".*).?.line);
 }
 
+test "archived window row decodes from the wire with its position and content, and reads its parts line" {
+    const protocol = @import("protocol.zig");
+    const protocol_reply = @import("protocol_reply.zig");
+    const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5b) };
+    const content: content_value.Value = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } };
+    const wire: protocol.ArchivedRow.Fields = .{ .reference = "w00009", .archive_seq = 9, .stopped_at = test_now_s - 9, .label = null, .first = .{ .position = 3, .admission = 9, .content = content, .line = null } };
+    var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&json);
+    try wire.writeJson(&out);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const decoded = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+    var rows = [_]Listed{Listed.archived(&decoded)};
+
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    const answered = try step(&state, .{ .archived = .{ .read = effects.slice()[0].read_archived, .page = .{ .rows = &rows, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
+    var reads_seen: usize = 0;
+    for (answered.slice()) |effect| switch (effect) {
+        .read_first_lines => |reads| for (reads.slice()) |read| {
+            reads_seen += 1;
+            try std.testing.expectEqual(@as(u64, 3), read.position);
+            try std.testing.expectEqual(@as(u64, 9), read.admission);
+            try std.testing.expectEqualDeep(content, read.content);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), reads_seen);
+    try std.testing.expectEqual(FirstLineRead.requested, state.find("w00009".*).?.line);
+}
+
+test "archived window names a row by the same line the first-line read gives: control bytes and long lines" {
+    const long: [300]u8 = @splat('a');
+    for ([_][]const u8{ "x\x1b[31my", &long }) |raw| {
+        // The Host cuts the line it sends to the first-line bound; the window path takes it as sent.
+        const sent = session_line.cut(session_list.max_first_line_bytes, session_line.firstLine(raw));
+
+        var window = try opened(&.{});
+        defer window.deinit();
+        window.size = .{ .width = 80, .height = 2 };
+        var window_effects: Effects = .{};
+        try changeArchiveView(&window, .archived, &window_effects);
+        var window_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = sent.slice() } })};
+        _ = try step(&window, .{ .archived = .{ .read = window_effects.slice()[0].read_archived, .page = .{ .rows = &window_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
+
+        // The first-line read of the same Message: the worker's raw line, then the overview's own rule.
+        var read = try opened(&.{});
+        defer read.deinit();
+        read.size = .{ .width = 80, .height = 2 };
+        var read_effects: Effects = .{};
+        try changeArchiveView(&read, .archived, &read_effects);
+        var read_row = [_]Listed{session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 3, .admission = 9, .sender = null, .content = test_first } })};
+        _ = try step(&read, .{ .archived = .{ .read = read_effects.slice()[0].read_archived, .page = .{ .rows = &read_row, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
+        _ = try step(&read, .{ .first_line = .{ .reference = "w00009".*, .admission = 9, .line = raw } });
+
+        const window_name = window.lineOf(window.find("w00009".*).?).?;
+        const read_name = read.lineOf(read.find("w00009".*).?).?;
+        try std.testing.expectEqualStrings(read_name, window_name);
+        try std.testing.expect(window_name.len <= session_line.max_line_bytes);
+    }
+}
+
+test "an empty Archived page off the head re-reads the head in a new epoch" {
+    var host: [3]Listed = undefined;
+    const refs = [_][6]u8{ "e00030".*, "e00029".*, "e00028".* };
+    for (&host, refs, 0..) |*row, ref, at| {
+        const key: u64 = 30 - @as(u64, @intCast(at));
+        row.* = session(&ref, .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var buffer: [window_test_page]Listed = undefined;
+
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    _ = try step(&state, .{ .archived = .{ .read = effects.slice()[0].read_archived, .page = hostPage(&host, .head, &buffer) } });
+    const epoch = state.archived.epoch;
+
+    // A stale anchor below the window answers with no rows: the Host has nothing for it.
+    const stale = try step(&state, .{ .archived = .{ .read = .{ .from = .{ .below = 28 }, .rows = session_list.archived_window_size, .epoch = epoch }, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = true, .more_below = false } } });
+    try std.testing.expectEqual(@as(usize, 1), stale.slice().len);
+    const restart = stale.slice()[0].read_archived;
+    try std.testing.expectEqual(session_list.ArchivedCursor.head, restart.from);
+    try std.testing.expectEqual(epoch +% 1, restart.epoch);
+    try std.testing.expect(state.archived.inflight);
+
+    // An empty head answer is taken as the Archived list being empty: no further read.
+    const empty_head = try step(&state, .{ .archived = .{ .read = restart, .page = .{ .rows = &.{}, .first = null, .last = null, .more_above = false, .more_below = false } } });
+    try std.testing.expectEqual(@as(usize, 0), empty_head.slice().len);
+    try std.testing.expect(!state.archived.inflight);
+    try std.testing.expect(state.archived.at_head);
+}
+
 test "archived window scrolls back up after trimming and reads the rows above with an above cursor" {
     var refs: [20][6]u8 = undefined;
     for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "a{d:0>5}", .{at}) catch unreachable;
@@ -7998,7 +8107,8 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
+    // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
+    try std.testing.expectEqual(@as(u64, 0x697d3b6457f515c), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {
