@@ -2021,6 +2021,7 @@ const Seen = struct {
     model_lists: usize = 0,
     listed: usize = 1,
     working: usize = listed_references.len,
+    pinned: usize = 0,
 
     var now: Seen = .{};
 
@@ -2073,6 +2074,7 @@ const fake_operations: Operations = .{
                 row.model.set("gpt-5.5") catch unreachable;
                 row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .text = .{ .length = 27, .digest = @splat(0) } } };
                 row.peers.from_person_at = since;
+                row.pin_order = if (at < Seen.now.pinned) 7 else null;
             }
             return null;
         }
@@ -2386,13 +2388,15 @@ fn overviewGround() !void {
 }
 
 test "SUI-40 pinned Session separator is ground and inert" {
-    const rig = try openListed();
+    const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    Seen.now.pinned = 1;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(overview.state.order.items.len > 1);
-    overview.state.rows.items[overview.state.order.items[0]].pin_order = 7;
+    try std.testing.expectEqual(@as(?u64, 7), overview.state.rows.items[overview.state.order.items[0]].pin_order);
     overview.state.rows.items[overview.state.order.items[0]].label = try @import("bounded.zig").Bounded(view.max_label_bytes).from("Pinned test Session");
     overview.caps = .{};
     const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
@@ -2403,6 +2407,7 @@ test "SUI-40 pinned Session separator is ground and inert" {
         overview.state.selected = selection;
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
+        errdefer for (0..30) |r| std.debug.print("{d}|{s}|\n", .{ r, shown.line(@intCast(r)) catch "" });
         const pinned_row: u16 = for (0..30) |row| {
             if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Pinned test Session") != null) break @intCast(row);
         } else return error.PinnedSessionNotDrawn;
@@ -4531,10 +4536,13 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
         }
     }.stop;
     overview.state.notice = null;
+    // Home, then Down past the tabs, selects the first listed row.
+    const first = shownRow(rig, 0);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
+    var expected: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "! {s} not stopped: stop_request_failed", .{&first}), overview.state.notice.?.text());
 }
 
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
@@ -7973,7 +7981,8 @@ test "App overview list activation resumes the open chat without closing its pre
             closes += 1;
         }
     };
-    for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+    // Right folds the creator tree, so only Enter activates a row.
+    for ([_][]const u8{"\r"}) |key| {
         const rig = try openListed();
         defer rig.close();
         const reference = shownRow(rig, 2);
