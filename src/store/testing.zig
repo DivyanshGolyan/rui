@@ -442,7 +442,6 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
 
 pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !void {
     const schema = @import("schema.zig");
-    try restoreSessionArchiveForTesting(storage);
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {
             if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
@@ -705,6 +704,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
+    try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {
