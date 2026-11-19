@@ -3828,7 +3828,10 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     for (expected, effects) |want, got| {
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .list => |request| try std.testing.expectEqualDeep(request, got.list),
+            .list => |request| {
+                try std.testing.expectEqual(request.since, got.list.since);
+                try std.testing.expectEqual(request.archive, got.list.archive);
+            },
             .read_first_lines => |reads| {
                 try std.testing.expectEqual(reads.len, got.read_first_lines.len);
                 for (reads.slice(), got.read_first_lines.slice()) |a, b| {
