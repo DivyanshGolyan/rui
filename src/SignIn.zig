@@ -842,8 +842,22 @@ fn formEvent(self: *Self, field: core.Field, input: vxfw.Event, pasting: bool) !
     if (!self.formEditable()) return;
     const form = try self.ensureForm();
     const editor = form.editor(field);
+    // A refused paste keeps the field locked until Enter in it, because the
+    // key field is masked and the person may miss that the paste did not land.
+    // A typed refusal never changed the text, so it is reported and the field
+    // stays editable.
+    const in_paste = pasting or editor.pasting() or input == .paste_end or input == .focus_out;
+    const was_locked = editor.rejected != null;
     const edited = @import("panel_editor.zig").event(editor, input, pasting, &self.issue);
-    if (edited == .refused) editor.refuse();
+    if (in_paste) {
+        if (edited == .refused or editor.rejected != null) {
+            editor.refuse();
+            self.issue = " · Paste refused. Press Enter in the field to dismiss.";
+        }
+    } else if (!was_locked and (edited == .refused or editor.rejected != null)) {
+        editor.release();
+        self.issue = " · text couldn't be entered";
+    }
     if (input == .paste_end) {
         const text = editor.text();
         const trimmed = api_key.trimNewline(text);
@@ -913,7 +927,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (self.activeField()) |field| {
         if (key.matchExact(vaxis.Key.enter, .{})) {
             const editor = (try self.ensureForm()).editor(field);
+            const acknowledging = editor.rejected != null;
             if (@import("panel_editor.zig").event(editor, input, false, &self.issue) == .submit) _ = self.state.step(.{ .move = true });
+            if (acknowledging and editor.rejected == null) self.issue = null;
             ctx.redraw = true;
         } else try self.formEvent(field, input, false);
         ctx.redraw = true;
@@ -1560,15 +1576,17 @@ test "Sign-in queued edits cannot change frozen fields before redraw or worker j
     };
 }
 
-test "Sign-in refuses every refused field after tab reverse tab and click until in-field acknowledgement" {
-    const Fault = enum { invalid_utf8, invalid_scalar, overflow, paste_invalid, paste_overflow };
+test "Sign-in typed refusals stay editable while refused pastes block Connect until in-field acknowledgement" {
+    const Fault = enum { unbound, typed_invalid_utf8, typed_invalid_scalar, typed_overflow, paste_invalid, paste_overflow };
     for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| {
+        errdefer std.debug.print("Sign-in refusal field={s} fault={s}\n", .{ @tagName(field), @tagName(fault) });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
         defer page.closeForm();
         const form = try page.ensureForm();
+        _ = form.base.set("https://custom.invalid/v1", "https://custom.invalid/v1".len);
         _ = form.key.set("sk-valid", 8);
         _ = form.model.set("service-model", 13);
         page.state.focus = switch (field) {
@@ -1578,33 +1596,46 @@ test "Sign-in refuses every refused field after tab reverse tab and click until 
         };
         _ = try testingDraw(&page, ctx.alloc, 90, 28);
         const editor = form.editor(field);
-        const valid = try arena.allocator().dupe(u8, editor.text());
-        if (fault == .paste_invalid or fault == .paste_overflow) try page.formEvent(field, .paste_start, true);
-        const bytes: []const u8 = switch (fault) {
-            .invalid_utf8, .paste_invalid => "\xff",
-            .invalid_scalar => "\x01",
-            .overflow, .paste_overflow => try arena.allocator().alloc(u8, editor.area.buffer.len + 1),
-        };
-        if (fault == .overflow or fault == .paste_overflow) @memset(@constCast(bytes), 'x');
-        try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = bytes } }, fault == .paste_invalid or fault == .paste_overflow);
-        if (fault == .paste_invalid or fault == .paste_overflow) try page.formEvent(field, .paste_end, false);
-        try std.testing.expect(editor.rejected != null);
-        try testingSend(&page, &ctx, "\t\x1b[Z", 90, 28);
-        _ = try testingDraw(&page, ctx.alloc, 90, 28);
-        for (page.drawn.hits) |hit| if (hit.action == .connect) {
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
-            break;
-        };
-        try std.testing.expect(page.state.page == .api and page.task.thread == null and page.frozen == null);
-        try std.testing.expectEqual(switch (field) {
-            .base => core.Control.base,
-            .key => .key,
-            .model => .model,
-        }, page.state.focus);
-        try testingSend(&page, &ctx, "\r", 90, 28);
-        try std.testing.expect(editor.rejected == null);
-        _ = editor.set(valid, valid.len);
-        try std.testing.expect(try page.freeze(.key, .connect));
+        const paste = fault == .paste_invalid or fault == .paste_overflow;
+        const overflow = try arena.allocator().alloc(u8, editor.area.buffer.len + 1);
+        @memset(overflow, 'x');
+        if (paste) try page.formEvent(field, .paste_start, true);
+        switch (fault) {
+            .unbound => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .mods = .{ .alt = true } } }, false),
+            .typed_invalid_utf8 => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = "\xff" } }, false),
+            .typed_invalid_scalar => try page.formEvent(field, .{ .key_press = .{ .codepoint = 0x01, .text = "\x01" } }, false),
+            .typed_overflow => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = overflow } }, false),
+            .paste_invalid => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = "\xff" } }, true),
+            .paste_overflow => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = overflow } }, true),
+        }
+        if (paste) try page.formEvent(field, .paste_end, false);
+        try std.testing.expect(page.issue != null);
+        try std.testing.expectEqualStrings(if (paste) " · Paste refused. Press Enter in the field to dismiss." else " · text couldn't be entered", page.issue.?);
+        const before = try arena.allocator().dupe(u8, editor.text());
+        if (paste) {
+            // A refused paste keeps the field locked: Connect is blocked, typing is ignored.
+            try std.testing.expect(!try page.freeze(.key, .connect));
+            try std.testing.expect(page.state.page == .api and page.task.thread == null);
+            try std.testing.expectEqual(switch (field) {
+                .base => core.Control.base,
+                .key => .key,
+                .model => .model,
+            }, page.state.focus);
+            try testingSend(&page, &ctx, "q", 90, 28);
+            try std.testing.expectEqualStrings(before, editor.text());
+            try testingSend(&page, &ctx, "\r", 90, 28);
+            try std.testing.expect(editor.rejected == null and page.issue == null);
+            try std.testing.expect(try page.freeze(.key, .connect));
+        } else {
+            // A typed refusal leaves the field unlocked, so Connect is not blocked by it.
+            for (std.enums.values(core.Field)) |other| try std.testing.expect(form.editor(other).rejected == null);
+            try std.testing.expectEqualStrings(" · text couldn't be entered", page.issue.?);
+        }
+        // Editing works after the refusal: Backspace removes one byte, then a letter is typed.
+        try testingSend(&page, &ctx, "\x7f", 90, 28);
+        try testingSend(&page, &ctx, "q", 90, 28);
+        try std.testing.expectEqual(before.len, editor.text().len);
+        if (!paste) try std.testing.expect(std.mem.indexOfScalar(u8, editor.text(), 'q') != null);
     };
 }
 
