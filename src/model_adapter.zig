@@ -1,4 +1,5 @@
 const std = @import("std");
+const transport_policy = @import("transport_policy.zig");
 const model_catalog = @import("model_catalog.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -91,7 +92,6 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
 
 test "HTTP 429 quota authority requires an exact valid code but not reset metadata" {
     const cases = [_]struct { bytes: []const u8, permanent: bool, reset: ?u64 = null, plan: bool = false }{
-        .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"pro\",\"resets_at\":1795336193,\"eligible_promo\":null,\"resets_in_seconds\":444255}}", .permanent = true, .reset = 1_795_336_193 },
         .{ .bytes = "{\"error\":{\"type\":\"usage_not_included\"}}", .permanent = true, .plan = true },
         .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"code\":null,\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
         .{ .bytes = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"type\":\"usage_limit_reached\"}}", .permanent = false },
@@ -131,38 +131,6 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         if (case.permanent and !case.plan) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
         try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, output_decode.testingProviderFailure()) == .ordinary);
     }
-}
-
-test "HTTP 429 usage limit named by error.type is a permanent quota with its reset" {
-    const bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"pro\",\"resets_at\":1795336193,\"eligible_promo\":null,\"resets_in_seconds\":444255}}";
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "quota-type", .{ .read = true });
-    defer file.close(std.testing.io);
-    try file.writeStreamingAll(std.testing.io, bytes);
-    const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, output_decode.testingProviderFailure());
-    const decision = execution.transferDecision(.{ .transport_finished = .{
-        .disposition = .temporary_http,
-        .http_status = 429,
-        .retry_after_ms = 9_000,
-    } }, response);
-    try std.testing.expectEqual(execution.FailureKind.permanent, decision.fail.kind);
-    var actual: [96]u8 = undefined;
-    try std.testing.expectEqualStrings("provider_quota", decision.fail.codeText(&actual));
-    try std.testing.expectEqual(@as(?u64, 1_795_336_193), decision.fail.quota.?.resets_at);
-    try std.testing.expect(decision.fail.answered);
-    try std.testing.expect(decision.fail.retry_after_ms == null);
-
-    const outage = "{\"error\":{\"type\":\"server_error\",\"message\":\"Try again\"}}";
-    const outage_file = try tmp.dir.createFile(std.testing.io, "outage", .{ .read = true });
-    defer outage_file.close(std.testing.io);
-    try outage_file.writeStreamingAll(std.testing.io, outage);
-    const server_error = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, outage_file, outage.len, 503, output_decode.testingProviderFailure());
-    const retried = execution.transferDecision(.{ .transport_finished = .{
-        .disposition = .temporary_http,
-        .http_status = 503,
-    } }, server_error);
-    try std.testing.expect(retried.fail.kind != .permanent);
 }
 
 test "provider interpretation preserves independently reported model evidence" {
@@ -235,12 +203,32 @@ test "provider interpretation preserves independently reported model evidence" {
     }
 }
 
-const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8, status: u16, provenance: []const u8, permanent: bool, code: []const u8, resets_at: ?u64, overflow: bool = false }{
+/// Where a corpus body came from. `captured` and `captured_redacted` come from a Host's
+/// `diagnostics/failed-responses/`; `documented` follows a provider's published error reference;
+/// `reconstructed` is written from the shape a client parses, and says so in its `source`.
+const Provenance = enum { captured, captured_redacted, documented, reconstructed };
+
+const openai_error_codes = "OpenAI API error codes documentation (platform.openai.com/docs/guides/error-codes)";
+
+const provider_error_corpus = [_]struct {
+    file: []const u8,
+    body: []const u8,
+    status: u16,
+    /// `stream` bodies are the JSON payload of one SSE `data:` event; the test adds the framing.
+    transport: enum { http, stream } = .http,
+    provenance: Provenance,
+    source: []const u8,
+    permanent: bool,
+    code: []const u8,
+    resets_at: ?u64,
+    overflow: bool = false,
+}{
     .{
         .file = "chatgpt-429-usage-limit.json",
         .body = @embedFile("testing/fixtures/provider-errors/chatgpt-429-usage-limit.json"),
         .status = 429,
-        .provenance = "field set from failed-responses diagnostics of 2026-11-17 (rui-dogfood inbox); message text reconstructed",
+        .provenance = .reconstructed,
+        .source = "field set from failed-responses diagnostics of 2026-11-17; message text reconstructed",
         .permanent = true,
         .code = "provider_quota",
         .resets_at = 1_795_336_193,
@@ -249,7 +237,8 @@ const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8,
         .file = "openai-429-insufficient-quota.json",
         .body = @embedFile("testing/fixtures/provider-errors/openai-429-insufficient-quota.json"),
         .status = 429,
-        .provenance = "OpenAI API documented error shape",
+        .provenance = .documented,
+        .source = openai_error_codes,
         .permanent = true,
         .code = "provider_quota",
         .resets_at = null,
@@ -258,7 +247,8 @@ const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8,
         .file = "openai-429-rate-limit.json",
         .body = @embedFile("testing/fixtures/provider-errors/openai-429-rate-limit.json"),
         .status = 429,
-        .provenance = "OpenAI API documented error shape",
+        .provenance = .documented,
+        .source = openai_error_codes,
         .permanent = false,
         .code = "provider_temporary_http_429",
         .resets_at = null,
@@ -267,7 +257,8 @@ const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8,
         .file = "openai-400-context-length.json",
         .body = @embedFile("testing/fixtures/provider-errors/openai-400-context-length.json"),
         .status = 400,
-        .provenance = "documented shape",
+        .provenance = .documented,
+        .source = openai_error_codes,
         .permanent = false,
         .code = "provider_context_overflow",
         .resets_at = null,
@@ -277,7 +268,8 @@ const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8,
         .file = "openai-500-server-error.json",
         .body = @embedFile("testing/fixtures/provider-errors/openai-500-server-error.json"),
         .status = 500,
-        .provenance = "documented shape",
+        .provenance = .documented,
+        .source = openai_error_codes,
         .permanent = false,
         .code = "provider_temporary_http_500",
         .resets_at = null,
@@ -286,32 +278,52 @@ const recorded_provider_errors = [_]struct { file: []const u8, body: []const u8,
         .file = "chatgpt-429-usage-not-included.json",
         .body = @embedFile("testing/fixtures/provider-errors/chatgpt-429-usage-not-included.json"),
         .status = 429,
-        .provenance = "shape as Codex CLI parses it (error.type); message reconstructed",
+        .provenance = .reconstructed,
+        .source = "shape as Codex CLI parses it (error.type); message reconstructed",
         .permanent = true,
         .code = "provider_plan",
         .resets_at = null,
     },
+    .{
+        .file = "chatgpt-stream-usage-limit.json",
+        .body = @embedFile("testing/fixtures/provider-errors/chatgpt-stream-usage-limit.json"),
+        .status = 200,
+        .transport = .stream,
+        .provenance = .reconstructed,
+        .source = "in-stream error event with error.type, as the stream codec parses it; message reconstructed",
+        .permanent = true,
+        .code = "provider_quota",
+        .resets_at = null,
+    },
 };
 
-test "EXR-67 recorded provider error bodies classify as their route meant" {
+test "EXR-67 provider error bodies in the corpus classify by their kind" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for (recorded_provider_errors) |entry| {
-        const file = try tmp.dir.createFile(std.testing.io, "recorded-provider-error", .{ .read = true });
-        defer file.close(std.testing.io);
-        try file.writeStreamingAll(std.testing.io, entry.body);
-        const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, entry.body.len, entry.status, output_decode.testingProviderFailure());
-        const decision = execution.transferDecision(.{ .transport_finished = .{
-            .disposition = if (entry.status == 400) .permanent_http else .temporary_http,
-            .http_status = entry.status,
-        } }, response);
+    for (provider_error_corpus) |entry| {
+        errdefer std.debug.print("provider error corpus {s}\n", .{entry.file});
         const expected_kind: execution.FailureKind = if (entry.overflow) .context_overflow else if (entry.permanent) .permanent else .temporary;
-        errdefer std.debug.print("recorded provider error {s}\n", .{entry.file});
-        try std.testing.expectEqual(expected_kind, decision.fail.kind);
-        if (entry.overflow) try std.testing.expect(response == .context_overflow);
         var actual: [96]u8 = undefined;
-        try std.testing.expectEqualStrings(entry.code, decision.fail.codeText(&actual));
-        try std.testing.expectEqual(entry.resets_at, if (decision.fail.quota) |quota| quota.resets_at else null);
+        switch (entry.transport) {
+            .http => {
+                const file = try tmp.dir.createFile(std.testing.io, "provider-error-corpus", .{ .read = true });
+                defer file.close(std.testing.io);
+                try file.writeStreamingAll(std.testing.io, entry.body);
+                const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, entry.body.len, entry.status, output_decode.testingProviderFailure());
+                const outcome = try transport_policy.outcome(.{ .cause = .complete, .status = entry.status });
+                const decision = execution.transferDecision(outcome, response);
+                try std.testing.expectEqual(expected_kind, decision.fail.kind);
+                if (entry.overflow) try std.testing.expect(response == .context_overflow);
+                try std.testing.expectEqualStrings(entry.code, decision.fail.codeText(&actual));
+                try std.testing.expectEqual(entry.resets_at, if (decision.fail.quota) |quota| quota.resets_at else null);
+            },
+            .stream => {
+                // The stream seam reports no reset time, so `resets_at` is checked on HTTP entries only.
+                const sse = try std.fmt.allocPrint(std.testing.allocator, "data: {s}\n\n", .{entry.body});
+                defer std.testing.allocator.free(sse);
+                try expectStreamFailure(sse, expected_kind, entry.code);
+            },
+        }
     }
 }
 

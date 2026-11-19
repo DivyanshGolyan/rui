@@ -53,7 +53,7 @@ A bug shows that the catalog was missing a promise or stated it too loosely.
 Its fix names the promise it broke, adds or sharpens that invariant at the right level, and extends the invariant's owner test.
 No test exists only to replay one bug.
 
-Provider wire classification is tested over recorded bodies in `src/testing/fixtures/provider-errors/`, each with its provenance; a new provider shape enters as a captured file, never a hand-written guess.
+Provider wire classification is tested over the corpus in `src/testing/fixtures/provider-errors/`; each body states its provenance (captured, captured_redacted, documented or reconstructed); a new provider shape or refusal code enters as a corpus body, captured whenever one is available (import it from the Host's `diagnostics/failed-responses/` with secrets redacted), and the CI check refuses a refusal code with no body unless it is on the shrink-only uncaptured list.
 
 ## Flake sources and their root fixes
 
