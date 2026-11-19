@@ -606,7 +606,7 @@ An explicit `providers` object selects exactly the providers a new Host serves; 
 When `providers` is omitted, every new-Host entry uses automatic selection, including plain `rui`, `host start`, foreground `host serve`, saved `host.json`, and file or framed-stdin settings documents.
 Automatic selection offers device-code sign-in (`codex`) even while signed out, browser sign-in (`chatgpt`) with a usable local credential, and OpenAI (`openai`) with a usable local key.
 Offering the device-code route while signed out does not imply usable credentials or that a model request can succeed before sign-in.
-A saved `host set` or `unset` of `providers.NAME...` on a document with no `providers` object first saves that automatic set, so the edit changes only that provider and the saved set is then exact; `--set` on `host start` is unchanged.
+A saved `host set` of `providers.NAME...`, or `unset` of an automatically served `providers.NAME`, on a document with no `providers` object first saves that automatic set (any other `unset` below `providers` changes nothing), so the edit changes only that provider and the saved set is then exact; `--set` on `host start` is unchanged.
 Divyansh chose automatic omission on November 14, 2026, answering "yes, automatic" to automatic services from sign-ins and API keys versus none until explicit setup (#1461, under #1459).
 This decision supersedes the unresolved omission finding in #1452's body and review; merging #1452 did not itself approve the policy.
 Upgrade replay preserves the previously observed provider selection exactly rather than re-evaluating omitted settings against new defaults or changed local credentials.
