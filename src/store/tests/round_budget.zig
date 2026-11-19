@@ -377,7 +377,7 @@ test "each Store entry point takes its round budget on its common path" {
             try request.session.set(session.slice());
             var page: reads_domain.PublicConversationPage = undefined;
             meter.start();
-            try storage.publicConversationPage(&request, &page);
+            try storage.publicConversationPage(&request, &page, std.testing.allocator);
             meter.stop(.publicConversationPage);
             const answer = for (page.items[0..page.count]) |entry| {
                 if (entry.kind == .assistant) break entry.position;

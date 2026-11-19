@@ -872,16 +872,19 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
-    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
-        return self.queue().run(publicConversationPageHeld, .{ self, request, out });
+    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
+        // Allocated before entry: a failed allocation must not fence the Store.
+        const reads = try row_allocator.create([PublicConversationPage.capacity]reads_domain.PublicRowRead);
+        defer row_allocator.destroy(reads);
+        return self.queue().run(publicConversationPageHeld, .{ self, request, out, reads });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, reads: *[PublicConversationPage.capacity]reads_domain.PublicRowRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out));
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, reads));
     }
 
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
@@ -2346,7 +2349,7 @@ pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage)
 
 pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
-    try self.publicConversationPage(&request, &page);
+    try self.publicConversationPage(&request, &page, std.testing.allocator);
     return page;
 }
 

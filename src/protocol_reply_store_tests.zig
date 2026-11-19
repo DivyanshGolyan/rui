@@ -291,7 +291,7 @@ const PromotedAction = struct {
 
         const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
         defer std.testing.allocator.destroy(produced);
-        try storage.publicConversationPage(&.{ .session = self.session }, produced);
+        try storage.publicConversationPage(&.{ .session = self.session }, produced, std.testing.allocator);
         var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rendered.deinit();
         try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
