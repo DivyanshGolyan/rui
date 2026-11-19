@@ -170,7 +170,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
     }.run);
 }
 
-test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
+test "MCP calls run at once whatever their read-only hints, and hint changes keep frozen offers" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const records = comptime testingHostToolRecords(&.{
@@ -185,9 +185,10 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             const patterns = [_]struct { reads: []const bool, waves: []const usize }{
-                .{ .reads = &.{ false, true, true, false }, .waves = &.{ 1, 2, 1 } },
+                .{ .reads = &.{ false, true, true, false }, .waves = &.{4} },
                 .{ .reads = &.{ true, true }, .waves = &.{2} },
-                .{ .reads = &.{ false, false }, .waves = &.{ 1, 1 } },
+                .{ .reads = &.{ false, false }, .waves = &.{2} },
+                .{ .reads = &.{ true, false }, .waves = &.{2} },
             };
             for (patterns) |pattern| {
                 var tmp = std.testing.tmpDir(.{});
@@ -332,12 +333,12 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try shared_fixtures.settleMessagesForTesting(&storage, &tmp, continuation, 1, false, null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL", .{continuation.turn_id}));
-            phase = "serialized proposal";
-            const serialized = try propose(&storage, &tmp, sessions[0].slice(), "same-session-call");
+            phase = "same-Session proposal";
+            const same_session = try propose(&storage, &tmp, sessions[0].slice(), "same-session-call");
             phase = "finite proposal";
             const finite = try propose(&storage, &tmp, sessions[1].slice(), "finite-call");
             phase = "selection";
-            try std.testing.expect(old < serialized and serialized < finite);
+            try std.testing.expect(old < same_session and same_session < finite);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(0, true))) == null);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, false))) == null);
             try std.testing.expectEqual(old, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
@@ -346,6 +347,10 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             phase = "old Attempt";
             const old_binding = (try storage.admitActionAttempt(selected_old, 30_000, .{})).?.permit.binding;
             try std.testing.expect((try storage.admitActionAttempt(selected_old, 30_000, .{})) == null);
+            phase = "same-Session Attempt";
+            const selected_same = (try storage.nextAction(.mcp, .fromFree(1, true))).?;
+            try std.testing.expectEqual(same_session, selected_same.action_id);
+            const same_binding = (try storage.admitActionAttempt(selected_same, 30_000, .{})).?.permit.binding;
             const selected_finite = (try storage.nextAction(.mcp, .fromFree(1, true))).?;
             try std.testing.expectEqual(finite, selected_finite.action_id);
             phase = "finite Attempt";
@@ -355,7 +360,8 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, true))) == null);
             phase = "old settlement";
             try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(old_binding, .succeeded, "Old background result", .{})).outcome);
-            try std.testing.expectEqual(serialized, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(same_binding, .succeeded, "Same-Session result", .{})).outcome);
+            try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, true))) == null);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND resolution_code='succeeded'", .{old}));
         }
     }.run);
