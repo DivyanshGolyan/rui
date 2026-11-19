@@ -8418,6 +8418,48 @@ test "wide launch waits for listing and opens the newest empty Session without c
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
 }
 
+test "named launch waits for sign-in before choosing its binding" {
+    const Listing = struct {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
+            const row = &page.rows[0];
+            row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
+            row.reference.set(listed_references[0]) catch unreachable;
+            row.workspace.set("/work") catch unreachable;
+            row.provider = .codex;
+            row.model.set("gpt-6-luna") catch unreachable;
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    // A provider without a model resolves to no default, so the launch names a binding that sign-in has not yet saved.
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "openai" }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expectEqual(@as(?view.Default, null), rig.overview.state.default);
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .named });
+    var shown = try rig.shown(140, 40);
+    defer shown.deinit();
+    var ctx = rig.context();
+    defer {
+        for (ctx.cmds.items) |command| if (command == .set_title) std.testing.allocator.free(command.set_title);
+        ctx.cmds.deinit(std.testing.allocator);
+    }
+    _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
+    _ = try rig.settle();
+    try rig.overview.appNext(&ctx, try rig.overview.event(.launch_poll));
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+    try std.testing.expectEqual(.waiting, rig.overview.state.launch);
+    try std.testing.expect(rig.overview.state.hidesOverview());
+    try rig.overview.appNext(&ctx, try rig.overview.event(.{ .defaults_saved = view.Default.of("openai", "gpt-6-sol") }));
+    try rig.overview.appNext(&ctx, try rig.overview.event(.launch_poll));
+    _ = try rig.settle();
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+    try std.testing.expectEqualStrings("openai", Seen.now.creation.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-sol", Seen.now.creation.model.?.slice());
+}
+
 test "narrow launch and later widening do not open a chat" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);

@@ -1392,16 +1392,21 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .launch_poll => {
             if (state.launch == .waiting and state.listed_at_ms != null and !state.list_stale) {
-                if (chooseLaunch(state.launch_intent, state.default, state.rows.items)) |reference| {
-                    state.launch = .done;
-                    state.selected = .{ .session = reference };
-                    effects.add(.{ .open = reference });
-                } else {
-                    state.selected = .new_session;
-                    try enter(state, &effects);
-                    state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                switch (chooseLaunch(state.launch_intent, state.default, state.rows.items)) {
+                    .wait => {},
+                    .reopen => |reference| {
+                        state.launch = .done;
+                        state.selected = .{ .session = reference };
+                        effects.add(.{ .open = reference });
+                        effects.redraw = true;
+                    },
+                    .create => {
+                        state.selected = .new_session;
+                        try enter(state, &effects);
+                        state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                        effects.redraw = true;
+                    },
                 }
-                effects.redraw = true;
             }
         },
         .observed => |read| {
@@ -2845,17 +2850,24 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     };
 }
 
+/// What a waiting launch does at poll time. `wait` keeps the launch open until
+/// sign-in saves a default, so a named launch never creates under another binding.
+pub const LaunchChoice = union(enum) { reopen: Reference, create, wait };
+
 /// The one launch choice, read at poll time from `default`, the binding that
-/// creation uses. `defaults` reopens the newest empty Session of any binding.
-/// `named` reopens only an empty Session with `default`'s provider and model;
-/// with no `default` yet it returns null so the launch creates and never reuses.
-/// Only `defaults` and `named` reach this choice.
-pub fn chooseLaunch(intent: LaunchIntent, default: ?Default, rows: []const Row) ?Reference {
-    return switch (intent) {
+/// creation uses. `defaults` reopens the newest empty Session of any binding,
+/// or creates when none exists, including with no `default` yet.
+/// `named` with a `default` reopens only an empty Session with that provider
+/// and model, otherwise creates; with no `default` yet it waits for sign-in.
+/// Only `defaults` and `named` reach this choice: `launch_poll` runs only while
+/// `launch_start` has set one of them.
+pub fn chooseLaunch(intent: LaunchIntent, default: ?Default, rows: []const Row) LaunchChoice {
+    const reference = switch (intent) {
         .defaults => newestEmpty(rows, null),
-        .named => if (default) |binding| newestEmpty(rows, binding) else null,
-        .explicit_session, .restoring => null,
+        .named => if (default) |binding| newestEmpty(rows, binding) else return .wait,
+        .explicit_session, .restoring => unreachable,
     };
+    return if (reference) |found| .{ .reopen = found } else .create;
 }
 
 /// The newest unarchived Session with no first Message, restricted to
@@ -6853,6 +6865,8 @@ test "launch core reopens the empty Session that the binding read at poll time r
     const sol = Default.of("codex", "gpt-6-sol").?;
     const other_provider = Default.of("openai", "gpt-6-luna").?;
     // A null start models first-run sign-in: the binding is set after launch_start.
+    // A null poll is a named launch still waiting for sign-in; `defaults_saved`
+    // then supplies `sol`, and the next poll decides.
     const at_starts = [_]?Default{ null, sol };
     const at_polls = [_]?Default{ null, luna, sol };
     for (std.enums.values(Intent)) |intent| for (at_starts) |at_start| for (at_polls) |at_poll| for (std.enums.values(Store)) |store| {
@@ -6877,16 +6891,27 @@ test "launch core reopens the empty Session that the binding read at poll time r
         } });
         state.default = at_poll;
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
-        const effects = try step(&state, .launch_poll);
+        var binding = at_poll;
+        var effects = try step(&state, .launch_poll);
+        if (intent == .named and binding == null) {
+            // Still waiting for sign-in: no effect, overview stays hidden.
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
+            try expectEffects(&.{}, try step(&state, .launch_poll));
+            binding = sol;
+            _ = try step(&state, .{ .defaults_saved = binding });
+            effects = try step(&state, .launch_poll);
+        }
         const reopens = switch (intent) {
             .defaults => store != .none,
-            .named => if (at_poll) |binding| if (stored) |want| binding.eql(&want) else false else false,
+            .named => if (binding) |resolved| if (stored) |want| resolved.eql(&want) else false else false,
         };
         if (reopens) {
             try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, effects);
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
         } else {
-            try expectEffects(&.{.{ .create = at_poll }}, effects);
+            try expectEffects(&.{.{ .create = binding }}, effects);
             try std.testing.expect(state.hidesOverview());
         }
         try expectEffects(&.{}, try step(&state, .launch_poll));
