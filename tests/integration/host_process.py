@@ -1277,12 +1277,24 @@ def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
 
 
 def disposed_store(process):
-    """The Store a Host was started on: its ready field, else its --store or --store-hex argument, else None."""
+    """The Store whose socket a reaped Host process owned: its ready field, else its argv, else None.
+
+    A client command (`rui request ... --store S`) shares the Store argument but owns no socket, so
+    only a Host's argv names a Store here; retiring for a client would probe the live Host serving S."""
     store = getattr(process, "rui_ready_fields", {}).get("store")
     if store is not None:
         return store
     argv = getattr(process, "args", None)
-    args = [str(argument) for argument in argv] if isinstance(argv, (list, tuple)) else []
+    return host_store(argv) if isinstance(argv, (list, tuple)) else None
+
+
+def host_store(argv):
+    """The resolved Store a `host serve` argv (possibly behind a wrapper) names, else None."""
+    args = [str(argument) for argument in argv]
+    serve = next((index + 2 for index in range(len(args) - 1) if args[index:index + 2] == ["host", "serve"]), None)
+    if serve is None:
+        return None
+    args = args[serve:]
     if "--store" in args and args.index("--store") + 1 < len(args):
         return os.path.realpath(args[args.index("--store") + 1])
     if "--store-hex" in args and args.index("--store-hex") + 1 < len(args):

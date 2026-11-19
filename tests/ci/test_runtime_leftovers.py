@@ -207,7 +207,7 @@ class HostDisposal(unittest.TestCase):
         return path.resolve()
 
     def start(self, store, mode="serve"):
-        args = [sys.executable, str(self.script), "--store", str(store), "--mode", mode]
+        args = [sys.executable, str(self.script), "host", "serve", "--store", str(store), "--mode", mode]
         return HOST.start_ready_process(args, env=self.env, isolate_providers=False)[0]
 
     def kill(self, process):
@@ -266,6 +266,20 @@ class HostDisposal(unittest.TestCase):
         shutil.rmtree(store)
         return []
 
+    def scenario_client_on_the_store_retires_nothing(self):
+        # A client command names the Store too but owns no socket: disposing it leaves the Host's
+        # socket alone (a live Host would otherwise be probed), and the Host's own disposal retires it.
+        store = self.store("client")
+        host = self.start(store)
+        self.kill(host)
+        client = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                   "request", "read-result", "--store", str(store)])
+        HOST.stop_process(client)
+        self.assertTrue(self.socket.exists())
+        HOST.stop_process(host)
+        shutil.rmtree(store)
+        return []
+
     def scenario_foreign_hint_is_kept(self):
         store = self.store("own")
         other = pathlib.Path(self.tmp.name) / "other-store"
@@ -283,6 +297,7 @@ class HostDisposal(unittest.TestCase):
             ("live, stopped with retire=False keeps socket and hint", self.scenario_live_host_stopped_without_retire_keeps_socket_and_hint),
             ("exits before ready, retired through --store", self.scenario_exits_before_ready_retired_through_store_argument),
             ("same-Store successor on the same socket path is kept", self.scenario_same_store_successor_on_the_socket_path_is_kept),
+            ("client on the Store retires nothing; its Host's disposal does", self.scenario_client_on_the_store_retires_nothing),
             ("foreign hint is kept", self.scenario_foreign_hint_is_kept),
         ]
 
@@ -298,19 +313,26 @@ class HostDisposal(unittest.TestCase):
 
 
 class DisposedStore(unittest.TestCase):
-    """disposed_store over every process shape stop_process is handed: Popen-like, ready fields only,
-    and objects with neither (fakes and wrappers without .args)."""
+    """disposed_store over every process shape stop_process is handed: a Host (bare or behind a
+    wrapper), a client command on the same Store, ready fields only, and objects with neither
+    (fakes and wrappers without .args). Only a Host owns a socket, so only a Host names a Store:
+    retiring for a client would probe the live Host still serving that Store."""
 
     def test_disposed_store_shapes(self):
         root = os.path.realpath(tempfile.gettempdir())
         store = os.path.join(root, "s")
         cases = [
             ("ready field wins", types.SimpleNamespace(rui_ready_fields={"store": "/r"}, args=["--store", store]), "/r"),
-            ("--store argument", types.SimpleNamespace(args=["rui", "--store", store]), store),
-            ("--store-hex argument", types.SimpleNamespace(args=["rui", "--store-hex", os.fsencode(store).hex()]), store),
-            ("string args", types.SimpleNamespace(args="rui --store x"), None),
+            ("Host --store", types.SimpleNamespace(args=["rui", "host", "serve", "--store", store]), store),
+            ("Host --store-hex", types.SimpleNamespace(args=["rui", "host", "serve", "--store-hex", os.fsencode(store).hex()]), store),
+            ("Host behind a wrapper", types.SimpleNamespace(args=["prlimit", "--nofile=64", "rui", "host", "serve", "--store", store]), store),
+            ("Host with path-typed argv", types.SimpleNamespace(args=[pathlib.Path("rui"), "host", "serve", "--store", pathlib.Path(store)]), store),
+            ("client --store", types.SimpleNamespace(args=["rui", "request", "read-result", "--store", store, "--key", "k"]), None),
+            ("client --store-hex", types.SimpleNamespace(args=["rui", "session", "inspect", "--store-hex", os.fsencode(store).hex()]), None),
+            ("Store before host serve", types.SimpleNamespace(args=["rui", "--store", store, "host", "serve"]), None),
+            ("string args", types.SimpleNamespace(args="rui host serve --store x"), None),
             ("no args attribute", types.SimpleNamespace(), None),
-            ("dangling --store", types.SimpleNamespace(args=["rui", "--store"]), None),
+            ("dangling --store", types.SimpleNamespace(args=["rui", "host", "serve", "--store"]), None),
         ]
         for name, process, expected in cases:
             with self.subTest(name):
