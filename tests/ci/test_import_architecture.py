@@ -243,7 +243,7 @@ const y = @import("after.zig");
             "src/protocol.zig": "const value = 1;",
             "src/server.zig": 'const store = @import("store.zig");',
             "src/store/wire/mysql.zig": 'const std = @import("std");',
-            "src/logic_tests.zig": 'test { _ = @import("store/wire/mysql.zig"); _ = @import("store/write_batch.zig"); }',
+            "src/logic_tests.zig": 'test { _ = @import("store/wire/mysql.zig"); _ = @import("store/write_batch.zig"); _ = @import("store/pass_plan.zig"); _ = @import("store/round_order.zig"); }',
         }
         for name, text, error in (
                 ("src/unreached.zig", 'test { _ = @import("store/domain/a.zig"); }', "import src/store.zig instead"),

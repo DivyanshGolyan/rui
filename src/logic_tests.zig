@@ -156,6 +156,8 @@ const cores = .{
     .{ "start_report.zig", @import("start_report.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
+    .{ "store/pass_plan.zig", @import("store/pass_plan.zig") },
+    .{ "store/round_order.zig", @import("store/round_order.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "store/write_batch.zig", @import("store/write_batch.zig") },
     .{ "store_id.zig", @import("store_id.zig") },
