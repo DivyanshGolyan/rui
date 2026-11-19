@@ -7,7 +7,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
-const session_line = @import("../../session_line.zig");
+const first_line = @import("../../first_line.zig");
 const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -283,7 +283,7 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 // The Archived window: one statement per page, newest archive first. The page is the keyed range of
 // session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. Each row joins its first
 // Message once (report.zig's first_admission_join: the same rule as FirstCandidates). The line is that
-// Message's first display line (session_line.firstLine, the rule the overview's first-line read uses),
+// Message's first display line (first_line.firstLine, the rule the overview's first-line read uses),
 // read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
 // the line NULL; their line comes from the overview's parts read.
 const archived_window_limit = session_list.archived_window_size + 1;
@@ -350,13 +350,13 @@ const ArchivedPage = struct {
     }
 };
 
-/// The first display line of an inline first Message: session_line.firstLine, cut to the line bound. The client
+/// The first display line of an inline first Message: first_line.firstLine, cut to the line bound. The client
 /// escapes it for the terminal exactly as it does a line it reads itself.
-fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(session_line.max_line_bytes)) ?[]const u8 {
+fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_line_bytes)) ?[]const u8 {
     const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
-    const line = session_line.firstLine(bytes);
+    const line = first_line.firstLine(bytes);
     if (line.len == 0) return null;
-    text.* = session_line.cut(session_line.max_line_bytes, line);
+    text.* = first_line.cut(first_line.max_line_bytes, line);
     return text.slice();
 }
 
@@ -395,7 +395,7 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
         std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
     }
     try visitor.head();
-    var text: Bounded(session_line.max_line_bytes) = undefined;
+    var text: Bounded(first_line.max_line_bytes) = undefined;
     for (page.rows[0..page.count]) |*row| {
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
         const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{
@@ -917,9 +917,9 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
         const bytes = utf8_validation.completePrefix(prefix.slice());
         var lines = std.mem.splitAny(u8, bytes, "\r\n");
         while (lines.next()) |line| {
-            const trimmed = session_line.firstLine(line);
+            const trimmed = first_line.firstLine(line);
             if (trimmed.len == 0) continue;
-            text.* = session_line.cut(session_list.max_last_line_bytes, trimmed);
+            text.* = first_line.cut(session_list.max_last_line_bytes, trimmed);
             answer = text.slice();
             break;
         }
