@@ -174,18 +174,24 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/list-sessions",
         .kind = .list_sessions,
-        .summary = "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`.",
-        .variants = &.{variant(protocol.list_sessions_request.head ++ .{
-            Optional(protocol.list_sessions_request.archive),
-        } ++ protocol.list_sessions_request.cursor ++ .{
-            Optional(protocol.list_sessions_request.since),
-            Optional(protocol.list_sessions_request.through),
-            Optional(protocol.list_sessions_request.after_reference),
-        } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } })},
+        .summary = "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. `window` reads one page of Archived Sessions, newest archive first, in one round: only with `archive` = `archived`, no `workspace`, no `since`, and zero `after` and `ceiling`.",
+        .variants = &.{
+            variant(protocol.list_sessions_request.head ++ .{
+                Optional(protocol.list_sessions_request.archive),
+            } ++ protocol.list_sessions_request.cursor ++ .{
+                Optional(protocol.list_sessions_request.since),
+                Optional(protocol.list_sessions_request.through),
+                Optional(protocol.list_sessions_request.after_reference),
+            } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
+            // The Archived window: archive is required and must be archived; no since or through.
+            variant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archive ++
+                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "archived" }, .{ 3, "0" }, .{ 4, "0" }, .{ 5, "below:12" } }),
+        },
         .reply = jsonReply(.{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.last_tail,
+            protocol.session_list_reply.head ++ .{ListOf(protocol.ArchivedRow.Fields)} ++ protocol.session_list_reply.window_tail,
         }),
     },
     .{
@@ -1324,6 +1330,11 @@ fn publishedRequestSchemas() !void {
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
             .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
+            // Live and since reads, or an Archived window: a one-of over the two request forms.
+            .list_sessions => {
+                try std.testing.expectEqual(@as(usize, 2), route.variants.len);
+                try std.testing.expect(schema.contains("anyOf"));
+            },
             else => {
                 try std.testing.expectEqual(@as(usize, 1), route.variants.len);
                 try std.testing.expectEqualStrings("object", schema.get("type").?.string);

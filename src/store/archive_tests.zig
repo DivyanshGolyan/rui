@@ -555,7 +555,11 @@ const ListWalk = struct {
             },
             .last => self.more = false,
             .changed => return error.TestUnexpectedResult,
+            .window => return error.TestUnexpectedResult,
         }
+    }
+    pub fn archivedRow(_: *ListWalk, _: *const session_list.ArchivedRow) !void {
+        return error.TestUnexpectedResult;
     }
 };
 
@@ -689,6 +693,169 @@ test "Session list membership and order equal the state reference for every filt
                 const actual_count = try walkAll(&storage, filter, workspace, &actual);
                 try std.testing.expectEqualSlices([6]u8, expected[0..expected_count], actual[0..actual_count]);
             };
+        }
+    }.run);
+}
+
+const WindowRow = struct { reference: [6]u8, key: u64 };
+
+/// Records one Archived window page: its rows (newest first), and the page's tail.
+const WindowVisitor = struct {
+    rows: [session_list.archived_window_size]WindowRow = undefined,
+    count: usize = 0,
+    first: ?u64 = null,
+    last: ?u64 = null,
+    more_above: bool = false,
+    more_below: bool = false,
+
+    pub fn head(self: *WindowVisitor) !void {
+        self.* = .{};
+    }
+
+    pub fn archivedRow(self: *WindowVisitor, archived: *const session_list.ArchivedRow) !void {
+        if (self.count == self.rows.len or archived.reference.len != 6) return error.TooManyRows;
+        self.rows[self.count] = .{ .reference = archived.reference[0..6].*, .key = archived.archive_seq };
+        self.count += 1;
+    }
+
+    pub fn row(self: *WindowVisitor, values: *const session_list.Row) !void {
+        _ = self;
+        _ = values;
+        return error.UnexpectedRow;
+    }
+
+    pub fn tail(self: *WindowVisitor, values: session_list.Tail) !void {
+        const window = switch (values) {
+            .window => |window| window,
+            else => return error.UnexpectedTail,
+        };
+        self.first = window.first;
+        self.last = window.last;
+        self.more_above = window.more_above;
+        self.more_below = window.more_below;
+    }
+
+    pub fn rowsSlice(self: *const WindowVisitor) []const WindowRow {
+        return self.rows[0..self.count];
+    }
+};
+
+fn readWindow(storage: *Store, cursor: session_list.ArchivedCursor, visitor: *WindowVisitor) !void {
+    const request: protocol.ListSessions = .{ .archive = .archived, .window = cursor };
+    try storage.readSessionList(&request, visitor);
+}
+
+test "Archived window pages walk every archived Session once, newest archive first, in both directions" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const archived_count = 43;
+            var refs: [archived_count + 3][6]u8 = undefined;
+            var key_buffer: [48]u8 = undefined;
+            for (&refs, 0..) |*ref, index| {
+                if (index == archived_count + 2) break;
+                const key = try std.fmt.bufPrint(&key_buffer, "window-session-{d}", .{index});
+                const session = try testing.configureTestSession(&storage, key);
+                try std.testing.expectEqual(@as(usize, 6), session.slice().len);
+                ref.* = session.slice()[0..6].*;
+            }
+            // Session 45 is archiving: an unaccepted Action keeps its stop incomplete.
+            const pending = try runningBash(&storage, &tmp, "window-pending");
+            refs[archived_count + 2] = pending.session.slice()[0..6].*;
+
+            // Archive order, oldest first. Session 5 is restored and archived again, so it takes a newer key.
+            var order: [archived_count][6]u8 = undefined;
+            for (0..archived_count) |index| {
+                const key = try std.fmt.bufPrint(&key_buffer, "window-archive-{d}", .{index});
+                var archive = try archiveCommand(key, &refs[index], true);
+                try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&archive, .{}).accepted.completion);
+                order[index] = refs[index];
+            }
+            var restore = try archiveCommand("window-restore-5", &refs[5], false);
+            try std.testing.expect(storage.archiveSession(&restore, .{}) == .accepted);
+            var again = try archiveCommand("window-archive-5-again", &refs[5], true);
+            try std.testing.expect(storage.archiveSession(&again, .{}) == .accepted);
+            var moved: [archived_count][6]u8 = undefined;
+            var moved_len: usize = 0;
+            for (order) |ref| if (!std.mem.eql(u8, &ref, &refs[5])) {
+                moved[moved_len] = ref;
+                moved_len += 1;
+            };
+            moved[moved_len] = refs[5];
+            moved_len += 1;
+            try std.testing.expectEqual(archived_count, moved_len);
+            var expected: [archived_count][6]u8 = undefined;
+            for (0..archived_count) |index| expected[index] = moved[archived_count - 1 - index];
+
+            var pending_archive = try archiveCommand("window-archive-pending", &refs[archived_count + 2], true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.pending, storage.archiveSession(&pending_archive, .{}).accepted.completion);
+
+            // Newest first from the head, then down by the last key of each page.
+            var seen: [archived_count]WindowRow = undefined;
+            var seen_len: usize = 0;
+            var page: WindowVisitor = .{};
+            try readWindow(&storage, .head, &page);
+            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), page.count);
+            try std.testing.expect(!page.more_above and page.more_below);
+            while (true) {
+                for (page.rowsSlice()) |row| {
+                    seen[seen_len] = row;
+                    seen_len += 1;
+                }
+                if (!page.more_below) break;
+                const next = page.rowsSlice()[page.count - 1].key;
+                try readWindow(&storage, .{ .below = next }, &page);
+                try std.testing.expect(page.more_above);
+            }
+            try std.testing.expectEqual(archived_count, seen_len);
+            for (expected, seen[0..seen_len]) |want, got| try std.testing.expectEqualSlices(u8, &want, &got.reference);
+            for (seen[1..seen_len], seen[0 .. seen_len - 1]) |after, before| try std.testing.expect(after.key < before.key);
+
+            // Oldest first from the tail, then upward by the newest key of each page. Blocks come out
+            // oldest first, so they are reversed for display.
+            var blocks: [4][session_list.archived_window_size]WindowRow = undefined;
+            var block_lengths: [4]usize = .{ 0, 0, 0, 0 };
+            var blocks_len: usize = 0;
+            try readWindow(&storage, .tail, &page);
+            try std.testing.expect(!page.more_below and page.more_above);
+            while (true) {
+                @memcpy(blocks[blocks_len][0..page.count], page.rowsSlice());
+                block_lengths[blocks_len] = page.count;
+                blocks_len += 1;
+                if (!page.more_above) break;
+                const newest = page.rowsSlice()[0].key;
+                try readWindow(&storage, .{ .above = newest }, &page);
+                try std.testing.expect(page.more_below);
+            }
+            var upward: [archived_count]WindowRow = undefined;
+            var upward_len: usize = 0;
+            var block = blocks_len;
+            while (block > 0) {
+                block -= 1;
+                for (blocks[block][0..block_lengths[block]]) |row| {
+                    upward[upward_len] = row;
+                    upward_len += 1;
+                }
+            }
+            try std.testing.expectEqual(archived_count, upward_len);
+            for (expected, upward[0..upward_len]) |want, got| try std.testing.expectEqualSlices(u8, &want, &got.reference);
+
+            // Restored and archived again: one row, at its newer key, first in the window.
+            var appearances: usize = 0;
+            for (seen[0..seen_len]) |row| if (std.mem.eql(u8, &row.reference, &refs[5])) {
+                appearances += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 1), appearances);
+            try std.testing.expectEqualSlices(u8, &refs[5], &seen[0].reference);
+
+            // Live and archiving Sessions are absent from every page.
+            for (seen[0..seen_len]) |row| {
+                for (refs[archived_count..]) |ref| try std.testing.expect(!std.mem.eql(u8, &row.reference, &ref));
+            }
         }
     }.run);
 }

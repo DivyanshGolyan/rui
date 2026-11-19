@@ -159,6 +159,8 @@ pub const Delta = enum {
             .not_modified => .not_modified,
             .changed => .changed,
             .full => .full,
+            // The roster never requests a window, and protocol_reply refuses a window reply before it gets here.
+            .window => unreachable,
         };
     }
 };

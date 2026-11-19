@@ -336,7 +336,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. */
+        /** One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. `window` reads one page of Archived Sessions, newest archive first, in one round: only with `archive` = `archived`, no `workspace`, no `since`, and zero `after` and `ceiling`. */
         post: operations["listSessions"];
         delete?: never;
         options?: never;
@@ -951,6 +951,17 @@ export interface components {
             /** @enum {string} */
             provider?: "codex" | "openai" | "chatgpt";
             workspace?: string;
+        };
+        ArchivedFirstFields: {
+            admission: components["schemas"]["Decimal"];
+            line: string | null;
+        };
+        ArchivedRowFields: {
+            reference: string;
+            archive_seq: components["schemas"]["Decimal"];
+            stopped_at: components["schemas"]["Decimal"];
+            label: string | null;
+            first: components["schemas"]["ArchivedFirstFields"] | null;
         };
         CallActivity: {
             total: components["schemas"]["Decimal"];
@@ -1614,7 +1625,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full";
+            delta: "not_modified" | "changed" | "full" | "window";
             since: string;
             next: {
                 after: components["schemas"]["Decimal"];
@@ -1627,7 +1638,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full";
+            delta: "not_modified" | "changed" | "full" | "window";
             since: string;
             next: {
                 through: components["schemas"]["Decimal"];
@@ -1640,9 +1651,24 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full";
+            delta: "not_modified" | "changed" | "full" | "window";
             since: string;
             next: null;
+        } | {
+            /** @constant */
+            version: "22";
+            /** @constant */
+            type: "session_list";
+            sessions: components["schemas"]["ArchivedRowFields"][];
+            /** @enum {string} */
+            delta: "not_modified" | "changed" | "full" | "window";
+            since: string;
+            next: {
+                first: components["schemas"]["Decimal"] | null;
+                last: components["schemas"]["Decimal"] | null;
+                more_above: boolean;
+                more_below: boolean;
+            };
         };
         ListSessionsRequest: {
             /** @constant */
@@ -1658,6 +1684,18 @@ export interface components {
             since?: string;
             through?: components["schemas"]["Decimal"];
             after_reference?: string;
+        } | {
+            /** @constant */
+            version: "22";
+            /** @constant */
+            kind: "list_sessions";
+            store: string;
+            workspace: string | null;
+            /** @enum {string} */
+            archive: "active" | "archived" | "all";
+            after: components["schemas"]["Decimal"];
+            ceiling: components["schemas"]["Decimal"];
+            window: string;
         };
         MessageConflictReply: {
             /** @constant */
@@ -3207,6 +3245,7 @@ export interface components {
             archive_state: "active" | "archiving" | "archived";
             pin_order: components["schemas"]["Decimal"] | null;
             reference: string;
+            archive_seq: components["schemas"]["Decimal"] | null;
             workspace: string;
             /** @enum {string} */
             provider: "codex" | "openai" | "chatgpt";

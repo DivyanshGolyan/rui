@@ -483,7 +483,8 @@ export class Sessions {
 		for (;;) {
 			const wireAfter = after;
 			const wireCeiling = ceiling;
-			const page = parse<Schemas["ListSessionsReply"]>(
+			// The live roster: the Archived window reply (the one with `next.more_above`) is read by its own client.
+			const page = parse<Exclude<Schemas["ListSessionsReply"], { next: { more_above: boolean } }>>(
 				await this.#link.exchange(
 					"/v1/list-sessions",
 					(store) => JSON.stringify({

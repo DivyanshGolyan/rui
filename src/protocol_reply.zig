@@ -1564,6 +1564,8 @@ pub const SessionListPage = struct {
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 pin_order: ?JsonString(20),
                 reference: JsonString(protocol.max_session_bytes),
+                // The Archived key. Live rows carry null; the overview does not read it until the Archived window client.
+                archive_seq: ?JsonString(20),
                 parent: ?JsonString(protocol.session_id_bytes),
                 creator: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
@@ -1684,6 +1686,8 @@ pub const SessionListPage = struct {
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
         }
         switch (result.delta) {
+            // A roster request never asks for a window, so a window reply is not this request's answer.
+            .window => return error.InvalidSessionPage,
             .not_modified => {
                 const since = cursor.since orelse return error.InvalidSessionPage;
                 if (cursor.changed != null or result.count != 0 or wire.next != null or
@@ -3048,7 +3052,7 @@ fn listValidationCase0() !void {
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
@@ -3079,7 +3083,7 @@ fn listValidationCase0() !void {
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
@@ -3141,7 +3145,7 @@ test "Session list byte range reads a shorter overwritten prefix without changin
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const old = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
+    const old = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"old\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}" ++ testing_list_facts ++ "null}";
     const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, old, 0);
     try file.writePositionalAll(io, current, 0);
@@ -3200,7 +3204,7 @@ fn listValidationCase1() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const row = "{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
+    const row = "{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}";
     inline for (.{
         "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
         "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[" ++ testing_list_facts ++ "null}",
@@ -3214,7 +3218,7 @@ fn listValidationCase1() !void {
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
     inline for (.{
         "\"tools\":[\"bash\",\"bash\"],\"permission_mode\":\"ask\"",
         "\"tools\":null,\"permission_mode\":\"ask\"",
@@ -3307,7 +3311,7 @@ fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const 
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"{s}\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
         try writer.writeAll(testing_row_details ++ "}");
     }
     try writer.writeAll(facts);
@@ -3411,7 +3415,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
         const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
@@ -3432,7 +3436,7 @@ test "Session list rows retain host tool names" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "tools", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[\"bash\",\"fetch_page\"],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"archive_seq\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[\"bash\",\"fetch_page\"],\"permission_mode\":\"ask\"" ++ testing_row_facts ++ "}" ++ testing_list_facts ++ "null}";
     try file.writePositionalAll(io, wire, 0);
     const page = try SessionListPage.read(io, file, wire.len, null, .{});
     try std.testing.expectEqualStrings("bash fetch_page", page.rows[0].tools.names.slice());

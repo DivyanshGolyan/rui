@@ -1045,7 +1045,7 @@
     "/v1/list-sessions": {
       "post": {
         "operationId": "listSessions",
-        "summary": "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`.",
+        "summary": "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. `window` reads one page of Archived Sessions, newest archive first, in one round: only with `archive` = `archived`, no `workspace`, no `since`, and zero `after` and `ceiling`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -3704,6 +3704,77 @@
         "required": [
           "model"
         ]
+      },
+      "ArchivedFirstFields": {
+        "type": "object",
+        "properties": {
+          "admission": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "x-rui-max-bytes": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "admission",
+          "line"
+        ],
+        "additionalProperties": false
+      },
+      "ArchivedRowFields": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "maxLength": 6,
+            "x-rui-max-bytes": 6
+          },
+          "archive_seq": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "stopped_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArchivedFirstFields"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "reference",
+          "archive_seq",
+          "stopped_at",
+          "label",
+          "first"
+        ],
+        "additionalProperties": false
       },
       "CallActivity": {
         "type": "object",
@@ -6612,7 +6683,8 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full"
+                  "full",
+                  "window"
                 ]
               },
               "since": {
@@ -6666,7 +6738,8 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full"
+                  "full",
+                  "window"
                 ]
               },
               "since": {
@@ -6722,7 +6795,8 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full"
+                  "full",
+                  "window"
                 ]
               },
               "since": {
@@ -6742,71 +6816,209 @@
               "next"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "22"
+              },
+              "type": {
+                "const": "session_list"
+              },
+              "sessions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ArchivedRowFields"
+                }
+              },
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "not_modified",
+                  "changed",
+                  "full",
+                  "window"
+                ]
+              },
+              "since": {
+                "type": "string",
+                "x-rui-max-bytes": 53
+              },
+              "next": {
+                "type": "object",
+                "properties": {
+                  "first": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "last": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "more_above": {
+                    "type": "boolean"
+                  },
+                  "more_below": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "first",
+                  "last",
+                  "more_above",
+                  "more_below"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "sessions",
+              "delta",
+              "since",
+              "next"
+            ],
+            "additionalProperties": false
           }
         ]
       },
       "ListSessionsRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "const": "22"
-          },
-          "kind": {
-            "const": "list_sessions"
-          },
-          "store": {
-            "type": "string",
-            "maxLength": 492,
-            "x-rui-max-bytes": 492
-          },
-          "workspace": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 4096,
-                "x-rui-max-bytes": 4096
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "22"
               },
-              {
-                "type": "null"
+              "kind": {
+                "const": "list_sessions"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "workspace": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "x-rui-max-bytes": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "archive": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived",
+                  "all"
+                ]
+              },
+              "after": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ceiling": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "since": {
+                "type": "string",
+                "x-rui-max-bytes": 53
+              },
+              "through": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "after_reference": {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
               }
-            ]
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "workspace",
+              "after",
+              "ceiling"
+            ],
+            "additionalProperties": false
           },
-          "archive": {
-            "type": "string",
-            "enum": [
-              "active",
-              "archived",
-              "all"
-            ]
-          },
-          "after": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "ceiling": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "since": {
-            "type": "string",
-            "x-rui-max-bytes": 53
-          },
-          "through": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "after_reference": {
-            "type": "string",
-            "maxLength": 6,
-            "x-rui-max-bytes": 6
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "22"
+              },
+              "kind": {
+                "const": "list_sessions"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "workspace": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "x-rui-max-bytes": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "archive": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived",
+                  "all"
+                ]
+              },
+              "after": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ceiling": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "window": {
+                "type": "string",
+                "x-rui-max-bytes": 25
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "workspace",
+              "archive",
+              "after",
+              "ceiling",
+              "window"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "version",
-          "kind",
-          "store",
-          "workspace",
-          "after",
-          "ceiling"
-        ],
-        "additionalProperties": false
+        ]
       },
       "MessageConflictReply": {
         "type": "object",
@@ -13317,6 +13529,16 @@
             "maxLength": 128,
             "x-rui-max-bytes": 128
           },
+          "archive_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "workspace": {
             "type": "string",
             "maxLength": 4096,
@@ -13442,6 +13664,7 @@
           "archive_state",
           "pin_order",
           "reference",
+          "archive_seq",
           "workspace",
           "provider",
           "model",
