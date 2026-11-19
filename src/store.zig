@@ -131,7 +131,7 @@ test {
     _ = @import("store/domain/action_read.zig");
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
-    _ = @import("store/tests/access.zig");
+    _ = @import("store/engine_contract.zig");
     _ = @import("store/tests/access_rules.zig");
     _ = @import("store/tests/action.zig");
     _ = @import("store/tests/action_parts.zig");

@@ -53,6 +53,8 @@ A bug shows that the catalog was missing a promise or stated it too loosely.
 Its fix names the promise it broke, adds or sharpens that invariant at the right level, and extends the invariant's owner test.
 No test exists only to replay one bug.
 
+Provider wire classification is tested over the corpus in `src/testing/fixtures/provider-errors/`; each body states its provenance (captured, captured_redacted, documented or reconstructed); a new provider shape or refusal code enters as a corpus body, captured whenever one is available (import it from the Host's `diagnostics/failed-responses/` with secrets redacted), and the CI check refuses a refusal code with no body unless it is on the shrink-only uncaptured list.
+
 ## Flake sources and their root fixes
 
 | Source | Root fix |
@@ -60,7 +62,7 @@ No test exists only to replay one bug.
 | Time: sleeps, timeouts, the wall clock | Time is a value: every decision that depends on time (deadlines, retries, expiry, dates) takes the current time as an argument, and only the imperative shell reads the clock. Tests pass chosen times and wait for events Rui emits, never a duration. A real timeout in a test is only a watchdog for a broken harness ([#1732](https://github.com/DivyanshGolyan/rui/issues/1732)) |
 | PTYs and terminals | Screens are a pure function of state, tested without a PTY; the few Product PTY tests use one shared PTY owner |
 | Shared processes and ports | Each test owns its Host, Store and socket path under its own temporary directory |
-| Leftover state | A test's processes die with the test; nothing outlives it |
+| Leftover state | A test's processes die with the test; nothing outlives it, including a killed Host's socket and `.store` hint in `/tmp/rui-<uid>`: a fixture that kills a Host removes them before deleting the Store, and `run_selected.py` fails a step that leaves one ([runtime_leftovers.py](../../tests/integration/runtime_leftovers.py), #1855) |
 | Network and live providers | The scripted fake provider; live providers are manual, never a gate |
 | Ordering and races | Inject the interleaving through a named pause point; never rely on the scheduler |
 | Platform differences | Platform code sits behind one small seam; only that seam's tests run on both systems |

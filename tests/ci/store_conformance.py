@@ -48,6 +48,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TESTS = "src/store/tests.zig"
+ENGINE_CONTRACT = "src/store/engine_contract.zig"
 SQLITE_TESTS = "src/store/sqlite_tests.zig"
 
 SQLITE_CODE = re.compile(
@@ -471,7 +472,7 @@ def table(pre_split):
 
 def conformance_sources(root=ROOT):
     directory = root / Path(TESTS).with_suffix("")
-    return [(TESTS, (root / TESTS).read_text())] + [
+    return [(TESTS, (root / TESTS).read_text()), (ENGINE_CONTRACT, (root / ENGINE_CONTRACT).read_text())] + [
         (path.relative_to(root).as_posix(), path.read_text()) for path in sorted(directory.rglob("*.zig"))]
 
 

@@ -29,6 +29,22 @@ FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_flake_source
 WHITESPACE = [sys.executable, "-B", "tests/ci/prepush.py", "--fix-whitespace", "BASE"]
 
 AVAILABLE = set(build_files.steps())
+import runtime_leftovers  # noqa: E402
+
+_leftover_runtime = None
+
+
+def setUpModule():
+    # The harness sweeps for leftover Host sockets; keep it off this machine's real directory.
+    global _leftover_runtime
+    _leftover_runtime = tempfile.TemporaryDirectory()
+    os.environ[runtime_leftovers.OVERRIDE] = _leftover_runtime.name
+
+
+def tearDownModule():
+    os.environ.pop(runtime_leftovers.OVERRIDE, None)
+    _leftover_runtime.cleanup()
+
 
 
 class PrepushTest(unittest.TestCase):
