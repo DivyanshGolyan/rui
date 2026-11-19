@@ -239,12 +239,12 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
         try writer.writeAll("\n");
         try upgrade.writeResult(writer, result);
     }
-    if (self.failure) |err| {
+    if (self.result == null and !upgrade_run.failedBeyondCancel(self.facts()) and std.meta.activeTag(self.ending()) == .cancelled) {
+        try writer.writeAll("\nUpgrade cancelled; nothing changed.\n");
+    } else if (self.failure) |err| {
         try writer.print("\nUpgrade {s} failed: {s}\n", .{ if (self.operation == .check) "check" else "installation", failureWords(err) });
         try self.download.write(writer);
         if (self.operation == .install and self.result == null) try writer.writeAll("No completed installation receipt; inspect the selected command and Host before retrying.\n");
-    } else if (self.cancelling and self.result == null) {
-        try writer.writeAll("\nUpgrade cancelled before installation.\n");
     }
     try self.cleanup.write(writer);
     if (self.outcome == .incompatible) try writer.writeAll("\nThis client cannot safely resume Host requests. Keep the draft and recovery handles; use the selected Rui in a new terminal. Do not resend indeterminate work.\n");
@@ -596,6 +596,23 @@ test "a failed release check never offers a relaunch" {
     try std.testing.expectEqualDeep(upgrade_status.Ended{ .failed = .download }, job.ending());
 }
 
+test "#1792 Esc while preparing ends cancelled without failure guidance" {
+    const job: Self = .{ .started = true, .finished = true, .operation = .install, .failure = error.Cancelled, .cancelling = true };
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try job.writeReport(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Upgrade cancelled; nothing changed.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "failed") == null);
+    try std.testing.expect(!job.hasGuidance());
+    // A failure that races the cancel is still reported, as its guidance says.
+    const raced: Self = .{ .started = true, .finished = true, .operation = .install, .failure = error.ReleaseChecksumMismatch, .cancelling = true };
+    writer = std.Io.Writer.fixed(&buffer);
+    try raced.writeReport(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Upgrade installation failed:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "nothing changed") == null);
+    try std.testing.expect(raced.hasGuidance());
+}
+
 test "the Upgrade ending uses every Host result not the selected Store supersession" {
     var entries = [_]@import("host_restart_all.zig").Entry{
         .{ .socket = "", .store = "/selected", .state = .{ .outcome = .superseded } },
@@ -734,7 +751,7 @@ test "discovery handoff domain retains validated candidate and transport only fo
 
 test "SH-76 Upgrade job adapts joined errors and receipts through the shared owner" {
     const cases = [_]struct { anyerror, upgrade_run.Cause }{
-        .{ error.Cancelled, .cancelled }, // F2 (#1792) retains cancellation guidance.
+        .{ error.Cancelled, .cancelled }, // #1792: a worker cancellation is the run's cancelled cause.
         .{ error.ReleaseDownloadFailed, .download },
         .{ error.InvalidReleaseVersion, .release },
         .{ error.ReleaseChecksumMismatch, .preparation },
