@@ -1877,19 +1877,33 @@ fi
         self.assertEqual(result.stdout, '1' * 40)
 
 
+class FakeClock:
+    """Time that moves only when a wait sleeps, so a 30 second disposal budget costs no real time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class FullCheckPartitionTest(unittest.TestCase):
     @staticmethod
-    def wait_for_group_retirement(group, deadline):
+    def wait_for_group_retirement(group, deadline, clock=time):
         def live_members():
+            # The census is a real watchdog: the fake clock can leave a tiny remainder that real ps would miss.
             census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                    text=True, check=True, timeout=max(0, deadline - time.monotonic()))
+                                    text=True, check=True, timeout=30)
             return [state for pgid, state in (row.split() for row in census.stdout.splitlines())
                     if int(pgid) == group and not state.startswith("Z")]
-        wait_for(live_members, f"live driver group {group} to retire", interval=.005, deadline=deadline,
-                 ready=lambda live: not live)
+        wait_for(live_members, f"live driver group {group} to retire", interval=.25, deadline=deadline,
+                 ready=lambda live: not live, clock=clock)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False):
+                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False, clock=time):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -1901,7 +1915,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                     if process is not None and not retired:
                         self.wait_for_group_retirement(
                             process.pid, disposal_deadline if disposal_deadline is not None
-                            else time.monotonic() + 30)
+                            else clock.monotonic() + 30, clock)
                     shutil.rmtree(root)
                 except BaseException as cleanup:
                     if failure is None:
@@ -1983,8 +1997,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                        HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
                        RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
+                # One real slow start: the driver's own interpreter probe. Every later start is normal.
                 (root / "sitecustomize.py").write_text(
-                    f"import time\ntime.sleep({python_delay!r})\n")
+                    "import os, time\n"
+                    "try:\n"
+                    "    os.close(os.open(os.path.join(os.environ['GATE_DIR'], 'slow-start'), os.O_CREAT | os.O_EXCL))\n"
+                    "except FileExistsError:\n"
+                    "    pass\n"
+                    f"else:\n    time.sleep({python_delay!r})\n")
                 env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
@@ -2007,8 +2027,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 command = ["/bin/sh", driver, "release", "debug", *arguments]
             releases = []
             if timing:
-                clock = root / "clock"
-                clock.write_text("10000000000")
+                clock_file = root / "clock"
+                clock_file.write_text("10000000000")
                 (root / "sitecustomize.py").write_text(
                     "import os, time\nfrom pathlib import Path\n"
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
@@ -2037,8 +2057,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 wait_for(timed_started, "both timed fixtures to start", interval=.005, deadline=deadline)
                                 if fail_at == "timed_ready":
                                     self.fail("injected failure at timed_ready")
-                                clock.with_suffix(".next").write_text("13000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("13000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                                 os.write(releases[1], b"r\n")
                                 def timing_recorded():
                                     self.assertIsNone(process.poll())
@@ -2048,8 +2068,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                          interval=.005, deadline=deadline)
                                 if fail_at == "timed_recorded":
                                     self.fail("injected failure at timed_recorded")
-                                clock.with_suffix(".next").write_text("30000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("30000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                             elif hold:
                                 def held_started():
                                     self.assertIsNone(process.poll())
@@ -2087,7 +2107,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             timeout=.001 if timeout_after_held else max(0, deadline - time.monotonic()))
                     except BaseException as failure:
                         failure.add_note(f"driver_pid={process.pid}")
-                        disposal_deadline = time.monotonic() + 30
+                        disposal_deadline = clock.monotonic() + 30
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
                         except ProcessLookupError:
@@ -2099,17 +2119,19 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             except BaseException as cleanup:
                                 failure.add_note(f"driver kill failed: {cleanup!r}")
                         try:
-                            process.wait(timeout=max(0, disposal_deadline - time.monotonic()))
+                            process.wait(timeout=max(0, disposal_deadline - clock.monotonic()))
                             failure.add_note(f"driver_pid={process.pid}, returncode={process.returncode}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver reap failed: {cleanup!r}")
                         try:
-                            stdout, stderr = process.communicate(timeout=max(0, disposal_deadline - time.monotonic()))
+                            # A group that survives its leader can hold these pipes open, so the drain is a
+                            # real watchdog, not part of the disposal budget. Killed groups close them at once.
+                            stdout, stderr = process.communicate(timeout=2)
                             failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver disposal failed: {cleanup!r}")
                         try:
-                            self.wait_for_group_retirement(process.pid, disposal_deadline)
+                            self.wait_for_group_retirement(process.pid, disposal_deadline, clock)
                             retired = True
                         except BaseException as cleanup:
                             failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
@@ -2192,7 +2214,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             "os.killpg", side_effect=PermissionError("injected group retirement failure")):
                         with self.assertRaisesRegex(AssertionError, "injected failure at held_ready") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     notes = "\n".join(rejected.exception.__notes__)
                     driver = re.search(r"driver_pid=(\d+), returncode=(-?\d+)", notes)
                     self.assertIsNotNone(driver, notes)
@@ -2273,7 +2295,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             "shutil.rmtree", side_effect=delete_after_retirement):
                         with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     self.assertTrue(observed_live, "the counterexample must contain a live descendant")
                     notes = rejected.exception.__notes__
                     self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)

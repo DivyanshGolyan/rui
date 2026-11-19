@@ -502,25 +502,30 @@ class WaitTimeout(AssertionError):
 WAIT_HOOKS = []
 
 
-def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True):
+def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True,
+             clock=None):
+    """Poll observe until ready. clock is any object with monotonic() and sleep(); a clock that is not
+    the time module sleeps instead of waiting on descriptors, because its timeouts are not real."""
+    if clock is None:
+        clock = time
     if deadline is None:
-        deadline = time.monotonic() + timeout
+        deadline = clock.monotonic() + timeout
     value = None
-    while time.monotonic() < deadline:
+    while clock.monotonic() < deadline:
         if drain:
             for hook, _readers in WAIT_HOOKS:
                 hook()
         value = observe()
-        if time.monotonic() >= deadline:
+        if clock.monotonic() >= deadline:
             break
         if ready(value):
             return value
         readers = [fd for _hook, descriptors in WAIT_HOOKS for fd in descriptors()] if drain else []
-        pause = min(interval, max(0, deadline - time.monotonic()))
-        if readers:
+        pause = min(interval, max(0, deadline - clock.monotonic()))
+        if readers and clock is time:
             select.select(readers, [], [], pause)
         else:
-            time.sleep(pause)
+            clock.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
 
 
