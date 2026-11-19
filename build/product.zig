@@ -128,6 +128,19 @@ pub fn buildIdentity(b: *std.Build) BuildIdentity {
     return identity;
 }
 
+var host_tool_target_memo: ?struct { owner: *std.Build, target: std.Build.ResolvedTarget } = null;
+
+/// Sets the target translate-c is built for, once per build from build.zig. Without it, translate-c is
+/// built for the host's native CPU, as local builds have always done; CI builds it for the CI target.
+pub fn setHostToolTarget(b: *std.Build, target: std.Build.ResolvedTarget) void {
+    host_tool_target_memo = .{ .owner = b, .target = target };
+}
+
+fn hostToolTarget(b: *std.Build) ?std.Build.ResolvedTarget {
+    if (host_tool_target_memo) |memo| if (memo.owner == b) return memo.target;
+    return null;
+}
+
 fn addRuiWithIdentity(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -497,7 +510,11 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
 }
 
 fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {
-    const bindings: Translator = .init(b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast }), .{
+    const translate_c = if (hostToolTarget(b)) |target|
+        b.dependency("translate_c", .{ .target = target, .optimize = std.builtin.OptimizeMode.ReleaseFast })
+    else
+        b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast });
+    const bindings: Translator = .init(translate_c, .{
         .name = name,
         .c_source_file = b.addWriteFiles().add(b.fmt("{s}.h", .{name}), header),
         .target = module.resolved_target.?,

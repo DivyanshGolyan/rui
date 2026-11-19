@@ -17,6 +17,9 @@ pub fn build(b: *std.Build) void {
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
+    // translate-c runs on the build host. CI builds it for the same baseline CPU as the products so its
+    // snapshot is reusable across runners; local builds keep the host's native CPU.
+    if (ci_mode) product.setHostToolTarget(b, target);
     if (pr_ci and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
         @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
