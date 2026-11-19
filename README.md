@@ -5,10 +5,10 @@ Work picks up where it left off when Rui restarts after a crash.
 Your application starts agents, gives them tools and reads their answers through a TypeScript client.
 The same runtime also gives you an agent in your terminal.
 
-**100 waiting agents.
+**100 agents.
 2.5 MB of private memory.**
 
-![Private memory at 0, 1, 10, and 100 waiting agents for Rui, pi, fx, Codex app-server, and OpenCode, from the published Linux benchmark.](docs/assets/waiting-agent-memory.svg)
+![Private memory at 0, 1, 10, and 100 agents for Rui, pi, fx, Codex app-server, and OpenCode, from the published Linux benchmark.](docs/assets/waiting-agent-memory.svg)
 
 Source: the [published Linux model-wait benchmark](https://divyanshgolyan.com/posts/hundred-agents/) at [Rui revision 5014980](https://github.com/DivyanshGolyan/rui/commit/50149807908283e044e3573f1b251d6a2f21e854).
 See the [data and method](docs/waiting-agent-memory.md) for measurement scope and versions.
@@ -16,8 +16,8 @@ See the [data and method](docs/waiting-agent-memory.md) for measurement scope an
 ## Why Rui
 
 - **Many agents, one process.**
-  Agents spend most of their time waiting on the model.
-  In Rui a waiting agent is saved state in one shared process, so in the [published benchmark](docs/waiting-agent-memory.md) a hundred waiting agents used about as much memory as one.
+  An agent spends most of its time waiting on the model, so in Rui an agent is saved state in one shared process.
+  In the [published benchmark](docs/waiting-agent-memory.md) a hundred agents used about as much memory as one.
 - **Safe across crashes.**
   Every step is saved before Rui moves on.
   If Rui stops in the middle of a command, it reports that the command may have run and never runs it again by itself.
