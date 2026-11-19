@@ -137,9 +137,9 @@ const Form = struct {
 
     fn init(self: *Form, original: host_start.ConnectionInfo, model: ?[]const u8) void {
         self.original = original;
-        self.base = .init(&self.base_bank);
-        self.key = .init(&self.key_bank);
-        self.model = .init(&self.model_bank);
+        self.base = .initLocked(&self.base_bank, .pastes_only);
+        self.key = .initLocked(&self.key_bank, .pastes_only);
+        self.model = .initLocked(&self.model_bank, .pastes_only);
         self.initial_base = .{};
         const endpoint = original.endpoint.slice();
         const base = if (std.mem.endsWith(u8, endpoint, "/responses")) endpoint[0 .. endpoint.len - "/responses".len] else endpoint;
@@ -154,9 +154,21 @@ const Form = struct {
             .model => &self.model,
         };
     }
+    /// The first field a refused paste locked; Connect stays blocked until it is acknowledged.
+    fn refusedField(self: *Form) ?core.Field {
+        for (std.enums.values(core.Field)) |field| if (self.editor(field).rejected != null) return field;
+        return null;
+    }
+    fn label(self: *Form, field: core.Field) []const u8 {
+        return switch (field) {
+            .base => if (self.endpointEdit() == .unchanged and !std.mem.endsWith(u8, self.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL",
+            .key => "API key",
+            .model => "Model ID",
+        };
+    }
     fn wipeKey(self: *Form) void {
         std.crypto.secureZero(u8, &self.key_bank);
-        self.key = .init(&self.key_bank);
+        self.key = .initLocked(&self.key_bank, .pastes_only);
     }
     fn endpointEdit(self: *Form) host_start.EndpointEdit {
         return if (std.mem.eql(u8, self.initial_base.slice(), self.base.text()))
@@ -710,11 +722,10 @@ fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
     if (action == .reuse) provider = action.reuse;
     if (attempt == .key) {
         const form = try self.ensureForm();
-        for (std.enums.values(core.Field)) |field| if (form.editor(field).rejected != null) {
-            self.issue = "Input was refused. Return to the field and press Enter to acknowledge, then edit it.";
+        if (form.refusedField()) |field| {
             _ = self.state.step(.{ .invalid = field });
             return false;
-        };
+        }
         const endpoint_edit = form.endpointEdit();
         const endpoint = switch (endpoint_edit) {
             .unchanged => |value| value,
@@ -726,14 +737,14 @@ fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
         };
         defer if (endpoint_edit == .base) self.initAllocator().free(endpoint);
         const using_saved = form.key.text().len == 0 and endpoint_edit == .unchanged and form.original.reusable();
-        if (form.key.rejected != null or (!using_saved and !api_key.valid(form.key.text()))) {
+        if (!using_saved and !api_key.valid(form.key.text())) {
             self.issue = "Enter one API key without spaces. Pasted keys stay masked.";
             _ = self.state.step(.{ .invalid = .key });
             return false;
         }
         const custom = !std.mem.eql(u8, endpoint, host_start.openai_endpoint);
         const model = if (form.model.text().len != 0) form.model.text() else if (!custom) @import("product_defaults.zig").recommended_model else "";
-        if (form.model.rejected != null or !@import("model_capability.zig").validModelSyntax(model)) {
+        if (!@import("model_capability.zig").validModelSyntax(model)) {
             self.issue = "Enter the model ID served by this custom Responses API.";
             _ = self.state.step(.{ .invalid = .model });
             return false;
@@ -842,8 +853,7 @@ fn formEvent(self: *Self, field: core.Field, input: vxfw.Event, pasting: bool) !
     if (!self.formEditable()) return;
     const form = try self.ensureForm();
     const editor = form.editor(field);
-    const edited = @import("panel_editor.zig").event(editor, input, pasting, &self.issue);
-    if (edited == .refused) editor.refuse();
+    _ = @import("panel_editor.zig").event(editor, input, pasting, &self.issue);
     if (input == .paste_end) {
         const text = editor.text();
         const trimmed = api_key.trimNewline(text);
@@ -974,18 +984,37 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     return writer.written();
 }
 fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
+    try appendLines(rows, ctx, label, text, control, action, width, .cells);
+}
+/// Prose (Status) breaks at spaces so a sentence never clips; links and commands fill each line.
+fn appendProse(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, width: u16) !void {
+    try appendLines(rows, ctx, label, text, null, null, width, .words);
+}
+fn appendLines(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: ?core.Control, action: ?core.Action, width: u16, breaks: enum { cells, words }) !void {
     const value_width = Panel.valueWidth(width);
-    const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
-    try append(rows, ctx.arena, label, first, control, action);
-    var at = first.len;
-    while (at < text.len and value_width > 0) {
-        const part = line.fit(ctx, text[at..], value_width).text;
-        if (part.len == 0) break;
-        try append(rows, ctx.arena, "", part, null, if (action == .open) action else null);
+    var at: usize = 0;
+    var first = true;
+    while (first or (at < text.len and value_width > 0)) {
+        var part = if (value_width > 0) line.fit(ctx, text[at..], value_width).text else "";
+        if (breaks == .words and at + part.len < text.len and text[at + part.len] != ' ') {
+            if (std.mem.lastIndexOfScalar(u8, part, ' ')) |space| part = part[0 .. space + 1];
+        }
+        if (!first and part.len == 0) break;
+        const shown = if (breaks == .words) std.mem.trimEnd(u8, part, " ") else part;
+        if (first) try append(rows, ctx.arena, label, shown, control, action) else try append(rows, ctx.arena, "", shown, null, if (action) |act| if (act == .open) act else null else null);
         at += part.len;
+        if (breaks == .words) while (at < text.len and text[at] == ' ') : (at += 1) {};
+        first = false;
     }
 }
 
+/// Derived each draw from the editors' locks, so the message cannot outlive the lock.
+fn pasteStatus(self: *const Self, a: std.mem.Allocator) std.mem.Allocator.Error!?[]const u8 {
+    if (self.state.page != .api) return null;
+    const mapped = self.form orelse return null;
+    const field = mapped.value.refusedField() orelse return null;
+    return try std.fmt.allocPrint(a, "Paste refused in {s}. Press Enter or edit it to continue.", .{mapped.value.label(field)});
+}
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
@@ -1045,9 +1074,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 const form = mapped.value;
                 const field_width = Panel.valueWidth(width) -| 1;
                 try append(&rows, a, "Scope", "Selected Host. New chats here only.", null, null);
-                try appendEditor(&rows, ctx, if (form.endpointEdit() == .unchanged and !std.mem.endsWith(u8, form.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL", &form.base, .base, field_width, "HTTPS base URL");
-                try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
-                try appendEditor(&rows, ctx, "Model ID", &form.model, .model, field_width, "Required for custom services");
+                try appendEditor(&rows, ctx, form.label(.base), &form.base, .base, field_width, "HTTPS base URL");
+                try appendEditor(&rows, ctx, form.label(.key), &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
+                try appendEditor(&rows, ctx, form.label(.model), &form.model, .model, field_width, "Required for custom services");
                 try append(&rows, a, "API", "HTTPS Responses API. Key is not verified remotely.", null, null);
                 try button(&buttons, a, "Connect", .connect, .connect);
                 try button(&buttons, a, "Back", .back, .back);
@@ -1100,7 +1129,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Close", .close, .close);
         },
     }
-    if (self.issue) |issue| try append(&rows, a, "Status", issue, null, null);
+    if (try self.pasteStatus(a)) |message| {
+        try appendProse(&rows, ctx, "Status", message, width);
+    } else if (self.issue) |issue| try appendProse(&rows, ctx, "Status", issue, width);
     const fields = try a.alloc(Panel.Field, rows.items.len);
     const labels = try a.alloc([]const u8, buttons.items.len);
     var selected: usize = 0;
@@ -1560,15 +1591,33 @@ test "Sign-in queued edits cannot change frozen fields before redraw or worker j
     };
 }
 
-test "Sign-in refuses every refused field after tab reverse tab and click until in-field acknowledgement" {
-    const Fault = enum { invalid_utf8, invalid_scalar, overflow, paste_invalid, paste_overflow };
-    for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| {
+fn testingClickConnect(page: *Self, ctx: *vxfw.EventContext) !void {
+    for (page.drawn.hits) |hit| if (hit.action == .connect) {
+        try page.widget().handleEvent(ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+        return;
+    };
+    return error.TestConnectNotDrawn;
+}
+
+fn testingStatusFor(page: *Self, ctx: *vxfw.EventContext) ![]const u8 {
+    return testingText(try testingDraw(page, ctx.alloc, 90, 28), ctx.alloc);
+}
+
+test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their field; typed refusals only report" {
+    const Fault = enum { unbound, typed_overflow, typed_invalid_utf8, typed_invalid_scalar, paste_invalid, paste_overflow };
+    const Ack = enum { enter, letter, backspace_at_start, arrow };
+    for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| for (std.enums.values(Ack)) |ack| {
+        const paste = fault == .paste_invalid or fault == .paste_overflow;
+        // A typed refusal never locks, so the acknowledgement keys only vary for pastes.
+        if (!paste and ack != .enter) continue;
+        errdefer std.debug.print("Sign-in refusal field={s} fault={s} ack={s}\n", .{ @tagName(field), @tagName(fault), @tagName(ack) });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
         defer page.closeForm();
         const form = try page.ensureForm();
+        _ = form.base.set("https://custom.invalid/v1", "https://custom.invalid/v1".len);
         _ = form.key.set("sk-valid", 8);
         _ = form.model.set("service-model", 13);
         page.state.focus = switch (field) {
@@ -1578,34 +1627,167 @@ test "Sign-in refuses every refused field after tab reverse tab and click until 
         };
         _ = try testingDraw(&page, ctx.alloc, 90, 28);
         const editor = form.editor(field);
+        const label = switch (field) {
+            .base => "Base URL",
+            .key => "API key",
+            .model => "Model ID",
+        };
+        const overflow = try arena.allocator().alloc(u8, editor.area.buffer.len + 1);
+        @memset(overflow, 'x');
         const valid = try arena.allocator().dupe(u8, editor.text());
-        if (fault == .paste_invalid or fault == .paste_overflow) try page.formEvent(field, .paste_start, true);
-        const bytes: []const u8 = switch (fault) {
-            .invalid_utf8, .paste_invalid => "\xff",
-            .invalid_scalar => "\x01",
-            .overflow, .paste_overflow => try arena.allocator().alloc(u8, editor.area.buffer.len + 1),
-        };
-        if (fault == .overflow or fault == .paste_overflow) @memset(@constCast(bytes), 'x');
-        try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = bytes } }, fault == .paste_invalid or fault == .paste_overflow);
-        if (fault == .paste_invalid or fault == .paste_overflow) try page.formEvent(field, .paste_end, false);
-        try std.testing.expect(editor.rejected != null);
-        try testingSend(&page, &ctx, "\t\x1b[Z", 90, 28);
-        _ = try testingDraw(&page, ctx.alloc, 90, 28);
-        for (page.drawn.hits) |hit| if (hit.action == .connect) {
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
-            break;
-        };
-        try std.testing.expect(page.state.page == .api and page.task.thread == null and page.frozen == null);
-        try std.testing.expectEqual(switch (field) {
-            .base => core.Control.base,
-            .key => .key,
-            .model => .model,
-        }, page.state.focus);
-        try testingSend(&page, &ctx, "\r", 90, 28);
-        try std.testing.expect(editor.rejected == null);
-        _ = editor.set(valid, valid.len);
-        try std.testing.expect(try page.freeze(.key, .connect));
+        // Sending a whole field's worth of bytes draws once per event, too slow for CI's per-test limit; start one byte short of full.
+        if (fault == .typed_overflow or fault == .paste_overflow) try std.testing.expect(editor.set(overflow[0 .. overflow.len - 2], overflow.len - 2) == null);
+        const before = try arena.allocator().dupe(u8, editor.text());
+        // Every fault reaches the field as the person's keys, through the drawn view.
+        switch (fault) {
+            .unbound => try testingSend(&page, &ctx, "\x1bx", 90, 28),
+            .typed_overflow => try testingSend(&page, &ctx, "xx", 90, 28),
+            .typed_invalid_utf8 => try testingSend(&page, &ctx, "\xff", 90, 28),
+            .typed_invalid_scalar => try testingSend(&page, &ctx, "\u{200b}", 90, 28),
+            .paste_invalid => try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28),
+            .paste_overflow => try testingSend(&page, &ctx, "\x1b[200~xx\x1b[201~", 90, 28),
+        }
+        const status = try testingStatusFor(&page, &ctx);
+        // A typed overflow keeps the bytes that fit before refusing, as the editor always has.
+        if (fault != .typed_overflow) try std.testing.expectEqualStrings(before, editor.text());
+        if (!paste) {
+            // A typed refusal is reported, locks nothing and does not block Connect.
+            try std.testing.expectEqual(@as(?core.Field, null), form.refusedField());
+            try std.testing.expect(std.mem.indexOf(u8, status, " · text couldn't be entered") != null);
+            try std.testing.expect(std.mem.indexOf(u8, status, "Paste refused") == null);
+            // The person deletes what overflowed, so the field's own validation is not the thing under test.
+            const extra = editor.text().len - before.len;
+            const deletes = try arena.allocator().alloc(u8, extra);
+            @memset(deletes, 0x7f);
+            try testingSend(&page, &ctx, deletes, 90, 28);
+            try std.testing.expectEqualStrings(before, editor.text());
+            if (fault == .typed_overflow) try std.testing.expect(editor.set(valid, valid.len) == null);
+            try std.testing.expect(try page.freeze(.key, .connect));
+        } else {
+            // The Status row wraps, so match the field-naming prefix; the full sentence is in pasteStatus.
+            const message = try std.fmt.allocPrint(arena.allocator(), "Paste refused in {s}.", .{label});
+            try std.testing.expect(std.mem.indexOf(u8, status, message) != null);
+            try testingClickConnect(&page, &ctx);
+            try std.testing.expect(page.state.page == .api and page.task.thread == null and page.frozen == null);
+            try std.testing.expectEqual(switch (field) {
+                .base => core.Control.base,
+                .key => .key,
+                .model => .model,
+            }, page.state.focus);
+            switch (ack) {
+                .enter => try testingSend(&page, &ctx, "\r", 90, 28),
+                .letter => try testingSend(&page, &ctx, "q", 90, 28),
+                .backspace_at_start => {
+                    editor.setCursor(0);
+                    try testingSend(&page, &ctx, "\x7f", 90, 28);
+                },
+                // A caret move is not an acknowledgement: the lock and its Status stay.
+                .arrow => try testingSend(&page, &ctx, "\x1b[D", 90, 28),
+            }
+            const after = try testingStatusFor(&page, &ctx);
+            if (ack == .arrow) {
+                try std.testing.expect(editor.rejected != null);
+                try std.testing.expect(std.mem.indexOf(u8, after, message) != null);
+                try testingClickConnect(&page, &ctx);
+                try std.testing.expect(page.task.thread == null and page.frozen == null);
+            } else {
+                // The acknowledgement clears the lock and the stale transient, so Connect proceeds.
+                try std.testing.expect(editor.rejected == null);
+                try std.testing.expect(std.mem.indexOf(u8, after, "Paste refused") == null);
+                try std.testing.expect(std.mem.indexOf(u8, after, "couldn't be entered") == null);
+                if (fault == .paste_overflow) try std.testing.expect(editor.set(valid, valid.len) == null);
+                try std.testing.expect(try page.freeze(.key, .connect));
+            }
+        }
     };
+}
+
+test "SUI-63 Sign-in Status shows the whole refusal at every width, breaking only between words" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 90, 140 }) |width| {
+        errdefer std.debug.print("width={d}\n", .{width});
+        var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
+        defer page.closeForm();
+        _ = try page.ensureForm();
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", width, 30);
+        const text = try testingText(try testingDraw(&page, ctx.alloc, width, 30), ctx.alloc);
+        var words = std.mem.tokenizeScalar(u8, (try page.pasteStatus(ctx.alloc)).?, ' ');
+        while (words.next()) |word| try std.testing.expect(std.mem.indexOf(u8, text, word) != null);
+    }
+}
+
+test "SUI-63 Sign-in cross-field paste refusals name the locked field and only Enter or an edit in it releases" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+
+    // Paste refused in Key, then Tab and type in Model: Status still names Key and Connect stays blocked.
+    errdefer std.debug.print("cross-field block 1\n", .{});
+    {
+        var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
+        defer page.closeForm();
+        const form = try page.ensureForm();
+        _ = form.base.set("https://custom.invalid/v1", "https://custom.invalid/v1".len);
+        _ = form.key.set("sk-valid", 8);
+        _ = form.model.set("service-model", 13);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28);
+        try testingSend(&page, &ctx, "\t", 90, 28);
+        try testingSend(&page, &ctx, "q", 90, 28);
+        try std.testing.expectEqual(core.Control.model, page.state.focus);
+        try std.testing.expect(std.mem.indexOfScalar(u8, form.model.text(), 'q') != null);
+        const status = try testingStatusFor(&page, &ctx);
+        try std.testing.expect(std.mem.indexOf(u8, status, "Paste refused in API key.") != null);
+        try testingClickConnect(&page, &ctx);
+        try std.testing.expect(page.task.thread == null and page.frozen == null);
+        try std.testing.expectEqual(core.Control.key, page.state.focus);
+    }
+
+    // Paste refused in Key and in Model: acknowledging Key leaves Status naming Model.
+    errdefer std.debug.print("cross-field block 2\n", .{});
+    {
+        var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
+        defer page.closeForm();
+        const form = try page.ensureForm();
+        _ = form.base.set("https://custom.invalid/v1", "https://custom.invalid/v1".len);
+        _ = form.key.set("sk-valid", 8);
+        _ = form.model.set("service-model", 13);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28);
+        try testingSend(&page, &ctx, "\t\x1b[200~\xff\x1b[201~", 90, 28);
+        try testingSend(&page, &ctx, "\x1b[Z", 90, 28);
+        try std.testing.expectEqual(core.Control.key, page.state.focus);
+        try testingSend(&page, &ctx, "\r", 90, 28);
+        try std.testing.expect(form.key.rejected == null and form.model.rejected != null);
+        const status = try testingStatusFor(&page, &ctx);
+        try std.testing.expect(std.mem.indexOf(u8, status, "Paste refused in Model ID.") != null);
+        // The blocked Connect moves focus to the refused Model field, so Enter there acknowledges it.
+        try std.testing.expect(!try page.freeze(.key, .connect));
+        try std.testing.expectEqual(core.Control.model, page.state.focus);
+        try testingSend(&page, &ctx, "\r", 90, 28);
+        try std.testing.expect(form.model.rejected == null);
+        try std.testing.expect(std.mem.indexOf(u8, try testingStatusFor(&page, &ctx), "Paste refused") == null);
+        try std.testing.expect(try page.freeze(.key, .connect));
+    }
+
+    // A second paste into an already locked field is ignored and keeps the lock.
+    errdefer std.debug.print("cross-field block 3\n", .{});
+    {
+        var page: Self = .{ .state = .{ .page = .api, .focus = .key } };
+        defer page.closeForm();
+        const form = try page.ensureForm();
+        _ = form.key.set("sk-valid", 8);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28);
+        try testingSend(&page, &ctx, "\x1b[200~zz\x1b[201~", 90, 28);
+        try std.testing.expectEqualStrings("sk-valid", form.key.text());
+        try std.testing.expect(form.key.rejected != null);
+        try std.testing.expect(std.mem.indexOf(u8, try testingStatusFor(&page, &ctx), "Paste refused in API key.") != null);
+        try std.testing.expect(!try page.freeze(.key, .connect));
+    }
 }
 
 test "Sign-in choices subtitle footer and action buttons keep separate drawn keyboard and mouse authority" {
