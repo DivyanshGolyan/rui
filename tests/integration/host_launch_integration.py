@@ -1128,7 +1128,7 @@ def saved_settings(root, env):
                 assert defaults.returncode == 0 and json.loads(defaults.stdout)["host"]["status"] == "ready", defaults
                 retained = run_start(moved, selected_env, "--set", "execution.activeCapacity=3")
                 assert retained.returncode == 0 and instance(json.loads(retained.stdout), DEFAULT_ACTIVE_CAPACITY) == info["instance"], retained
-                assert f"rui host pause --store $'{moved.resolve()}'\n" in retained.stderr, retained
+                assert f"rui host pause --store $'{moved.resolve()}', then rui host start --store $'{moved.resolve()}'\n" in retained.stderr, retained
                 record = root / f"{name}-request.json"
                 command = subprocess.run([RUI, "session", "start",
                                           "--record", str(record), "--key", "placement-start",
