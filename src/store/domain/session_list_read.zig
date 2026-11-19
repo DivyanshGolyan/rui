@@ -59,6 +59,8 @@ pub fn Watched(comptime Visitor: type) type {
 pub const list_failures = .{
     .{ list_ceiling, error.SessionReadFailed },
     .{ list_page, error.SessionReadFailed },
+    .{ live_active_page, error.SessionReadFailed },
+    .{ live_archiving_page, error.SessionReadFailed },
     .{ workspace_list_page, error.SessionReadFailed },
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },

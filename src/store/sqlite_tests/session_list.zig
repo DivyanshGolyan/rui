@@ -307,8 +307,12 @@ fn expectListStepFailure(sql: [:0]const u8, expected: anyerror, comptime work: e
     try std.testing.expect(storage.isFenced());
 }
 
-test "a list page whose page read fails answers main's SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed, .queued);
+test "a live list page whose active page read fails answers main's SessionReadFailed" {
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "WHERE archive_seq IS NULL AND created_seq>?1"), error.SessionReadFailed, .queued);
+}
+
+test "a live list page whose archiving page read fails answers main's SessionReadFailed" {
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "AND s.archive_seq IS NOT NULL AND s.created_seq>?1"), error.SessionReadFailed, .queued);
 }
 
 test "a list row whose Action statement fails answers ActionReadFailed" {
