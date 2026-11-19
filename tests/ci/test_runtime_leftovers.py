@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -294,6 +295,26 @@ class HostDisposal(unittest.TestCase):
                 finally:
                     for leftover in self.runtime.iterdir():
                         leftover.unlink()
+
+
+class DisposedStore(unittest.TestCase):
+    """disposed_store over every process shape stop_process is handed: Popen-like, ready fields only,
+    and objects with neither (fakes and wrappers without .args)."""
+
+    def test_disposed_store_shapes(self):
+        root = os.path.realpath(tempfile.gettempdir())
+        store = os.path.join(root, "s")
+        cases = [
+            ("ready field wins", types.SimpleNamespace(rui_ready_fields={"store": "/r"}, args=["--store", store]), "/r"),
+            ("--store argument", types.SimpleNamespace(args=["rui", "--store", store]), store),
+            ("--store-hex argument", types.SimpleNamespace(args=["rui", "--store-hex", os.fsencode(store).hex()]), store),
+            ("string args", types.SimpleNamespace(args="rui --store x"), None),
+            ("no args attribute", types.SimpleNamespace(), None),
+            ("dangling --store", types.SimpleNamespace(args=["rui", "--store"]), None),
+        ]
+        for name, process, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(expected, HOST.disposed_store(process))
 
 
 class ForcedCrashCleanup(unittest.TestCase):
