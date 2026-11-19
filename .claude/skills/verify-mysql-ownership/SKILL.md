@@ -40,8 +40,8 @@ The model describes these, at the sync commit below:
 | `HostOpens`, `HostRefused` | `src/store/engine/mysql_open.zig` `open`: `GET_LOCK(db,0)`, then one transaction raising `store_owner.epoch` and reading `commit_seq` |
 | `HostSendsBatch`, `ServerRuns` | `src/store/engine/Mysql.zig` `appendControls` (fence `UPDATE ... WHERE epoch=? AND commit_seq=?` plus guard) and `appendCommit` |
 | `HostCommitted`, `HostFenceFailed` | `Mysql.zig` `committed`, the `fence and changed != 1` check in `sendPass` |
-| `HostLosesConnection` | `Mysql.zig` `lost` (`committing` picks CommitOutcomeUnknown, `armed` picks rerunnable), `Store.zig` `armRerun`, `recoverRerun`, `fence` |
-| `HostReclaimReads`, `HostReclaimsLock`, `HostLockTimesOut`, `HostLosesReclaim` | `Mysql.zig` `reconnect`, `settleLostCommit`, `recover`; `mysql_open.zig` `reclaim` (IS_USED_LOCK and epoch, KILL, `GET_LOCK(db,10)`, epoch and commit_seq) |
+| `HostLosesConnection` | `Mysql.zig` `lost`, which takes its failure and rerunnable from `mysql_commit.lost` (`committing` picks CommitOutcomeUnknown, `armed` picks rerunnable); `Mysql.zig` `defersFence` (`mysql_commit.defers`); `Store.zig` `armRerun`, `recoverRerun`, `fence` |
+| `HostReclaimReads`, `HostReclaimsLock`, `HostLockTimesOut`, `HostLosesReclaim` | `Mysql.zig` `reconnect`; `settleLostCommit`, which decides saved, not saved or ownership lost with `mysql_commit.settle`; `recover`, which decides with `mysql_commit.recover` and `rerunAfter`; `mysql_open.zig` `reclaim` (IS_USED_LOCK and epoch, KILL, `GET_LOCK(db,10)`, epoch and commit_seq) |
 | `ServerEndsSession`, `ServerForgetsLock` | The MySQL server: a session outlives its client until KILL or a timeout; user locks free when the session ends |
 | `HostCloses` | `Mysql.zig` close via `mysql_open.releaseLock` |
 
