@@ -71,21 +71,31 @@ pub const Rule = struct {
 
     spins: bool = false,
 
+    /// The word an active row shows in its age column when it holds still.
+    held: ?[]const u8 = null,
+
     cause: bool = false,
 };
 
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle" },
     .pending = .{ .mark = .queued, .colour = .quiet },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true },
+    .working = .{ .mark = .active, .colour = .ink, .spins = true, .held = "working" },
+    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .held = "retrying" },
+    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .held = "working" },
     .approval = .{ .mark = .needs_you, .colour = .attention },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true },
+    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .held = "stopping" },
     .finished = .{ .mark = .none, .colour = .mark, .word = "finished" },
     .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true },
     .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped" },
 });
+
+comptime {
+    for (std.enums.values(Kind)) |kind| {
+        const rule = rules.get(kind);
+        if ((rule.mark == .active) != (rule.held != null)) @compileError("an active row's rule must name its held word, and only active rules may");
+    }
+}
 
 pub const marks = state_marks.marks;
 
@@ -2627,16 +2637,21 @@ pub fn nextRedrawAt(state: *const State, drawn: Drawn, caps: Caps, awake_ms: u64
     var next: ?u64 = null;
     for (drawn.first..drawn.end) |at| {
         const kind = Lines.kind(state, at) orelse break;
-        if (Lines.spins(state, at, caps)) {
-            const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
-            next = @min(next orelse deadline, deadline);
-        }
-        if (kind == .row and hasAge(state, kind.row)) {
-            const row = &state.rows.items[state.order.items[kind.row]];
-            if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
-                const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+        if (kind != .row) continue;
+        switch (rowActivity(state, kind.row, caps)) {
+            .spin => {
+                const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
                 next = @min(next orelse deadline, deadline);
-            }
+            },
+            // A held word never changes on its own.
+            .held => {},
+            .none => {
+                const row = &state.rows.items[state.order.items[kind.row]];
+                if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
+                    const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+                    next = @min(next orelse deadline, deadline);
+                }
+            },
         }
     }
     if (drawn.header) if (band(state)) |trouble| if (trouble.trouble == .quota) {
@@ -2728,7 +2743,7 @@ pub const Lines = struct {
     /// The same animation decision used by rendering and redraw scheduling.
     pub fn spins(state: *const State, line: usize, caps: Caps) bool {
         const entry = kind(state, line) orelse return false;
-        return entry == .row and rowSpins(state, entry.row, caps);
+        return entry == .row and rowActivity(state, entry.row, caps) == .spin;
     }
 
     pub fn at(arena: Allocator, state: *const State, line: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!?Line {
@@ -2739,7 +2754,7 @@ pub const Lines = struct {
                 .segments = try rowSegments(arena, state, entry.row, width, caps, frame),
                 .target = .{ .open = row.reference },
                 .alternate = .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } },
-                .spins = rowSpins(state, entry.row, caps),
+                .spins = rowActivity(state, entry.row, caps) == .spin,
             };
         }
         var built: Spans = .of(arena, caps, width);
@@ -2754,8 +2769,16 @@ fn rowSelected(state: *const State, row: *const Row) bool {
     return std.mem.eql(u8, &ref, &row.reference);
 }
 
-fn hasAge(state: *const State, row: usize) bool {
-    return rules.get(shownKind(state, &state.rows.items[state.order.items[row]])).mark != .active;
+/// How a listed row shows that it is active. Every reader (glyph, colour, age
+/// column and redraw deadlines) asks this one owner.
+pub const Activity = union(enum) { none, spin, held: []const u8 };
+
+fn rowActivity(state: *const State, at: usize, caps: Caps) Activity {
+    const row = &state.rows.items[state.order.items[at]];
+    const rule = rules.get(shownKind(state, row));
+    if (rule.mark != .active) return .none;
+    if (rule.spins and !state.list_stale and caps.unicode and caps.depth != .none) return .spin;
+    return .{ .held = rule.held.? };
 }
 
 fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
@@ -2765,7 +2788,11 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     const rule = rules.get(shownKind(state, row));
     built.begin();
     const mark = marks.get(rule.mark);
-    const glyph = if (rowSpins(state, at, caps)) spinner[frame % spinner.len] else if (caps.unicode) mark.unicode else mark.ascii;
+    const activity = rowActivity(state, at, caps);
+    const glyph = switch (activity) {
+        .spin => spinner[frame % spinner.len],
+        .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
+    };
     var words: [work_line.max_words_bytes]u8 = undefined;
     const progress = workLine(&words, state, row);
     const colour = if (progress) |line| switch (line.tone) {
@@ -2780,7 +2807,11 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
-    const age = if (!hasAge(state, at)) "" else (Age{ .elapsed = shownSince(state, row) }).text(&buffer, state.now_ms);
+    const age: []const u8 = switch (activity) {
+        .none => (Age{ .elapsed = shownSince(state, row) }).text(&buffer, state.now_ms),
+        .spin => "",
+        .held => |word| word,
+    };
     const end = width -| 1;
     const age_cells = @min(built.measure(age), end -| text_column);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
@@ -2794,12 +2825,6 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     _ = try built.put(text_column + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
-}
-
-fn rowSpins(state: *const State, at: usize, caps: Caps) bool {
-    if (state.list_stale or !caps.unicode or caps.depth == .none) return false;
-    const row = &state.rows.items[state.order.items[at]];
-    return yours(row) and rules.get(shownKind(state, row)).spins;
 }
 
 fn yours(row: *const Row) bool {
@@ -3261,11 +3286,11 @@ const mixed = [_]Listed{
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
     .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                          now", .ascii = " : Write the notes                                                          now", .colour = .quiet, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .working = ago(40) }, .unicode = " ◜ Write the notes", .ascii = " * Write the notes                                                      working", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ◝ Write the notes                                                     retrying", .ascii = " * Write the notes                                                     retrying", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ◜ Write the notes", .ascii = " * Write the notes                                                      working", .colour = .ink, .stoppable = true },
     .{ .state = .{ .approval = ago(3 * 60) }, .unicode = " ● Write the notes                                                           3m", .ascii = " ? Write the notes                                                           3m", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .stopping = ago(8) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .quiet, .stoppable = false },
+    .{ .state = .{ .stopping = ago(8) }, .unicode = " ◝ Write the notes                                                     stopping", .ascii = " * Write the notes                                                     stopping", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .unicode = "   Write the notes                                                          12m", .ascii = "   Write the notes                                                          12m", .colour = .mark, .stoppable = false },
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .unicode = " × Write the notes                                                           3h", .ascii = " x Write the notes                                                           3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ▪ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
@@ -3476,6 +3501,66 @@ fn anySpins(state: *const State, caps: Caps) bool {
     var line: usize = 0;
     while (line < Lines.count(state)) : (line += 1) if (Lines.spins(state, line, caps)) return true;
     return false;
+}
+
+test "OVM-5 a working row spins while live, and every other active row holds its word" {
+    const caps_domain = [_]Caps{ .{}, .{ .depth = .none }, .{ .unicode = false } };
+    for (kind_cases) |case| for ([_]bool{ false, true }) |is_yours| for ([_]bool{ false, true }) |stale| for (caps_domain) |caps| {
+        var state = try opened(&.{session("aaaaaa", case.state, .{ .label = "Write the notes", .yours = is_yours })});
+        defer state.deinit();
+        state.list_stale = stale;
+        const kind = shownKind(&state, &state.rows.items[0]);
+        const held_word: ?[]const u8 = switch (kind) {
+            .working, .bash => "working",
+            .retrying => "retrying",
+            .stopping => "stopping",
+            else => null,
+        };
+        const live = !stale and caps.unicode and caps.depth != .none;
+        const want: Activity = if (held_word) |word| blk: {
+            if (live and (kind == .working or kind == .bash)) break :blk .spin;
+            break :blk .{ .held = word };
+        } else .none;
+        const got = rowActivity(&state, 0, caps);
+        try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
+        if (want == .held) try std.testing.expectEqualStrings(want.held, got.held);
+
+        const frame: u64 = 3;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const row = (try Lines.at(arena.allocator(), &state, 0, 80, caps, frame)).?;
+        const text = try segmentText(arena.allocator(), row.segments);
+        const mark = marks.get(rules.get(kind).mark);
+        const glyph: []const u8 = switch (want) {
+            .spin => spinner[frame % spinner.len],
+            .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
+        };
+        const name_at = std.mem.indexOf(u8, text, "Write the notes").?;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, glyph, " "), std.mem.trim(u8, text[0..name_at], " "));
+        const ending = std.mem.trimEnd(u8, text, " ");
+        switch (want) {
+            .spin => try std.testing.expect(std.mem.endsWith(u8, ending, "Write the notes")),
+            .held => |word| {
+                try std.testing.expect(std.mem.endsWith(u8, ending, word));
+                try std.testing.expectEqual(Colour.quiet, (try styleOf(row.segments, word)).colour);
+            },
+            .none => {
+                var buffer: [8]u8 = undefined;
+                const age = (Age{ .elapsed = shownSince(&state, &state.rows.items[0]) }).text(&buffer, state.now_ms);
+                try std.testing.expect(std.mem.endsWith(u8, ending, age));
+            },
+        }
+        try std.testing.expectEqual(want == .spin, row.spins);
+        try std.testing.expectEqual(want == .spin, Lines.spins(&state, 0, caps));
+
+        const awake_ms: u64 = 1000;
+        const deadline = nextRedrawAt(&state, .{ .end = 1 }, caps, awake_ms);
+        switch (want) {
+            .spin => try std.testing.expectEqual(@as(?u64, awake_ms + (spin_interval_ms - awake_ms % spin_interval_ms)), deadline),
+            .held => try std.testing.expectEqual(@as(?u64, null), deadline),
+            .none => {},
+        }
+    };
 }
 
 test "OVM-4 stop gestures follow the work state" {
@@ -3992,7 +4077,7 @@ test "Host facts change only the counts line, and a row from before a restart st
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New chat").?..], after[std.mem.indexOf(u8, after, " + New chat").?..]);
-    try std.testing.expect(std.mem.indexOf(u8, after, " ◝ Admitted before the restart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, " ◜ Admitted before the restart") != null);
 }
 
 test "a row from another Workspace keeps its title at every width" {
@@ -4519,7 +4604,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 2, " ◝ Bell? and ?[31mred");
+    try expectScreenLine(&state, 2, " ◜ Bell? and ?[31mred");
 }
 
 test "overview idle rows never fold" {
@@ -6328,9 +6413,9 @@ test "session list state ages are compact stable against redraw and reset on sta
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 0)).?.segments);
-        try std.testing.expect(std.mem.endsWith(u8, first, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
+        try std.testing.expect(std.mem.endsWith(u8, first, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{if (rules.get(work).spins) "" else rules.get(work).held orelse case[1]})));
         const again = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 9)).?.segments);
-        try std.testing.expect(std.mem.endsWith(u8, again, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
+        try std.testing.expect(std.mem.endsWith(u8, again, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{if (rules.get(work).spins) "" else rules.get(work).held orelse case[1]})));
         const now = state.now_ms;
         _ = try step(&state, .{ .conversation = "aaaaaa".* });
         _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }), .opening = false } });
@@ -6380,7 +6465,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             };
             try std.testing.expect(!Lines.spins(&state, line, .{ .depth = .none }));
         }
-        try std.testing.expectEqual(@as(usize, 2), changed);
+        try std.testing.expectEqual(@as(usize, 3), changed);
     }
 
     {
@@ -6424,7 +6509,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
         try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
         try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "now", .quiet } });
-        try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "◝", .attention }, .{ "Investigate retry storm", .normal } });
+        try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "◝", .attention }, .{ "Investigate retry storm", .normal }, .{ "retrying", .quiet } });
         try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
         try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
         try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "▪", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
@@ -6448,10 +6533,12 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments;
-            const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◝ ", "◝ ", "◝ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
+            const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◜ ", "◝ ", "◜ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
             var buffer: [8]u8 = undefined;
-            const expected = [_][]const u8{ prefix, (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms) };
-            try expectLine(first, width, expected[0..if (rules.get(shownKind(&state, &state.rows.items[0])).mark == .active) @as(usize, 1) else 2]);
+            const shown = rules.get(shownKind(&state, &state.rows.items[0]));
+            const age_text = if (shown.spins) "" else shown.held orelse (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms);
+            const expected = [_][]const u8{ prefix, age_text };
+            try expectLine(first, width, if (age_text.len == 0) expected[0..1] else expected[0..]);
             try std.testing.expectEqual(Colour.strong, (try styleOf(first, "A useful Session name")).colour);
             try std.testing.expect((try styleOf(first, "A useful Session name")).bold);
             const first_text = try segmentText(arena.allocator(), first);
@@ -6477,7 +6564,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
             try std.testing.expectEqualStrings("◝", markOf(text, "Mine, retrying"));
             try std.testing.expectEqualStrings("◝", markOf(text, "Mine, stopping"));
-            try std.testing.expectEqualStrings("◝", markOf(text, "Theirs, thinking"));
+            try std.testing.expectEqualStrings(turn, markOf(text, "Theirs, thinking"));
             try std.testing.expectEqualStrings("", markOf(text, "Theirs, finished"));
             var screen = try Frame.of(&state, 80, 24, .{}, frame);
             defer screen.deinit();
@@ -6491,7 +6578,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         try std.testing.expect(state.openStop("y0urs1".*) != null);
         const asked = try frameText(&state, 80, 24, .{}, 1);
         defer std.testing.allocator.free(asked);
-        try std.testing.expectEqualStrings("◝", markOf(asked, "Mine, thinking"));
+        try std.testing.expectEqualStrings(spinner[1], markOf(asked, "Mine, thinking"));
         for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
             if (at == 3) state.list_stale = true;
             const first = try screenText(&state, 80, 24, caps);
@@ -6535,12 +6622,18 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         const mark = if (unicode_marks) expected_marks[kind] else expected_ascii[kind];
         const prefix = try std.fmt.allocPrint(arena.allocator(), " {s} Domain row", .{mark});
         try std.testing.expectEqualStrings(prefix, text[0..prefix.len]);
-        const active = switch (work) {
-            .working, .retrying, .bash, .stopping => true,
-            else => false,
+        const is_spinning = unicode_marks and (work == .working or work == .bash);
+        const held: ?[]const u8 = switch (work) {
+            .working, .bash => "working",
+            .retrying => "retrying",
+            .stopping => "stopping",
+            else => null,
         };
-        if (active) {
+        if (is_spinning) {
             try std.testing.expectEqualStrings(prefix, std.mem.trimEnd(u8, text, " "));
+        } else if (held) |word| {
+            const suffix = try std.fmt.allocPrint(arena.allocator(), "{s} ", .{word});
+            try std.testing.expectEqualStrings(suffix, text[text.len - suffix.len ..]);
         } else {
             const suffix = try std.fmt.allocPrint(arena.allocator(), "{s} ", .{age.text});
             try std.testing.expectEqualStrings(suffix, text[text.len - suffix.len ..]);
@@ -6573,7 +6666,7 @@ test "OVM-2 overview redraw deadlines follow visible changing content" {
         rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
         var state = try opened(&rows);
         defer state.deinit();
-        try std.testing.expect(!anySpins(&state, .{}));
+        try std.testing.expect(anySpins(&state, .{}));
     }
     const Case = struct { remaining: ?u64, text: []const u8, delay: ?u64 };
     const cases = [_]Case{
@@ -6613,7 +6706,7 @@ test "OVM-2 overview redraw deadlines follow visible changing content" {
         try std.testing.expect(position(&state, "quota0".*).? >= drawn.end);
         var expected: ?u64 = if (header) case.delay else null;
         if (ages) expected = @min(expected orelse 9_750, 9_750);
-        if (working and (screen == .unicode or screen == .indexed)) {
+        if (working and (screen == .unicode or screen == .indexed or screen == .peer)) {
             const delay: u64 = if (awake_ms == 1000) 200 else 1;
             expected = @min(expected orelse delay, delay);
         }
@@ -7054,30 +7147,31 @@ test "launch admission belongs to bare app startup" {
 // Frozen against 03aa26d0. The fixture is in the base's visible order:
 // approval, work (newest first), done (newest first), pending. Input is sent
 // backwards; pinned ranks preserve the fixture order. No oracle reads order,
-// Lines, rules, or yours. This preserves the oracle from the base test.
+// Lines, rules, or yours. This preserves the oracle from the base test, except
+// that held active rows (#1938) keep their still mark and show their word.
 // Base semantics intentionally differ: focused highlight follows selected;
 // unfocused highlight AND bold names follow conversing orelse selected, even
 // when that reference is absent. Archive membership precedes empty projection.
 const LinesDomainBase = struct {
     const Shape = enum { empty, unpinned, pinned, both };
-    const Fixture = struct { listed: Listed, spins: bool };
+    const Fixture = struct { listed: Listed };
     const Expected = struct { fixture: ?usize = null, gap: bool = false };
     const absent: Reference = "zzzzzz".*;
 
     fn fixtures() [12]Fixture {
         return .{
-            .{ .listed = session("f00000", .{ .approval = ago(1) }, .{ .label = "Approval", .yours = true }), .spins = false },
-            .{ .listed = session("f00001", .{ .working = ago(2) }, .{ .label = "My work", .yours = true }), .spins = true },
-            .{ .listed = session("f00002", .{ .bash = .{ .since = test_now_s - 3, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "My Bash", .yours = true }), .spins = true },
-            .{ .listed = session("f00003", .{ .working = ago(4) }, .{ .label = "Other work" }), .spins = false },
-            .{ .listed = session("f00004", .{ .bash = .{ .since = test_now_s - 5, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "Other Bash" }), .spins = false },
-            .{ .listed = session("f00005", .{ .retrying = .{ .since = test_now_s - 6, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Retry", .yours = true }), .spins = false },
-            .{ .listed = session("f00006", .{ .stopping = ago(7) }, .{ .label = "Stopping", .yours = true }), .spins = false },
-            .{ .listed = session("f00007", .{ .idle = ago(8) }, .{ .label = "Idle", .yours = true }), .spins = false },
-            .{ .listed = session("f00008", .{ .finished = ago(9) }, .{ .label = "Finished", .yours = true }), .spins = false },
-            .{ .listed = session("f00009", .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Failed", .yours = true }), .spins = false },
-            .{ .listed = session("f00010", .{ .stopped = .{ .since = test_now_s - 11, .cause = .stop } }, .{ .label = "Stopped", .yours = true }), .spins = false },
-            .{ .listed = session("f00011", .{ .pending = ago(12) }, .{ .label = "Pending", .yours = true }), .spins = false },
+            .{ .listed = session("f00000", .{ .approval = ago(1) }, .{ .label = "Approval", .yours = true }) },
+            .{ .listed = session("f00001", .{ .working = ago(2) }, .{ .label = "My work", .yours = true }) },
+            .{ .listed = session("f00002", .{ .bash = .{ .since = test_now_s - 3, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "My Bash", .yours = true }) },
+            .{ .listed = session("f00003", .{ .working = ago(4) }, .{ .label = "Other work" }) },
+            .{ .listed = session("f00004", .{ .bash = .{ .since = test_now_s - 5, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "Other Bash" }) },
+            .{ .listed = session("f00005", .{ .retrying = .{ .since = test_now_s - 6, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Retry", .yours = true }) },
+            .{ .listed = session("f00006", .{ .stopping = ago(7) }, .{ .label = "Stopping", .yours = true }) },
+            .{ .listed = session("f00007", .{ .idle = ago(8) }, .{ .label = "Idle", .yours = true }) },
+            .{ .listed = session("f00008", .{ .finished = ago(9) }, .{ .label = "Finished", .yours = true }) },
+            .{ .listed = session("f00009", .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Failed", .yours = true }) },
+            .{ .listed = session("f00010", .{ .stopped = .{ .since = test_now_s - 11, .cause = .stop } }, .{ .label = "Stopped", .yours = true }) },
+            .{ .listed = session("f00011", .{ .pending = ago(12) }, .{ .label = "Pending", .yours = true }) },
         };
     }
 
@@ -7277,8 +7371,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
                         try std.testing.expect(alternate == .pin);
                         try std.testing.expectEqual(entry.listed.reference, alternate.pin.reference);
                         try std.testing.expectEqual(entry.listed.pin_order == null, alternate.pin.pinned);
-                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, row.spins);
-                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, Lines.spins(&state, index, caps));
+                        try std.testing.expectEqual(Lines.spins(&state, index, caps), row.spins);
                         const name = if (entry.listed.first == null) "New chat" else entry.listed.label.?;
                         try std.testing.expectEqual(D.same(bold_ref, entry.listed.reference), (try styleOf(row.segments, name)).bold);
                         const text = try segmentText(arena.allocator(), row.segments);
@@ -7346,8 +7439,8 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    // Recorded by running this same fixture domain against base 03aa26d0.
-    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
+    // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
+    try std.testing.expectEqual(@as(u64, 0x697d3b6457f515c), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {

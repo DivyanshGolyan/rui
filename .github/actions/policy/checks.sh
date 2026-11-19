@@ -62,7 +62,7 @@ workflows() (
     ignores=()
     # 1.7.7 predates GitHub's server-enforced cache policy key.
     case "$workflow" in
-      .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml)
+      .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml|.github/workflows/race-sweep.yml)
         ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
     esac
     # 1.7.7 predates GitHub's bounded concurrency queue option.
@@ -77,6 +77,7 @@ check "Check caller error coverage and shrink-only pending causes" python3 -B te
 check "Check flake sources and shrink-only allowances" python3 -B tests/ci/flake_sources.py
 check "Check client locality and shrink-only exceptions" python3 -B tests/ci/client_locality.py
 check "Check the Store statement table was generated from the current inputs" python3 -B tests/ci/rsql_table.py fingerprint
+check "Check the build's link table was generated from the current build inputs" python3 -B tests/ci/link_table.py fingerprint
 check "Run tests/ci, less self-checks whose inputs are unchanged" python3 -B tests/ci/policy_suite.py --skips "$SKIPS"
 # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
 check "Reject undefined fixture names before native builds" python3 -m ruff check --select F821 tests

@@ -106,7 +106,7 @@ def queued_in_active():
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"   ◝ First peer task *", working), working
+                assert re.fullmatch(r"   [◜◝◞◟] First peer task *", working), working
                 assert re.fullmatch(r"   ◌ Second peer task +now", queued), queued
                 done = row(frame, "Dispatcher")
                 assert lines.index(working) < lines.index(done) < lines.index(queued), frame
@@ -136,7 +136,7 @@ def detail_column():
             frame = screen.wait(lambda shown: "Rate limited task" in shown and "Fails every time" in shown,
                                 "the retrying and failed rows")
             shown = row(frame, "Rate limited task")
-            assert re.fullmatch(r"   ◝ Rate limited task *", shown), shown
+            assert re.fullmatch(r"   ◝ Rate limited task +retrying", shown), shown
             assert "retry in" not in frame and "workspace" not in frame, frame
             failure = row(frame, "Fails every time")
             assert re.fullmatch(r"   × Fails every time {2,}now", failure), (failure, code)

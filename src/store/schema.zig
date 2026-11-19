@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 85;
+pub const schema_version: u32 = 87;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -65,6 +65,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
+    .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
+    .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -849,6 +851,38 @@ pub const migrations = [_]Migration{
             "DROP TABLE session_archive",
         },
     },
+    .{
+        .from = 85,
+        .sqlite = &.{
+            "UPDATE tool_set_member SET tool_record_id=(SELECT min(keep.tool_record_id) FROM tool_record keep JOIN tool_record cur ON cur.tool_record_id=tool_set_member.tool_record_id WHERE keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id)",
+            "DELETE FROM tool_record WHERE tool_record_id NOT IN (SELECT min(tool_record_id) FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record RENAME TO tool_record_85",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record_85",
+            "DROP TABLE tool_record_85",
+        },
+        .mysql = &.{
+            "UPDATE tool_set_member member JOIN tool_record cur ON cur.tool_record_id=member.tool_record_id JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id SET member.tool_record_id=keep.keep_id",
+            "DELETE cur FROM tool_record cur JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id WHERE cur.tool_record_id<>keep.keep_id",
+            "SET @rui_read_only_ddl=NULL",
+            "SET @rui_read_only_ddl=IF((SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tool_record' AND COLUMN_NAME='read_only')=0,'DO 0',(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP INDEX name, DROP COLUMN read_only, ADD UNIQUE(name,owner,server,description_content_id,input_schema_content_id)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND cc.CHECK_CLAUSE LIKE '%read_only%'))",
+            "PREPARE rui_read_only FROM @rui_read_only_ddl",
+            "EXECUTE rui_read_only",
+            "DEALLOCATE PREPARE rui_read_only",
+            "SET @rui_read_only_ddl=NULL",
+        },
+    },
+    .{
+        .from = 86,
+        .sqlite = &.{
+            "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
+            "CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED AFTER action_operation_approval_lead, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
+            "ALTER TABLE turn ADD COLUMN turn_outcome_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN outcome_position IS NULL THEN session_ref END) STORED AFTER turn_unpositioned_lead, ADD INDEX turn_outcome_unpositioned(turn_outcome_unpositioned_lead)",
+        },
+    },
 };
 
 comptime {
@@ -1178,12 +1212,11 @@ pub const tables = [_]Table{
                 .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
-            .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "read_only", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
@@ -1917,6 +1950,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
+    .{ .name = "action_operation_unaccepted", .table = "action_operation", .columns = &.{"session_ref"}, .where = "acceptance_position IS NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
@@ -1944,6 +1978,7 @@ pub const indexes = [_]Index{
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
+    .{ .name = "turn_outcome_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_position IS NULL" },
     .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
 
@@ -2045,6 +2080,37 @@ pub fn hasIndex(comptime name: []const u8) bool {
         for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return true;
         return false;
     }
+}
+
+/// The partial index named `name`, or null when no index has that name or it has no WHERE. rsql's
+/// `@in_index` states the rows of exactly these indexes.
+pub fn partialIndex(comptime name: []const u8) ?Index {
+    comptime {
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return if (index.where == null) null else index;
+        return null;
+    }
+}
+
+/// Whether the column `column` of table `table` admits NULL.
+pub fn columnNullable(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |found| if (std.mem.eql(u8, found.name, column)) return found.nullable;
+        }
+        @compileError("schema: no column " ++ table ++ "." ++ column);
+    }
+}
+
+/// The MySQL generated column that a `.leading` partial index is built on, as the DDL names it.
+pub fn leadingColumnName(comptime index: Index) []const u8 {
+    return leadingColumn(index);
+}
+
+/// One key part of a `.unique_when` partial index on MySQL: `predicate` (already rendered) decides whether
+/// `column` is kept. The index DDL and rsql's `@in_index` both build their key parts with this function.
+pub fn mysqlKeyPart(comptime predicate: []const u8, comptime column: []const u8) []const u8 {
+    return "(CASE WHEN " ++ predicate ++ " THEN " ++ column ++ " END)";
 }
 
 const mysql_index_names: []const []const u8 = blk: {
@@ -2450,7 +2516,7 @@ fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const 
         parts = "";
         for (index.columns, 0..) |column, position| {
             const part = indexColumn(column);
-            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+            parts = parts ++ (if (position == 0) "" else ",") ++ mysqlKeyPart(expression(.mysql, all[tablePosition(all, index.table)], index.where.?), part.name) ++ part.order;
         }
     }
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
@@ -3727,6 +3793,34 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
     try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
+}
+
+test "schema 87 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {
+    const step = migrations[86 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 86), step.from);
+    try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
+    try std.testing.expectEqualStrings("CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL", step.sqlite[0]);
+    try std.testing.expectEqualStrings("CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL", step.sqlite[1]);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 86) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted' AND tbl_name='action_operation'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='turn_outcome_unpositioned' AND tbl_name='turn'"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM action_operation INDEXED BY action_operation_unaccepted WHERE acceptance_position IS NULL");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null);
 }
 
 // Export each schema value once per collect binary, under a stable symbol name.

@@ -164,6 +164,55 @@ func exitedTestHost(t *testing.T, stdout io.ReadCloser) *Host {
 	return host
 }
 
+func TestRetireSocketRemovesOnlyARefusingSocketHintedToTheStore(t *testing.T) {
+	directory := t.TempDir()
+	store := filepath.Join(directory, "store")
+	other := filepath.Join(directory, "other")
+	listen := func(name string, keep bool) string {
+		socket := filepath.Join(directory, name+".sock")
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if keep {
+			t.Cleanup(func() { listener.Close() })
+		} else {
+			listener.Close()
+		}
+		return socket
+	}
+	hint := func(socket, named string) string {
+		path := strings.TrimSuffix(socket, ".sock") + ".store"
+		if err := os.WriteFile(path, []byte(named), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	exists := func(path string) bool { _, err := os.Lstat(path); return err == nil }
+	for _, row := range []struct {
+		name, named   string
+		live, retired bool
+	}{
+		{"dead", store, false, true},
+		{"live", store, true, false},
+		{"foreign", other, false, false},
+		{"gone", store, false, true},
+	} {
+		socket := listen(row.name, row.live)
+		if row.name == "gone" {
+			os.Remove(socket)
+		}
+		path := hint(socket, row.named)
+		retireSocket(socket, store)
+		if exists(socket) == row.retired || exists(path) == row.retired {
+			t.Errorf("%s: socket kept=%v hint kept=%v, want retired=%v", row.name, exists(socket), exists(path), row.retired)
+		}
+	}
+	retireSocket("", store)
+	retireSocket(filepath.Join(directory, "absent.sock"), store)
+}
+
 func TestStopWithExitSeparatesExpectedStatus(t *testing.T) {
 	host := exitedTestHost(t, io.NopCloser(strings.NewReader("")))
 	status, cleanupError := host.StopWithExit(time.Second)
@@ -765,6 +814,14 @@ func TestConfigureContract(t *testing.T) {
 	defer func() {
 		if err := host.Stop(TeardownAllowance); err != nil {
 			t.Error(err)
+		}
+		// Stop kills the Host, so the stop owner must retire the socket and the hint Rui
+		// published beside it (platform.zig storeHintPath); a leftover fails the leak check.
+		socket := host.Ready["socket"]
+		for _, path := range []string{socket, strings.TrimSuffix(socket, ".sock") + ".store"} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("stopped Host left %s (%v)", path, err)
+			}
 		}
 	}()
 	client := Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}

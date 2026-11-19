@@ -1281,7 +1281,8 @@ def disposed_store(process):
     store = getattr(process, "rui_ready_fields", {}).get("store")
     if store is not None:
         return store
-    args = [str(argument) for argument in process.args] if isinstance(process.args, (list, tuple)) else []
+    argv = getattr(process, "args", None)
+    args = [str(argument) for argument in argv] if isinstance(argv, (list, tuple)) else []
     if "--store" in args and args.index("--store") + 1 < len(args):
         return os.path.realpath(args[args.index("--store") + 1])
     if "--store-hex" in args and args.index("--store-hex") + 1 < len(args):

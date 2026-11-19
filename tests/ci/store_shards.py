@@ -4,7 +4,8 @@
     store_shards.py run BINARY --timeout 1200 [BINARY_ARGUMENTS...]
     store_shards.py native BINARY --timeout 1200
     store_shards.py aggregate BINARY --timeout 1200
-    store_shards.py measure BINARY --timeout 1800 --output tests/ci/store_test_times.json
+    store_shards.py measure BINARY --timeout 1800 --output tests/ci/unit_test_times.json
+(measure replaces only the entries of the binary's own root; see write_times)
 
 RUI_UNIT_SHARD is zero-based i/K. Assignment belongs to the binary's partition
 owner; this script owns process lifetimes and the Store dialect record join.
@@ -33,7 +34,10 @@ import host_process
 import live_engines
 import unit_test_metadata as metadata
 
-SHARD_COUNT = 4
+# RUI_UNIT_SHARD_COUNT overrides the process count for experiments (Store and native).
+SHARD_COUNT = int(os.environ.get("RUI_UNIT_SHARD_COUNT", "4"))
+if SHARD_COUNT < 1:
+    raise ValueError("RUI_UNIT_SHARD_COUNT must be a positive integer")
 MAX_OUTPUT = 64 * 1024 * 1024
 END = re.compile(rb"(?:^|\n)(OK|SKIP|FAIL[^\n]*)\r?\n")
 
@@ -193,6 +197,29 @@ def merge_records(paths, destination):
         temporary.unlink(missing_ok=True)
 
 
+def root_of(name):
+    # Mirrors src/unit_test_partition.zig owner(): one table holds both roots.
+    return "store" if name.startswith("store.") else "native"
+
+
+def write_times(path, measured):
+    """Replace one root's recorded seconds and keep the other root's entries."""
+    roots = {root_of(name) for name in measured}
+    if len(roots) != 1:
+        raise ValueError("measurement must name tests of exactly one unit root")
+    [root] = roots
+    destination = Path(path)
+    existing = json.loads(destination.read_text()) if destination.exists() else {}
+    merged = {name: seconds for name, seconds in existing.items() if root_of(name) != root}
+    merged.update(measured)
+    temporary = destination.with_name(destination.name + f".{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def report(result):
     passed = sum(state == "OK" for _, _, state in result.tests)
     skipped = sum(state == "SKIP" for _, _, state in result.tests)
@@ -244,7 +271,7 @@ def cancellation(stop):
 def run(binary, arguments, timeout, mode, environ, output=None):
     started = time.monotonic()
     record = environ.get(live_engines.MYSQL_RECORD)
-    count = SHARD_COUNT if mode == "run" else 1
+    count = SHARD_COUNT if mode in ("run", "native") else 1
     stop = threading.Event()
     test_timeout = duration(environ["RUI_UNIT_TEST_TIMEOUT"]) if environ.get("RUI_UNIT_TEST_TIMEOUT") else None
     with tempfile.TemporaryDirectory(prefix="rui-store-shards-") as directory:
@@ -255,19 +282,24 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             child["RUI_TEST_EXACT_INACTIVITY"] = "0"
             child.pop("RUI_UNIT_SHARD", None)
             child.pop("RUI_UNIT_EXCLUSIVE", None)
-            child["RUI_UNIT_MYSQL_NAMESPACE"] = f"s{os.getpid()}_{index}"
-            if mode == "native":
-                child["RUI_UNIT_MYSQL_NAMESPACE"] = f"n{os.getpid()}"
-            if mode == "run":
+            prefix = "s" if mode == "run" else "n"
+            child["RUI_UNIT_MYSQL_NAMESPACE"] = f"{prefix}{os.getpid()}_{index}"
+            if mode in ("run", "native"):
                 child["RUI_UNIT_SHARD"] = f"{index}/{count}"
             if record:
-                path = str(Path(directory) / f"record-{index}") if mode == "run" else record
-                if mode == "native":
-                    path = record + ".native"
+                # Store records join into the acceptance record. Native shards write
+                # informational records beside it: a shard that never opens MySQL writes none.
+                if mode == "run":
+                    path = str(Path(directory) / f"record-{index}")
+                elif mode == "native":
+                    path = record + f".native-{index}"
+                else:
+                    path = record
                 Path(path).unlink(missing_ok=True)
                 child[live_engines.MYSQL_RECORD] = path
                 records.append(path)
-            jobs.append((child, f"Store shard {index + 1}/{count}" if mode == "run" else mode))
+            label = f"{'Store' if mode == 'run' else 'Native'} shard {index + 1}/{count}" if mode in ("run", "native") else mode
+            jobs.append((child, label))
         # Clear previous acceptance before any child starts.
         if record and mode != "native":
             Path(record).unlink(missing_ok=True)
@@ -281,7 +313,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
                     if lock is not None:
                         fcntl.flock(lock, fcntl.LOCK_SH)
                     released.set()
-            if mode == "run" and not exclusive_count:
+            if mode in ("run", "native") and not exclusive_count:
                 release()
             def first():
                 try:
@@ -316,7 +348,7 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             results_by_name = {name: seconds for name, seconds, state in results[0].tests if state in ("OK", "SKIP")}
             if len(results_by_name) != len(results[0].tests):
                 raise ValueError("measurement requires a complete successful inventory with unique names")
-            Path(output).write_text(json.dumps(results_by_name, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+            write_times(output, results_by_name)
             total = sum(results_by_name.values())
             top = sorted(results_by_name.items(), key=lambda item: (-item[1], item[0]))[:20]
             print(f"Measured {len(results_by_name)} tests: total {total:.3f}s; top 20 {(sum(seconds for _, seconds in top) / total if total else 0):.1%}")
@@ -334,7 +366,7 @@ def main(argv=None):
     parser.add_argument("mode", choices=("run", "native", "aggregate", "measure"))
     parser.add_argument("binary")
     parser.add_argument("--timeout", type=float, default=1200)
-    parser.add_argument("--output", default="tests/ci/store_test_times.json")
+    parser.add_argument("--output", default="tests/ci/unit_test_times.json")
     args, arguments = parser.parse_known_args(argv)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")

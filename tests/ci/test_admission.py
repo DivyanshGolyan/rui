@@ -11,6 +11,7 @@ import shlex
 import unittest
 
 import build_files
+from dependency_replay import sqlite_bump
 from select_tests import select
 import steps
 from strict_paths import STRICT, strict
@@ -397,14 +398,16 @@ class AdmissionTest(unittest.TestCase):
         calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
                  'python3 -B tests/ci/client_locality.py',
                  'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
-                 'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
+                 'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -B tests/ci/link_table.py fingerprint',
+                 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
                  'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
-        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 8, 9)]
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 6, 9, 10)]
         names = ['Check caller error coverage and shrink-only pending causes',
                  'Check flake sources and shrink-only allowances',
                  'Check client locality and shrink-only exceptions',
                  'Run tests/ci, less self-checks whose inputs are unchanged',
                  'Check the Store statement table was generated from the current inputs',
+                 "Check the build's link table was generated from the current build inputs",
                  'Reject undefined fixture names before native builds',
                  "Check the TypeScript client's generated wire types and type-check it",
                  'Validate workflows with pinned-linter compatibility exceptions']
@@ -625,12 +628,13 @@ class CandidatePlanTest(unittest.TestCase):
     PR_TIER_CASES = {
         'documentation': (['README.md'], set()),
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
-        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
+        # A source file no owner reaches is unclassified, so it selects the full PR set.
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
         'build hub': (['build.zig'], {'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
-        # Without the manifest's text the SQLite pin may have changed, so the Store suite runs too.
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic', 'test-store'}),
+        # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic', 'test-native', 'test-store'}),
         'dependency fetch': (['src/fetch_dependencies.sh'], {'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
@@ -649,13 +653,15 @@ class CandidatePlanTest(unittest.TestCase):
             'session-list-integration', 'test-logic', 'test-native'}),
     }
 
+    PR_TIER_CONTENTS = {'dependency pins': {'build.zig.zon': sqlite_bump()}}
+
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
         from ci_plan import plan
         from docs_only import ChangeKind
         available = set(build_files.steps())
         for name, (paths, expected) in self.PR_TIER_CASES.items():
             with self.subTest(case=name):
-                selected = select(paths, 'review', available)
+                selected = select(paths, 'review', available, contents=self.PR_TIER_CONTENTS.get(name))
 
                 kind = ChangeKind.DOCUMENTATION if name == 'documentation' else ChangeKind.NORMAL
 
@@ -1163,7 +1169,7 @@ class ReleaseFlowTest(unittest.TestCase):
 
     def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
         text = PROMOTE.read_text()
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag', 'race_sweep'])
         self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
         self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
         qualify = job(text, 'qualify')

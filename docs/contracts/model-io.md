@@ -482,7 +482,7 @@ Under `openai-responses/1` the top-level `tools` holds the Operation's whole set
 The Host lists each MCP server only at startup; it never re-lists or handles list-change notifications while running (D110).
 The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
 Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.
-`store/domain/tool_offer.zig` owns one projection from intent and the Host's saved tool set: permitted MCP names resolve to today's identity (including server and read-only hint), unavailable names disappear, and built-ins retain their saved identity.
+`store/domain/tool_offer.zig` owns one projection from intent and the Host's saved tool set: permitted MCP names resolve to today's identity (including server), unavailable names disappear, and built-ins retain their saved identity.
 The configured names remain a ceiling, including for a K1-narrowed child: a new Host tool with an unpermitted name is not granted automatically.
 An unavailable name returns only if it is still intended; an explicit equal-valued narrowing is authoritative, regardless of command-key spelling.
 Operation admission freezes the projected loaded offer in `model_operation.tool_set_id`, atomically with admission; retries, history declarations, settlement and MCP dispatch use that immutable offer, never a new projection.

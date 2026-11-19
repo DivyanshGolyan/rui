@@ -1,8 +1,9 @@
 import ast
+import io
 import json
 import re
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 import signal
 import shutil
@@ -16,9 +17,11 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (ACCEPTANCE_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from dependency_replay import sqlite_bump, with_entry
+from link_table import fingerprint_error
+from select_tests import (ACCEPTANCE_INPUTS, BOOTSTRAP_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, CI_RUNNABLE, CONTENT_RULES, DEPENDENCY_MANIFEST, DIAGNOSTIC_INTEGRATIONS, FIXTURES, ci_policy, documentation, PR_UNIT_ROOTS, changed_dependencies, dependency_entries, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, ROOT, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
-                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
+                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning, normalize, tooling)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -1186,26 +1189,6 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("login-signal-integration", result["targets"])
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
-    def test_sqlite_pin_change_runs_the_store_suite_on_the_pr(self):
-        zon = """.{
-        .openssl = .{
-            .url = "https://example.invalid/openssl-3.0.zip",
-            .hash = "1220aaaa",
-        },
-        .sqlite = .{
-            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
-            .hash = "1220bbbb",
-        },
-}
-"""
-        pin_bump = zon.replace("sqlite-amalgamation-3540100", "sqlite-amalgamation-3541000").replace("1220bbbb", "1220cccc")
-        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, pin_bump)})
-        self.assertIn("test-store", result["fast_targets"])
-        self.assertTrue(covers("test-store", set(result["targets"])))
-        other_dependency = zon.replace("openssl-3.0", "openssl-3.1").replace("1220aaaa", "1220dddd")
-        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, other_dependency)})
-        self.assertNotIn("test-store", result["fast_targets"])
-
     def test_transport_inputs_keep_both_native_h2_owners(self):
         for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",
                      "tests/integration/h2_fixture.py", "tests/integration/codex_h2_cases.py"):
@@ -1727,7 +1710,8 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml',
+                     'race-sweep.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -2669,6 +2653,144 @@ class PolicySelfCheckTableTest(unittest.TestCase):
                 unnamed = sorted(value for value in literals if REPO_PATH.fullmatch(value)
                                  and not (matches(value, table[unit]) or matches(f"{value}/x", table[unit])))
                 self.assertEqual(unnamed, [], f"{unit} names paths none of its declared inputs match")
+
+
+MANIFEST = (ROOT / "build.zig.zon").read_text()
+PR_ROOTS = sorted(PR_UNIT_ROOTS)
+BUILD_MODULE_PATHS = tuple(BUILD_MODULES)
+CONTENT_RULE_PATHS = tuple(pattern for patterns, _ in CONTENT_RULES.values() for pattern in patterns)
+
+
+class LinkedDependencySelectionTest(unittest.TestCase):
+    def manifest_change(self, before, after, paths=(DEPENDENCY_MANIFEST,)):
+        return select(list(paths), "review", AVAILABLE, contents={DEPENDENCY_MANIFEST: (before, after)})
+
+    def test_sqlite_bump_replayed_from_history_selects_test_store(self):
+        before, after = sqlite_bump()
+        self.assertEqual(changed_dependencies(before, after), ["sqlite"])
+        result = self.manifest_change(before, after)
+        for root in ("test-store", "test-native"):
+            self.assertIn(root, result["fast_targets"])
+        self.assertNotIn("test-h2", result["fast_targets"])
+        self.assertNotIn("Unclassified path: full PR set and the full check", result["reasons"])
+        self.assertIn("Dependency: the build targets that link a changed build.zig.zon package", result["reasons"])
+
+    def test_sqlite_bump_selects_every_sqlite_consumer_in_the_main_tier(self):
+        result = self.manifest_change(*sqlite_bump())
+        for consumer in ("test-store", "test-native", "check", "check-full", "admission-integration", "dispatch-integration"):
+            self.assertTrue(covers(consumer, set(result["targets"])), consumer)
+
+    def test_libyaml_bump_selects_its_consumers(self):
+        yaml = dependency_entries(MANIFEST)["yaml"]
+        bumped = with_entry(MANIFEST, "yaml", "        .yaml = .{\n"
+                                              '            .url = "https://github.com/yaml/libyaml/archive/refs/tags/0.2.6.tar.gz",\n'
+                                              '            .hash = "N-V-bumped-libyaml",\n        },\n')
+        self.assertEqual(changed_dependencies(MANIFEST, bumped), ["yaml"])
+        result = self.manifest_change(MANIFEST, bumped)
+        self.assertIn("test-store", result["fast_targets"])
+        self.assertIn("test-native", result["fast_targets"])
+        self.assertNotIn("test-h2", result["fast_targets"])
+        self.assertIn("0.2.5", yaml["url"])
+
+    def test_each_package_selects_exactly_the_targets_its_link_set_names(self):
+        """For every linked package, a hash edit selects the targets whose link set names it."""
+        links = tree_graph().links
+        self.assertTrue(links, "build/link_table.json records no link sets")
+        for package in sorted({name for packages in links.values() for name in packages}):
+            with self.subTest(package=package):
+                entry = dependency_entries(MANIFEST)[package]
+                bumped = with_entry(MANIFEST, package, f"        .{package} = .{{\n"
+                                                       f"            .url = {entry['url']},\n"
+                                                       f'            .hash = "N-V-edited-{package}",\n        }},\n')
+                result = self.manifest_change(MANIFEST, bumped)
+                linkers = {target for target, packages in links.items() if package in packages} & set(AVAILABLE)
+                expected = linkers & CI_RUNNABLE
+                # The targets the bump adds over a manifest edit that changes no dependency (the rules it always had).
+                baseline = set(self.manifest_change(MANIFEST, MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1))["targets"])
+                added = set(result["targets"]) - baseline
+                # Exact: every CI-runnable linker the bump adds is selected (or covered), and it adds nothing beyond them.
+                self.assertEqual({target for target in expected - baseline if not covers(target, set(result["targets"]))}, set())
+                self.assertEqual({target for target in added if not covers(target, expected | {"test"})}, set())
+                self.assertEqual({root for root in PR_UNIT_ROOTS if root in linkers} - set(result["fast_targets"]), set())
+
+    def test_a_new_dependency_no_target_links_selects_the_full_pr_set(self):
+        added = MANIFEST.replace(".dependencies = .{",
+                                 ".dependencies = .{\n        .unlinked = .{\n"
+                                 '            .url = "https://example.invalid/unlinked.tar.gz",\n'
+                                 '            .hash = "N-V-unlinked",\n        },', 1)
+        result = self.manifest_change(MANIFEST, added)
+        self.assertEqual(result["fast_targets"], PR_ROOTS)
+        self.assertIn("build.zig.zon: a changed package the link table does not know, or an unreadable manifest: full PR set",
+                      result["reasons"])
+
+    def test_an_unreadable_manifest_selects_the_full_pr_set(self):
+        truncated = MANIFEST[: MANIFEST.index(".vaxis")]
+        self.assertEqual(self.manifest_change(MANIFEST, truncated)["fast_targets"], PR_ROOTS)
+        self.assertEqual(self.manifest_change(None, MANIFEST)["fast_targets"], PR_ROOTS)
+
+    def test_a_manifest_without_a_contents_diff_selects_the_full_pr_set(self):
+        self.assertEqual(select([DEPENDENCY_MANIFEST], "review", AVAILABLE)["fast_targets"], PR_ROOTS)
+
+    def test_manifest_edit_outside_dependencies_keeps_bootstrap_selection(self):
+        after = MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1)
+        self.assertEqual(changed_dependencies(MANIFEST, after), [])
+        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["test-logic"])
+
+    def test_every_manifest_dependency_is_linked_by_some_target(self):
+        linked = {name for packages in tree_graph().links.values() for name in packages}
+        self.assertEqual(set(dependency_entries(MANIFEST)), linked)
+
+    def test_link_table_matches_the_build_inputs(self):
+        self.assertIsNone(fingerprint_error())
+
+    def test_unknown_new_file_selects_the_full_pr_set(self):
+        result = select(["notes/unclassified_new_file.bin"], "review", AVAILABLE)
+        self.assertEqual(result["fast_targets"], PR_ROOTS)
+        self.assertIn("Unclassified path: full PR set and the full check", result["reasons"])
+
+    def test_docs_and_test_only_changes_keep_small_selections(self):
+        for path in ("docs/verification/gates.md", "README.md"):
+            with self.subTest(path=path):
+                self.assertEqual(select([path], "review", AVAILABLE)["fast_targets"], [])
+        result = select(["tests/ci/test_selection.py"], "review", AVAILABLE)
+        self.assertEqual(result["fast_targets"], [])
+        self.assertNotIn("Unclassified path: full PR set and the full check", result["reasons"])
+
+    def test_diagnostic_integrations_exist_and_no_graph_edge_reaches_them(self):
+        graph = tree_graph()
+        for path in DIAGNOSTIC_INTEGRATIONS:
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file())
+                self.assertFalse(graph.targets(path))
+
+    def test_every_tracked_path_is_classified_or_selects_the_full_pr_set(self):
+        """Sweeps git ls-files: a path no owner classifies may never select less than the full PR set.
+
+        Documentation and tooling are declared small: each selects no PR target, so a change to one never widens.
+        """
+        graph = tree_graph()
+        rules = [patterns for patterns, *_ in RULES] + [patterns for patterns, *_ in LIVE_RULES]
+        failures = []
+        tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout.split()
+        self.assertGreater(len(tracked), 1000)
+        for path in tracked:
+            if documentation(path) or tooling(path):
+                if select([path], "review", AVAILABLE, graph=graph)["fast_targets"]:
+                    failures.append((path, "declared small class selects a PR target"))
+                continue
+            explicit = (ci_policy(path) or path.startswith("tests/qualification/")
+                        or path in DIAGNOSTIC_INTEGRATIONS or graph.targets(path)
+                        or any(matches(path, patterns) for patterns in rules)
+                        or matches(path, BOOTSTRAP_INPUTS) or path in BUILD_MODULE_PATHS
+                        or matches(path, CONTENT_RULE_PATHS)
+                        or (path.startswith("tests/integration/") and Path(path).stem.replace("_", "-") in AVAILABLE))
+            result = select([path], "review", AVAILABLE, graph=graph)
+            if explicit:
+                if "Unclassified path: full PR set and the full check" in result["reasons"]:
+                    failures.append((path, "explicit path reached the unclassified fallback"))
+            elif result["fast_targets"] != PR_ROOTS:
+                failures.append((path, result["fast_targets"]))
+        self.assertEqual(failures, [])
 
 
 class PolicyPrepushTest(unittest.TestCase):

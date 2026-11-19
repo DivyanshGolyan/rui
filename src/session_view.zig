@@ -517,7 +517,8 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         for ([_]bool{ true, false }) |unicode_script| {
-            const caps: overview.Caps = .{ .unicode = unicode_script };
+            // No colour, so a working row holds its still mark (#1938) and the shared glyph shows.
+            const caps: overview.Caps = .{ .unicode = unicode_script, .depth = .none };
             try std.testing.expect(!overview.Lines.spins(&state, 0, caps));
             const row = (try overview.Lines.at(arena.allocator(), &state, 0, 80, caps, 4)).?.segments;
             try std.testing.expectEqualStrings(" ", row[0].text);
