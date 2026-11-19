@@ -315,7 +315,7 @@ pub const Event = union(enum) {
     list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
-    launch_start: struct { explicit_session: bool, restoring: bool },
+    launch_start: struct { explicit_session: bool, restoring: bool, named_binding: bool },
     launch_size: struct { size: Size, wide: bool },
     launch_poll,
     presentation_start: u64,
@@ -681,6 +681,7 @@ pub const State = struct {
     size: Size = .{},
     sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
+    launch_named_binding: bool = false,
     presentation: union(enum) { done, holding: u64, released } = .done,
     presentation_fell_back: bool = false,
 
@@ -1365,7 +1366,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .launch_start => |startup| {
-            if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) state.launch = .sizing;
+            if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) {
+                state.launch = .sizing;
+                state.launch_named_binding = startup.named_binding;
+            }
         },
         .launch_size => |frame| {
             state.size = frame.size;
@@ -1373,7 +1377,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .launch_poll => {
             if (state.launch == .waiting and state.listed_at_ms != null and !state.list_stale) {
-                if (newestEmpty(state)) |reference| {
+                const reuse = if (state.launch_named_binding) null else newestEmpty(state);
+                if (reuse) |reference| {
                     state.launch = .done;
                     state.selected = .{ .session = reference };
                     effects.add(.{ .open = reference });
@@ -6619,7 +6624,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
     for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Outcome)) |outcome| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false, .named_binding = false } });
         _ = try step(&state, .{ .presentation_start = 1000 });
         try std.testing.expect(state.initialPresentation(true) == .holding);
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
@@ -6690,7 +6695,7 @@ test "launch core handles late list after presentation release" {
     for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Release)) |release| for (std.enums.values(Listing)) |listing| for ([_]bool{ false, true }) |size_first| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false, .named_binding = false } });
         _ = try step(&state, .{ .presentation_start = 1000 });
         if (size_first) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
@@ -6723,7 +6728,7 @@ test "launch core drops a late launch once the overview is used" {
     for ([_]bool{ false, true }) |leave| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false, .named_binding = false } });
         _ = try step(&state, .{ .presentation_start = 1000 });
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
@@ -6743,7 +6748,7 @@ test "launch core drops a late launch once the overview is used" {
 test "initial presentation core does not hold a narrow resumed chat" {
     var state = try testState();
     defer state.deinit();
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false, .named_binding = false } });
     _ = try step(&state, .{ .presentation_start = 1000 });
     try std.testing.expect(state.initialPresentation(false) != .holding);
     try std.testing.expect(state.initialPresentation(true) == .holding);
@@ -6805,6 +6810,25 @@ test "launch core reopens newest active empty Session" {
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
     try std.testing.expect(!state.hidesOverview());
     try expectEffects(&.{}, try step(&state, .launch_poll));
+}
+
+test "launch core reuses an empty Session only for a bare launch" {
+    for ([_]bool{ false, true }) |has_empty| for ([_]bool{ false, true }) |named| {
+        const row = if (has_empty) session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null }) else session("bbbbbb", .{ .idle = ago(1) }, .{});
+        var state = try opened(&.{row});
+        defer state.deinit();
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false, .named_binding = named } });
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        const effects = try step(&state, .launch_poll);
+        if (has_empty and !named) {
+            try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, effects);
+            try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        } else {
+            try expectEffects(&.{.{ .create = null }}, effects);
+            try std.testing.expect(state.hidesOverview());
+        }
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    };
 }
 
 test "launch core exposes overview after unsuccessful first listing" {
@@ -6881,13 +6905,13 @@ test "launch admission belongs to bare app startup" {
     defer state.deinit();
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false, .named_binding = false } });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = true } });
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = true, .named_binding = false } });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false, .named_binding = false } });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.waiting, state.launch);
 }
