@@ -16,6 +16,7 @@ const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const command_domain = @import("command.zig");
+const archive_membership = @import("archive_membership.zig");
 const configuration_domain = @import("configuration.zig");
 const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
@@ -58,6 +59,9 @@ pub fn Watched(comptime Visitor: type) type {
 pub const list_failures = .{
     .{ list_ceiling, error.SessionReadFailed },
     .{ list_page, error.SessionReadFailed },
+    .{ live_active_page, error.SessionReadFailed },
+    .{ live_turn_page, error.SessionReadFailed },
+    .{ live_action_page, error.SessionReadFailed },
     .{ workspace_list_page, error.SessionReadFailed },
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
@@ -70,10 +74,6 @@ fn runList(a: *ReadAccess) !void {
     return store_access.runNamed(a, list_failures, error.CorruptStore);
 }
 
-fn archiveFilterSql(comptime parameter: []const u8) []const u8 {
-    return " AND (" ++ parameter ++ "='all' OR ((" ++ command_domain.archive_state_sql ++ ")='archived')=(" ++ parameter ++ "='archived'))";
-}
-
 const list_ceiling = rsql.Read(.{
     .sql = "SELECT coalesce(max(created_seq),0) AS ceiling FROM session",
     .Args = struct {},
@@ -84,15 +84,49 @@ const list_ceiling = rsql.Read(.{
 const list_limit = session_list.session_list_page_size + 1;
 
 const list_page = rsql.Read(.{
-    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?3") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2" ++ archive_membership.filterSql("session", "?3") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
     .Args = struct { after: u64, ceiling: u64, archive: session_archive.Filter },
+    .Row = ListPage.Row,
+    .cardinality = .each,
+});
+
+// The live tab is active Sessions (the column is NULL, one index range) plus archiving Sessions. An archiving
+// Session is found by one candidate set, so each set is its own page statement: the candidate is the IN
+// list, which MySQL can seek. A single UNION in the IN list makes MySQL scan session instead. Each statement
+// is bounded by created_seq and LIMIT 9; mergeLive merges them in Zig by created_seq and keeps the first page.
+fn livePageSql(comptime candidate: []const u8) []const u8 {
+    return "SELECT s.created_seq,s.session_ref FROM session s WHERE s.session_ref IN (" ++ candidate ++ ") " ++
+        "AND s.archive_seq IS NOT NULL AND s.created_seq>?1 AND s.created_seq<=?2 AND (" ++ archive_membership.stateSql("s") ++ ")='archiving' " ++
+        "ORDER BY s.created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit});
+}
+
+pub const live_active_page = rsql.Read(.{
+    .sql = "SELECT created_seq,session_ref FROM session @index(session_tab) WHERE archive_seq IS NULL AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .Args = struct { after: u64, ceiling: u64 },
+    .Row = ListPage.Row,
+    .cardinality = .each,
+});
+
+pub const live_turn_source = livePageSql(archive_membership.turn_candidates_sql);
+pub const live_action_source = livePageSql(archive_membership.unaccepted_action_candidates_sql);
+
+pub const live_turn_page = rsql.Read(.{
+    .sql = live_turn_source,
+    .Args = struct { after: u64, ceiling: u64 },
+    .Row = ListPage.Row,
+    .cardinality = .each,
+});
+
+pub const live_action_page = rsql.Read(.{
+    .sql = live_action_source,
+    .Args = struct { after: u64, ceiling: u64 },
     .Row = ListPage.Row,
     .cardinality = .each,
 });
 
 const workspace_list_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
-        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?5") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2" ++ archive_membership.filterSql("session", "?5") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
     .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8, archive: session_archive.Filter },
     .Row = ListPage.Row,
     .cardinality = .each,
@@ -104,6 +138,65 @@ const workspace_key = rsql.Read(.{
     .Row = struct { workspace_key: rsql.Positive },
     .cardinality = .optional,
 });
+
+const LiveCandidates = struct {
+    refs: [list_limit]change_ring.Id = undefined,
+    seqs: [list_limit]u64 = undefined,
+    count: usize = 0,
+    failure: ?error{CorruptStore} = null,
+
+    pub fn visit(self: *LiveCandidates, row: *const ListPage.Row) bool {
+        if (self.count == list_limit) return false;
+        const ref = row.session_ref.slice();
+        if (ref.len != change_ring.id_bytes) {
+            self.failure = error.CorruptStore;
+            return false;
+        }
+        self.refs[self.count] = ref[0..change_ring.id_bytes].*;
+        self.seqs[self.count] = row.created_seq.get();
+        self.count += 1;
+        return true;
+    }
+};
+
+const LivePages = struct {
+    active: LiveCandidates = .{},
+    turn: LiveCandidates = .{},
+    action: LiveCandidates = .{},
+};
+
+/// Merges the three live statements by created_seq and keeps the first page. Each statement holds its
+/// first list_limit rows, so the first page of the union is complete. A Session can be in both archiving
+/// candidate sets; created_seq is unique per Session, so its two rows are adjacent and the second is dropped.
+/// `more` is exact: it is set only when a further distinct Session follows the page.
+fn mergeLive(live: *const LivePages) !ListPage {
+    if (live.active.failure) |err| return err;
+    if (live.turn.failure) |err| return err;
+    if (live.action.failure) |err| return err;
+    const lists = [_]*const LiveCandidates{ &live.active, &live.turn, &live.action };
+    var cursor = [_]usize{ 0, 0, 0 };
+    var page: ListPage = .{};
+    while (true) {
+        var chosen: ?usize = null;
+        for (lists, 0..) |list, index| {
+            if (cursor[index] == list.count) continue;
+            if (chosen == null or list.seqs[cursor[index]] < lists[chosen.?].seqs[cursor[chosen.?]]) chosen = index;
+        }
+        const index = chosen orelse break;
+        const seq = lists[index].seqs[cursor[index]];
+        if (!(page.count > 0 and seq == page.last)) {
+            if (page.count == session_list.session_list_page_size) {
+                page.more = true;
+                break;
+            }
+            page.refs[page.count] = lists[index].refs[cursor[index]];
+            page.last = seq;
+            page.count += 1;
+        }
+        cursor[index] += 1;
+    }
+    return page;
+}
 
 const ListPage = struct {
     const Row = struct { created_seq: rsql.Positive, session_ref: SessionText };
@@ -194,11 +287,17 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
     const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
     var page: ListPage = .{};
+    var live: LivePages = .{};
+    const live_tab = request.workspace == null and request.archive == .active;
     if (request.workspace) |*workspace|
         a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
-    else
-        a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
+    else if (live_tab) {
+        a.readEach(live_active_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.active);
+        a.readEach(live_turn_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.turn);
+        a.readEach(live_action_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.action);
+    } else a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
     try store_access.runAs(a, error.SessionReadFailed);
+    if (live_tab) page = try mergeLive(&live);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
     try readRows(a, request, page.refs[0..page.count], visitor);
@@ -213,9 +312,9 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
 const changed_ancestors = rsql.Read(.{
     .sql = "WITH RECURSIVE ancestors(session_ref,creator_ref) AS (" ++
         "SELECT session.session_ref,session.creator_ref FROM session JOIN session seed ON seed.creator_ref=session.session_ref " ++
-        "WHERE seed.session_ref=?1 AND (?2 IS NULL OR session.workspace=?2)" ++ archiveFilterSql("?3") ++
+        "WHERE seed.session_ref=?1 AND (?2 IS NULL OR session.workspace=?2)" ++ archive_membership.filterSql("session", "?3") ++
         " UNION SELECT session.session_ref,session.creator_ref FROM session JOIN ancestors child ON child.creator_ref=session.session_ref " ++
-        "WHERE (?2 IS NULL OR session.workspace=?2)" ++ archiveFilterSql("?3") ++ ") " ++
+        "WHERE (?2 IS NULL OR session.workspace=?2)" ++ archive_membership.filterSql("session", "?3") ++ ") " ++
         "SELECT session_ref,NOT EXISTS (SELECT 1 FROM ancestors tail WHERE tail.creator_ref IS NULL OR NOT EXISTS " ++
         "(SELECT 1 FROM ancestors parent WHERE parent.session_ref=tail.creator_ref)) AS cycle FROM ancestors",
     .Args = struct { seed: []const u8, workspace: ?[]const u8, archive: session_archive.Filter },
@@ -312,10 +411,10 @@ const clock_columns =
 const descendant_page = rsql.Read(.{
     .sql = "WITH RECURSIVE descendants(origin,session_ref,workspace_digest,workspace) AS (" ++
         "SELECT session.session_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
-        "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archiveFilterSql("?11") ++
+        "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archive_membership.filterSql("session", "?11") ++
         " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
         "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
-        "WHERE 1=1" ++ archiveFilterSql("?11") ++ ") " ++
+        "WHERE 1=1" ++ archive_membership.filterSql("session", "?11") ++ ") " ++
         "SELECT member.origin,session.session_ref,session.created_at," ++ clock_columns[0 .. clock_columns.len - 1] ++
         ",EXISTS(SELECT 1 FROM session root WHERE root.session_ref=member.origin AND root.creator_ref IN " ++
         "(SELECT cycle_member.session_ref FROM descendants cycle_member WHERE cycle_member.origin=member.origin)) AS cycle " ++
@@ -433,7 +532,7 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
 }
 
 const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
-    command_domain.archive_state_sql ++ " AS archive_state," ++
+    archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
     last_line_columns ++ "," ++ clock_columns;

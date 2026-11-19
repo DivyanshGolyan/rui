@@ -48,6 +48,8 @@ jobs:
       reuse: ${{ steps.batch.outputs.reuse }}
       run: ${{ steps.batch.outputs.run }}
       version: ${{ steps.batch.outputs.version }}
+      weekly: ${{ steps.weekly.outputs.weekly }}
+      daily: ${{ steps.weekly.outputs.daily }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,6 +68,24 @@ jobs:
           outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN" $( [ "$SCHEDULED" = true ] && echo --scheduled ))
           echo "$outputs" >> "$GITHUB_OUTPUT"
           echo "$outputs"
+      - name: Choose whether this run checks pins (weekly) or sweeps for races (daily)
+        id: weekly
+        env:
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          # Promote runs at :45 UTC every three hours; the 03:45 Monday run (09:15 IST) checks pins, allowing two hours of schedule delay.
+          day_hour=$(date -u +%u%H)
+          weekly=false
+          if [ "$SCHEDULED" = true ] && [ "$day_hour" \> 102 ] && [ "$day_hour" \< 106 ]; then weekly=true; fi
+          echo "weekly=$weekly" >> "$GITHUB_OUTPUT"
+          echo "weekly dependency check: $weekly"
+          # The 18:45 UTC run (00:15 IST) sweeps for races once a day, allowing two hours of schedule delay.
+          hour=$(date -u +%H)
+          daily=false
+          if [ "$SCHEDULED" = true ] && [ "$hour" \> 17 ] && [ "$hour" \< 21 ]; then daily=true; fi
+          echo "daily=$daily" >> "$GITHUB_OUTPUT"
+          echo "daily race sweep: $daily"
   qualify:
     # The shared tier and its verdict (qualification-tier.yml), only when the
     # chosen commit is main HEAD without a green record to reuse.
@@ -107,3 +127,25 @@ jobs:
       sha: ${{ needs.batch.outputs.head }}
       version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version || needs.qualify.outputs.version }}
       artifact-run: ${{ needs.batch.outputs.run }}
+  dependency_lag:
+    # Keeps the deps-behind issue current (#1893); a skipped job uses no runner.
+    needs: batch
+    if: ${{ needs.batch.outputs.weekly == 'true' }}
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/dependency-lag.yml
+  race_sweep:
+    # Starts the daily race sweep as its own run, so its result, issues and duration
+    # stay apart from Promote's; a skipped job uses no runner.
+    needs: batch
+    if: ${{ needs.batch.outputs.daily == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Start the race sweep on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run race-sweep.yml --repo "$GITHUB_REPOSITORY" --ref main

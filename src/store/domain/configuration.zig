@@ -386,7 +386,7 @@ pub const creation_hint = rsql.Read(.{
 
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=session.session_ref AND archived.command_key IS NOT NULL)",
+        "AND session.archive_seq IS NULL",
     .Args = struct { session: []const u8 },
     .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
     .cardinality = .optional,

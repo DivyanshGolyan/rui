@@ -146,7 +146,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         const output = generate.addOutputFileArg("unit_test_runner.zig");
-        generate.addFileArg(b.path("tests/ci/store_test_times.json"));
+        generate.addFileArg(b.path("tests/ci/unit_test_times.json"));
         break :runner output;
     } else null;
     const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
@@ -180,7 +180,6 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         if (unit_runner != null) {
             const options = b.addOptions();
             options.addOption(usize, "root", @backingInt(partition));
-            options.addOption(bool, "sharded", partition == .store);
             compile.root_module.addOptions("unit_test_options", options);
             compile.root_module.addImport("unit_test_partition", b.createModule(.{
                 .root_source_file = b.path("src/unit_test_partition.zig"),

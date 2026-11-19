@@ -51,7 +51,6 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
                 .input_schema = entry.input_schema,
                 .owner = .mcp,
                 .server = source.server,
-                .read_only = entry.read_only,
             } });
         } else if (saved) |tool_set| {
             for (tool_set.records) |record| {
@@ -132,7 +131,6 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
         .name = try arena.dupe(u8, entry.name),
         .description = if (entry.description) |text| try arena.dupe(u8, text) else null,
         .input_schema = try arena.dupe(u8, entry.input_schema),
-        .read_only = entry.read_only,
     };
     if (listing.leftOut() != 0) stderr.diagnostic("rui: MCP server {s}: {d} tool(s) left out for a bad definition\n", .{ server.name.slice(), listing.leftOut() });
     return .{ .listed = copies };
@@ -164,7 +162,7 @@ pub noinline fn collect(
 }
 
 fn listed(name: []const u8) Listing.Entry {
-    return .{ .name = name, .description = "d", .input_schema = "{\"type\":\"object\"}", .read_only = false };
+    return .{ .name = name, .description = "d", .input_schema = "{\"type\":\"object\"}" };
 }
 
 test "listed tools join the built-ins in name order" {
@@ -245,25 +243,6 @@ test "a saved tool of an unreachable server can collide with a fresh one" {
         .{ .server = "down", .listed = null },
         .{ .server = "up", .listed = &found },
     }, &collision));
-}
-
-test "MCP read-only hints survive listing and unavailable-server fallback" {
-    var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer memory.deinit();
-    var collision: Collision = .{};
-    var read = listed("read_page");
-    read.read_only = true;
-    const found = [_]Listing.Entry{ read, listed("write_page") };
-    const saved = try merge(memory.allocator(), null, &.{.{ .server = "docs", .listed = &found }}, &collision);
-    try std.testing.expect(saved.records[saved.find("read_page").?].read_only);
-    try std.testing.expect(!saved.records[saved.find("write_page").?].read_only);
-    const fallback = try merge(memory.allocator(), &saved, &.{.{ .server = "docs", .listed = null }}, &collision);
-    try std.testing.expect(fallback.records[fallback.find("read_page").?].read_only);
-    try std.testing.expectEqualSlices(u8, &saved.digests[saved.find("read_page").?], &fallback.digests[fallback.find("read_page").?]);
-    read.read_only = false;
-    const replaced = try merge(memory.allocator(), &saved, &.{.{ .server = "docs", .listed = &.{read} }}, &collision);
-    try std.testing.expect(!replaced.records[replaced.find("read_page").?].read_only);
-    try std.testing.expect(!std.mem.eql(u8, &saved.digests[saved.find("read_page").?], &replaced.digests[replaced.find("read_page").?]));
 }
 
 test "MCP missing tools distinguish empty servers from saved copies without guessing ownership" {

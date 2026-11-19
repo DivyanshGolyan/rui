@@ -7,6 +7,7 @@ const sqlite = @import("sqlite.zig");
 const wire = @import("wire/mysql_connection.zig");
 const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
+const Bounded = @import("../bounded.zig").Bounded;
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
 const os = @import("os");
@@ -52,6 +53,12 @@ fn drain(source: anytype, changes: ?*i64) !void {
         else => {},
     };
     if (failed) return error.MysqlFixtureFailed;
+}
+
+/// Reads the rest of a result the caller gave up on, so the next caller starts on a ready connection. A connection that
+/// cannot be read to its end is lost, and the next call reports that.
+fn drainAfterFailure() void {
+    while (!root.isReady()) _ = root.next() catch return;
 }
 
 fn run(sql: []const u8) !void {
@@ -246,6 +253,14 @@ pub fn untouchedForTesting(storage: *Store, touched: *const change_ring.Touched)
     return missing;
 }
 
+/// Runs SQL on the Store's own connection, so it sees the Store's transaction and savepoints. `rawExec` runs on the
+/// fixture's root connection, which is a different session.
+pub fn storeRawExec(storage: *Store, sql: []const u8) !void {
+    const source = &storage.engine.mysql.state.connection;
+    try source.query(sql);
+    try drain(source, null);
+}
+
 pub fn rawExec(storage: *Store, sql: []const u8) !void {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
@@ -256,12 +271,95 @@ pub fn rawExec(storage: *Store, sql: []const u8) !void {
     try run(sql);
 }
 
+/// Test-only: every row of `table` as SELECT * returns it, field bytes (null for SQL NULL), in the server's order.
+pub fn tableRows(storage: *Store, arena: std.mem.Allocator, table: []const u8) !testing.TableRows {
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    const text = try std.fmt.allocPrint(arena, "SELECT * FROM `{s}`", .{table});
+    try root.query(text);
+    // The connection is shared: a failed read leaves it mid-stream unless the rest of the result is read out here.
+    errdefer drainAfterFailure();
+    var names: std.ArrayList([]const u8) = .empty;
+    var table_rows: std.ArrayList([]const ?[]const u8) = .empty;
+    var count: usize = 0;
+    while (!root.isReady()) switch (try root.next()) {
+        .columns => |n| {
+            count = n;
+            for (0..n) |_| switch (try root.next()) {
+                .column => |column| try names.append(arena, try arena.dupe(u8, column.name)),
+                else => return error.ProtocolViolation,
+            };
+        },
+        .row => {
+            const fields = try arena.alloc(?[]const u8, count);
+            for (fields) |*field| {
+                const len = switch (try root.next()) {
+                    .value => |value| value,
+                    else => return error.ProtocolViolation,
+                };
+                field.* = if (len) |n| try readField(arena, n) else null;
+            }
+            try table_rows.append(arena, fields);
+        },
+        .err => return error.QueryFailed,
+        else => {},
+    };
+    return .{ .names = try names.toOwnedSlice(arena), .rows = try table_rows.toOwnedSlice(arena) };
+}
+
+fn readField(arena: std.mem.Allocator, len: u32) ![]const u8 {
+    const bytes = try arena.alloc(u8, len);
+    var filled: usize = 0;
+    while (filled < len) switch (try root.next()) {
+        .bytes => |chunk| {
+            if (chunk.len > len - filled) return error.ProtocolViolation;
+            @memcpy(bytes[filled..][0..chunk.len], chunk);
+            filled += chunk.len;
+        },
+        else => return error.ProtocolViolation,
+    };
+    return bytes;
+}
+
 pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try root.query(sql);
     return readU64(&root);
+}
+
+/// The MySQL plan of `sql` as EXPLAIN FORMAT=TREE lines, each ended by a newline, written into `out`.
+pub fn planText(storage: *Store, sql: []const u8, out: []u8) ![]const u8 {
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    var statement: [8192]u8 = undefined;
+    try root.query(try std.fmt.bufPrint(&statement, "EXPLAIN FORMAT=TREE {s}", .{sql}));
+    return readPlan(&root, out);
+}
+
+fn readPlan(source: *wire.Connection, out: []u8) ![]const u8 {
+    const Row = struct { line: Bounded(16384) };
+    var columns: rows.Columns(Row) = undefined;
+    var length: usize = 0;
+    while (!source.isReady()) switch (try source.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, source, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, source, &row);
+            const line = row.line.slice();
+            if (length + line.len + 1 > out.len) return error.PlanTooLong;
+            @memcpy(out[length..][0..line.len], line);
+            length += line.len;
+            out[length] = '\n';
+            length += 1;
+        },
+        .err => return error.QueryFailed,
+        else => {},
+    };
+    return out[0..length];
 }
 
 pub fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {

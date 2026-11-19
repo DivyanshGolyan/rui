@@ -1204,7 +1204,7 @@ test "bounded compound admission freezes its pending prefix while later input ar
                 var meter: shared_fixtures.RoundMeter = .{ .storage = &storage };
                 meter.start();
                 try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
-                meter.stop(.advancePartsPressure);
+                try meter.stop(.advancePartsPressure);
                 const work = meter.measured.get(.advancePartsPressure).?;
                 try std.testing.expect(work.rounds + work.content_rounds <= 1);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1", .{session.slice()}));

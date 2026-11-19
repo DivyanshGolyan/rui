@@ -721,6 +721,34 @@ test "schema 82 MySQL migration backfills input sources and preserves admissions
     writeRecord();
 }
 
+test "schema 86 MySQL tool record migration merges records that differed only in the read-only hint" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 85) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database_sql, @import("sqlite_tests/tool_record_hint.zig").format_85_twins_sql ++
+        "INSERT INTO tool_set(tool_set_id,digest,member_count) VALUES(9000,RANDOM_BYTES(32),3);" ++
+        "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES(9000,0,900),(9000,1,901),(9000,2,902)", false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(85).?, false);
+    var merged: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer merged.deinit();
+    try writeResult("SELECT (SELECT count(*) FROM tool_record WHERE tool_record_id IN (900,902))," ++
+        "(SELECT count(*) FROM tool_record WHERE tool_record_id=901)," ++
+        "(SELECT count(*) FROM tool_set_member WHERE tool_set_id=9000 AND ((ordinal=0 AND tool_record_id=900) OR (ordinal=1 AND tool_record_id=900) OR (ordinal=2 AND tool_record_id=902)))," ++
+        "(SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tool_record' AND COLUMN_NAME='read_only')", &merged.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:0 1:3 1:0", merged.written());
+    try expectCatalog(migrated_database_sql);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "model call timing MySQL format 68 migration preserves format 67 resolutions with null final attempt timings" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -855,6 +883,9 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     const saved_facts = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
         "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session_archive intent ON intent.command_key=c.command_key LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
         "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
+    const saved_facts_after = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
+        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session intent ON intent.archive_seq=c.command_seq LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
+        "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
     var before_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer before_facts.deinit();
     try writeResult(saved_facts, &before_facts.writer);
@@ -884,7 +915,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     try std.testing.expectEqualStrings(before.written(), after.written());
     var after_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after_facts.deinit();
-    try writeResult(saved_facts, &after_facts.writer);
+    try writeResult(saved_facts_after, &after_facts.writer);
     try std.testing.expectEqualStrings(before_facts.written(), after_facts.written());
     var provenance: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer provenance.deinit();

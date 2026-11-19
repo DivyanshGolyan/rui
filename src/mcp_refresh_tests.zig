@@ -52,7 +52,7 @@ fn narrowedChild(storage: *store.Store, tmp: *std.testing.TmpDir, parent: protoc
 test "MCP offer projection covers identity changes removals additions and name narrowing" {
     try testing.forEachEngine(struct {
         fn run(engine: *testing.Case) !void {
-            const Scenario = enum { unchanged, description, schema, server, read_only, owner, name, removed, mixed, added, builtins, narrowed, unloaded, key_namespace };
+            const Scenario = enum { unchanged, description, schema, server, owner, name, removed, mixed, added, builtins, narrowed, unloaded, key_namespace };
             var rounds: std.EnumArray(Scenario, u64) = .initFill(0);
             for (std.enums.values(Scenario)) |scenario| {
                 errdefer std.debug.print("MCP refresh scenario {s}\n", .{@tagName(scenario)});
@@ -89,7 +89,6 @@ test "MCP offer projection covers identity changes removals additions and name n
                     .description, .unloaded => after_rows[a].description = "new a",
                     .schema => after_rows[a].input_schema = "{\"type\":\"object\"}",
                     .server => after_rows[a].server = "moved",
-                    .read_only => after_rows[a].read_only = true,
                     .owner => {
                         after_rows[a].owner = .rui;
                         after_rows[a].server = "";
@@ -137,7 +136,7 @@ test "MCP offer projection covers identity changes removals additions and name n
                 rounds.set(scenario, storage.testing_content_work.rounds - rounds_before);
                 try std.testing.expectEqual(old_count, try revisions(&storage, session.slice()));
                 const changed = switch (scenario) {
-                    .description, .schema, .server, .read_only, .owner, .name, .removed, .mixed => true,
+                    .description, .schema, .server, .owner, .name, .removed, .mixed => true,
                     .unchanged, .added, .builtins, .narrowed, .unloaded, .key_namespace => false,
                 };
                 try std.testing.expectEqual(@as(u64, @intFromBool(!changed)), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.tool_set_id=coalesce(s.loaded_tool_set_id,s.tool_set_id)", .{next.operation_id}));
