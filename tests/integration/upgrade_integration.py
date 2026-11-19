@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import quote
 
 import live_engines
@@ -315,6 +317,23 @@ def discovery_cases(root, binary, releases):
         c.assert_no_host()
 
 
+def read_until(stream, text, what, timeout=10):
+    """Read a live child's pipe until `text` arrives; return what was read.
+
+    Reads the raw descriptor, so a later communicate() continues after it."""
+    deadline = time.monotonic() + timeout
+    seen = b""
+    while text.encode() not in seen:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, (f"timed out waiting for {what}", seen.decode(errors="replace"))
+        ready, _, _ = select.select([stream.fileno()], [], [], remaining)
+        if ready:
+            chunk = os.read(stream.fileno(), 65536)
+            assert chunk, (f"output ended before {what}", seen.decode(errors="replace"))
+            seen += chunk
+    return seen.decode()
+
+
 def install_cases(root, binary, releases):
     with case(root, binary, releases, "install-pinned-no-host") as c:
         # The release is resolved once: a later change of latest cannot
@@ -324,9 +343,11 @@ def install_cases(root, binary, releases):
         start = len(releases.requests)
         child = c.spawn_upgrade()
         wait_for(gate.entered.is_set, "pinned archive after release resolution")
+        # #1854: the installing line reaches the reader while the download is still held.
+        early = read_until(child.stdout, f"Installing Rui {releases.version}...", "installing line during the download")
         releases.latest_location = releases.origin + "/releases/tag/v0.999.0"
         gate.release.set()
-        output = c.finish_upgrade(child)
+        output = early + c.finish_upgrade(child)
         releases.latest_location = None
         assert "Upgraded to Rui" in output and "No running Hosts." in output, output
         # #1854: the check report, then what is happening, then the verdict.
