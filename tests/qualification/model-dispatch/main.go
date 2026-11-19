@@ -415,11 +415,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	nghttp2, err := h2Pin(os.Args[1], "nghttp2_version")
+	repo, err := measurement.RepositoryRoot()
 	if err != nil {
 		panic(err)
 	}
-	openssl, err := h2Pin(os.Args[1], "openssl_version")
+	nghttp2, err := h2Pin(repo, "nghttp2_version")
+	if err != nil {
+		panic(err)
+	}
+	openssl, err := h2Pin(repo, "openssl_version")
 	if err != nil {
 		panic(err)
 	}

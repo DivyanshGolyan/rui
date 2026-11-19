@@ -75,7 +75,7 @@ SOURCE_POLICY = (
                                           ("test_store_conformance.py", "*"))),
     (("tests/ci/caller_errors.py",), (("test_store_engine_boundary.py", "*"),)),
     (("src/store/schema.zig", "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
-    (("build.zig.zon", "src/h2/h2.zig", "tests/integration/host_process.py", "tests/integration/*.py",
+    (("build.zig.zon", "src/h2/h2.zig", "tests/integration/*.py",
       "tests/integration/*.sh", "tests/qualification/*.go", "tests/qualification/*.py", "tests/qualification/*.sh"),
      (("test_transport_version_fixtures.py", "*"),)),
     (("src/store/schema.zig", "src/store/migration_baseline.sqlite.sql",
