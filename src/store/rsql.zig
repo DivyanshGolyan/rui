@@ -2162,13 +2162,15 @@ fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const 
     }
 }
 
-/// Why `@in_index(alias, name)` is refused, or null when it is legal. A partial index must exist, and its
-/// first column must be NOT NULL: the MySQL form tests that column, which equals the index predicate only then.
+/// Why `@in_index(alias, name)` is refused, or null when it is legal. A partial index must exist. The `.leading`
+/// and `.unique_when` MySQL forms test the first column, which equals the predicate only when that column is
+/// NOT NULL; the `.plain_unique` form states the predicate itself.
 fn inIndexRefusal(comptime name: []const u8) ?[]const u8 {
     comptime {
         const index = schema.partialIndex(name) orelse return "rsql: @in_index names no partial index " ++ name;
         const first = columnName(index.columns[0]);
-        if (schema.columnNullable(index.table, first)) return "rsql: @in_index needs the first column " ++ first ++ " of " ++ name ++ " NOT NULL; a nullable first column makes its MySQL test differ from the index predicate";
+        const tests_first_column = schema.mysqlIndexForm(index).? != .plain_unique;
+        if (tests_first_column and schema.columnNullable(index.table, first)) return "rsql: @in_index needs the first column " ++ first ++ " of " ++ name ++ " NOT NULL; a nullable first column makes its MySQL test differ from the index predicate";
         return null;
     }
 }
