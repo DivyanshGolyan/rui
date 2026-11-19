@@ -90,7 +90,15 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
 }
 
 test "HTTP 429 quota authority requires an exact valid code but not reset metadata" {
-    const cases = [_]struct { bytes: []const u8, permanent: bool, reset: ?u64 = null }{
+    const cases = [_]struct { bytes: []const u8, permanent: bool, reset: ?u64 = null, plan: bool = false }{
+        .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"pro\",\"resets_at\":1795336193,\"eligible_promo\":null,\"resets_in_seconds\":444255}}", .permanent = true, .reset = 1_795_336_193 },
+        .{ .bytes = "{\"error\":{\"type\":\"usage_not_included\"}}", .permanent = true, .plan = true },
+        .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"code\":null,\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
+        .{ .bytes = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"type\":\"usage_limit_reached\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"type\":\"usage_limit_reached\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":7,\"type\":\"usage_limit_reached\",\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
+        .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"type\":\"x\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"Slow down\"}}", .permanent = false },
         .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\"}}", .permanent = true },
         .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":null}}", .permanent = true },
         .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":-1}}", .permanent = true },
@@ -120,9 +128,41 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
             .http_status = 429,
         } }, response).fail;
         try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
-        if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
+        if (case.permanent and !case.plan) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
         try std.testing.expect(interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, case.bytes.len, 200, output_decode.testingProviderFailure()) == .ordinary);
     }
+}
+
+test "HTTP 429 usage limit named by error.type is a permanent quota with its reset" {
+    const bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"pro\",\"resets_at\":1795336193,\"eligible_promo\":null,\"resets_in_seconds\":444255}}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "quota-type", .{ .read = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, bytes);
+    const response = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, file, bytes.len, 429, output_decode.testingProviderFailure());
+    const decision = execution.transferDecision(.{ .transport_finished = .{
+        .disposition = .temporary_http,
+        .http_status = 429,
+        .retry_after_ms = 9_000,
+    } }, response);
+    try std.testing.expectEqual(execution.FailureKind.permanent, decision.fail.kind);
+    var actual: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("provider_quota", decision.fail.codeText(&actual));
+    try std.testing.expectEqual(@as(?u64, 1_795_336_193), decision.fail.quota.?.resets_at);
+    try std.testing.expect(decision.fail.answered);
+    try std.testing.expect(decision.fail.retry_after_ms == null);
+
+    const outage = "{\"error\":{\"type\":\"server_error\",\"message\":\"Try again\"}}";
+    const outage_file = try tmp.dir.createFile(std.testing.io, "outage", .{ .read = true });
+    defer outage_file.close(std.testing.io);
+    try outage_file.writeStreamingAll(std.testing.io, outage);
+    const server_error = interpretErrorResponse(&testing_decode, .@"openai-responses/1", std.testing.io, outage_file, outage.len, 503, output_decode.testingProviderFailure());
+    const retried = execution.transferDecision(.{ .transport_finished = .{
+        .disposition = .temporary_http,
+        .http_status = 503,
+    } }, server_error);
+    try std.testing.expect(retried.fail.kind != .permanent);
 }
 
 test "provider interpretation preserves independently reported model evidence" {

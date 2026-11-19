@@ -774,6 +774,9 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 429, .kind = .quota, .report = "insufficient_quota: Out." },
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 403, .kind = .refusal, .report = "insufficient_quota: Out." },
         .{ .body = "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Too long.\"}}", .status = 400, .kind = .context_overflow, .report = "context_length_exceeded: Too long." },
+        .{ .body = "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 403, .kind = .refusal, .report = "insufficient_quota: Out." },
+        .{ .body = "{\"error\":{\"type\":\"model_not_found\"}}", .status = 503, .kind = .refusal, .report = "model_not_found" },
+        .{ .body = "{\"error\":{\"type\":\"context_length_exceeded\",\"message\":\"Too long.\"}}", .status = 400, .kind = .context_overflow, .report = "context_length_exceeded: Too long." },
         .{ .body = "{\"error\":{\"code\":\"rate_limit_exceeded\"}}", .status = 429, .kind = .ordinary, .report = "rate_limit_exceeded" },
     };
     for (ordered) |case| {
@@ -1193,6 +1196,8 @@ test "a provider error event keeps its refusal and the provider's own words" {
         .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Overloaded,\\ntry\\tlater.\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "server_error: Overloaded, try later." },
         .{ .event = "{\"type\":\"error\",\"code\":null,\"message\":\"Something failed.\"}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "Something failed." },
         .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "insufficient_quota" },
+        .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"Limit\"}}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "usage_limit_reached: Limit" },
+        .{ .event = "{\"type\":\"error\",\"error\":{\"code\":\"\",\"type\":\"usage_limit_reached\",\"message\":\"Limit\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "usage_limit_reached: Limit" },
         .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
         .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "" },
