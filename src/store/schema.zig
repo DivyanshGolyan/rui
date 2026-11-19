@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 85;
+pub const schema_version: u32 = 86;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -65,6 +65,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
+    .{ .schema_version = 86, .digest = 0x6099b37b911cb4ba },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -847,6 +848,15 @@ pub const migrations = [_]Migration{
             "UPDATE session s JOIN session_archive a ON a.session_ref=s.session_ref JOIN core_command c ON c.command_key=a.command_key SET s.archive_seq=c.command_seq WHERE a.command_key IS NOT NULL",
             "CREATE INDEX session_tab ON session(archive_seq,created_seq)",
             "DROP TABLE session_archive",
+        },
+    },
+    .{
+        .from = 85,
+        .sqlite = &.{
+            "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
         },
     },
 };
@@ -1917,6 +1927,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
+    .{ .name = "action_operation_unaccepted", .table = "action_operation", .columns = &.{"session_ref"}, .where = "acceptance_position IS NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
@@ -3727,6 +3738,32 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
     try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
+}
+
+test "schema 86 adds the unaccepted action partial index on SQLite and MySQL" {
+    const step = migrations[85 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 85), step.from);
+    try std.testing.expectEqual(@as(usize, 1), step.sqlite.len);
+    try std.testing.expectEqualStrings("CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL", step.sqlite[0]);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 85) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted' AND tbl_name='action_operation'"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM action_operation INDEXED BY action_operation_unaccepted WHERE acceptance_position IS NULL");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null);
 }
 
 // Export each schema value once per collect binary, under a stable symbol name.

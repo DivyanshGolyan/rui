@@ -520,3 +520,178 @@ test "Session pin parent and child organization stays independent during attache
         }
     }.run);
 }
+
+const session_list = @import("../session_list.zig");
+const session_archive = @import("../session_archive.zig");
+
+fn configureInWorkspace(storage: *Store, key: []const u8, workspace: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    var command = try testing.completeConfiguration(key, "", workspace, "model-a");
+    const reply = try storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+/// Walks one list request page by page, following the full tail cursor until it ends.
+const ListWalk = struct {
+    refs: [256][6]u8 = undefined,
+    count: usize = 0,
+    after: u64 = 0,
+    ceiling: u64 = 0,
+    more: bool = false,
+
+    pub fn head(_: *ListWalk) !void {}
+    pub fn row(self: *ListWalk, value: *const session_list.Row) !void {
+        try std.testing.expect(self.count < self.refs.len);
+        try std.testing.expectEqual(@as(usize, 6), value.reference.len);
+        self.refs[self.count] = value.reference[0..6].*;
+        self.count += 1;
+    }
+    pub fn tail(self: *ListWalk, value: session_list.Tail) !void {
+        switch (value) {
+            .full => |full| {
+                self.more = true;
+                self.after = full.after;
+                self.ceiling = full.ceiling;
+            },
+            .last => self.more = false,
+            .changed => return error.TestUnexpectedResult,
+        }
+    }
+};
+
+fn walkAll(storage: *Store, archive: session_archive.Filter, workspace: ?[]const u8, out: *[256][6]u8) !usize {
+    var request: session_list.ListSessions = .{ .archive = archive };
+    if (workspace) |name| {
+        var bounded: @TypeOf(request.workspace.?) = .{};
+        try bounded.set(name);
+        request.workspace = bounded;
+    }
+    var count: usize = 0;
+    while (true) {
+        var walk: ListWalk = .{};
+        storage.readSessionList(&request, &walk) catch |err| {
+            std.debug.print("WALK ERR {s} archive={s} ws={?s}\n", .{ @errorName(err), @tagName(archive), workspace });
+            return err;
+        };
+        for (walk.refs[0..walk.count]) |ref| {
+            try std.testing.expect(count < out.len);
+            out[count] = ref;
+            count += 1;
+        }
+        if (!walk.more) return count;
+        request.after = walk.after;
+        request.ceiling = walk.ceiling;
+    }
+}
+
+test "Session list membership and order equal the state reference for every filter and workspace" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const home = try testing.canonicalCwd(std.testing.io, &other_buffer);
+            const other = std.fs.path.dirname(home) orelse home;
+
+            // created_seq order is the order of creation; `expected` records it with each Session's workspace.
+            var created: [64]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            var in_other: [64]bool = undefined;
+            var created_count: usize = 0;
+            const Add = struct {
+                fn session(list: *[64]protocol.Bounded(protocol.max_session_bytes), flags: *[64]bool, n: *usize, ref: protocol.Bounded(protocol.max_session_bytes), other_flag: bool) void {
+                    list[n.*] = ref;
+                    flags[n.*] = other_flag;
+                    n.* += 1;
+                }
+            };
+            // Active Sessions in the canonical workspace and in the other workspace.
+            for (0..10) |i| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "walk-live-{d}", .{i});
+                const ref = try testing.configureTestSession(&storage, key);
+                Add.session(&created, &in_other, &created_count, ref, false);
+            }
+            for (0..2) |i| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "walk-other-live-{d}", .{i});
+                const ref = try configureInWorkspace(&storage, key, other);
+                Add.session(&created, &in_other, &created_count, ref, true);
+            }
+            // Archiving by an open turn: a Message is admitted to a model attempt that never settles.
+            {
+                const ref = try testing.configureTestSession(&storage, "walk-turn-open");
+                var message_key_buffer: [protocol.max_key_bytes]u8 = undefined;
+                const message_key = try std.fmt.bufPrint(&message_key_buffer, "walk-turn-open-message", .{});
+                try testing.submitTestMessage(&storage, &tmp, message_key, message_key, ref.slice(), "keep the turn open");
+                _ = (try storage.admitNextModelAttempt(.{})).?;
+                var archive = try archiveCommand("walk-turn-open-archive", ref.slice(), true);
+                const accepted = storage.archiveSession(&archive, .{});
+                try std.testing.expect(accepted == .accepted);
+                // The stop's interrupt settles the open turn in the same commit, so no fixture reaches a pending
+                // turn-only stop; this Session is archived. The pending turn-only state is not reproduced.
+                try expectState(&storage, ref.slice(), .archived);
+                Add.session(&created, &in_other, &created_count, ref, false);
+            }
+            // Archiving by an unaccepted Action: a running Bash Action (its turn is open too).
+            {
+                const bash = try runningBash(&storage, &tmp, "walk-action-open");
+                var archive = try archiveCommand("walk-action-open-archive", bash.session.slice(), true);
+                const accepted = storage.archiveSession(&archive, .{});
+                try std.testing.expect(accepted == .accepted);
+                try std.testing.expectEqual(protocol.SessionStopCompletion.pending, accepted.accepted.completion);
+                try expectState(&storage, bash.session.slice(), .archiving);
+                Add.session(&created, &in_other, &created_count, bash.session, false);
+            }
+            // Archived and restored Sessions, twelve archived so the Archived filter spans pages.
+            for (0..12) |i| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "walk-archived-{d}", .{i});
+                const ref = try testing.configureTestSession(&storage, key);
+                var archive_key_buffer: [32]u8 = undefined;
+                var archive = try archiveCommand(try std.fmt.bufPrint(&archive_key_buffer, "walk-archive-{d}", .{i}), ref.slice(), true);
+                try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                try expectState(&storage, ref.slice(), .archived);
+                Add.session(&created, &in_other, &created_count, ref, false);
+            }
+            for (0..2) |i| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "walk-restored-{d}", .{i});
+                const ref = try testing.configureTestSession(&storage, key);
+                var archive_key_buffer: [32]u8 = undefined;
+                var archive = try archiveCommand(try std.fmt.bufPrint(&archive_key_buffer, "walk-restore-archive-{d}", .{i}), ref.slice(), true);
+                try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                var restore_key_buffer: [32]u8 = undefined;
+                var restore = try archiveCommand(try std.fmt.bufPrint(&restore_key_buffer, "walk-restore-{d}", .{i}), ref.slice(), false);
+                try std.testing.expect(storage.archiveSession(&restore, .{}) == .accepted);
+                try expectState(&storage, ref.slice(), .active);
+                Add.session(&created, &in_other, &created_count, ref, false);
+            }
+            const filters = [_]session_archive.Filter{ .all, .active, .archived };
+            const workspaces = [_]?[]const u8{ null, other };
+            for (workspaces) |workspace| for (filters) |filter| {
+                // Reference: creation order, restricted to the workspace, then classified by the Session's own state.
+                var expected: [64][6]u8 = undefined;
+                var expected_count: usize = 0;
+                for (created[0..created_count], in_other[0..created_count]) |session, is_other| {
+                    if (workspace != null and !is_other) continue;
+                    const observation = try storage.inspectSessionForTesting(session.slice());
+                    try std.testing.expect(observation.found);
+                    const state: session_archive.State = switch (observation.archive_state) {
+                        .active => .active,
+                        .archiving => .archiving,
+                        .archived => .archived,
+                    };
+                    if (!filter.includes(state)) continue;
+                    expected[expected_count] = session.slice()[0..6].*;
+                    expected_count += 1;
+                }
+                var actual: [256][6]u8 = undefined;
+                const actual_count = try walkAll(&storage, filter, workspace, &actual);
+                try std.testing.expectEqualSlices([6]u8, expected[0..expected_count], actual[0..actual_count]);
+            };
+        }
+    }.run);
+}

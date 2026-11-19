@@ -7,6 +7,7 @@ const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
 const action_domain = @import("../domain/action.zig");
 const archive_membership = @import("../domain/archive_membership.zig");
+const session_list_read = @import("../domain/session_list_read.zig");
 const c = sqlite.c;
 const membership_state = archive_membership.stateSql("s");
 const openRaw = shared_fixtures.openRaw;
@@ -73,4 +74,41 @@ test "schema 85 archive membership migration keeps every Session's archive state
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(raw, "UPDATE session SET archive_seq=999 WHERE session_ref='act1v3'"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(raw, "UPDATE session SET archive_seq=0 WHERE session_ref='act1v3'"));
     try store_schema.openExisting(std.testing.io, raw, root, null, null);
+}
+
+test "format 86 live Session page reads session_tab and the archiving probe reads the in-flight indexes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/plan.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(raw, store_testing.baseline_rows);
+    for (store_schema.migrations) |step| {
+        for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+    }
+    const active = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.live_active_page.sql);
+    defer _ = c.sqlite3_finalize(active);
+    var uses_tab = false;
+    while (c.sqlite3_step(active) == c.SQLITE_ROW) {
+        const detail = std.mem.span(c.sqlite3_column_text(active, 3));
+        try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
+        if (std.mem.indexOf(u8, detail, "session_tab") != null) uses_tab = true;
+    }
+    try std.testing.expect(uses_tab);
+    const archiving = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.live_archiving_page.sql);
+    defer _ = c.sqlite3_finalize(archiving);
+    var probes_index = false;
+    var scans_session = false;
+    while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
+        const detail = std.mem.span(c.sqlite3_column_text(archiving, 3));
+        if (std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null) probes_index = true;
+        if (std.mem.indexOf(u8, detail, "SCAN s") != null) scans_session = true;
+    }
+    try std.testing.expect(probes_index);
+    try std.testing.expect(!scans_session);
 }

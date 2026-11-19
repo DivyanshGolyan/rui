@@ -28,6 +28,24 @@ pub fn stateSql(comptime alias: []const u8) []const u8 {
         "ELSE 'archived' END";
 }
 
+/// The Archived predicate on the Session row aliased `alias`: a key whose three-state rule says 'archived'.
+pub fn archivedSql(comptime alias: []const u8) []const u8 {
+    return comptime alias ++ ".archive_seq IS NOT NULL AND (" ++ stateSql(alias) ++ ")='archived'";
+}
+
+/// Filters a Session list by archive state. `parameter` is the bound Filter name:
+/// 'all' keeps every row, 'archived' keeps Archived rows, 'active' keeps active and archiving rows.
+pub fn filterSql(comptime alias: []const u8, comptime parameter: []const u8) []const u8 {
+    return comptime " AND (" ++ parameter ++ "='all' OR (" ++ archivedSql(alias) ++ ")=(" ++ parameter ++ "='archived'))";
+}
+
+/// Sessions that may be archiving, from the indexes that hold in-flight work: open turns (`outcome_code`
+/// null, or `outcome_position` null with a code), and unaccepted Actions. A superset of the archiving
+/// Sessions, so the caller still decides each one with `stateSql`.
+pub const archiving_candidates_sql = "SELECT t.session_ref FROM turn t @index(turn_one_active_per_session) WHERE t.outcome_code IS NULL " ++
+    "UNION SELECT u.session_ref FROM turn u @index(turn_unpositioned) WHERE (u.outcome_code IS NULL)!=(u.outcome_position IS NULL) " ++
+    "UNION SELECT a.session_ref FROM action_operation a @index(action_operation_unaccepted) WHERE a.acceptance_position IS NULL";
+
 const mark_archived = rsql.Write(.{
     .sql = "UPDATE session SET archive_seq=?2 WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, seq: u64 },
