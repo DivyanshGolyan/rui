@@ -391,6 +391,10 @@ pub const ConnectionInfo = struct {
     pub fn reusable(self: *const @This()) bool {
         return self.readiness.usable() and !self.unauthenticated and self.key_source != null;
     }
+    /// The key source the Host reads for this connection; null when it sends no key.
+    pub fn servedKey(self: *const @This()) @FieldType(@This(), "key_source") {
+        return if (self.unauthenticated) null else self.key_source;
+    }
     pub fn custom(self: *const @This()) bool {
         return !std.mem.eql(u8, self.endpoint.slice(), openai_endpoint);
     }
@@ -2306,6 +2310,7 @@ test "inspectConnection reports the key source the Host will use" {
     try savedEdit(init, open_dir, "providers", "{\"openai\":{\"unauthenticated\":true}}", &failure);
     const from_open = try inspectConnection(init, open_dir);
     try std.testing.expectEqual(true, from_open.unauthenticated);
+    try std.testing.expect(from_open.servedKey() == null);
     try std.testing.expectEqual(Readiness.configured, from_open.readiness);
     try std.testing.expectEqual(false, from_open.key_source != null);
 }

@@ -1858,7 +1858,7 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
 /// A failed inspect, or a Store whose Host names no key source, leaves the local readiness standing.
 fn storeReadiness(init: std.process.Init, store: []const u8, local: provider_selection.Readinesses) defaults_report.Overlay {
     const info = host_start.inspectConnection(init, store) catch return defaults_report.overlayStore(local, null);
-    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .unauthenticated = info.unauthenticated, .key_source = copiedKeySource(init, info.key_source) });
+    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) });
 }
 
 /// The key source copied into the arena, so it outlives the inspect result; null when none or when the copy fails.

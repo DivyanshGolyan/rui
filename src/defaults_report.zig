@@ -54,7 +54,6 @@ pub const KeySource = union(enum) { file: []const u8, env: []const u8 };
 /// The Store's Host inspect result for the OpenAI key, as the shell copies it.
 pub const Inspected = struct {
     readiness: provider_selection.Readiness,
-    unauthenticated: bool = false,
     key_source: ?KeySource = null,
 };
 
@@ -65,13 +64,12 @@ pub const Overlay = struct {
 };
 
 /// The one rule for the OpenAI key as a Store's Host reads it: the inspect result overrides the local
-/// OpenAI readiness only when it names a key source and is not unauthenticated. Otherwise the local
+/// OpenAI readiness only when it names the key source the Host reads. Otherwise the local
 /// readiness stands and no source is reported.
 pub fn overlayStore(local: provider_selection.Readinesses, inspected: ?Inspected) Overlay {
     var overlay: Overlay = .{ .readiness = local };
     const info = inspected orelse return overlay;
     const source = info.key_source orelse return overlay;
-    if (info.unauthenticated) return overlay;
     overlay.readiness.set(.openai, info.readiness);
     overlay.key_source = source;
     return overlay;
@@ -696,12 +694,4 @@ test "Store overlay reports the OpenAI key source only when the Store names one"
     const omitted = overlayStore(local, .{ .readiness = .missing, .key_source = null });
     try std.testing.expectEqual(Readiness.configured, omitted.readiness.get(.openai));
     try std.testing.expectEqual(@as(?Tag, null), tagOf(omitted.key_source));
-
-    // Unauthenticated sends no key, so it never overrides the local readiness, whatever source it names.
-    const open = overlayStore(local, .{ .readiness = .configured, .unauthenticated = true, .key_source = null });
-    try std.testing.expectEqual(Readiness.configured, open.readiness.get(.openai));
-    try std.testing.expectEqual(@as(?Tag, null), tagOf(open.key_source));
-    const open_with_source = overlayStore(provider_selection.Readinesses.initFill(.missing), .{ .readiness = .configured, .unauthenticated = true, .key_source = .{ .env = "RUI_OPENAI_KEY" } });
-    try std.testing.expectEqual(Readiness.missing, open_with_source.readiness.get(.openai));
-    try std.testing.expectEqual(@as(?Tag, null), tagOf(open_with_source.key_source));
 }
