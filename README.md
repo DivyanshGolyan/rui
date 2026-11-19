@@ -1,7 +1,7 @@
 # Rui
 
 Rui runs many agents from your application in one small process.
-Work picks up where it left off after a crash.
+Work picks up where it left off when Rui restarts after a crash.
 Your application starts agents, gives them tools and reads their answers through a TypeScript client.
 The same runtime also gives you an agent in your terminal.
 
@@ -17,7 +17,7 @@ See the [data and method](docs/waiting-agent-memory.md) for measurement scope an
 
 - **Many agents, one process.**
   Agents spend most of their time waiting on the model.
-  In Rui a waiting agent is a few kilobytes of state in one shared process, so a hundred agents cost about as much as one.
+  In Rui a waiting agent is saved state in one shared process, so in the [published benchmark](docs/waiting-agent-memory.md) a hundred waiting agents used about as much memory as one.
 - **Safe across crashes.**
   Every step is saved before Rui moves on.
   If Rui stops in the middle of a command, it reports that the command may have run and never runs it again by itself.
