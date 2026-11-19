@@ -32,6 +32,10 @@ HOST = "src/server.zig"
 CALLER = "src/client.zig"
 FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
+# build/link_table.json: the dependency packages each build target links, walked from the build graph
+# (build/link_table.zig). A changed build.zig.zon package selects the targets it links.
+LINK_TABLE = "build/link_table.json"
+DEPENDENCY_MANIFEST = "build.zig.zon"
 
 MODULES = {
     "url": "src/url.zig", "os": "src/os/os.zig",
@@ -206,6 +210,8 @@ class Graph:
                 if "RUI_TEST_MYSQL_" in read(name):
                     mysql_cases.add(name)
         self.compiled = set(self.every).union(*self.every.values())
+        self.links = ({target: set(packages) for target, packages in json.loads(read(LINK_TABLE))["targets"].items()}
+                      if LINK_TABLE in names else {})
         self.cores = {"src/" + core for core in re.findall(
             r'\.\{ "([^"]+\.zig)", @import', read(FUNCTIONAL_CORES).split("const cores = .{", 1)[1].split("\n};", 1)[0])}
         self.tests = {name for name in self.production if matches(name, TEST_CODE)}
@@ -414,8 +420,9 @@ RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
 # What the build itself reads beyond the import graph: the build scripts, dependency pins and
 # fetch, the compiler and cache setup, and the CI producer that writes the zig command.
 BOOTSTRAP_INPUTS = ("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*",
-                    "src/*.patch", ".agents/setup", ".github/actions/setup/action.yml", "screen-emulator/*",
-                    "tests/ci/build_artifact.py", "tests/ci/cache_snapshot.py")
+                    "src/*.patch", "src/fetch_screen_dependencies.sh", "tests/integration/requirements.txt",
+                    ".agents/setup", ".github/actions/setup/action.yml", "screen-emulator/*",
+                    "tests/ci/build_artifact.py", "tests/ci/cache_snapshot.py", LINK_TABLE)
 
 RULES = (
     (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
@@ -498,6 +505,10 @@ RULES = (
      ("transport-h2-integration", "codex-h2-integration"), "Transport build and managed TLS/H2 bootstrap"),
     (("release/publish.sh",), ("host-status-integration",), ("host-status-integration",),
      "Installer report reads the CLI's defaults and Host status JSON"),
+    (("src/parser_fuzz_tests.zig",), ("test-logic",), ("test-logic",),
+     "Parser fuzz seed corpus: the logic root runs its seeds"),
+    (("src/tool_digest_generator.zig", "src/tool_digests_generated.zig"), ("test-logic",), ("test-logic",),
+     "Tool digest generator and its table: the logic root checks the digests"),
 )
 
 RULES += ((('src/host_reply.zig', 'src/command_reply.zig', 'src/command_spec.zig',
@@ -564,6 +575,7 @@ BUILD_MODULES = {
     "build/measurement.zig": ("measurement-check",),
     FIXTURE_TABLE: tuple(sorted(step for step, owner in build_files.steps().items() if owner == FIXTURE_TABLE)),
     "build/cross.zig": (),
+    "build/link_table.zig": BUILD_HUB,
     "build/darwin.zig": ("test", "host-launch-integration"),
     ".github/actions/setup/caches/action.yml": ("test-logic",),
     ".github/actions/setup/caches/save-keys.cjs": ("test-logic",),
@@ -719,7 +731,7 @@ def own_fixture(target, paths):
     return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
 
 
-def fast_tier(targets, paths, bootstrap_only=False):
+def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False):
     """The PR tier of a raw (unnormalized) selection.
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
@@ -727,6 +739,8 @@ def fast_tier(targets, paths, bootstrap_only=False):
     alone selected it; `test-store` only for Store paths) and the fixtures
     whose own sources the diff touches. A fixture the diff reaches only
     through imports runs on main and in promotion, never on the PR.
+    `linked` are the unit roots a changed dependency links, kept whatever the
+    paths are. An unclassified path selects every PR unit root.
     """
     targets = set(targets)
     fast = targets & PR_UNIT_ROOTS
@@ -736,12 +750,94 @@ def fast_tier(targets, paths, bootstrap_only=False):
         fast |= {"test-logic"} if bootstrap_only else {"test-native", "test-logic"}
     if not any(matches(path, STORE_PATHS) for path in paths):
         fast.discard("test-store")
+    fast |= set(linked) & PR_UNIT_ROOTS
+    if unclassified:
+        fast = set(PR_UNIT_ROOTS)
     fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
              if own_fixture(target, paths)}
     for broad, covered in FIXTURE_COVERS.items():
         if broad in fast:
             fast -= covered
     return sorted(fast)
+
+
+ZON_BLOCK_ENTRY = re.compile(r"\.(\w+)\s*=\s*\.\{([^{}]*)\}")
+ZON_FIELD = re.compile(r'\.(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|\w+)')
+
+
+def dependency_entries(text):
+    """build.zig.zon's dependency entries by name, each as its fields; None when the manifest cannot be read."""
+    if text is None:
+        return None
+    start = text.find(".dependencies")
+    if start < 0:
+        return {}
+    open_brace = text.find("{", start)
+    if open_brace < 0:
+        return None
+    depth, end = 0, None
+    for index in range(open_brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index
+                break
+    if end is None:
+        return None
+    block = text[open_brace:end + 1]
+    entries = {}
+    for name, body in ZON_BLOCK_ENTRY.findall(block):
+        fields = dict(ZON_FIELD.findall(body))
+        if name in entries or not fields:
+            return None
+        entries[name] = fields
+    # Every entry is one brace-free block inside the dependencies block; any other shape is unreadable.
+    if block.count(".{") != len(entries):
+        return None
+    return entries
+
+
+def changed_dependencies(before, after):
+    """Names of build.zig.zon dependencies whose entries (url, hash and the rest) differ; None when unreadable."""
+    old, new = dependency_entries(before), dependency_entries(after)
+    if old is None or new is None:
+        return None
+    return sorted(name for name in old.keys() | new.keys() if old.get(name) != new.get(name))
+
+
+def package_targets(packages, graph, available):
+    """The build targets that link each package, or None when some package links no target (an unknown package)."""
+    targets = set()
+    for package in packages:
+        linked = {target for target, names in graph.links.items() if package in names}
+        if not linked:
+            return None
+        targets |= linked
+    return targets & available
+
+
+def documentation(path):
+    """Documentation and research: references and whitespace, never runtime acceptance."""
+    return path.endswith(".md") or path.startswith(("docs/", "research/"))
+
+
+def ci_policy(path):
+    """CI code and workflows: the policy job runs their checks, and no unit root or fixture is reached through them."""
+    return (path.startswith((".github/", "tests/ci/", "tests/formal/")) and path != ".github/actions/setup/action.yml"
+            or path == "tests/integration/previous_release_upgrade.py")
+
+
+# Integration scripts that no fixture owns and no name in the tree reaches. They are diagnostics a document or
+# a helper runs by hand; a change to one keeps the check selection it has always had. test_selection checks
+# that each still exists and that the graph reaches none of them.
+DIAGNOSTIC_INTEGRATIONS = (
+    "tests/integration/background_action_integration.py", "tests/integration/codex_live.py",
+    "tests/integration/host_serve_dialect.py", "tests/integration/message_observation_resources.py",
+    "tests/integration/proc_sample.py", "tests/integration/saved_request_resources.py",
+    "tests/integration/session_list_release_probe.c", "tests/integration/session_list_release_proof.py",
+)
 
 
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
@@ -757,6 +853,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                               for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
+    unclassified = False
     live_needs = set()
     manual_checks = set()
     linux_memory_checks = False
@@ -765,15 +862,14 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             continue
         reached = graph.targets(path)
         shortcut = False
-        if path.endswith(".md") or path.startswith(("docs/", "research/")):
+        if documentation(path):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             shortcut = True
         elif (path in graph.host if path.startswith("src/") and path.endswith(".zig")
               else any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)):
             targets.add("stack-frames")
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
-        if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
-                or path == "tests/integration/previous_release_upgrade.py"):
+        if ci_policy(path):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
             shortcut = True
         matched = shortcut
@@ -814,16 +910,24 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                 manual_checks.add(f"{path}: syntax/compilation and reviewer-selected affected diagnostic when measurement claims change")
                 reasons.add("Qualification executable: cheap checks do not qualify its measurement claims")
             continue
-        if not matched and path.startswith("tests/integration/"):
-            candidate = Path(path).stem.replace("_", "-")
-            targets.add(candidate if candidate in available else "check")
-            native_targets.add(candidate if candidate in available else "check")
-            reasons.add("Maintained integration target or full fallback")
-            matched = True
-        if not matched and path.startswith("src/"):
+        if not matched and path in DIAGNOSTIC_INTEGRATIONS:
             targets.add("check")
             native_targets.add("check")
-            reasons.add("Source no import or rule reaches: full fallback")
+            reasons.add("Diagnostic integration script no fixture owns: the full check, as before")
+            matched = True
+        if not matched and path.startswith("tests/integration/") and Path(path).stem.replace("_", "-") in available:
+            candidate = Path(path).stem.replace("_", "-")
+            targets.add(candidate)
+            native_targets.add(candidate)
+            reasons.add("Maintained integration target named after its file")
+            matched = True
+        if not matched:
+            # Fail safe: a path no owner classifies may hide a dependency of any suite, so it selects the full PR set.
+            unclassified = True
+            targets.add("check")
+            native_targets.add("check")
+            reasons.add("Source no import or rule reaches: full fallback" if path.startswith("src/")
+                        else "Unclassified path: full PR set and the full check")
         if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")
             native_targets.add("test-full")
@@ -847,6 +951,19 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             targets.update(asserted)
             native_targets.update(asserted - LINUX_ONLY)
             reasons.add("Asserted text: a fixture waits for text this file draws")
+    linked = set()
+    if DEPENDENCY_MANIFEST in changed:
+        packages = changed_dependencies(*contents[DEPENDENCY_MANIFEST]) if DEPENDENCY_MANIFEST in contents else None
+        linked = package_targets(packages, graph, available) if packages is not None else None
+        if linked is None:
+            unclassified = True
+            targets.add("check")
+            native_targets.add("check")
+            reasons.add("build.zig.zon: a changed package the link table does not know, or an unreadable manifest: full PR set")
+        else:
+            targets |= linked
+            native_targets |= linked - LINUX_ONLY
+            reasons.add("Dependency: the build targets that link a changed build.zig.zon package")
     unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
     mac_required = phase == "review" and any(mac_path(path) for path in paths)
     if mac_required:
@@ -868,7 +985,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     product = [path for path in changed if path not in bootstrap]
     bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
-    fast_targets = fast_tier(targets, paths, bootstrap_only)
+    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -930,7 +1047,7 @@ def main():
     result = select(paths, args.phase, available,
                     contents={path: (revision_text(base, path), revision_text(head, path))
                               for path in paths
-                              if path.startswith("src/") or path == FIXTURE_TABLE
+                              if path.startswith("src/") or path in (FIXTURE_TABLE, DEPENDENCY_MANIFEST)
                               or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
     result["base"] = base
     result["head"] = head
