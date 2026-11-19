@@ -1,5 +1,5 @@
 name: Promote
-# Runs every three hours and by hand. Publish a qualified main commit and
+# Runs every three hours at :45 UTC (15 past the hour IST) and by hand. Publish a qualified main commit and
 # advance stable to it. On schedule the commit is main HEAD (inputs are empty,
 # so `inputs.sha` is ''); when stable already holds it, the run does nothing.
 # A HEAD with a red main-qualified record is skipped quietly, since the failing
@@ -21,7 +21,7 @@ on:
         required: false
         default: ''
   schedule:
-    - cron: '17 */3 * * *'
+    - cron: '45 */3 * * *'
 
 permissions:
   contents: read
@@ -48,6 +48,7 @@ jobs:
       reuse: ${{ steps.batch.outputs.reuse }}
       run: ${{ steps.batch.outputs.run }}
       version: ${{ steps.batch.outputs.version }}
+      weekly: ${{ steps.weekly.outputs.weekly }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,6 +67,18 @@ jobs:
           outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN" $( [ "$SCHEDULED" = true ] && echo --scheduled ))
           echo "$outputs" >> "$GITHUB_OUTPUT"
           echo "$outputs"
+      - name: Choose whether this is the week's dependency check
+        id: weekly
+        env:
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          # Promote runs at :45 UTC every three hours; the 03:45 Monday run (09:15 IST) checks pins, allowing two hours of schedule delay.
+          day_hour=$(date -u +%u%H)
+          weekly=false
+          if [ "$SCHEDULED" = true ] && [ "$day_hour" \> 102 ] && [ "$day_hour" \< 106 ]; then weekly=true; fi
+          echo "weekly=$weekly" >> "$GITHUB_OUTPUT"
+          echo "weekly dependency check: $weekly"
   qualify:
     # The shared tier and its verdict (qualification-tier.yml), only when the
     # chosen commit is main HEAD without a green record to reuse.
@@ -107,3 +120,11 @@ jobs:
       sha: ${{ needs.batch.outputs.head }}
       version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version || needs.qualify.outputs.version }}
       artifact-run: ${{ needs.batch.outputs.run }}
+  dependency_lag:
+    # Keeps the deps-behind issue current (#1893); a skipped job uses no runner.
+    needs: batch
+    if: ${{ needs.batch.outputs.weekly == 'true' }}
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/dependency-lag.yml

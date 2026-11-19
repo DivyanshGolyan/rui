@@ -159,6 +159,8 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
         try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
         document = try parse(gpa, bytes, failure);
     }
+    var automatic_buffer: AutomaticBuffer = undefined;
+    const automatic_set: []const protocol.Provider = if (!document.object.contains("providers")) automaticProviders(init, &automatic_buffer) else &.{};
     if (value) |given| {
         try input(init, settings, path, given, failure);
         const all = try complete(gpa, settings, failure);
@@ -175,7 +177,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
                 }
             }
         }
-        try put(gpa, &document, path, admitted);
+        try editProviders(gpa, &document, path, admitted, automatic_set);
     } else {
         const all = try complete(gpa, settings, failure);
         if (lookup(all, path)) |existing| {
@@ -193,7 +195,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
             };
             try assign(settings, init.gpa, path, sample, failure);
         }
-        remove(&document, path);
+        try editProviders(gpa, &document, path, null, automatic_set);
     }
     const bytes = try encoded(gpa, document);
     if (bytes.len > hs.max_document_bytes) return invalid(failure, "settings", "saved document exceeds the document byte bound");
@@ -291,9 +293,9 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             try assign(settings, ctx.init.gpa, "providers.openai.key", try std.fmt.allocPrint(ctx.gpa, "file:{s}", .{ctx.key_file}), &failure);
             try assign(settings, ctx.init.gpa, "providers.openai.unauthenticated", "false", &failure);
             const all = try complete(ctx.gpa, settings, &failure);
-            if (!document.object.contains("providers")) {
-                try put(ctx.gpa, &document, "providers", lookup(all, "providers").?);
-            } else try put(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?);
+            var automatic_buffer: AutomaticBuffer = undefined;
+            const automatic_set: []const protocol.Provider = if (automatic) automaticProviders(ctx.init, &automatic_buffer) else &.{};
+            try editProviders(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?, automatic_set);
             const bytes = try encoded(ctx.gpa, document);
             if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
             settings.deinit();
@@ -391,6 +393,10 @@ pub const ConnectionInfo = struct {
     pub fn reusable(self: *const @This()) bool {
         return self.readiness.usable() and !self.unauthenticated and self.key_source != null;
     }
+    /// The key source the Host reads for this connection; null when it sends no key.
+    pub fn servedKey(self: *const @This()) @FieldType(@This(), "key_source") {
+        return if (self.unauthenticated) null else self.key_source;
+    }
     pub fn custom(self: *const @This()) bool {
         return !std.mem.eql(u8, self.endpoint.slice(), openai_endpoint);
     }
@@ -429,15 +435,16 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
     try fillAt(init, &parsed, dir, settings, &failure);
     var result: ConnectionInfo = .{};
     try result.endpoint.set(if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*value| value.slice() else openai_endpoint else openai_endpoint);
-    if (settings.providers.entries.openai) |*entry| {
-        result.unauthenticated = entry.unauthenticated.value;
-        if (!entry.unauthenticated.value) {
-            try defaultKeySource(init, &entry.key);
-            result.key_source = entry.key.source;
-        }
-    } else return result;
-    resolveProviders(init, settings, &failure) catch {
-        result.readiness = .credential_error;
+    const entry = if (settings.providers.entries.openai) |*value| value else return result;
+    result.unauthenticated = entry.unauthenticated.value;
+    if (entry.unauthenticated.value) {
+        result.readiness = .configured;
+        return result;
+    }
+    try defaultKeySource(init, &entry.key);
+    result.key_source = entry.key.source;
+    resolve(init, &entry.key) catch |err| {
+        result.readiness = if (err == error.ApiKeyMissing) .missing else if (err == error.OutOfMemory) return err else .credential_error;
         return result;
     };
     result.readiness = .configured;
@@ -462,8 +469,11 @@ pub fn listPaths(out: *std.Io.Writer) !void {
     for (hs.leaves) |leaf| try out.print("{s}\t{s}\t{s}\t{s}\n", .{ leaf.pattern, leaf.kind, leaf.default, leaf.doc });
 }
 
-fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
-    try assign(settings, init.gpa, "providers", "{}", failure);
+const AutomaticBuffer = [std.enums.values(protocol.Provider).len]protocol.Provider;
+
+/// The providers a Host with no saved `providers` object serves automatically: each one whose credential is usable.
+fn automaticProviders(init: std.process.Init, buffer: *AutomaticBuffer) []const protocol.Provider {
+    var count: usize = 0;
     inline for (std.enums.values(protocol.Provider)) |provider| {
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const usable = switch (comptime provider.facts().credential) {
@@ -478,10 +488,41 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
             },
         };
         if (usable) {
-            const at = "providers." ++ @tagName(provider);
-            try assign(settings, init.gpa, at, "{}", failure);
+            buffer[count] = provider;
+            count += 1;
         }
     }
+    return buffer[0..count];
+}
+
+fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    var buffer: AutomaticBuffer = undefined;
+    const automatic = automaticProviders(init, &buffer);
+    try assign(settings, init.gpa, "providers", "{}", failure);
+    inline for (std.enums.values(protocol.Provider)) |provider| {
+        if (std.mem.indexOfScalar(protocol.Provider, automatic, provider) != null) try assign(settings, init.gpa, "providers." ++ @tagName(provider), "{}", failure);
+    }
+}
+
+/// Owner of a saved-document provider edit. A `providers.NAME...` assignment or unset on a document with no
+/// `providers` object first materializes the automatic set, so the edit changes only that provider. An unset
+/// of anything else under `providers` on such a document changes nothing. Assigning `providers` itself, or
+/// editing a document that already has `providers`, is a plain exact put or remove.
+fn editProviders(gpa: std.mem.Allocator, document: *std.json.Value, path: []const u8, value: ?std.json.Value, automatic: []const protocol.Provider) !void {
+    if (std.mem.startsWith(u8, path, "providers.") and !document.object.contains("providers")) {
+        const name = path["providers.".len..];
+        const leaf = std.mem.indexOfScalar(u8, name, '.') == null;
+        if (value == null and !(leaf and automaticNamed(automatic, name))) return;
+        var set: std.json.Value = .{ .object = .{} };
+        for (automatic) |provider| try set.object.put(gpa, try gpa.dupe(u8, @tagName(provider)), .{ .object = .{} });
+        try put(gpa, document, "providers", set);
+    }
+    if (value) |given| try put(gpa, document, path, given) else remove(document, path);
+}
+
+fn automaticNamed(automatic: []const protocol.Provider, name: []const u8) bool {
+    for (automatic) |provider| if (std.mem.eql(u8, @tagName(provider), name)) return true;
+    return false;
 }
 
 pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
@@ -1225,6 +1266,127 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
 }
 
+test "Host start saved edits below providers materialize the automatic set and only providers replaces it" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try private.realPath(init.io, &root)];
+    // With HOME holding no sign-in, the automatic set is codex alone.
+    const Start = enum { automatic, explicit };
+    const Change = enum { endpoint, whole, unset };
+    const cases = [_]struct { start: Start, change: Change, served: []const []const u8 }{
+        .{ .start = .automatic, .change = .endpoint, .served = &.{ "codex", "openai" } },
+        .{ .start = .automatic, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .automatic, .change = .unset, .served = &.{} },
+        .{ .start = .explicit, .change = .endpoint, .served = &.{ "codex", "chatgpt", "openai" } },
+        .{ .start = .explicit, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .explicit, .change = .unset, .served = &.{"chatgpt"} },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("providers edit case {s} {s}\n", .{ @tagName(case.start), @tagName(case.change) });
+        try private.writeFile(init.io, .{ .sub_path = "host.json", .data = switch (case.start) {
+            .automatic => "{}",
+            .explicit => "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}",
+        } });
+        try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        var failure: start_report.Failure = undefined;
+        switch (case.change) {
+            .endpoint => try savedEdit(init, dir, "providers.openai.endpoint", "https://example.test/v1", &failure),
+            .whole => try savedEdit(init, dir, "providers", "{\"chatgpt\":{}}", &failure),
+            .unset => try savedEdit(init, dir, "providers.codex", null, &failure),
+        }
+        const bytes = try private.readFileAlloc(init.io, "host.json", arena.allocator(), .limited(hs.max_document_bytes));
+        const json = try parse(arena.allocator(), bytes, &failure);
+        const providers_object = lookup(json, "providers").?;
+        try std.testing.expectEqual(case.served.len, providers_object.object.count());
+        for (case.served) |name| try std.testing.expect(providers_object.object.contains(name));
+    }
+}
+
+test "Host start saved provider edits have one owner over the automatic set" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const Start = enum { automatic, explicit };
+    const Edit = enum { set_endpoint, set_whole, unset_codex, unset_openai, unset_codex_endpoint };
+    // Index 0 is the automatic set [codex]; index 1 is [codex, chatgpt, openai]. Null means no providers object.
+    const Row = struct { start: Start, edit: Edit, expected: [2]?[]const u8 };
+    const rows = [_]Row{
+        .{ .start = .automatic, .edit = .set_endpoint, .expected = .{ "{\"codex\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}", "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}" } },
+        .{ .start = .automatic, .edit = .set_whole, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_codex, .expected = .{ "{}", "{\"openai\":{},\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_openai, .expected = .{ null, "{\"codex\":{},\"chatgpt\":{}}" } },
+        .{ .start = .automatic, .edit = .unset_codex_endpoint, .expected = .{ null, null } },
+        .{ .start = .explicit, .edit = .set_endpoint, .expected = .{ "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}", "{\"codex\":{},\"chatgpt\":{},\"openai\":{\"endpoint\":\"https://example.test/v1\"}}" } },
+        .{ .start = .explicit, .edit = .set_whole, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_codex, .expected = .{ "{\"chatgpt\":{}}", "{\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_openai, .expected = .{ "{\"codex\":{},\"chatgpt\":{}}", "{\"codex\":{},\"chatgpt\":{}}" } },
+        .{ .start = .explicit, .edit = .unset_codex_endpoint, .expected = .{ "{\"codex\":{},\"chatgpt\":{}}", "{\"codex\":{},\"chatgpt\":{}}" } },
+    };
+    const sets = [_][]const protocol.Provider{ &.{.codex}, &.{ .codex, .chatgpt, .openai } };
+    for (rows) |row| {
+        for (sets, 0..) |automatic, index| {
+            errdefer std.debug.print("providers edit {s} {s} automatic set {d}\n", .{ @tagName(row.start), @tagName(row.edit), index });
+            var failure: start_report.Failure = undefined;
+            var document = try parse(arena.allocator(), switch (row.start) {
+                .automatic => "{}",
+                .explicit => "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}",
+            }, &failure);
+            const whole = try parse(arena.allocator(), "{\"chatgpt\":{}}", &failure);
+            const endpoint: std.json.Value = .{ .string = "https://example.test/v1" };
+            switch (row.edit) {
+                .set_endpoint => try editProviders(arena.allocator(), &document, "providers.openai.endpoint", endpoint, automatic),
+                .set_whole => try editProviders(arena.allocator(), &document, "providers", whole, automatic),
+                .unset_codex => try editProviders(arena.allocator(), &document, "providers.codex", null, automatic),
+                .unset_openai => try editProviders(arena.allocator(), &document, "providers.openai", null, automatic),
+                .unset_codex_endpoint => try editProviders(arena.allocator(), &document, "providers.codex.endpoint", null, automatic),
+            }
+            if (row.expected[index]) |expected| {
+                const providers_object = lookup(document, "providers").?;
+                try std.testing.expectEqualStrings(expected, try encoded(arena.allocator(), providers_object));
+            } else try std.testing.expect(lookup(document, "providers") == null);
+        }
+    }
+}
+
+test "Host start saved openai edit carries a usable key into the saved automatic set" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try private.realPath(init.io, &root)];
+    var key_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const key_file = try std.fmt.bufPrint(&key_root, "{s}/openai.key", .{dir});
+    try api_key.install(key_file, "sk-synthetic-usable-key");
+    try environment.put(credential_location.variable(.openai), key_file);
+    try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{}" });
+    try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    var failure: start_report.Failure = undefined;
+    try savedEdit(init, dir, "providers.openai.endpoint", "https://example.test/v1", &failure);
+    const bytes = try private.readFileAlloc(init.io, "host.json", arena.allocator(), .limited(hs.max_document_bytes));
+    const json = try parse(arena.allocator(), bytes, &failure);
+    const providers_object = lookup(json, "providers").?;
+    try std.testing.expectEqual(@as(usize, 2), providers_object.object.count());
+    try std.testing.expect(providers_object.object.contains("codex") and providers_object.object.contains("openai"));
+}
+
 test "Host start reads a previous release's retired flags as the settings those flags filled" {
     const serve_grammar = @import("serve_grammar.zig");
     const gpa = std.testing.allocator;
@@ -1341,13 +1503,15 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     try showSaved(init, dir, &shown.writer, &failure);
     var json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers.openai") != null);
-    try std.testing.expect(lookup(json, "providers.codex") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
+    // Unsetting openai on the materialized automatic set removes only openai; codex stays.
     try savedEdit(init, dir, "providers.openai", null, &failure);
     shown.clearRetainingCapacity();
     try showSaved(init, dir, &shown.writer, &failure);
     json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers") != null);
-    inline for (std.enums.values(protocol.Provider)) |provider| try std.testing.expect(lookup(json, "providers." ++ @tagName(provider)) == null);
+    try std.testing.expect(lookup(json, "providers.openai") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
     try savedEdit(init, dir, "store.mysql.url", "env:MYSQL_TEST_URL", &failure);
     try savedEdit(init, dir, "store.mysql.url", null, &failure);
     shown.clearRetainingCapacity();
@@ -2193,6 +2357,121 @@ test "Host start unsaved placement is refused but saved placement and other over
     try std.testing.expectError(error.SettingsInvalid, checkStart(init, .{ .dir = dir, .settings_file = file }, &failure));
     try savedEdit(init, dir, "interface.dir", interface, &failure);
     try checkStart(init, .{ .dir = dir, .assignments = &.{"execution.activeCapacity=3"} }, &failure);
+}
+
+test "inspectConnection reports the key source the Host will use" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    try environment.put("RUI_TEST_OPENAI_KEY", "sk-inspect-env-key-0001");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    const a = arena.allocator();
+    var failure: start_report.Failure = undefined;
+
+    // No key anywhere: nothing usable, and no source is reported.
+    const none = try inspectConnection(init, try std.fs.path.join(a, &.{ home, "none" }));
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, none.readiness);
+    try std.testing.expect(none.key_source == null);
+
+    // Default key file present and no configured source: the default file is the source.
+    const default_dir = try std.fs.path.join(a, &.{ home, "default" });
+    try provider_login.key(init, "sk-inspect-default-key-0001");
+    try savedEdit(init, default_dir, "providers", "{\"openai\":{}}", &failure);
+    var default_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const default_path = try credential_location.default(&environment, .openai, &default_path_buffer);
+    const from_default = try inspectConnection(init, default_dir);
+    try std.testing.expect(from_default.readiness.usable());
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_default.key_source.?)).file, std.meta.activeTag(from_default.key_source.?));
+    try std.testing.expectEqualStrings(default_path, from_default.key_source.?.file.slice());
+
+    // Configured file present: the configured file wins over the default file.
+    const configured_path = try std.fs.path.join(a, &.{ home, ".config", "rui", "configured.key" });
+    try api_key.install(configured_path, "sk-inspect-configured-key-0001");
+    const configured_dir = try std.fs.path.join(a, &.{ home, "configured" });
+    const configured_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{configured_path});
+    try savedEdit(init, configured_dir, "providers", configured_edit, &failure);
+    const from_configured = try inspectConnection(init, configured_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.configured, from_configured.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_configured.key_source.?)).file, std.meta.activeTag(from_configured.key_source.?));
+    try std.testing.expectEqualStrings(configured_path, from_configured.key_source.?.file.slice());
+
+    // Configured file missing: missing, and the named path is the reported source.
+    const absent_path = try std.fs.path.join(a, &.{ home, ".config", "rui", "absent.key" });
+    const absent_dir = try std.fs.path.join(a, &.{ home, "absent" });
+    const absent_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{absent_path});
+    try savedEdit(init, absent_dir, "providers", absent_edit, &failure);
+    const from_absent = try inspectConnection(init, absent_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, from_absent.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_absent.key_source.?)).file, std.meta.activeTag(from_absent.key_source.?));
+    try std.testing.expectEqualStrings(absent_path, from_absent.key_source.?.file.slice());
+
+    // Configured environment variable set: configured, reported as the env source.
+    const env_dir = try std.fs.path.join(a, &.{ home, "env" });
+    try savedEdit(init, env_dir, "providers", "{\"openai\":{\"key\":{\"env\":\"RUI_TEST_OPENAI_KEY\"}}}", &failure);
+    const from_env = try inspectConnection(init, env_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.configured, from_env.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_env.key_source.?)).env, std.meta.activeTag(from_env.key_source.?));
+    try std.testing.expectEqualStrings("RUI_TEST_OPENAI_KEY", from_env.key_source.?.env.slice());
+
+    // Configured environment variable unset: missing, and the variable name is reported.
+    const unset_dir = try std.fs.path.join(a, &.{ home, "unset" });
+    try savedEdit(init, unset_dir, "providers", "{\"openai\":{\"key\":{\"env\":\"RUI_TEST_OPENAI_KEY_ABSENT\"}}}", &failure);
+    const from_unset = try inspectConnection(init, unset_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, from_unset.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_unset.key_source.?)).env, std.meta.activeTag(from_unset.key_source.?));
+    try std.testing.expectEqualStrings("RUI_TEST_OPENAI_KEY_ABSENT", from_unset.key_source.?.env.slice());
+
+    const Readiness = @import("provider_selection.zig").Readiness;
+    const rui_dir = try std.fs.path.join(a, &.{ home, ".config", "rui" });
+    var rui = try std.Io.Dir.openDirAbsolute(io, rui_dir, .{});
+    defer rui.close(io);
+
+    // Configured file readable by others: refused as insecure, and the named file is the reported source.
+    const insecure_path = try std.fs.path.join(a, &.{ rui_dir, "insecure.key" });
+    try api_key.install(insecure_path, "sk-inspect-insecure-key-0001");
+    try rui.setFilePermissions(io, "insecure.key", .fromMode(0o644), .{});
+    const insecure_dir = try std.fs.path.join(a, &.{ home, "insecure" });
+    const insecure_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{insecure_path});
+    try savedEdit(init, insecure_dir, "providers", insecure_edit, &failure);
+    const from_insecure = try inspectConnection(init, insecure_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_insecure.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_insecure.key_source.?)).file, std.meta.activeTag(from_insecure.key_source.?));
+    try std.testing.expectEqualStrings(insecure_path, from_insecure.key_source.?.file.slice());
+
+    // Configured file whose content is not one key (a space inside): unreadable, and the file is the reported source.
+    const invalid_path = try std.fs.path.join(a, &.{ rui_dir, "invalid.key" });
+    try rui.writeFile(io, .{ .sub_path = "invalid.key", .data = "sk-two words\n" });
+    try rui.setFilePermissions(io, "invalid.key", .fromMode(0o600), .{});
+    const invalid_dir = try std.fs.path.join(a, &.{ home, "invalid" });
+    const invalid_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{invalid_path});
+    try savedEdit(init, invalid_dir, "providers", invalid_edit, &failure);
+    const from_invalid = try inspectConnection(init, invalid_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_invalid.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_invalid.key_source.?)).file, std.meta.activeTag(from_invalid.key_source.?));
+    try std.testing.expectEqualStrings(invalid_path, from_invalid.key_source.?.file.slice());
+
+    // Explicit providers that omit openai, with the default key file present: no OpenAI key and no source.
+    const omitted_dir = try std.fs.path.join(a, &.{ home, "omitted" });
+    try savedEdit(init, omitted_dir, "providers", "{\"chatgpt\":{}}", &failure);
+    const from_omitted = try inspectConnection(init, omitted_dir);
+    try std.testing.expectEqual(Readiness.missing, from_omitted.readiness);
+    try std.testing.expectEqual(false, from_omitted.key_source != null);
+
+    // Unauthenticated: no credential is sent, so it names no key source.
+    const open_dir = try std.fs.path.join(a, &.{ home, "open" });
+    try savedEdit(init, open_dir, "providers", "{\"openai\":{\"unauthenticated\":true}}", &failure);
+    const from_open = try inspectConnection(init, open_dir);
+    try std.testing.expectEqual(true, from_open.unauthenticated);
+    try std.testing.expect(from_open.servedKey() == null);
+    try std.testing.expectEqual(Readiness.configured, from_open.readiness);
+    try std.testing.expectEqual(false, from_open.key_source != null);
 }
 
 test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {

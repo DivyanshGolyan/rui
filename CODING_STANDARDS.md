@@ -54,10 +54,13 @@ Obtain independent opinions on material design questions.
 
 ### Goal
 
-Every PR body has a visible `Goal: #123 <how this change serves the issue>` line, using an issue number or full GitHub issue URL and at least three explanation words.
+Every PR body has a visible goal line naming an issue by number or full GitHub issue URL, with at least three explanation words.
+Use `Fixes #123 <how this change finishes the issue>` when merging the PR completes the issue, so GitHub closes it on merge; nobody closes it by hand afterwards.
+Use `Goal: #123 <how this change serves the issue>` for an issue that stays open, such as a workstream, a parent or a multi-PR issue.
+A PR can carry both, and one line per finished issue.
 For housekeeping, red-main reverts, model trials or similar work without an issue, use `No issue: <reason>` instead.
 The plan checks the text, not whether the issue exists.
-[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
+[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its goal-line issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
 ### Shape before code
 
@@ -95,6 +98,9 @@ A new surface that does the same job as an existing component calls that compone
 
 Before correcting a failure, identify its owner, invariant and earliest violating transition.
 Correct that transition or replace the owning model, not a downstream observer.
+For a bug, that owner answers why the bug was possible: a rule with two owners, a rule applied beyond its case, a check only one path runs, a caller that must know a policy or a call order, or a test that pinned the broken promise ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
+The bug fix's `## Summary` states it in a `Why possible:` line and how the fix removes that class.
+Only a root fix that needs a user decision under [Authority](AGENTS.md#authority) (a contract or behavior change, or wider scope) may land after the instance fix, as a linked issue under the same workstream.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.

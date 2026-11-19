@@ -698,7 +698,12 @@ fn observeHostForUpgradeAt(io: std.Io, paths: *const platform.Paths, deadline: ?
     };
 }
 
-pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !?HostControlObservation {
+/// What one listed socket showed. `unanswered` is a refusal or missing socket
+/// at connect, after the retry: nothing accepted, so a complete process census
+/// can settle it. Every failure after a connection is an error instead.
+pub const SocketObservation = union(enum) { absent, unanswered: anyerror, observed: HostControlObservation };
+
+pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !SocketObservation {
     const until = hostObservationDeadline(io, deadline);
     const address = try std.Io.net.UnixAddress.init(socket_path);
     const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + refused_connect_retry_ns);
@@ -707,7 +712,7 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
             const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
                 switch (err) {
                     error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
-                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
+                        if (platform.socketStoreIsUnowned(io, socket_path)) return .absent;
                     },
                     else => {},
                 }
@@ -718,7 +723,10 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
                         if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < connect_until) continue;
                     }
                 }
-                return err;
+                return switch (err) {
+                    error.ConnectionRefused, error.FileNotFound => .{ .unanswered = err },
+                    else => err,
+                };
             };
             break :connection connected;
         }
@@ -743,7 +751,7 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
     const observed = try observeHostForUpgradeAt(io, &paths, until);
     if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
-    return observed;
+    return .{ .observed = observed };
 }
 
 /// Authenticate the process at the saved DIR socket without decoding its wire
@@ -797,7 +805,11 @@ pub const UpgradeCandidate = struct {
     directory: ?[]const u8 = null,
     pid: ?c_int = null,
     generation: ?u64 = null,
-    result: union(enum) { observed: HostControlObservation, failed: anyerror },
+    /// `unanswered` holds a socket that refused or vanished at connect until
+    /// the process census settles it: `stale` when a complete census found no
+    /// Host serving it (#1855), else `failed`. Callers never see `unanswered`.
+    /// A stale Host state is still unconfirmed, so nothing acts on it.
+    result: union(enum) { observed: HostControlObservation, failed: anyerror, unanswered: anyerror, stale },
 
     pub fn deinit(self: UpgradeCandidate, allocator: std.mem.Allocator) void {
         if (self.socket) |path| allocator.free(path);
@@ -851,7 +863,11 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         try requests.check();
         try candidates.ensureUnusedCapacity(allocator, 1);
         const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null);
-        const result: @FieldType(UpgradeCandidate, "result") = if (observed) |facts| .{ .observed = facts orelse continue } else |err| .{ .failed = err };
+        const result: @FieldType(UpgradeCandidate, "result") = if (observed) |seen| switch (seen) {
+            .absent => continue,
+            .unanswered => |err| .{ .unanswered = err },
+            .observed => |facts| .{ .observed = facts },
+        } else |err| .{ .failed = err };
         const owned_socket = try allocator.dupe(u8, socket);
         errdefer allocator.free(owned_socket);
         const directory = if (result == .observed) try allocator.dupe(u8, result.observed.directory()) else null;
@@ -866,12 +882,14 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }) },
     }) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        settleUnansweredSockets(candidates.items, .incomplete);
         try candidates.append(allocator, .{ .result = .{ .failed = err } });
         return candidates.toOwnedSlice(allocator);
     };
     defer allocator.free(processes.stdout);
     defer allocator.free(processes.stderr);
     if (!processes.term.success()) {
+        settleUnansweredSockets(candidates.items, .incomplete);
         try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessSnapshotUnavailable } });
         return candidates.toOwnedSlice(allocator);
     }
@@ -915,7 +933,24 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         };
         try appendUpgradeCandidate(allocator, &candidates, candidate);
     }
+    settleUnansweredSockets(candidates.items, .complete);
     return candidates.toOwnedSlice(allocator);
+}
+
+/// The one place an unanswered socket is decided. After a complete process
+/// census that located every Host process's socket, a Host process resolving
+/// to a socket has replaced that socket's candidate, so one still unanswered
+/// has no live owner: a leftover, not a failed Host. Otherwise it stays a
+/// per-Host failure.
+fn settleUnansweredSockets(candidates: []UpgradeCandidate, census: enum { complete, incomplete }) void {
+    // A Host process whose socket stayed unknown might own any unanswered socket.
+    const located = census == .complete and for (candidates) |candidate| {
+        if (candidate.pid != null and candidate.socket == null) break false;
+    } else true;
+    for (candidates) |*candidate| switch (candidate.result) {
+        .unanswered => |err| candidate.result = if (located) .stale else .{ .failed = err },
+        else => {},
+    };
 }
 
 /// Process generation and retirement are independent of runtime/Store leases.
@@ -6109,7 +6144,7 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
     defer tmp.cleanup();
     var buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
     const address = try tmp.address("discovery.sock", &buffer);
-    try std.testing.expectError(error.FileNotFound, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    try std.testing.expectEqual(error.FileNotFound, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
     {
         var listener = try address.listen(io, .{ .kernel_backlog = 1 });
         defer listener.deinit(io);
@@ -6127,10 +6162,13 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
             count += 1;
         } else return error.TestUnexpectedResult;
         try std.testing.expectEqual(if (blocks) error.TransferInactive else error.ConnectionRefused, blocked);
-        try std.testing.expectError(if (blocks) error.TransferInactive else error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+        if (blocks)
+            try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, null))
+        else
+            try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
     }
     const before = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - before >= 25 * std.time.ns_per_ms);
     try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1));
 }
@@ -6160,12 +6198,12 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
     listener.deinit(io);
     const refused_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - refused_at >= refused_connect_retry_ns);
     lease.release();
     held = false;
     const stale_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectEqual(@as(?HostControlObservation, null), try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expect(try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null) == .absent);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }
@@ -6246,6 +6284,42 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expectEqual(@as(c_int, 42), candidates.items[0].result.observed.pid);
     try std.testing.expectEqual(@as(?c_int, 43), candidates.items[1].pid);
     try std.testing.expect(candidates.items[1].socket == null);
+}
+
+test "#1855 only a socket unanswered at connect, after a complete census, is a stale leftover" {
+    var observation: HostControlObservation = .{ .profile = .current, .facts = std.mem.zeroes(protocol_reply.HostInfoFacts), .pid = 42 };
+    try observation.host_directory.set("/host");
+    const Settled = enum { stale, failed, observed };
+    const Row = struct { candidate: UpgradeCandidate, complete: Settled, incomplete: Settled };
+    const rows = [_]Row{
+        .{ .candidate = .{ .socket = "/refused.sock", .result = .{ .unanswered = error.ConnectionRefused } }, .complete = .stale, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/vanished.sock", .result = .{ .unanswered = error.FileNotFound } }, .complete = .stale, .incomplete = .failed },
+        // Same error names after a connection: a live Host whose Store vanished.
+        .{ .candidate = .{ .socket = "/accepted.sock", .result = .{ .failed = error.FileNotFound } }, .complete = .failed, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/old-wire.sock", .result = .{ .failed = error.WrongWireVersion } }, .complete = .failed, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/silent.sock", .result = .{ .failed = error.TransferInactive } }, .complete = .failed, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/live.sock", .directory = "/host", .pid = 42, .result = .{ .observed = observation } }, .complete = .observed, .incomplete = .observed },
+        .{ .candidate = .{ .socket = "/owned.sock", .pid = 43, .result = .{ .failed = error.HostPeerPidMismatch } }, .complete = .failed, .incomplete = .failed },
+    };
+    // A Host process whose socket stayed unknown might own any unanswered socket.
+    const unlocated: Row = .{ .candidate = .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } }, .complete = .failed, .incomplete = .failed };
+    inline for (.{ false, true }) |with_unlocated| {
+        inline for (.{ .complete, .incomplete }) |census| {
+            const all = if (with_unlocated) rows ++ [_]Row{unlocated} else rows;
+            var candidates: [all.len]UpgradeCandidate = undefined;
+            for (all, &candidates) |row, *candidate| candidate.* = row.candidate;
+            settleUnansweredSockets(&candidates, census);
+            for (all, candidates) |row, candidate| {
+                const expected = @field(row, @tagName(census));
+                try std.testing.expectEqual(if (with_unlocated and expected == .stale) Settled.failed else expected, switch (candidate.result) {
+                    .stale => Settled.stale,
+                    .failed => Settled.failed,
+                    .observed => Settled.observed,
+                    .unanswered => unreachable,
+                });
+            }
+        }
+    }
 }
 
 test "upgrade process retirement covers macOS zombie generations and living cleanup tails" {

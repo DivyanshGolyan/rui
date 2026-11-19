@@ -181,6 +181,7 @@ pub const Listed = struct {
     created_at: u64 = 0,
     workspace: []const u8,
     provider: Provider,
+    model: []const u8 = "",
     label: ?[]const u8 = null,
     state: WorkState,
 
@@ -205,6 +206,7 @@ pub const Listed = struct {
             .created_at = row.created_at,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
+            .model = row.model.slice(),
             .label = if (row.label) |*text| text.slice() else null,
             .state = row.work.state,
             .turn = row.work.turn,
@@ -315,7 +317,7 @@ pub const Event = union(enum) {
     list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
-    launch_start: struct { explicit_session: bool, restoring: bool },
+    launch_start: LaunchIntent,
     launch_size: struct { size: Size, wide: bool },
     launch_poll,
     presentation_start: u64,
@@ -534,6 +536,17 @@ pub const Default = struct {
     }
 };
 
+/// What the command line asks the wide launch to open. Only `defaults` and
+/// `named` wait for the listing to choose between reopening and creating.
+/// The binding is never carried here: `chooseLaunch` reads `State.default`
+/// at poll time, the same value creation uses.
+pub const LaunchIntent = enum {
+    defaults,
+    named,
+    explicit_session,
+    restoring,
+};
+
 pub const Binding = struct {
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
@@ -613,6 +626,7 @@ pub const Row = struct {
 
     workspace: u32,
     provider: ?Provider = null,
+    model: Bounded(model_capability.max_model_bytes) = .{},
     label: ?Bounded(max_label_bytes),
     state: WorkState,
 
@@ -681,6 +695,7 @@ pub const State = struct {
     size: Size = .{},
     sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
+    launch_intent: LaunchIntent = .defaults,
     presentation: union(enum) { done, holding: u64, released } = .done,
     presentation_fell_back: bool = false,
 
@@ -1364,8 +1379,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 releaseInitialPresentation(state, &effects);
             }
         },
-        .launch_start => |startup| {
-            if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) state.launch = .sizing;
+        .launch_start => |intent| switch (intent) {
+            .defaults, .named => if (!state.left and state.conversing == null) {
+                state.launch = .sizing;
+                state.launch_intent = intent;
+            },
+            .explicit_session, .restoring => {},
         },
         .launch_size => |frame| {
             state.size = frame.size;
@@ -1373,16 +1392,21 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .launch_poll => {
             if (state.launch == .waiting and state.listed_at_ms != null and !state.list_stale) {
-                if (newestEmpty(state)) |reference| {
-                    state.launch = .done;
-                    state.selected = .{ .session = reference };
-                    effects.add(.{ .open = reference });
-                } else {
-                    state.selected = .new_session;
-                    try enter(state, &effects);
-                    state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                switch (chooseLaunch(state.launch_intent, state.default, state.rows.items)) {
+                    .wait => {},
+                    .reopen => |reference| {
+                        state.launch = .done;
+                        state.selected = .{ .session = reference };
+                        effects.add(.{ .open = reference });
+                        effects.redraw = true;
+                    },
+                    .create => {
+                        state.selected = .new_session;
+                        try enter(state, &effects);
+                        state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                        effects.redraw = true;
+                    },
                 }
-                effects.redraw = true;
             }
         },
         .observed => |read| {
@@ -1571,6 +1595,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .created_at = listed.created_at,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
+            .model = bounded(model_capability.max_model_bytes, listed.model),
             .label = if (listed.label) |text| labelOf(text) else null,
             .state = shown,
             .turn = listed.turn,
@@ -1647,6 +1672,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         row.created_at = incoming.created_at;
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
+        row.model = incoming.model;
         row.label = incoming.label;
         row.first = incoming.first;
         row.from_person_at = incoming.from_person_at;
@@ -2824,10 +2850,33 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     };
 }
 
-pub fn newestEmpty(state: *const State) ?Reference {
+/// What a waiting launch does at poll time. `wait` keeps the launch open until
+/// sign-in saves a default, so a named launch never creates under another binding.
+pub const LaunchChoice = union(enum) { reopen: Reference, create, wait };
+
+/// The one launch choice, read at poll time from `default`, the binding that
+/// creation uses. `defaults` reopens the newest empty Session of any binding,
+/// or creates when none exists, including with no `default` yet.
+/// `named` with a `default` reopens only an empty Session with that provider
+/// and model, otherwise creates; with no `default` yet it waits for sign-in.
+/// Only `defaults` and `named` reach this choice: `launch_poll` runs only while
+/// `launch_start` has set one of them.
+pub fn chooseLaunch(intent: LaunchIntent, default: ?Default, rows: []const Row) LaunchChoice {
+    const reference = switch (intent) {
+        .defaults => newestEmpty(rows, null),
+        .named => if (default) |binding| newestEmpty(rows, binding) else return .wait,
+        .explicit_session, .restoring => unreachable,
+    };
+    return if (reference) |found| .{ .reopen = found } else .create;
+}
+
+/// The newest unarchived Session with no first Message, restricted to
+/// `binding`'s provider and model when one is given.
+pub fn newestEmpty(rows: []const Row, binding: ?Default) ?Reference {
     var newest: ?*const Row = null;
-    for (state.rows.items) |*row| {
+    for (rows) |*row| {
         if (!row.listed or row.archive_state == .archived or row.first != null) continue;
+        if (binding) |want| if (row.provider != want.provider or !row.model.eql(want.model.slice())) continue;
         if (newest == null or row.created_at > newest.?.created_at or
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
@@ -2944,6 +2993,7 @@ const TestSession = struct {
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
     provider: Provider = .codex,
+    model: []const u8 = "gpt-6-luna",
     first: ?First = .{ .position = 1, .admission = 4, .sender = null, .content = test_first },
     yours: bool = false,
     turn: ?u64 = null,
@@ -2959,6 +3009,7 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .pin_order = options.pin_order,
         .workspace = options.workspace,
         .provider = options.provider,
+        .model = options.model,
         .label = options.label,
         .state = state,
         .turn = options.turn,
@@ -6619,7 +6670,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
     for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Outcome)) |outcome| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .defaults });
         _ = try step(&state, .{ .presentation_start = 1000 });
         try std.testing.expect(state.initialPresentation(true) == .holding);
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
@@ -6690,7 +6741,7 @@ test "launch core handles late list after presentation release" {
     for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Release)) |release| for (std.enums.values(Listing)) |listing| for ([_]bool{ false, true }) |size_first| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .defaults });
         _ = try step(&state, .{ .presentation_start = 1000 });
         if (size_first) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
@@ -6723,7 +6774,7 @@ test "launch core drops a late launch once the overview is used" {
     for ([_]bool{ false, true }) |leave| {
         var state = try testState();
         defer state.deinit();
-        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .launch_start = .defaults });
         _ = try step(&state, .{ .presentation_start = 1000 });
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
@@ -6743,7 +6794,7 @@ test "launch core drops a late launch once the overview is used" {
 test "initial presentation core does not hold a narrow resumed chat" {
     var state = try testState();
     defer state.deinit();
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .explicit_session });
     _ = try step(&state, .{ .presentation_start = 1000 });
     try std.testing.expect(state.initialPresentation(false) != .holding);
     try std.testing.expect(state.initialPresentation(true) == .holding);
@@ -6805,6 +6856,115 @@ test "launch core reopens newest active empty Session" {
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
     try std.testing.expect(!state.hidesOverview());
     try expectEffects(&.{}, try step(&state, .launch_poll));
+}
+
+/// Store rows for the launch core's domain. The matching row for `luna` is
+/// older than a newer non-matching row in `behind_newer_other`; the archived
+/// and populated rows match `luna` but must never be reopened.
+const LaunchStore = enum { none, same, other_provider, other_model, behind_newer_other, archived_and_populated };
+
+fn launchStoreRows(store: LaunchStore, buffer: *[2]Listed) []const Listed {
+    switch (store) {
+        .none => return buffer[0..0],
+        .same => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            return buffer[0..1];
+        },
+        .other_provider => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            return buffer[0..1];
+        },
+        .other_model => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-sol" });
+            return buffer[0..1];
+        },
+        .behind_newer_other => {
+            buffer[0] = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0].created_at = 1;
+            buffer[1] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            buffer[1].created_at = 2;
+            return buffer[0..2];
+        },
+        .archived_and_populated => {
+            buffer[0] = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0].created_at = 3;
+            buffer[1] = session("dddddd", .{ .idle = ago(1) }, .{ .provider = .codex, .model = "gpt-6-luna" });
+            buffer[1].created_at = 4;
+            return buffer[0..2];
+        },
+    }
+}
+
+const LaunchKind = enum { defaults, named };
+
+fn bindingIs(poll: ?Default, want: Default) bool {
+    return if (poll) |resolved| resolved.eql(&want) else false;
+}
+
+/// The reference the core must reopen for this store and launch, or null for create.
+fn launchReopen(store: LaunchStore, intent: LaunchKind, binding: ?Default) ?[6]u8 {
+    const luna = Default.of("codex", "gpt-6-luna").?;
+    const sol = Default.of("codex", "gpt-6-sol").?;
+    const other_provider = Default.of("openai", "gpt-6-luna").?;
+    return switch (store) {
+        .none, .archived_and_populated => null,
+        .same => if (intent == .defaults or bindingIs(binding, luna)) "bbbbbb".* else null,
+        .other_provider => if (intent == .defaults or bindingIs(binding, other_provider)) "bbbbbb".* else null,
+        .other_model => if (intent == .defaults or bindingIs(binding, sol)) "bbbbbb".* else null,
+        .behind_newer_other => switch (intent) {
+            .defaults => "bbbbbb".*,
+            .named => if (bindingIs(binding, luna)) "aaaaaa".* else null,
+        },
+    };
+}
+
+test "launch core reopens the empty Session that the binding read at poll time resolves to" {
+    const luna = Default.of("codex", "gpt-6-luna").?;
+    const sol = Default.of("codex", "gpt-6-sol").?;
+    // Bindings arrive only as `defaults_saved` events, which a null save leaves unchanged.
+    // A named launch with no binding yet waits for sign-in; the poll-time binding is what
+    // the later `defaults_saved` supplies, and that poll decides.
+    const at_starts = [_]?Default{ null, sol };
+    const at_polls = [_]?Default{ null, luna, sol };
+    for (std.enums.values(LaunchKind)) |intent| for (at_starts) |at_start| for (at_polls) |at_poll| for (std.enums.values(LaunchStore)) |store| {
+        var buffer: [2]Listed = undefined;
+        var state = try opened(launchStoreRows(store, &buffer));
+        defer state.deinit();
+        if (at_start) |start| _ = try step(&state, .{ .defaults_saved = start });
+        _ = try step(&state, .{ .launch_start = switch (intent) {
+            .defaults => .defaults,
+            .named => .named,
+        } });
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        if (intent == .named and at_start == null) {
+            // Still waiting for sign-in: a poll and a null save both leave the overview hidden with no effect.
+            try expectEffects(&.{}, try step(&state, .launch_poll));
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
+            _ = try step(&state, .{ .defaults_saved = null });
+            try expectEffects(&.{}, try step(&state, .launch_poll));
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
+        }
+        if (at_poll) |saved| _ = try step(&state, .{ .defaults_saved = saved });
+        if (intent == .named and state.default == null) {
+            // Still waiting: no effect until a binding is saved.
+            try expectEffects(&.{}, try step(&state, .launch_poll));
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
+            continue;
+        }
+        const binding = state.default;
+        const effects = try step(&state, .launch_poll);
+        if (launchReopen(store, intent, binding)) |reference| {
+            try expectEffects(&.{ .{ .open = reference }, .list_models }, effects);
+            try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        } else {
+            try expectEffects(&.{.{ .create = binding }}, effects);
+            try std.testing.expect(state.hidesOverview());
+        }
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    };
 }
 
 test "launch core exposes overview after unsuccessful first listing" {
@@ -6881,13 +7041,13 @@ test "launch admission belongs to bare app startup" {
     defer state.deinit();
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .explicit_session });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = true } });
+    _ = try step(&state, .{ .launch_start = .restoring });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.done, state.launch);
-    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try step(&state, .{ .launch_start = .defaults });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.waiting, state.launch);
 }

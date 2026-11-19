@@ -60,6 +60,8 @@ concurrency:
 
 jobs:
   mac_runner:
+    # A pull request selects no native target (ci_plan.plan), so its routing decision is never read.
+    if: ${{ github.event_name != 'pull_request' }}
     continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 3
@@ -312,6 +314,13 @@ jobs:
           cache-part: compiled
           # Only main saves caches; this job runs only for pull requests.
           publish-caches: 'false'
+      - name: Log the CI host and compiled cache match
+        env:
+          BUILD_MATCH: ${{ steps.setup.outputs.build-match }}
+        run: |
+          set -euo pipefail
+          cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//' || true)
+          echo "CI host: cpu=${cpu:-unknown} compiled-cache=${BUILD_MATCH:-miss}"
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -796,10 +805,16 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     needs: [plan, policy, pr_linux, linux_build, linux_build_unit, linux_suites, macos_typecheck]
-    if: ${{ always() && !github.event.repository.private }}
+    # A pull request's admission runs the same aggregate (require_linux_parts.sh) itself.
+    if: ${{ always() && !github.event.repository.private && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
       - name: Require every selected Linux part
         env:
           DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
@@ -817,67 +832,7 @@ jobs:
           TYPECHECK: ${{ needs.plan.outputs.typecheck_macos }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
           COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
-        run: |
-          test "$PLAN_RESULT" = success
-          # A compile-only build runs neither policy nor suites.
-          case "$COMPILE_ONLY" in
-            true) RAN=skipped ;;
-            false) RAN=success ;;
-            *) echo 'Missing or invalid compile-only selection' >&2; exit 1 ;;
-          esac
-          case "$DRAFT_RUN:${CHANGE_KIND-normal}" in
-            true:normal|true:documentation|false:documentation)
-              test "$COMPILE_ONLY" = false
-              test "$POLICY_RESULT" = skipped
-              test "$TARGETS" = '[]'
-              test "$COMPILE_TARGETS" = '[]'
-              test "$SPLIT" = false
-              test "$TYPECHECK" = false
-              test "$PR_JOB" = false
-              for result in "$PR_RESULT" "$BUILD_RESULT" "$UNIT_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
-                test "$result" = skipped
-              done
-              exit 0 ;;
-            false:normal) ;;
-            *) echo 'Invalid draft run or change kind' >&2; exit 1 ;;
-          esac
-          case "$PR_JOB" in
-            true)
-              # The single PR job holds policy, compile and suites; nothing else runs.
-              test "$COMPILE_ONLY" = false
-              test "$PR_RESULT" = success
-              test "$SPLIT" = false
-              test "$TYPECHECK" = false
-              for result in "$POLICY_RESULT" "$BUILD_RESULT" "$UNIT_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
-                test "$result" = skipped
-              done
-              exit 0 ;;
-            false) test "$PR_RESULT" = skipped ;;
-            *) echo 'Missing or invalid PR job selection' >&2; exit 1 ;;
-          esac
-          test "$POLICY_RESULT" = "$RAN"
-          if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
-          case "$TYPECHECK" in
-            true) test "$TYPECHECK_RESULT" = success ;;
-            false) test "$TYPECHECK_RESULT" = skipped ;;
-            *) echo 'Missing or invalid typecheck selection' >&2; exit 1 ;;
-          esac
-          if [ -n "$COMPILE_TARGETS" ] && [ "$COMPILE_TARGETS" != '[]' ]; then
-            test "$BUILD_RESULT" = success
-          else
-            test "$BUILD_RESULT" = skipped
-          fi
-          if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
-            test "$NATIVE_RESULT" = "$RAN"
-          else
-            test "$NATIVE_RESULT" = skipped
-          fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ failure() }}
-        with:
-          ref: ${{ needs.plan.outputs.candidate_ref }}
-          sparse-checkout: tests/ci
-          persist-credentials: false
+        run: bash tests/ci/require_linux_parts.sh
       - name: Name each failed job and its cause
         if: ${{ failure() }}
         env:
@@ -995,13 +950,13 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   admission:
     # This is the sole PR admission status. Reduced draft feedback cannot pass it.
-    needs: [plan, policy, linux, macos, cache_execution]
+    # It checks the Linux parts itself (require_linux_parts.sh); the linux job does so off pull requests.
+    needs: [plan, policy, macos, cache_execution, pr_linux, linux_build, linux_build_unit, linux_suites, macos_typecheck]
     if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ needs.plan.outputs.screens_required == 'true' }}
         with:
           ref: ${{ needs.plan.outputs.candidate_ref }}
           sparse-checkout: tests/ci
@@ -1028,7 +983,6 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
           PR_JOB: ${{ needs.plan.outputs.pr_job }}
-          LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
           NATIVE: ${{ needs.plan.outputs.native }}
           CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
@@ -1037,7 +991,6 @@ jobs:
           set -euo pipefail
           if [ "$DRAFT" != false ]; then echo '::error::A draft never admits: mark the PR ready for review.'; exit 1; fi
           test "$PLAN_RESULT" = success
-          test "$LINUX_RESULT" = success
           case "$CHANGE_KIND" in
             documentation)
               test "$POLICY_RESULT" = skipped
@@ -1052,7 +1005,7 @@ jobs:
               test "$MACOS_SPLIT" = false
               test "$LINUX_MEMORY" = false ;;
             normal)
-              # The single PR job runs policy itself; the linux aggregate requires that job.
+              # The single PR job runs policy itself; admission requires that job.
               case "$PR_JOB" in
                 true) test "$POLICY_RESULT" = skipped ;;
                 false) test "$POLICY_RESULT" = success ;;
@@ -1071,12 +1024,25 @@ jobs:
             false) test "$CACHE_RESULT" = skipped ;;
             *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
           esac
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ failure() }}
-        with:
-          ref: ${{ needs.plan.outputs.candidate_ref }}
-          sparse-checkout: tests/ci
-          persist-credentials: false
+      - name: Require every selected Linux part
+        if: ${{ !cancelled() }}
+        env:
+          DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
+          CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          COMPILE_TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+          PR_JOB: ${{ needs.plan.outputs.pr_job }}
+          PR_RESULT: ${{ needs.pr_linux.result }}
+          BUILD_RESULT: ${{ needs.linux_build.result }}
+          UNIT_RESULT: ${{ needs.linux_build_unit.result }}
+          SPLIT: ${{ needs.plan.outputs.linux_split }}
+          NATIVE_RESULT: ${{ needs.linux_suites.result }}
+          TYPECHECK: ${{ needs.plan.outputs.typecheck_macos }}
+          TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
+          COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
+        run: bash tests/ci/require_linux_parts.sh
       - name: Name each failed job and its cause
         if: ${{ failure() }}
         env:

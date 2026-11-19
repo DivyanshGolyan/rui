@@ -661,38 +661,8 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, protocol.session_list_page_size));
-        }
-    }.run);
-}
-
-test "a list Action step fault keeps its named error and fences" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSessionAsk(&storage, "list-actions-config");
-            try submitTestMessage(&storage, &tmp, "list-actions-input", "list-actions-message", session.slice(), "call");
-            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const call = [_]TestingCall{.{ .item_id = "list-actions-item", .name = "bash", .encoded_call_id = "list-actions-call", .decoded_call_id = "list-actions-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
-            try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
-            var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_failures, null, "SELECT count(*) AS total,") };
-            if (storage.engine == .sqlite) {
-                fault.arm(storage.sqliteDatabase());
-            } else try store_testing.failReadsOf(&storage, "action_operation");
-            defer if (storage.engine == .sqlite) fault.disarm(storage.sqliteDatabase());
-            var used = std.atomic.Value(u64).init(0);
-            const expected = switch (storage.engine) {
-                .sqlite => error.ActionReadFailed,
-                .mysql => error.SessionReadFailed,
-            };
-            try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));
-            if (storage.engine == .sqlite) try std.testing.expect(fault.failed > 0);
-            try std.testing.expect(storage.isFenced());
+            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }
@@ -802,6 +772,461 @@ test "a list row reads the same steps however long its Session's history, in rou
             defer listed.deinit();
             try std.testing.expectEqualStrings("finished", listed.get(&.{ "work", "state", "kind" }).string);
             return taken;
+        }
+    }.run);
+}
+
+test "SL-3: Session list dates meaningful work transitions" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try execution(case);
+            try permissions(case, false);
+            try permissions(case, true);
+            try owed(case, false);
+            try owed(case, true);
+            inline for (.{ .continuation, .failure, .stop }) |outcome| try compaction(case, outcome);
+            try missingProjection(case);
+        }
+
+        fn expectClock(store: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: u64) !void {
+            var row = try testingListRow(store, tmp, session);
+            defer row.deinit();
+            try std.testing.expectEqual(expected, try row.number(&.{"state_change_at"}));
+        }
+
+        fn execution(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: Store = undefined;
+            try store_testing.testingStore(case, &store, &tmp, std.testing.io);
+            defer store.close() catch unreachable;
+            const session = try configureTestSession(&store, "sl3-execution-config");
+            try store_testing.exec(&store, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+            try expectClock(&store, &tmp, session.slice(), 100);
+            try submitTestMessage(&store, &tmp, "sl3-first", "sl3-first-key", session.slice(), "first");
+            try store_testing.exec(&store, "UPDATE message_admission SET admitted_at=120 WHERE command_key='sl3-first-key'", .{});
+            try expectClock(&store, &tmp, session.slice(), 120);
+            const first = (try store.admitNextModelAttempt(.{})).?.permit.binding;
+            try store_testing.exec(&store, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+            try expectClock(&store, &tmp, session.slice(), 150);
+            try store.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+            try expectClock(&store, &tmp, session.slice(), 150);
+            try store_testing.exec(&store, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{first.operation_id});
+            const retry = (try shared_fixtures.admitRetryForTesting(&store)).?.permit.binding;
+            try expectClock(&store, &tmp, session.slice(), 150);
+            try store_testing.settleItemsForTesting(&store, &tmp, retry, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+            try store_testing.exec(&store, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1", .{session.slice()});
+            try expectClock(&store, &tmp, session.slice(), 200);
+            try submitTestMessage(&store, &tmp, "sl3-queued", "sl3-queued-key", session.slice(), "next");
+            try store_testing.exec(&store, "UPDATE message_admission SET admitted_at=300 WHERE command_key='sl3-queued-key'", .{});
+            try expectClock(&store, &tmp, session.slice(), 300);
+            var stop = try completeSessionStop("sl3-stop", session.slice());
+            try std.testing.expect(store.stopSession(&stop, .{}) == .accepted);
+            try store_testing.exec(&store, "UPDATE session_stop SET stopped_at=350 WHERE command_key='sl3-stop'", .{});
+            try expectClock(&store, &tmp, session.slice(), 350);
+        }
+
+        fn permissions(case: *store_testing.Case, deny_last: bool) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: Store = undefined;
+            try store_testing.testingStore(case, &store, &tmp, std.testing.io);
+            defer store.close() catch unreachable;
+            const session = try configureTestSessionAsk(&store, "sl3-permission-config");
+            try submitTestMessage(&store, &tmp, "sl3-permission-input", "sl3-permission-key", session.slice(), "propose");
+            const model = (try store.admitNextModelAttempt(.{})).?.permit.binding;
+            try shared_fixtures.settleTwoActionsForTesting(&store, &tmp, model, "sl3-permission-tools");
+            try store_testing.exec(&store, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+            try store_testing.exec(&store, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+            try store_testing.exec(&store, "UPDATE model_operation SET resolved_at=200 WHERE session_ref=?1 AND resolved_at IS NOT NULL", .{session.slice()});
+            try expectClock(&store, &tmp, session.slice(), 200);
+            const first = try store_testing.queryU64(&store, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            const second = try store_testing.queryU64(&store, "SELECT max(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
+            try allow.key.set("sl3-first-allow");
+            try allow.session.set(session.slice());
+            try std.testing.expect(store.decidePermission(&allow, .{}) == .accepted);
+            try store_testing.exec(&store, "UPDATE action_operation SET decided_at=300 WHERE action_id=?1", .{first});
+            try expectClock(&store, &tmp, session.slice(), 200);
+            allow.action_id = second;
+            allow.decision = if (deny_last) .deny else .allow_once;
+            try allow.key.set("sl3-second-decision");
+            try std.testing.expect(store.decidePermission(&allow, .{}) == .accepted);
+            if (deny_last) {
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&store, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND decided_at IS NULL AND resolution_code='denied'", .{second}));
+                try store_testing.exec(&store, "UPDATE action_operation SET resolved_at=400 WHERE action_id=?1", .{second});
+            } else {
+                try store_testing.exec(&store, "UPDATE action_operation SET decided_at=400 WHERE action_id=?1", .{second});
+            }
+            try expectClock(&store, &tmp, session.slice(), 400);
+            const action = (try store.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            _ = try store.settleActionAttempt(action, .succeeded, "done", .{});
+            try store_testing.exec(&store, "UPDATE action_operation SET resolved_at=500 WHERE action_id=?1", .{first});
+            try expectClock(&store, &tmp, session.slice(), 400);
+        }
+
+        fn owed(case: *store_testing.Case, finished: bool) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: Store = undefined;
+            try store_testing.testingStore(case, &store, &tmp, std.testing.io);
+            defer store.close() catch unreachable;
+            const root = try configureTestSession(&store, "sl3-owed-root");
+            if (finished) {
+                const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+                try answerTestTurn(&store, &tmp, root.slice(), "sl3-owed-answer", &answer);
+                try store_testing.exec(&store, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{root.slice()});
+                try store_testing.exec(&store, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1", .{root.slice()});
+            }
+            try store_testing.exec(&store, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{root.slice()});
+            const child = try configureTestSession(&store, "sl3-owed-child");
+            try store_testing.exec(&store, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+            try submitTestMessage(&store, &tmp, "sl3-owed-input", "sl3-owed-key", child.slice(), "work");
+            try store_testing.exec(&store, "UPDATE message_admission SET admitted_at=300 WHERE command_key='sl3-owed-key'", .{});
+            try shared_fixtures.refreshFrontierForTesting(&store, child.slice());
+            try expectClock(&store, &tmp, root.slice(), 300);
+        }
+
+        const CompactionOutcome = enum { continuation, failure, stop };
+
+        fn compaction(case: *store_testing.Case, outcome: CompactionOutcome) !void {
+            errdefer std.debug.print("SL-3 compaction {s} failed\n", .{@tagName(outcome)});
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: Store = undefined;
+            try store_testing.testingStore(case, &store, &tmp, std.testing.io);
+            defer store.close() catch unreachable;
+            const session = try configureTestSession(&store, "sl3-compaction-config");
+            var patch: @import("../../wire_request.zig").ConfigureCommand = .{};
+            try patch.key.set("sl3-compaction-settings");
+            try patch.session.set(session.slice());
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1");
+            patch.configuration.output_reservation.state = .value;
+            try patch.configuration.output_reservation.value.set("1");
+            try std.testing.expect(try store.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&store, &tmp, "sl3-compact-first", "sl3-compact-first-key", session.slice(), "original");
+            const first = (try store.admitNextModelAttempt(.{})).?.permit.binding;
+            try store.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+            try submitTestMessage(&store, &tmp, "sl3-compact-next", "sl3-compact-next-key", session.slice(), "pending");
+            try store_testing.exec(&store, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+            try store_testing.exec(&store, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+            try store_testing.exec(&store, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1 AND outcome_at IS NOT NULL", .{session.slice()});
+            try store_testing.exec(&store, "UPDATE message_admission SET admitted_at=300 WHERE command_key='sl3-compact-next-key'", .{});
+            const compact = (try store.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(@import("../domain/historical.zig").ModelOperationKind.compaction, try store.modelOperationKind(compact));
+            try expectClock(&store, &tmp, session.slice(), 300);
+            switch (outcome) {
+                .continuation => {
+                    try store.settleModelAttemptFailure(compact, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+                    try expectClock(&store, &tmp, session.slice(), 300);
+                    try store_testing.exec(&store, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{compact.operation_id});
+                    const retry = (try shared_fixtures.admitRetryForTesting(&store)).?.permit.binding;
+                    try expectClock(&store, &tmp, session.slice(), 300);
+                    try store_testing.settleCompactionForTesting(&store, &tmp, retry, &.{.compaction});
+                    _ = (try store.admitNextModelAttempt(.{})).?.permit.binding;
+                    try store_testing.exec(&store, "UPDATE conversation_entry SET recorded_at=400 WHERE source_admission_id=(SELECT admission_id FROM message_admission WHERE command_key='sl3-compact-next-key')", .{});
+                },
+                .failure => {
+                    try store.settleModelAttemptFailure(compact, .{ .uncorrelated = "bad_compaction" }, .ordinary, .{});
+                    try store_testing.exec(&store, "UPDATE turn SET outcome_at=400 WHERE turn_id=?1", .{compact.turn_id});
+                },
+                .stop => {
+                    var stop = try completeSessionStop("sl3-compact-stop", session.slice());
+                    try std.testing.expect(store.stopSession(&stop, .{}) == .accepted);
+                    try store_testing.exec(&store, "UPDATE session_stop SET stopped_at=400 WHERE command_key='sl3-compact-stop'", .{});
+                    try store_testing.exec(&store, "UPDATE turn SET outcome_at=400 WHERE turn_id=?1 AND outcome_at IS NOT NULL", .{compact.turn_id});
+                },
+            }
+            try expectClock(&store, &tmp, session.slice(), 400);
+        }
+
+        fn missingProjection(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var store: Store = undefined;
+            try store_testing.testingStore(case, &store, &tmp, std.testing.io);
+            defer store.close() catch unreachable;
+            const session = try configureTestSession(&store, "sl3-missing-config");
+            const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+            try answerTestTurn(&store, &tmp, session.slice(), "sl3-missing-first", &answer);
+            try answerTestTurn(&store, &tmp, session.slice(), "sl3-missing-latest", &answer);
+            try store_testing.exec(&store, "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT first_admission_id FROM turn WHERE session_ref=?1 ORDER BY turn_id DESC LIMIT 1)", .{session.slice()});
+            var used = std.atomic.Value(u64).init(0);
+            try std.testing.expectError(error.CorruptStore, testingSessionList(&store, &tmp, .{}, &used, 5));
+        }
+    }.run);
+}
+
+test "SL-4: changed Session pages include eligible creator ancestors" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const Change = struct {
+                fn configure(store: *Store, workspace_path: []const u8, session: []const u8, ordinal: usize) !change_ring.Id {
+                    var buffer: [64]u8 = undefined;
+                    const key = try std.fmt.bufPrint(&buffer, "sl4-config-{d}", .{ordinal});
+                    var command = try completeConfiguration(key, session, workspace_path, "model-a");
+                    command.configuration.label.state = .value;
+                    try command.configuration.label.value.set(try std.fmt.bufPrint(&buffer, "label-{d}", .{ordinal}));
+                    const result = try store.configure(&command, .{});
+                    try std.testing.expect(result == .accepted);
+                    return result.accepted.session.slice()[0..change_ring.id_bytes].*;
+                }
+
+                fn expectArchive(store: *Store, dir: *std.testing.TmpDir, list: protocol.ListSessions, id: *const change_ring.Id, state: []const u8) !void {
+                    var used = std.atomic.Value(u64).init(0);
+                    const bytes = try testingSessionList(store, dir, list, &used, 104);
+                    defer std.testing.allocator.free(bytes);
+                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                    defer parsed.deinit();
+                    for (parsed.value.object.get("sessions").?.array.items) |row| {
+                        if (!std.mem.eql(u8, row.object.get("reference").?.string, id)) continue;
+                        try std.testing.expectEqualStrings(state, row.object.get("archive_state").?.string);
+                        return;
+                    }
+                    return error.TestUnexpectedResult;
+                }
+            };
+            var ids: [14]change_ring.Id = undefined;
+            for (&ids, 0..) |*id, index| id.* = try Change.configure(&storage, workspace, "", index);
+            std.mem.sort(change_ring.Id, &ids, {}, testingIdLess);
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &ids[0], &ids[1] });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &ids[1], &ids[13] });
+            const before = try TestingListing.read(&storage, &tmp, .{});
+            for (ids[2..12], 0..) |id, index| _ = try Change.configure(&storage, workspace, &id, 20 + index);
+            _ = try Change.configure(&storage, workspace, &ids[13], 40);
+            var request: protocol.ListSessions = .{ .since = before.since };
+            const first = try TestingListing.read(&storage, &tmp, request);
+            try std.testing.expectEqual(protocol.ListDelta.changed, first.delta);
+            try first.expectReferences(ids[0..8]);
+            try std.testing.expect(first.next != null);
+            const second = try TestingListing.read(&storage, &tmp, first.next.?);
+            const expected_tail = [_]change_ring.Id{ ids[8], ids[9], ids[10], ids[11], ids[13] };
+            try second.expectReferences(&expected_tail);
+            try std.testing.expect(second.next == null);
+            try std.testing.expectEqual(first.since.generation, second.since.generation);
+
+            var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+            try archive.key.set("sl4-archive");
+            try archive.session.set(&ids[1]);
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            request.since = second.since;
+            const removed = try TestingListing.read(&storage, &tmp, request);
+            try removed.expectReferences(&.{ ids[0], ids[1] });
+            try Change.expectArchive(&storage, &tmp, request, &ids[1], "archived");
+            _ = try Change.configure(&storage, workspace, &ids[13], 41);
+            request.since = removed.since;
+            const cut = try TestingListing.read(&storage, &tmp, request);
+            try cut.expectReferences(&.{ids[13]});
+            archive.archived = false;
+            try archive.key.set("sl4-restore");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            request.since = cut.since;
+            const restored = try TestingListing.read(&storage, &tmp, request);
+            try restored.expectReferences(&.{ ids[0], ids[1] });
+            try Change.expectArchive(&storage, &tmp, request, &ids[1], "active");
+        }
+    }.run);
+}
+
+test "SL-1: Session list rolls up eligible descendants beyond the page" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var config = try completeConfiguration("rollup-root", "", workspace, "model-a");
+            config.configuration.tools = try .of(&.{ "bash", "start_agent" });
+            const root = (try storage.configure(&config, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "rollup-message", "rollup-key", root.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var calls: [10]TestingCall = undefined;
+            for (&calls, 0..) |*call, index| {
+                const id = try std.fmt.allocPrint(arena.allocator(), "rollup-child-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "rollup-calls", &calls);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var first: Capture = .{};
+            for (0..calls.len) |index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var spec = try shared_fixtures.testingAgentSpec(&.{ "bash", "start_agent" }, "ask");
+                var capture: Capture = .{};
+                try std.testing.expect(try storage.startAgent(action.binding, root.slice(), "child task", index == 0, &spec, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+                if (index == 0) first = capture;
+            }
+            const child_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND session_ref=?2", .{ child_model.turn_id, first.child.slice() }));
+            try settleCallsForTesting(&storage, &tmp, child_model, "rollup-nested-call", &.{.{
+                .item_id = "rollup-nested",
+                .name = "start_agent",
+                .encoded_call_id = "rollup-nested",
+                .decoded_call_id = "rollup-nested",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            const nested_action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+            var nested_spec = try shared_fixtures.testingAgentSpec(&.{"bash"}, "ask");
+            var nested: Capture = .{};
+            try std.testing.expect(try storage.startAgent(nested_action.binding, first.child.slice(), "nested task", false, &nested_spec, .{ .context = &nested, .call = Capture.call }, .{}) == .started);
+            var reached_nested = false;
+            var before_question: protocol.SinceToken = undefined;
+            for (0..20) |_| {
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const is_nested = try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND session_ref=?2", .{ next.turn_id, nested.child.slice() });
+                if (is_nested == 1) {
+                    before_question = (try TestingListing.read(&storage, &tmp, .{})).since;
+                    try settleCallsForTesting(&storage, &tmp, next, "rollup-question", &.{.{
+                        .item_id = "rollup-bash",
+                        .name = "bash",
+                        .encoded_call_id = "rollup-bash",
+                        .decoded_call_id = "rollup-bash",
+                        .encoded_arguments = "{\\\"description\\\":\\\"Review\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Review\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    }});
+                    reached_nested = true;
+                    break;
+                }
+                try store_testing.settleItemsForTesting(&storage, &tmp, next, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+            }
+            try std.testing.expect(reached_nested);
+            var affected = [_]change_ring.Id{
+                root.slice()[0..change_ring.id_bytes].*,
+                first.child.slice()[0..change_ring.id_bytes].*,
+                nested.child.slice()[0..change_ring.id_bytes].*,
+            };
+            std.mem.sort(change_ring.Id, &affected, {}, testingIdLess);
+            const delta = try TestingListing.read(&storage, &tmp, .{ .since = before_question });
+            try std.testing.expectEqual(protocol.ListDelta.changed, delta.delta);
+            try delta.expectReferences(&affected);
+            try store_testing.exec(&storage, "UPDATE session SET created_at=100 WHERE created_at>0", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=110 WHERE admitted_at>0", .{});
+            try store_testing.exec(&storage, "UPDATE conversation_entry SET recorded_at=CASE WHEN session_ref=?1 THEN 300 WHEN session_ref=?2 THEN 200 ELSE 150 END WHERE recorded_at>0", .{ nested.child.slice(), first.child.slice() });
+            try store_testing.exec(&storage, "UPDATE turn SET outcome_at=CASE WHEN session_ref=?1 THEN 150 WHEN session_ref=?2 THEN 200 ELSE 180 END WHERE outcome_at IS NOT NULL", .{ root.slice(), first.child.slice() });
+            try store_testing.exec(&storage, "UPDATE model_operation SET resolved_at=CASE WHEN session_ref=?1 THEN 400 ELSE 150 END WHERE resolved_at IS NOT NULL", .{nested.child.slice()});
+            var root_row = try testingListRow(&storage, &tmp, root.slice());
+            defer root_row.deinit();
+            try std.testing.expectEqual(@as(u64, 11), try root_row.number(&.{"descendant_count"}));
+            try std.testing.expectEqual(@as(u64, 1), try root_row.number(&.{"descendant_needs_you_count"}));
+            try std.testing.expect((try root_row.number(&.{"subtree_state_change_at"})) >= (try root_row.number(&.{"state_change_at"})));
+            try std.testing.expectEqual(@as(u64, 150), try root_row.number(&.{"state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 400), try root_row.number(&.{"subtree_state_change_at"}));
+            var child_row = try testingListRow(&storage, &tmp, first.child.slice());
+            defer child_row.deinit();
+            try std.testing.expectEqual(@as(u64, 200), try child_row.number(&.{"state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 400), try child_row.number(&.{"subtree_state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 1), try child_row.number(&.{"descendant_count"}));
+            try std.testing.expectEqual(@as(u64, 1), try child_row.number(&.{"descendant_needs_you_count"}));
+            const first_page = try TestingListing.read(&storage, &tmp, .{});
+            var used = std.atomic.Value(u64).init(0);
+            const later_bytes = try testingSessionList(&storage, &tmp, first_page.next.?, &used, 78);
+            defer std.testing.allocator.free(later_bytes);
+            var later_page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, later_bytes, .{});
+            defer later_page.deinit();
+            var leaf_found = false;
+            for (later_page.value.object.get("sessions").?.array.items) |row| {
+                if (!std.mem.eql(u8, row.object.get("reference").?.string, nested.child.slice())) continue;
+                try std.testing.expectEqualStrings("400", row.object.get("state_change_at").?.string);
+                try std.testing.expectEqualStrings("400", row.object.get("subtree_state_change_at").?.string);
+                leaf_found = true;
+            }
+            try std.testing.expect(leaf_found);
+            var samples: [5]u64 = undefined;
+            for (&samples) |*sample| {
+                var counter: store_testing.ReadWork = .{};
+                try counter.begin(case, &storage);
+                var measured = testingListRow(&storage, &tmp, root.slice()) catch |err| {
+                    counter.cancel();
+                    return err;
+                };
+                defer measured.deinit();
+                sample.* = try counter.finish();
+                try std.testing.expectEqual(@as(u64, 150), try measured.number(&.{"state_change_at"}));
+                try std.testing.expectEqual(@as(u64, 400), try measured.number(&.{"subtree_state_change_at"}));
+                try std.testing.expectEqual(@as(u64, 11), try measured.number(&.{"descendant_count"}));
+                try std.testing.expectEqual(@as(u64, 1), try measured.number(&.{"descendant_needs_you_count"}));
+                try std.testing.expect(sample.* > 0);
+            }
+            std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+            std.debug.print("list rollup three-level, eleven descendants ({s}, five warmed pages): min={d} median={d} max={d} {s}\n", .{ @tagName(case.engine), samples[0], samples[2], samples[4], switch (case.engine) {
+                .sqlite => "SQLite VM steps",
+                .mysql => "MySQL handler reads",
+            } });
+
+            // A second, idle chain isolates archive eligibility from the active work above.
+            const filter_root = try configureTestSession(&storage, "rollup-filter-root");
+            const filter_child = try configureTestSession(&storage, "rollup-filter-child");
+            const filter_leaf = try configureTestSession(&storage, "rollup-filter-leaf");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ filter_root.slice(), filter_child.slice() });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ filter_child.slice(), filter_leaf.slice() });
+            var archive: protocol.SessionArchiveCommand = .{ .session = filter_child, .archived = true };
+            try archive.key.set("rollup-filter-archive");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try store_testing.exec(&storage, "UPDATE session SET created_at=CASE WHEN session_ref=?1 THEN 100 WHEN session_ref=?2 THEN 200 ELSE 300 END WHERE session_ref IN (?1,?2,?3)", .{ filter_root.slice(), filter_child.slice(), filter_leaf.slice() });
+            try store_testing.exec(&storage, "UPDATE session_stop SET stopped_at=200 WHERE session_ref=?1", .{filter_child.slice()});
+            const start = try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{filter_root.slice()});
+            const end = try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{filter_leaf.slice()});
+            const ids = [3][]const u8{ filter_root.slice(), filter_child.slice(), filter_leaf.slice() };
+            var other_workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const other_workspace = other_workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &other_workspace_buffer)];
+            const cases = [_]struct {
+                filter: protocol.SessionArchiveFilter,
+                scope: enum { any, matching, other } = .any,
+                visible: [3]bool,
+                own: [3]u64,
+                subtree: [3]u64,
+                descendants: [3]u64,
+            }{
+                .{ .filter = .active, .visible = .{ true, false, true }, .own = .{ 100, 0, 300 }, .subtree = .{ 100, 0, 300 }, .descendants = .{ 0, 0, 0 } },
+                .{ .filter = .archived, .visible = .{ false, true, false }, .own = .{ 0, 200, 0 }, .subtree = .{ 0, 200, 0 }, .descendants = .{ 0, 0, 0 } },
+                .{ .filter = .all, .visible = .{ true, true, true }, .own = .{ 100, 200, 300 }, .subtree = .{ 300, 300, 300 }, .descendants = .{ 2, 1, 0 } },
+                .{ .filter = .all, .scope = .matching, .visible = .{ true, true, true }, .own = .{ 100, 200, 300 }, .subtree = .{ 300, 300, 300 }, .descendants = .{ 2, 1, 0 } },
+                .{ .filter = .all, .scope = .other, .visible = .{ false, false, false }, .own = .{ 0, 0, 0 }, .subtree = .{ 0, 0, 0 }, .descendants = .{ 0, 0, 0 } },
+            };
+            for (cases) |filter_case| {
+                var request: protocol.ListSessions = .{ .archive = filter_case.filter, .after = start - 1, .ceiling = end };
+                if (filter_case.scope != .any) {
+                    request.workspace = .{};
+                    try request.workspace.?.set(if (filter_case.scope == .matching) workspace else other_workspace);
+                }
+                const bytes = try testingSessionList(&storage, &tmp, request, &used, 103);
+                defer std.testing.allocator.free(bytes);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer parsed.deinit();
+                const rows = parsed.value.object.get("sessions").?.array.items;
+                var row_index: usize = 0;
+                for (ids, filter_case.visible, 0..) |id, visible, index| {
+                    if (!visible) continue;
+                    try std.testing.expect(row_index < rows.len);
+                    const row = rows[row_index].object;
+                    row_index += 1;
+                    try std.testing.expectEqualStrings(id, row.get("reference").?.string);
+                    try std.testing.expectEqual(filter_case.own[index], try std.fmt.parseInt(u64, row.get("state_change_at").?.string, 10));
+                    try std.testing.expectEqual(filter_case.subtree[index], try std.fmt.parseInt(u64, row.get("subtree_state_change_at").?.string, 10));
+                    try std.testing.expectEqual(filter_case.descendants[index], try std.fmt.parseInt(u64, row.get("descendant_count").?.string, 10));
+                    try std.testing.expectEqual(@as(u64, 0), try std.fmt.parseInt(u64, row.get("descendant_needs_you_count").?.string, 10));
+                }
+                try std.testing.expectEqual(row_index, rows.len);
+            }
         }
     }.run);
 }

@@ -157,7 +157,14 @@ def main():
                                      for row in after_growth[1]["sessions"])
             derived_work_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row["work"][name]))
                                      for row in after_growth[1]["sessions"] for name in ("attention", "group", "actions"))
-            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes + creator_field_bytes) + read_version_bytes + derived_work_bytes
+            rollup_names = ("state_change_at", "subtree_state_change_at", "descendant_count", "descendant_needs_you_count")
+            for row in after_growth[1]["sessions"]:
+                assert all(isinstance(row[name], str) and row[name].isdecimal() for name in rollup_names), row
+                assert row["subtree_state_change_at"] == row["state_change_at"], row
+                assert row["descendant_count"] == row["descendant_needs_you_count"] == "0", row
+            rollup_bytes = sum(len(', ' + json.dumps(name) + ': ' + json.dumps(row[name]))
+                               for row in after_growth[1]["sessions"] for name in rollup_names)
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes + creator_field_bytes) + read_version_bytes + derived_work_bytes + rollup_bytes
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

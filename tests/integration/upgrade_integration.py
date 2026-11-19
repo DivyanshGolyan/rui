@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
@@ -18,9 +19,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import quote
 
 import live_engines
+import runtime_leftovers
 import settings_fixture
 from terminal_screen import split_pane_row
 
@@ -315,6 +318,23 @@ def discovery_cases(root, binary, releases):
         c.assert_no_host()
 
 
+def read_until(stream, text, what, timeout=10):
+    """Read a live child's pipe until `text` arrives; return what was read.
+
+    Reads the raw descriptor, so a later communicate() continues after it."""
+    deadline = time.monotonic() + timeout
+    seen = b""
+    while text.encode() not in seen:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, (f"timed out waiting for {what}", seen.decode(errors="replace"))
+        ready, _, _ = select.select([stream.fileno()], [], [], remaining)
+        if ready:
+            chunk = os.read(stream.fileno(), 65536)
+            assert chunk, (f"output ended before {what}", seen.decode(errors="replace"))
+            seen += chunk
+    return seen.decode()
+
+
 def install_cases(root, binary, releases):
     with case(root, binary, releases, "install-pinned-no-host") as c:
         # The release is resolved once: a later change of latest cannot
@@ -324,11 +344,18 @@ def install_cases(root, binary, releases):
         start = len(releases.requests)
         child = c.spawn_upgrade()
         wait_for(gate.entered.is_set, "pinned archive after release resolution")
+        # #1854: the installing line reaches the reader while the download is still held.
+        early = read_until(child.stdout, f"Installing Rui {releases.version}...", "installing line during the download")
         releases.latest_location = releases.origin + "/releases/tag/v0.999.0"
         gate.release.set()
-        output = c.finish_upgrade(child)
+        output = early + c.finish_upgrade(child)
         releases.latest_location = None
-        assert "Installed Rui" in output and "No running Hosts." in output, output
+        assert "Upgraded to Rui" in output and "No running Hosts." in output, output
+        # #1854: the check report, then what is happening, then the verdict.
+        check_end = output.index("The running client and bundled/custom application binaries are not replaced.")
+        installing = output.index(f"Installing Rui {releases.version}...")
+        verdict = output.index(f"Upgraded to Rui {releases.version}. Complete build: ")
+        assert check_end < installing < verdict, output
         assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
@@ -349,7 +376,7 @@ def install_cases(root, binary, releases):
         releases.status[releases.archive_path] = 503
         child = c.spawn_upgrade()
         output = c.finish_upgrade(child, success=False)
-        assert "Installed Rui" not in output, output
+        assert "Upgraded to Rui" not in output, output
         c.assert_unchanged()
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
 
@@ -616,7 +643,7 @@ def upgrade_journey(root, binary, releases):
                 gate.release.set()
                 output = a.finish_upgrade(child, success=False)
                 assert child.returncode == 6, (child.returncode, output)
-                assert "Installed Rui" in output and "[host_restart_failed]" in output, output
+                assert "Upgraded to Rui" in output and "[host_restart_failed]" in output, output
                 for previous in (previous_a, previous_b):
                     assert f"{previous['store']}: restarted on {releases.version}" in output, output
                 assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
@@ -1134,6 +1161,18 @@ def restart_all_cases(root, binary, releases):
         assert socket_path.exists(), socket_path
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
         assert socket_path.exists(), "Discovery must not reclaim sockets"
+        # The harness's leftover reader agrees with platform's layout on a real
+        # crashed Host: not a leftover while its Store exists, one once it is gone.
+        hinted = pathlib.Path(socket_path.with_suffix(".store").read_text())
+        assert socket_path not in [path for path, _ in runtime_leftovers.leftovers()]
+        moved = hinted.with_name(hinted.name + ".moved")
+        hinted.rename(moved)
+        try:
+            assert (socket_path, str(hinted)) in runtime_leftovers.leftovers()
+        finally:
+            moved.rename(hinted)
+        runtime_leftovers.remove([(socket_path, str(hinted))])
+        assert not socket_path.exists()
 
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
@@ -1200,16 +1239,16 @@ def restart_all_cases(root, binary, releases):
                 assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
                 assert "[host_restart_failed]" in output, output
                 assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            output = first.run("host", "restart", "--all", expect=6)
-            assert str(unreadable) in output and "Host state is unconfirmed" in output, output
-            assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
-            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            assert "[host_restart_failed]" in output, output
+            # #1855: once nothing listens, the leftover socket has no live owner.
+            output = first.run("host", "restart", "--all")
+            assert str(unreadable) not in output and "failed at discovery" not in output, output
+            assert "Skipped 1 leftover Host socket: it refused connections and no running Host process serves it" in output, output
+            assert "2 Hosts: 0 restarted, 2 already current, 0 left unchanged, 0 failed." in output, output
         finally:
             unreadable.unlink(missing_ok=True)
         output = first.run("host", "restart", "--all")
         assert "2 Hosts: 0 restarted, 2 already current" in output, output
-        assert str(unreadable) not in output, output
+        assert str(unreadable) not in output and "leftover" not in output, output
 
     with case(root, binary, releases, "restart-all-managed-source") as c:
         old_host, previous = c.start_host("retained-older-source", source=True)
@@ -1538,7 +1577,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
                                  (releases.sums_path, "ipv4", 0),
                                  (releases.archive_path, "ipv4", 0)])
             receipt = exit_on_sigint(screen, process, "recovered download report after terminal restoration")
-            assert b"Installed Rui" in receipt and b"restarted on " in receipt, receipt.decode()
+            assert b"Upgraded to Rui" in receipt and b"restarted on " in receipt, receipt.decode()
             assert b"curl fixture final" not in receipt, receipt.decode()
             assert os.fsencode(shadow) in receipt, "recovery lost the retained PATH guidance"
             assert screen.entries == screen.restorations == 1, "retained guidance relaunched the TUI"
@@ -1666,7 +1705,7 @@ def signal_after_publication(root, binary, releases, artifacts):
             assert installed.exists() and gate.exists()
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             receipt = exit_on_sigint(screen, process, "joined publication receipt and terminal exit after SIGINT")
-            assert b"Installed Rui. Complete build:" in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
+            assert b"Upgraded to Rui " in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
             assert b"Host restart could not finish (Cancelled)" in receipt, receipt.decode()
             assert b"Installation was not rolled back" in receipt, receipt.decode()
             assert os.fsencode(installed.parent.parent) in receipt, "receipt lost the published build identity"

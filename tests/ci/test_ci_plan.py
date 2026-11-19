@@ -25,6 +25,18 @@ def selection(documentation=False):
 
 
 class PlanTest(unittest.TestCase):
+    def test_only_a_pull_request_may_skip_policy_self_checks(self):
+        # Every event check.yml can start: pull_request (ready and draft), schedule, workflow_dispatch and promotion.
+        for event_name, draft, promotion, skips in (('pull_request', False, False, ['test_unchanged']),
+                                                    ('pull_request', True, False, ['test_unchanged']),
+                                                    ('schedule', False, False, []),
+                                                    ('workflow_dispatch', False, False, []),
+                                                    ('workflow_dispatch', False, True, [])):
+            with self.subTest(event_name=event_name, draft=draft, promotion=promotion):
+                result = plan(selection(), event_name=event_name, draft=draft, promotion=promotion,
+                              change_kind=ChangeKind.NORMAL).outputs
+                self.assertEqual(result['policy_skips'], skips)
+
     def test_manual_native_diagnostics_keep_exact_targets_and_disable_retries(self):
         targets = ['test', 'test-logic', 'upgrade-integration']
         for mac_required in (False, True):
@@ -95,7 +107,7 @@ class PlanTest(unittest.TestCase):
                     linux_memory=not documentation and name in ('manual', 'promotion'),
                     cache_execution=not documentation and name in ('manual', 'promotion'),
                     typecheck_macos=not documentation and name in ('manual', 'promotion'),
-                    policy_skips=['test_unchanged'],
+                    policy_skips=['test_unchanged'] if event == 'pull_request' else [],
                     compile_only=False,
                 )
                 self.assertEqual(result.outputs, expected)

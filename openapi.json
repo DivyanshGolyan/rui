@@ -13392,6 +13392,18 @@
           "created_at": {
             "$ref": "#/components/schemas/Decimal"
           },
+          "state_change_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "subtree_state_change_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "descendant_count": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "descendant_needs_you_count": {
+            "$ref": "#/components/schemas/Decimal"
+          },
           "revision": {
             "$ref": "#/components/schemas/Decimal"
           },
@@ -13439,6 +13451,10 @@
           "creator",
           "label",
           "created_at",
+          "state_change_at",
+          "subtree_state_change_at",
+          "descendant_count",
+          "descendant_needs_you_count",
           "revision",
           "end",
           "first_message",
