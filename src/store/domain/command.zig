@@ -15,6 +15,7 @@ const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
+const command_replay = @import("../command_replay.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -2214,26 +2215,10 @@ pub noinline fn lookupCommand(a: anytype, key: []const u8, destination: *saved_c
     a.read(saved_command, .{ .key = key }, destination);
 }
 
-fn kindCode(kind: cli_value.CommandKind) u8 {
-    return switch (kind) {
-        .configure => 1,
-        .message => 2,
-        .session_stop => 3,
-        .model_interruption => 4,
-        .permission_decision => 5,
-        .session_archive => 6,
-        .session_pin => 7,
-        .action_background => 8,
-        .action_stop => 9,
-    };
-}
-
 fn savedAnswer(saved: *const saved_command.Result) error{CorruptStore}!?ExistingCommand {
     const row = if (saved.*) |*row| row else return null;
     return .{
-        .kind = for (std.enums.values(cli_value.CommandKind)) |candidate| {
-            if (kindCode(candidate) == row.kind) break candidate;
-        } else return error.CorruptStore,
+        .kind = command_replay.kindOf(row.kind) orelse return error.CorruptStore,
         .target = row.target,
         .digest = row.input_digest,
         .accepted = row.accepted,
@@ -2251,11 +2236,20 @@ pub fn classify(
     target: []const u8,
     digest: *const [32]u8,
 ) error{CorruptStore}!Replay(Rejection) {
-    const existing = try savedAnswer(saved) orelse return .fresh;
-    if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
-        !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
-    if (existing.accepted) return .{ .accepted = existing };
-    return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse return error.CorruptStore };
+    const existing = try savedAnswer(saved);
+    const facts: ?command_replay.Saved = if (existing) |*row| .{
+        .kind = row.kind,
+        .target = row.target.slice(),
+        .digest = row.digest,
+        .accepted = row.accepted,
+        .code = row.code.slice(),
+    } else null;
+    return switch (try command_replay.classify(Rejection, facts, kind, target, digest)) {
+        .fresh => .fresh,
+        .conflict => .conflict,
+        .accepted => .{ .accepted = existing orelse unreachable },
+        .rejected => |code| .{ .rejected = code },
+    };
 }
 
 pub const pending_messages = rsql.Read(.{
@@ -2303,7 +2297,7 @@ pub noinline fn queueCommand(
 ) !void {
     a.write(insert_command, .{
         .key = key,
-        .kind = kindCode(kind),
+        .kind = command_replay.codeOf(kind),
         .target = target,
         .digest = digest.*,
         .primary_content_id = primary_content_id,
