@@ -16,7 +16,7 @@ See the [data and method](docs/waiting-agent-memory.md) for measurement scope an
 ## Why Rui
 
 - **Many agents, one process.**
-  An agent spends most of its time waiting on the model, so in Rui an agent is saved state in one shared process.
+  In Rui an agent is saved state in one shared process.
   In the [published benchmark](docs/waiting-agent-memory.md) a hundred agents used about as much memory as one.
 - **Safe across crashes.**
   Every step is saved before Rui moves on.
