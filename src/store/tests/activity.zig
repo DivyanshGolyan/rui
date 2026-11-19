@@ -112,7 +112,9 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         const before = storage.testing_content_work.rounds;
-        try reads_domain.publicConversationPage(&a, conversation, &public_page, std.testing.allocator);
+        const row_reads = try std.testing.allocator.create([reads_domain.PublicConversationPage.capacity]reads_domain.PublicRowRead);
+        defer std.testing.allocator.destroy(row_reads);
+        try reads_domain.publicConversationPage(&a, conversation, &public_page, row_reads);
         result.rounds[0] = storage.testing_content_work.rounds - before;
     }
     {
