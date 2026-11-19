@@ -82,6 +82,7 @@ pub const keys: keymap.Keymap(Move) = .init(.{
     .ctrl_r = null,
     .ctrl_x = null,
     .alt_a = null,
+    .alt_question = null,
     .alt_up = null,
     .alt_down = null,
     .up = null,
@@ -229,7 +230,7 @@ pub const Effects = struct {
     pub const Focus = enum { main, list, settings, sign_in };
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
-    pub const Delivery = struct { under: Layer.Covered, pasted: bool, wide: bool = false };
+    pub const Delivery = struct { under: Layer.Covered, pasted: bool, wide: bool = false, list_origin: bool = true };
     pub const Route = union(enum) {
         pass,
         sign_in,
@@ -357,8 +358,8 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts, input.key);
-    if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down))
-        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
+    if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down or input.key.named == .alt_question))
+        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide, .list_origin = state.listFocused() or !facts.session_open } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
         const move = if (facts.accepts_tab and state.area == .main and state.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
         if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*), direction == .previous)) |target| {
@@ -831,7 +832,7 @@ pub fn sui4PasteOwnership() !void {
 }
 
 test "Option session navigation routes main chords without taking paste or modal custody" {
-    for ([_]keymap.Key{ .alt_up, .alt_down }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
+    for ([_]keymap.Key{ .alt_up, .alt_down, .alt_question }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
         var state: State = .{ .layer = layer, .area = if (focused) .list else .main, .pasting = pasted };
         const effects = step(&state, .{ .wide = wide, .session_open = open }, .{ .key = .{ .named = key } });
         if (layer == .sign_in) {
@@ -845,6 +846,7 @@ test "Option session navigation routes main chords without taking paste or modal
             if (!pasted or focused or !open) {
                 try std.testing.expect(effects.route == .overview);
                 try std.testing.expectEqual(pasted, effects.route.overview.pasted);
+                if (!pasted) try std.testing.expectEqual(focused or !open, effects.route.overview.list_origin);
             } else try std.testing.expect(effects.route == .session);
         }
         try std.testing.expectEqual(focused, state.listFocused());

@@ -548,6 +548,13 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
         },
         .tick => {
+            if (self.state.pointer_over and (!self.root.listVisible() or self.root.input.layer != .main)) {
+                self.app_sessions.anchor = null;
+                self.app_sessions.anchor_after_scroll = null;
+                self.app_sessions.pointer_row = null;
+                try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = false } }));
+                ctx.redraw = true;
+            }
             if (self.signInIsFirstRun()) return;
             try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
@@ -611,13 +618,33 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .left => .left,
         else => .ignored,
     };
+    const before = self.state.selected;
     try self.appNext(ctx, try self.event(.{ .input = .{
         .key = semantic,
         .under = delivery.under == .settings,
         .pasted = delivery.pasted,
         .wide = delivery.wide,
+        .list_origin = delivery.list_origin,
+        .at_ms = self.realMs(),
     } }));
+    // Any list key that moved the selection (arrows, Home/End, Alt-?, Alt-Up/Down) brings it into view.
+    if (delivery.list_origin and !delivery.pasted and delivery.under == .main and !std.meta.eql(before, self.state.selected)) {
+        self.app_sessions.followSelection();
+    }
     ctx.consumeAndRedraw();
+}
+
+fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!over) {
+        self.app_sessions.anchor = null;
+        self.app_sessions.anchor_after_scroll = null;
+        self.app_sessions.pointer_row = null;
+    }
+    if (self.state.pointer_over == over) return;
+    const revision = self.state.presentation_revision;
+    try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = over } }));
+    ctx.redraw = ctx.redraw or self.state.presentation_revision != revision;
 }
 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
@@ -918,19 +945,30 @@ const SessionRows = struct {
     caps: view.Caps,
     frame: u64,
 
+    fn find(raw: *const anyopaque, target: view.Click) ?u32 {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        return switch (target) {
+            .open => |reference| if (view.lineOfReference(self.state, reference)) |line| @intCast(line) else null,
+            else => null,
+        };
+    }
+
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         return @intCast(view.Lines.sessionsFrom(self.state, first));
     }
 
-    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
-        return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
-    }
-
-    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
-        const segments = try arena.alloc(vaxis.Segment, 1);
-        segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
-        return segments;
+    fn edge(raw: *const anyopaque, side: @import("widgets/List.zig").List(view.Target).Edge, range: @import("widgets/List.zig").List(view.Target).Range, counts: @import("widgets/List.zig").List(view.Target).Counts, arena: std.mem.Allocator) std.mem.Allocator.Error!?@import("widgets/List.zig").List(view.Target).Line {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        const question_count = view.edgeAttention(self.state, if (side == .above) .above else .below, range.first, range.end);
+        const more_count = if (side == .above) counts.above else counts.below;
+        if (question_count == 0 and more_count == 0) return null;
+        const arrow = if (self.caps.unicode) if (side == .above) "↑" else "↓" else if (side == .above) "^" else "v";
+        const text = if (question_count != 0)
+            try std.fmt.allocPrint(arena, "{s} {d} needs you {s} Alt-?", .{ arrow, question_count, if (self.caps.unicode) "·" else "." })
+        else
+            try std.fmt.allocPrint(arena, "{s} {d} more", .{ arrow, more_count });
+        return try arena.dupe(vaxis.Segment, &.{.{ .text = text, .style = @import("widget_style.zig").of(self.caps, .{ .colour = if (question_count != 0) .attention else .quiet }) }});
     }
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
@@ -1050,9 +1088,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     rows.* = .{ .state = &self.state, .width = @import("widgets/RowInset.zig").contentWidth(size.width), .caps = self.caps, .frame = frame };
     self.app_sessions.selected = if (view.Lines.highlighted(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
     self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
-    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.Lines.count(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
-    self.app_sessions.aboveFn = SessionRows.above;
-    self.app_sessions.belowFn = SessionRows.below;
+    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count, .findFn = SessionRows.find };
+    self.app_sessions.edges = .{ .userdata = rows, .lineFn = SessionRows.edge };
     self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
     self.app_settings_line.memory = self.state.memory;
     self.app_settings_line.run = self.state.upgrade.run;
@@ -1071,6 +1108,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_screen.header = header.widget();
     defer {
         self.app_sessions.rows = .none;
+        self.app_sessions.edges = null;
+        self.app_sessions.tail = null;
         self.app_screen.header = null;
         self.app_screen.host = null;
     }
@@ -1135,6 +1174,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
+    self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     return self;
@@ -1979,6 +2019,7 @@ const Seen = struct {
     model_lists: usize = 0,
     listed: usize = 1,
     working: usize = listed_references.len,
+    pinned: usize = 0,
 
     var now: Seen = .{};
 
@@ -2031,6 +2072,7 @@ const fake_operations: Operations = .{
                 row.model.set("gpt-5.5") catch unreachable;
                 row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .text = .{ .length = 27, .digest = @splat(0) } } };
                 row.peers.from_person_at = since;
+                row.pin_order = if (at < Seen.now.pinned) 7 else null;
             }
             return null;
         }
@@ -2344,13 +2386,15 @@ fn overviewGround() !void {
 }
 
 test "SUI-40 pinned Session separator is ground and inert" {
-    const rig = try openListed();
+    const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    Seen.now.pinned = 1;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(overview.state.order.items.len > 1);
-    overview.state.rows.items[overview.state.order.items[0]].pin_order = 7;
+    try std.testing.expectEqual(@as(?u64, 7), overview.state.rows.items[overview.state.order.items[0]].pin_order);
     overview.state.rows.items[overview.state.order.items[0]].label = try @import("bounded.zig").Bounded(view.max_label_bytes).from("Pinned test Session");
     overview.caps = .{};
     const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
@@ -2361,6 +2405,7 @@ test "SUI-40 pinned Session separator is ground and inert" {
         overview.state.selected = selection;
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
+        errdefer for (0..30) |r| std.debug.print("{d}|{s}|\n", .{ r, shown.line(@intCast(r)) catch "" });
         const pinned_row: u16 = for (0..30) |row| {
             if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Pinned test Session") != null) break @intCast(row);
         } else return error.PinnedSessionNotDrawn;
@@ -2736,6 +2781,27 @@ test "overview state ages request one minute frame only while visible" {
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSettings(&ctx);
     try std.testing.expect(!overview.wantsFrameAt(std.math.maxInt(u64)));
+}
+
+test "SUI-110 quiet overview schedules tree hold release without a worker" {
+    const rig = try openOverview();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.caps = .{ .depth = .none };
+    Seen.now.working = 0;
+    _ = try overview.event(.{ .tick = overview.realMs() });
+    try std.testing.expect(try rig.settle() == null);
+    const start = overview.state.now_ms;
+    _ = try overview.event(.{ .input = .{ .key = .{ .action = .next }, .at_ms = start } });
+    var shown = try rig.shown(80, 24);
+    shown.deinit();
+    const deadline = overview.app_redraw_at.?;
+    try std.testing.expect(!overview.wantsFrameAt(deadline - 1));
+    try std.testing.expect(overview.wantsFrameAt(deadline));
+    try std.testing.expect(overview.worker.thread == null);
+    const revision = overview.state.presentation_revision;
+    _ = try overview.event(.{ .tick = start + 3000 });
+    try std.testing.expect(overview.state.presentation_revision != revision);
 }
 
 test "the overview asks for frames only while a spinning mark is on screen" {
@@ -4468,10 +4534,13 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
         }
     }.stop;
     overview.state.notice = null;
+    // Home, then Down past the tabs, selects the first listed row.
+    const first = shownRow(rig, 0);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
+    var expected: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "! {s} not stopped: stop_request_failed", .{&first}), overview.state.notice.?.text());
 }
 
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
@@ -4921,6 +4990,55 @@ test "App overview prepares full-width list rows and splits only beside a Sessio
     try std.testing.expectEqual(@as(u16, 99), panes[2].surface.size.width);
     try std.testing.expectEqual(@as(usize, 1), Find.count(panes[0].surface, header));
     try std.testing.expectEqual(@as(usize, 1), Find.count(panes[2].surface, chat.widget()));
+}
+
+fn keyboardSelectionCase() !void {
+    const chat: vxfw.Text = .{ .text = "Chat", .width_basis = .parent };
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |shift| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        if (sidebar) {
+            overview.root.session = chat.widget();
+            overview.root.input.area = .list;
+        }
+        overview.state.selected = .{ .session = shownRow(rig, 0) };
+        var initial = try rig.shown(if (sidebar) 140 else 46, 7);
+        defer initial.deinit();
+        const span = overview.app_sessions.shown_at[0];
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.app_sessions.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = @intCast(span.row), .button = .none, .type = .motion, .mods = .{} } });
+        try std.testing.expect(overview.app_sessions.anchor != null);
+        for (0..4) |_| try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = shift } } }, .{ .under = .main, .pasted = false, .wide = sidebar });
+        var after = try rig.shown(if (sidebar) 140 else 46, 7);
+        defer after.deinit();
+        const selected = overview.app_sessions.selected orelse return error.TestExpectedEqual;
+        try std.testing.expect(selected >= overview.app_sessions.shown.first and selected < overview.app_sessions.shown.end);
+    };
+}
+
+fn keyboardOriginCase() !void {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.state.selected = .{ .session = shownRow(rig, 0) };
+    var initial = try rig.shown(46, 7);
+    defer initial.deinit();
+    const span = overview.app_sessions.shown_at[0];
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try overview.app_sessions.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = @intCast(span.row), .button = .none, .type = .motion, .mods = .{} } });
+    const anchor = overview.app_sessions.anchor orelse return error.TestExpectedEqual;
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.page_down } }, .{ .under = .main, .pasted = false });
+    try std.testing.expectEqualDeep(anchor, overview.app_sessions.anchor.?);
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } } }, .{ .under = .main, .pasted = false, .list_origin = false });
+    try std.testing.expectEqualDeep(anchor, overview.app_sessions.anchor.?);
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.end } }, .{ .under = .main, .pasted = false });
+    try std.testing.expect(overview.state.selected == .settings);
+    var after = try rig.shown(46, 7);
+    defer after.deinit();
+    try std.testing.expect(overview.app_sessions.pointer_row != null);
 }
 
 test "SUI-41 sidebar stays live and wheels route to their pane" {
@@ -6847,6 +6965,7 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
     .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
+    .alt_question = &.{ "\x1b?", "\x1b[63;3u", "\x1b[27;3;63~" },
     .alt_up = &.{ "\x1b[1;3A", "\x1b[1;3:1A" },
     .alt_down = &.{ "\x1b[1;3B", "\x1b[1;3:1B" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
@@ -7860,7 +7979,8 @@ test "App overview list activation resumes the open chat without closing its pre
             closes += 1;
         }
     };
-    for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+    // Right folds the creator tree, so only Enter activates a row.
+    for ([_][]const u8{"\r"}) |key| {
         const rig = try openListed();
         defer rig.close();
         const reference = shownRow(rig, 2);
@@ -8818,4 +8938,10 @@ test "SUI-4 Settings focus navigation and retained draft" {
         @import("app_input.zig").sui4RootRouting,
     };
     for (cases) |case| try case();
+}
+
+test "SUI-108 App overview keyboard and pointer precedence" {
+    try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
+    try keyboardSelectionCase();
+    try keyboardOriginCase();
 }

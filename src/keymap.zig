@@ -12,6 +12,7 @@ pub const Key = enum {
     ctrl_r,
     ctrl_x,
     alt_a,
+    alt_question,
     alt_up,
     alt_down,
     up,
@@ -140,13 +141,14 @@ pub const list = [_]Reference{
     .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "←→", .meaning = "fold tree · info actions", .keys = &.{.{ .key = .right }} },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
     .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
     .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
+    .{ .key = "alt+?", .meaning = "next question", .keys = &.{.{ .key = .alt_question }} },
     .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.{ .key = .ctrl_c }}, .aliases = &.{.ctrl_d} },
 };
 
@@ -215,7 +217,7 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 15), list.len);
+    try std.testing.expectEqual(@as(usize, 16), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
