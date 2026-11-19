@@ -2,7 +2,7 @@ const std = @import("std");
 const product = @import("product.zig");
 const CiArtifacts = @import("ci.zig").CiArtifacts;
 
-pub fn addCheck(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, release_safe: std.Build.LazyPath, tool_target: ?std.Build.ResolvedTarget) *std.Build.Step.Compile {
+pub fn addCheck(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, release_safe: std.Build.LazyPath) *std.Build.Step.Compile {
     const measurement_tests = b.addSystemCommand(&.{
         "go", "test", "-count=1", "-mod=readonly", "./...",
     });
@@ -19,7 +19,7 @@ pub fn addCheck(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    const sqlite_shell = product.addSqliteShell(b, target, .ReleaseSmall, tool_target);
+    const sqlite_shell = product.addSqliteShell(b, target, .ReleaseSmall);
     queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
 

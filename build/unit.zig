@@ -133,7 +133,7 @@ pub const Units = struct {
     run_os_tests: *std.Build.Step.Run,
 };
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, pr_ci: bool, tool_target: ?std.Build.ResolvedTarget) Units {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, pr_ci: bool) Units {
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -188,7 +188,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
                 .optimize = .ReleaseSafe,
             }));
         }
-        product.configureUnitRoot(b, compile, target, pinned_transport, tool_target);
+        product.configureUnitRoot(b, compile, target, pinned_transport);
     }
     const native = nativeGroup(b, ci, identities, tests, test_filters.len != 0, &runs);
     runs.set(.native_pair, native.final);
@@ -218,7 +218,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .filters = if (test_filters.len != 0) test_filters else &.{root(.deadline).filter.?},
         .test_runner = filtered_runner,
     });
-    product.configureUnitRoot(b, deadline_witness, target, pinned_transport, tool_target);
+    product.configureUnitRoot(b, deadline_witness, target, pinned_transport);
     const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
@@ -237,7 +237,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .test_runner = filtered_runner,
     });
     product.configurePauses(b, logic_tests, false);
-    product.configureTerminalEditor(b, logic_tests, tool_target);
+    product.configureTerminalEditor(b, logic_tests);
     logic_tests.root_module.addImport("url", product.addUrl(b));
     const run_logic_tests = ci.run(logic_tests);
     run_logic_tests.has_side_effects = true;

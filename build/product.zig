@@ -64,14 +64,14 @@ pub fn rsqlCollect(b: *std.Build) bool {
     return rsqlTable(b).collect;
 }
 
-pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport, tool_target: ?std.Build.ResolvedTarget) void {
+pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
     configurePauses(b, compile, true);
-    configureSqlite(b, compile, tool_target);
-    configureYaml(b, compile, tool_target);
+    configureSqlite(b, compile);
+    configureYaml(b, compile);
     configureBashPlatform(b, compile);
     configureHostLaunch(b, compile);
-    configureTerminalEditor(b, compile, tool_target);
-    configureTransport(b, compile, target, pinned, tool_target);
+    configureTerminalEditor(b, compile);
+    configureTransport(b, compile, target, pinned);
     configureOpenApi(b, compile);
 }
 
@@ -87,13 +87,12 @@ pub fn addRui(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     pinned_transport: ?PinnedTransport,
-    tool_target: ?std.Build.ResolvedTarget,
 ) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false, tool_target);
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false);
 }
 
-pub fn addPauseRui(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, pinned_transport: ?PinnedTransport, tool_target: ?std.Build.ResolvedTarget) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), true, tool_target);
+pub fn addPauseRui(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, pinned_transport: ?PinnedTransport) *std.Build.Step.Compile {
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), true);
 }
 
 /// Integration products share the qualified PR backend; production builds keep Zig's default.
@@ -104,14 +103,13 @@ pub fn addIntegrationRui(
     pinned_transport: ?PinnedTransport,
     pr_ci: bool,
     identity: BuildIdentity,
-    tool_target: ?std.Build.ResolvedTarget,
 ) *std.Build.Step.Compile {
-    return withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false, tool_target), pr_ci);
+    return withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci);
 }
 
 /// The pause-enabled integration product, on the same PR backend as the other integration products.
-pub fn addPauseIntegrationRui(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, pinned_transport: ?PinnedTransport, pr_ci: bool, tool_target: ?std.Build.ResolvedTarget) *std.Build.Step.Compile {
-    return withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport, tool_target), pr_ci);
+pub fn addPauseIntegrationRui(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, pinned_transport: ?PinnedTransport, pr_ci: bool) *std.Build.Step.Compile {
+    return withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci);
 }
 
 fn withPrBackend(executable: *std.Build.Step.Compile, pr_ci: bool) *std.Build.Step.Compile {
@@ -130,6 +128,19 @@ pub fn buildIdentity(b: *std.Build) BuildIdentity {
     return identity;
 }
 
+var host_tool_target_memo: ?struct { owner: *std.Build, target: std.Build.ResolvedTarget } = null;
+
+/// Sets the target translate-c is built for, once per build from build.zig. Without it, translate-c is
+/// built for the host's native CPU, as local builds have always done; CI builds it for the CI target.
+pub fn setHostToolTarget(b: *std.Build, target: std.Build.ResolvedTarget) void {
+    host_tool_target_memo = .{ .owner = b, .target = target };
+}
+
+fn hostToolTarget(b: *std.Build) ?std.Build.ResolvedTarget {
+    if (host_tool_target_memo) |memo| if (memo.owner == b) return memo.target;
+    return null;
+}
+
 fn addRuiWithIdentity(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -138,7 +149,6 @@ fn addRuiWithIdentity(
     pinned_transport: ?PinnedTransport,
     identity: BuildIdentity,
     test_pauses: bool,
-    tool_target: ?std.Build.ResolvedTarget,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
@@ -150,12 +160,12 @@ fn addRuiWithIdentity(
     });
     configurePauses(b, executable, test_pauses);
     executable.root_module.link_libc = true;
-    configureSqlite(b, executable, tool_target);
-    configureYaml(b, executable, tool_target);
+    configureSqlite(b, executable);
+    configureYaml(b, executable);
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
-    configureTerminalEditor(b, executable, tool_target);
-    configureTransportWithIdentity(b, executable, target, pinned_transport, identity, tool_target);
+    configureTerminalEditor(b, executable);
+    configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
 
@@ -206,9 +216,8 @@ fn configureTransport(
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     maybe_pinned: ?PinnedTransport,
-    tool_target: ?std.Build.ResolvedTarget,
 ) void {
-    configureTransportWithIdentity(b, compile, target, maybe_pinned, buildIdentity(b), tool_target);
+    configureTransportWithIdentity(b, compile, target, maybe_pinned, buildIdentity(b));
 }
 
 fn configureTransportWithIdentity(
@@ -217,7 +226,6 @@ fn configureTransportWithIdentity(
     target: std.Build.ResolvedTarget,
     maybe_pinned: ?PinnedTransport,
     identity: BuildIdentity,
-    tool_target: ?std.Build.ResolvedTarget,
 ) void {
     const options = b.addOptions();
     options.addOption(bool, "enabled", transportEnabled(target));
@@ -230,9 +238,9 @@ fn configureTransportWithIdentity(
     const url = addUrl(b);
     compile.root_module.addImport("url", url);
     const os = useOs(b, compile.root_module);
-    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url, os, tool_target) orelse return;
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url, os) orelse return;
     compile.root_module.addImport("tls_client", tls_client);
-    compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client, tool_target));
+    compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
 
 pub fn addTestPoll(b: *std.Build) *std.Build.Module {
@@ -273,7 +281,6 @@ pub fn addTlsClient(
     maybe_pinned: ?PinnedTransport,
     url: *std.Build.Module,
     os: *std.Build.Module,
-    tool_target: ?std.Build.ResolvedTarget,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -284,7 +291,7 @@ pub fn addTlsClient(
     });
     module.addImport("url", url);
     module.addImport("os", os);
-    const bindings = addBindings(b, module, tool_target, "openssl_c",
+    const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
         \\#include <openssl/x509v3.h>
@@ -307,7 +314,6 @@ pub fn addH2(
     maybe_pinned: ?PinnedTransport,
     test_poll: *std.Build.Module,
     tls_client: *std.Build.Module,
-    tool_target: ?std.Build.ResolvedTarget,
 ) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("src/h2/h2.zig"),
@@ -319,7 +325,7 @@ pub fn addH2(
     module.addImport("os", tls_client.import_table.get("os").?);
     module.addImport("test_poll", test_poll);
     module.addImport("tls_client", tls_client);
-    const bindings = addBindings(b, module, tool_target, "h2_c",
+    const bindings = addBindings(b, module, "h2_c",
         \\#include <nghttp2/nghttp2.h>
         \\
     );
@@ -445,11 +451,11 @@ fn sqliteMacros(module: *std.Build.Module) void {
     module.addCMacro("SQLITE_ENABLE_API_ARMOR", "1");
 }
 
-fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile, tool_target: ?std.Build.ResolvedTarget) void {
+fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const module = compile.root_module;
     const yaml = b.dependency("yaml", .{});
     if (module.root_source_file != null) {
-        const bindings = addBindings(b, module, tool_target, "yaml", "#include <yaml.h>\n");
+        const bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
         bindings.addIncludePath(yaml.path("include"));
     }
     module.addIncludePath(yaml.path("include"));
@@ -457,11 +463,11 @@ fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile, tool_target: ?
     module.linkLibrary(yamlLibrary(b, module.resolved_target.?, module.optimize.?));
 }
 
-fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile, tool_target: ?std.Build.ResolvedTarget) void {
+fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const sqlite = b.dependency("sqlite", .{});
     const module = compile.root_module;
     if (module.root_source_file != null) {
-        const bindings = addBindings(b, module, tool_target, "sqlite", "#include <sqlite3.h>\n");
+        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
         bindings.addIncludePath(sqlite.path("."));
     }
     module.link_libc = true;
@@ -487,8 +493,8 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
     });
 }
 
-pub fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile, tool_target: ?std.Build.ResolvedTarget) void {
-    configurePosix(b, compile.root_module, tool_target);
+pub fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    configurePosix(b, compile.root_module);
     configureVaxis(b, compile.root_module);
     compile.root_module.link_libc = true;
 }
@@ -503,10 +509,8 @@ fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
     module.addImport("vaxis", dependency.module("vaxis"));
 }
 
-/// `tool_target` is the target of the translate-c executable only; the translated module keeps
-/// `module`'s target. null builds the tool for the host's native CPU, as local builds always have.
-fn addBindings(b: *std.Build, module: *std.Build.Module, tool_target: ?std.Build.ResolvedTarget, name: []const u8, header: []const u8) Translator {
-    const translate_c = if (tool_target) |target|
+fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) Translator {
+    const translate_c = if (hostToolTarget(b)) |target|
         b.dependency("translate_c", .{ .target = target, .optimize = std.builtin.OptimizeMode.ReleaseFast })
     else
         b.dependency("translate_c", .{ .optimize = std.builtin.OptimizeMode.ReleaseFast });
@@ -520,9 +524,9 @@ fn addBindings(b: *std.Build, module: *std.Build.Module, tool_target: ?std.Build
     return bindings;
 }
 
-pub fn configurePosix(b: *std.Build, module: *std.Build.Module, tool_target: ?std.Build.ResolvedTarget) void {
+pub fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
     _ = useOs(b, module);
-    _ = addBindings(b, module, tool_target, "posix",
+    _ = addBindings(b, module, "posix",
         \\#undef _FORTIFY_SOURCE
         \\#include <unistd.h>
         \\#include <sys/stat.h>
@@ -542,7 +546,6 @@ pub fn addSqliteShell(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    tool_target: ?std.Build.ResolvedTarget,
 ) *std.Build.Step.Compile {
     const sqlite = b.dependency("sqlite", .{});
     const executable = b.addExecutable(.{
@@ -552,7 +555,7 @@ pub fn addSqliteShell(
             .optimize = optimize,
         }),
     });
-    configureSqlite(b, executable, tool_target);
+    configureSqlite(b, executable);
     sqliteMacros(executable.root_module);
     executable.root_module.addCSourceFile(.{
         .file = sqlite.path("shell.c"),

@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     // translate-c runs on the build host. CI builds it for the same baseline CPU as the products so its
     // snapshot is reusable across runners; local builds keep the host's native CPU.
-    const tool_target: ?std.Build.ResolvedTarget = if (ci_mode) target else null;
+    if (ci_mode) product.setHostToolTarget(b, target);
     if (pr_ci and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
         @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
@@ -40,14 +40,14 @@ pub fn build(b: *std.Build) void {
     const pinned_transport = product.addPinnedTransport(b, target);
 
     const test_pauses = b.option(bool, "test-pauses", "Enable test pause points in the product executable") orelse false;
-    const rui = if (test_pauses) product.addPauseRui(b, target, optimize, "rui", pinned_transport, tool_target) else product.addRui(b, target, optimize, "rui", pinned_transport, tool_target);
+    const rui = if (test_pauses) product.addPauseRui(b, target, optimize, "rui", pinned_transport) else product.addRui(b, target, optimize, "rui", pinned_transport);
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci, tool_target);
+    const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
@@ -84,8 +84,8 @@ pub fn build(b: *std.Build) void {
     const pg_root = unit_module.root(.pg);
     const h2_test_step = b.step(h2_root.target, "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step(pg_root.target, "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b), tool_target)) |tls_client| {
-        const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client, tool_target);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
+        const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
         h2.root_source_file = b.path(h2_root.source);
         const h2_tests = b.addTest(.{ .name = h2_root.name, .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
@@ -111,15 +111,15 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
-    product.configureTerminalEditor(b, terminal_notice, tool_target);
+    product.configureTerminalEditor(b, terminal_notice);
 
-    const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport, tool_target);
-    const release_safe_compile = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b), tool_target) else production_safe;
+    const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const release_safe_compile = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
     // Promotion tests the release archive's own executable instead of compiling a second ReleaseSafe rui.
     const rui_under_test = b.option([]const u8, "rui-under-test", "Run ReleaseSafe integrations against this prebuilt rui instead of compiling one");
     const release_safe: std.Build.LazyPath = if (rui_under_test) |path| .{ .cwd_relative = path } else ci.path(release_safe_compile);
-    const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport, tool_target);
-    const pause_rui = product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci, tool_target);
+    const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
+    const pause_rui = product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci);
     const pause_fixture = b.addExecutable(.{
         .name = "pause-socket-fixture",
         .root_module = b.createModule(.{
@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = target, .optimize = .ReleaseSafe }),
         .filters = &.{"seed CLI mixed parts fixture"},
     });
-    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport, tool_target);
+    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport);
     const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
     public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
     public_parts_integration.addFileArg(release_safe);
@@ -203,7 +203,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    product.configurePosix(b, read_client, tool_target);
+    product.configurePosix(b, read_client);
     read_client.addImport("url", product.addUrl(b));
     session_list_client.root_module.addImport("rui_client", read_client);
     const session_list_integration = b.addSystemCommand(&.{"python3"});
@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    product.configurePosix(b, credentials_module, tool_target);
+    product.configurePosix(b, credentials_module);
     credential_actor.root_module.addImport("codex_credentials", credentials_module);
     const credential_integration = b.addSystemCommand(&.{"python3"});
     credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
@@ -289,7 +289,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    product.configurePosix(b, preferences_module, tool_target);
+    product.configurePosix(b, preferences_module);
     preferences_module.addImport("url", product.addUrl(b));
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
@@ -314,7 +314,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b), tool_target)) |tls_client| {
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
         mysql_connection.addImport("tls_client", tls_client);
         mysql_connection.addImport("os", tls_client.import_table.get("os").?);
     }
@@ -364,7 +364,7 @@ pub fn build(b: *std.Build) void {
     const upgrade_release = product.addIntegrationRui(b, target, "rui-upgrade-release-fixture", pinned_transport, pr_ci, .{
         .version = b.fmt("0.{d}.10000", .{product.schemaVersion(b)}),
         .revision = product.buildIdentity(b).revision,
-    }, tool_target);
+    });
     // Keep PR archive work representative of stripped Linux release payloads.
     if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
@@ -457,7 +457,7 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("build"));
     format.addDirectoryArg(b.path("src"));
-    const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport, tool_target);
+    const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     fast_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     fast_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_BINARY=", ci.path(pause_rui));
@@ -538,8 +538,8 @@ pub fn build(b: *std.Build) void {
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
 
-    const sqlite_shell = measurement_module.addCheck(b, ci, target, release_safe, tool_target);
-    cross_module.add(b, target, pinned_transport, tool_target);
+    const sqlite_shell = measurement_module.addCheck(b, ci, target, release_safe);
+    cross_module.add(b, target, pinned_transport);
     measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
 
     darwin.configureAcceptance(b, ci.directory);
