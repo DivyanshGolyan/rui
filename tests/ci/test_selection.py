@@ -2142,18 +2142,24 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         except BaseException as cleanup:
                             failure.add_note(f"driver reap failed: {cleanup!r}")
                         try:
-                            # A group that survives its leader can hold these pipes open, so the drain is a
-                            # real watchdog, not part of the disposal budget. Killed groups close them at once;
-                            # 10 s real is loose enough for a slow host and still bounds a surviving group.
-                            stdout, stderr = process.communicate(timeout=10)
-                            failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
-                        except BaseException as cleanup:
-                            failure.add_note(f"driver disposal failed: {cleanup!r}")
-                        try:
                             self.wait_for_group_retirement(process.pid, disposal_deadline, clock)
                             retired = True
                         except BaseException as cleanup:
                             failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
+                        try:
+                            if retired:
+                                # Once the group has retired its pipes close at once. The 10 s real watchdog is
+                                # only a backstop for a pipe held by a process that left the group.
+                                stdout, stderr = process.communicate(timeout=10)
+                                failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
+                            else:
+                                # A surviving group keeps its pipes open by design, so close ours rather than
+                                # waiting for a drain that cannot finish.
+                                process.stdout.close()
+                                process.stderr.close()
+                                failure.add_note("stdout: not drained, driver group unretired")
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver disposal failed: {cleanup!r}")
                         failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
                         try:
                             peers = root / "peer-pids"
