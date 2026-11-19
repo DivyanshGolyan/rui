@@ -1564,7 +1564,7 @@ pub const SessionListPage = struct {
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 pin_order: ?JsonString(20),
                 reference: JsonString(protocol.max_session_bytes),
-                // The Archived key: null exactly while the Session is active (archiving and archived rows carry it).
+                // The Archived key. Live rows carry null; the overview does not read it until the Archived window client.
                 archive_seq: ?JsonString(20),
                 parent: ?JsonString(protocol.session_id_bytes),
                 creator: ?JsonString(protocol.session_id_bytes),

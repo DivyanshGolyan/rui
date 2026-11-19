@@ -83,13 +83,39 @@ pub const sec_trust = current.sec_trust;
 /// OpenSSL system trust probes before the bundles.
 pub const hashed_trust_directories = current.hashed_trust_directories;
 
-/// The command that opens a link in a browser here, given the environment:
-/// macOS's `open` always has one; Linux's `xdg-open` only in a graphical
-/// session, which names `DISPLAY` or `WAYLAND_DISPLAY`.
-pub fn linkOpener(environ: *const std.process.Environ.Map) ?[]const u8 {
-    const opener = current.link_opener orelse return null;
-    if (opener.needs_display and environ.get("DISPLAY") == null and environ.get("WAYLAND_DISPLAY") == null) return null;
-    return opener.command;
+pub const LinkOpener = union(enum) {
+    desktop: []const u8,
+    wsl: ?[]const u8,
+
+    pub fn open(self: LinkOpener, io: std.Io, link: []const u8) !void {
+        switch (self) {
+            .desktop => |command| try launch(io, &.{ command, link }),
+            .wsl => |fallback| launch(io, &.{ "rundll32.exe", "url.dll,FileProtocolHandler", link }) catch |err| {
+                const command = fallback orelse return err;
+                try launch(io, &.{ command, link });
+            },
+        }
+    }
+
+    fn launch(io: std.Io, argv: []const []const u8) !void {
+        _ = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    }
+};
+
+pub fn linkOpener(environ: *const std.process.Environ.Map) ?LinkOpener {
+    return linkOpenerFor(tag, environ);
+}
+
+fn linkOpenerFor(comptime platform: std.Target.Os.Tag, environ: *const std.process.Environ.Map) ?LinkOpener {
+    const opener = semantics(platform).link_opener orelse return null;
+    const has_display = environ.get("DISPLAY") != null or environ.get("WAYLAND_DISPLAY") != null;
+    const desktop: ?[]const u8 = if (!opener.needs_display or has_display) opener.command else null;
+    if (platform == .linux) {
+        if (environ.get("WSL_INTEROP")) |interop| {
+            if (interop.len != 0) return .{ .wsl = desktop };
+        }
+    }
+    return if (desktop) |command| .{ .desktop = command } else null;
 }
 
 test "Linux and Darwin semantics" {
@@ -105,11 +131,60 @@ test "Linux and Darwin semantics" {
     try std.testing.expect(!linux.stack_guard_bus_error and mac.stack_guard_bus_error);
     try std.testing.expect(!linux.sec_trust and mac.sec_trust);
     try std.testing.expect(linux.hashed_trust_directories and !mac.hashed_trust_directories);
-    try std.testing.expectEqualStrings("xdg-open", linux.link_opener.?.command);
-    try std.testing.expect(linux.link_opener.?.needs_display and !mac.link_opener.?.needs_display);
-    try std.testing.expectEqualStrings("open", mac.link_opener.?.command);
     const unsupported = semantics(.windows);
     try std.testing.expect(!unsupported.supported and unsupported.read_only_directory == null);
+}
+
+test "SUI-64 browser launch selects the native route and preserves arguments through refusal" {
+    if (tag != .linux and tag != .macos) return error.SkipZigTest;
+    const Probe = struct {
+        calls: usize = 0,
+        wsl: bool,
+        first_refused: bool,
+        second_refused: bool,
+        const url = "https://example.invalid/authorize?first=one&second=two%20words";
+        fn spawn(raw: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const expected: []const []const u8 = if (self.wsl and self.calls == 0)
+                &.{ "rundll32.exe", "url.dll,FileProtocolHandler", url }
+            else
+                &.{ if (tag == .macos) "open" else "xdg-open", url };
+            std.testing.expectEqual(expected.len, options.argv.len) catch return error.Unexpected;
+            for (expected, options.argv) |want, got| {
+                std.testing.expectEqualStrings(want, got) catch return error.Unexpected;
+            }
+            std.testing.expect(options.stdin == .ignore and options.stdout == .ignore and options.stderr == .ignore) catch return error.Unexpected;
+            const refused = if (self.calls == 0) self.first_refused else self.second_refused;
+            self.calls += 1;
+            if (refused) return error.FileNotFound;
+            return .{ .id = null, .thread_handle = {}, .stdin = null, .stdout = null, .stderr = null, .request_resource_usage_statistics = false };
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.processSpawn = Probe.spawn;
+    const displays = [_]?[]const u8{ null, "DISPLAY", "WAYLAND_DISPLAY" };
+    const interops = [_]?[]const u8{ null, "", "/run/WSL/synthetic" };
+    for (displays) |display| for (interops) |interop| for ([_]bool{ false, true }) |first_refused| for ([_]bool{ false, true }) |second_refused| {
+        var env = std.process.Environ.Map.init(std.testing.allocator);
+        defer env.deinit();
+        if (display) |key| try env.put(key, ":0");
+        if (interop) |value| try env.put("WSL_INTEROP", value);
+        const wsl = tag == .linux and interop != null and interop.?.len != 0;
+        const desktop = tag == .macos or display != null;
+        const selected = linkOpener(&env);
+        try std.testing.expectEqual(wsl or desktop, selected != null);
+        if (selected) |opener| {
+            var probe: Probe = .{ .wsl = wsl, .first_refused = first_refused, .second_refused = second_refused };
+            const io: std.Io = .{ .userdata = &probe, .vtable = &vtable };
+            const fallback = wsl and desktop and first_refused;
+            if (first_refused and (!fallback or second_refused)) {
+                try std.testing.expectError(error.FileNotFound, opener.open(io, Probe.url));
+            } else {
+                try opener.open(io, Probe.url);
+            }
+            try std.testing.expectEqual(@as(usize, if (fallback) 2 else 1), probe.calls);
+        }
+    };
 }
 
 test {
