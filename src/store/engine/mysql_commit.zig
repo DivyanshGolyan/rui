@@ -53,7 +53,7 @@ pub fn rerunAfter(ours: Owner, theirs: Owner) bool {
 // Expected values are transcribed from src/store/engine/Mysql.zig (lost, settleLostCommit, defersFence, recover)
 // before its shell used this core. None is computed from the functions under test.
 
-test "SH-100 a lost COMMIT is saved, not saved or no longer ours by the owner row alone" {
+test "SH-101 a lost COMMIT is saved, not saved or no longer ours by the owner row alone" {
     // Mysql.lost: committing picks the failure, armed picks rerunnable.
     for ([_]bool{ false, true }) |committing| {
         for ([_]bool{ false, true }) |armed| {
@@ -90,7 +90,7 @@ test "SH-100 a lost COMMIT is saved, not saved or no longer ours by the owner ro
     // A commit_seq of the maximum is not in the table: Mysql.settleLostCommit adds one to it, which has no defined result.
 }
 
-test "SH-101 a lost batch runs again only while unsaved and still ours, and once" {
+test "SH-102 a lost batch runs again only while unsaved and still ours, and once" {
     const failures = [_]?Failure{ null, .connection_lost, .commit_outcome_unknown, .ownership_lost, .other };
     const ours: Owner = .{ .epoch = 5, .commit_seq = 9 };
 

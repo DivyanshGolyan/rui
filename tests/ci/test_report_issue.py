@@ -504,9 +504,9 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(len(steps), 2)
         promotion = {name: re.findall(r'^      - name: (Require every selected .+)$',
                                       Path(f'.github/workflows/{name}').read_text(), re.M)
-                     for name in ('qualification-tier.yml', 'promote.yml', 'main-qualifier.yml')}
+                     for name in ('qualification-tier.yml', 'promote.yml')}
         self.assertEqual(promotion, {'qualification-tier.yml': ['Require every selected qualification tier'],
-                                     'promote.yml': [], 'main-qualifier.yml': []})
+                                     'promote.yml': []})
         gate = dict(id=3, name='mutations', conclusion='failure',
                     steps=[dict(name='Require behavioral kills in isolated source copies', conclusion='failure')])
         self.assertFalse(report_issue.aggregate_only(gate))

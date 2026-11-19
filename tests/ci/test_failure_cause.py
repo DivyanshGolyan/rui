@@ -156,7 +156,8 @@ class WiringTest(unittest.TestCase):
         # A rerun reruns the failed tier jobs, its verdict and Release, which waits for the rerun verdict.
         self.assertIn("needs: [batch, qualify]", release, "a rerun's Release waits for the rerun verdict")
         self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
-                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}", release,
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && "
+                      "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release,
                       "Release runs only on a reused green record or a successful tier")
 
     def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):

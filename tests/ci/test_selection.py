@@ -351,14 +351,15 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
+    def test_only_promote_is_scheduled_and_only_promote_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
                 scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
-                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
-                self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
+                self.assertEqual(len(scheduled), path.name == "promote.yml")
+                if path.name != "promote.yml":
+                    self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
         removed = ("daily-macos.yml", "cold-acceptance.yml",
@@ -1353,6 +1354,7 @@ class SelectionTest(unittest.TestCase):
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
             "src/preference_document.zig": {"admission-debug-integration", "test-logic"},
+            "src/defaults_report.zig": {"admission-debug-integration", "test-logic"},
             "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
             "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }
@@ -1999,14 +2001,16 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
                 if [ ! -e "$GATE_DIR/$peer.done" ]; then exit 44; fi
             done ;;
     esac
-    if [ "$fixture" = "$HOLD_FIXTURE" ] && [ "$2" != debug ]; then
-        read -r release < "$GATE_DIR/release"
-        test "$release" = r || exit 45
-    fi
+    case " $HOLD_FIXTURE " in
+        *" $fixture "*) if [ "$2" != debug ]; then
+            read -r release < "$GATE_DIR/hold.$fixture"
+            test "$release" = r || exit 45
+        fi ;;
+    esac
     touch "$GATE_DIR/$identity.done"
 fi
 printf "%s %s\\n" "$fixture" "$2" >> "$GATE_DIR/invocations"
-if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
+case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
 '''
             for name in ("python3", "sh", "native"):
                 (root / name).write_text(command)
@@ -2063,6 +2067,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             else:
                 command = ["/bin/sh", driver, "release", "debug", *arguments]
             releases = []
+            held_fds = {}
             if timing:
                 clock_file = root / "clock"
                 clock_file.write_text("10000000000")
@@ -2079,8 +2084,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         os.mkfifo(fifo)
                         releases.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
                 elif hold:
-                    os.mkfifo(root / "release")
-                    releases.append(os.open(root / "release", os.O_RDWR | os.O_NONBLOCK))
+                    for name in hold.split():
+                        os.mkfifo(root / f"hold.{name}")
+                        held_fds[name] = os.open(root / f"hold.{name}", os.O_RDWR | os.O_NONBLOCK)
+                        releases.append(held_fds[name])
                 with ExitStack() as streams:
                     process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, start_new_session=True)
@@ -2108,13 +2115,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 clock_file.with_suffix(".next").write_text("30000000000")
                                 clock_file.with_suffix(".next").replace(clock_file)
                             elif hold:
+                                holds = hold.split()
                                 def held_started():
                                     self.assertIsNone(process.poll())
-                                    return any(root.glob(f"{hold}.*.started"))
+                                    return all(any(root.glob(f"{name}.*.started")) for name in holds)
                                 wait_for(held_started, f"held {hold} to start", interval=.005, deadline=deadline)
                                 if fail_at == "held_ready":
                                     self.fail("injected failure at held_ready")
-                                held_name = {
+                                held_names = {
                                     "native": "native",
                                     "admission_integration.sh": "admission",
                                     "dispatch_integration.py": "dispatch",
@@ -2129,13 +2137,18 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                     "descriptor_capacity_integration.py": "descriptor-capacity",
                                     "host_stop_integration.py": "host-stop",
                                     "human_cli_integration.py:renderer": "human-cli-renderer",
-                                }[hold]
-                                def held_wait_started():
-                                    self.assertIsNone(process.poll())
-                                    return (root / f"wait.{held_name}").exists()
-                                wait_for(held_wait_started, f"driver to wait for {held_name}",
-                                         interval=.005, deadline=deadline)
-                                self.assertFalse((root / "isolated.started").exists())
+                                }
+                                # Release each peer only once the driver waits on it, in the driver's own order.
+                                # A peer the driver fails to drain is still held when the isolated cases start.
+                                for name in holds:
+                                    def held_wait_started(held_name=held_names[name]):
+                                        self.assertIsNone(process.poll())
+                                        return (root / f"wait.{held_name}").exists()
+                                    wait_for(held_wait_started, f"driver to wait for {held_names[name]}",
+                                             interval=.005, deadline=deadline)
+                                    self.assertFalse((root / "isolated.started").exists())
+                                    if not timeout_after_held:
+                                        os.write(held_fds[name], b"r\n")
                         finally:
                             if sys.exception() is None and not timeout_after_held:
                                 for release in releases:
@@ -2194,9 +2207,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 dispose_all(*(lambda fd=fd: os.close(fd) for fd in releases))
             return result, invocations.read_text().splitlines()
 
-    def records(self, result):
-        return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
-                          result.stdout + result.stderr, re.MULTILINE)
+    def records(self, result, elapsed=r"\d+\.\d{3}s"):
+        found = re.findall(rf"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=({elapsed})$",
+                           result.stdout + result.stderr, re.MULTILINE)
+        return [(name, status, value.removesuffix("s")) for name, status, value in found]
 
     def test_slow_interpreter_startup_is_not_a_driver_failure(self):
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
@@ -2462,15 +2476,21 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         self.assertIn("dispatch_integration.py release", lines)
         self.assertIn("human_cli_integration.py:callers release", lines)
 
+    def failed_records(self, result, lines, elapsed=r"\d+\.\d{3}s"):
+        records = self.records(result, elapsed)
+        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+        self.assertTrue({status for _, status, _ in records} <= {"0", "42"}, result.stdout + result.stderr)
+        return {name for name, status, _ in records if status == "42"}
+
     def test_parallel_gate_drains_native_and_execution_peers(self):
-        for peer in ("native", "admission_integration.sh", "dispatch_integration.py",
-                     "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
-                     "sender_identity_integration.py",
-                     "bash_lifecycle_integration.py", "bash_recovery_integration.py",
-                     "codex_integration.py", "control_integration.py", "descriptor_capacity_integration.py"):
-            with self.subTest(peer=peer):
-                result, _ = self.run_part("parallel", overlap=True, hold=peer)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # One run holds all twelve peers. Each is released only after the driver waits on it, in driver order.
+        peers = ("native", "admission_integration.sh", "dispatch_integration.py",
+                 "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
+                 "sender_identity_integration.py", "bash_lifecycle_integration.py",
+                 "bash_recovery_integration.py", "codex_integration.py", "control_integration.py",
+                 "descriptor_capacity_integration.py")
+        result, _ = self.run_part("parallel", overlap=True, hold=" ".join(peers))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
         complete = {}
@@ -2478,35 +2498,37 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0)
             complete[part] = set(lines)
-        for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
-                        "session_list_integration.py", "conversation_page_integration.py",
-                        "activity_integration.py",
-                        "host_status_integration.py", "host_stop_integration.py",
-                        "host_launch_integration.py", "host_process_test.py",
-                        "host_allocator_test.py", "admission_integration.sh"):
-            for part in ("callers", "parallel", "all"):
-                result, lines = self.run_part(part, fixture)
-                self.assertEqual(result.returncode, 42 if part == "all" else 1, (part, fixture))
-                records = self.records(result)
-                self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
-                self.assertIn("42", [status for _, status, _ in records])
-                if part == "all":
-                    self.assertEqual(lines[-1].split()[0], fixture)
-                else:
-                    self.assertEqual(set(lines), complete[part])
-        for part in ("callers", "parallel"):
-            for fixture, record in (("human_cli_integration.py:renderer", "human-cli-renderer"),
-                                    ("terminal_restoration_integration.py", "terminal-restoration"),
-                                    ("canonical_failure_integration.py", "canonical-failure")):
-                result, lines = self.run_part(part, fixture)
+        # Batch members fail together, one run per part: each still runs, each failure is recorded against its
+        # own name, and the part exits 1. Isolated members fail in their own run, so an isolated failure cannot
+        # hide a batch-only fault behind the same exit status.
+        callers_batch = ("human_cli_integration.py preference_policy_integration.py session_list_integration.py "
+                         "conversation_page_integration.py activity_integration.py host_status_integration.py "
+                         "host_stop_integration.py terminal_restoration_integration.py canonical_failure_integration.py")
+        callers_failed = {"human-cli", "human-cli-renderer", "terminal-restoration", "canonical-failure",
+                          "preference-policy", "session-list", "conversation-page", "activity", "host-status",
+                          "host-stop"}
+        for part, fail, failed in (
+            ("callers", callers_batch, callers_failed),
+            ("parallel", f"{callers_batch} dispatch_integration.py native admission_integration.sh",
+             callers_failed | {"dispatch", "native", "admission", "admission-debug"}),
+            ("callers", "host_launch_integration.py host_process_test.py host_allocator_test.py",
+             {"host-launch", "host-process", "host-allocator"}),
+        ):
+            with self.subTest(part=part, fail=fail):
+                result, lines = self.run_part(part, fail)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(self.failed_records(result, lines), failed)
                 self.assertEqual(set(lines), complete[part])
-                self.assertIn((record, "42"), [(name, status) for name, status, _ in self.records(result)])
-        for part in ("execution", "parallel", "all"):
-            result, _ = self.run_part(part, "dispatch_integration.py")
-            self.assertNotEqual(result.returncode, 0, part)
-        result, _ = self.run_part("parallel", "native")
-        self.assertNotEqual(result.returncode, 0)
+        # The serial parts stop at the first failing case, so each group needs its own witness.
+        for part, fixture, name in (("all", "dispatch_integration.py", "dispatch"),
+                                    ("all", "host_status_integration.py", "host-status"),
+                                    ("all", "host_allocator_test.py", "host-allocator"),
+                                    ("execution", "dispatch_integration.py", "dispatch")):
+            with self.subTest(part=part, fixture=fixture):
+                result, lines = self.run_part(part, fixture)
+                self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+                self.assertEqual(lines[-1].split()[0], fixture)
+                self.assertEqual(self.failed_records(result, lines), {name})
         result, lines = self.run_part("not-a-part")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(lines, [])
@@ -2525,19 +2547,24 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 self.assertEqual(records["host-launch"], "0")
 
     def test_clock_failure_preserves_fixture_results(self):
+        # Each clock mode runs with no failure and with failing fixtures. The serial part stops at its failing
+        # fixture, so only preference-policy is reached; the batch parts run every member, and host-launch is
+        # isolated, so both fail. Each member's record is checked by name, not as a set of statuses.
+        batch_fail = "preference_policy_integration.py host_launch_integration.py"
+        batch_failed = {"preference-policy", "host-launch"}
         for clock_error in ("start", "finish"):
-            for part in ("all", "execution", "callers", "parallel"):
-                fixture = "dispatch_integration.py" if part == "execution" else "preference_policy_integration.py"
-                failures = ("", fixture, "host_launch_integration.py") if part in ("callers", "parallel") else ("", fixture)
-                for fail in failures:
-                    with self.subTest(clock_error=clock_error, part=part, fail=fail):
-                        result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
-                        expected = (42 if part in ("all", "execution") else 1) if fail else 0
-                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                        records = re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=unavailable$",
-                                             result.stdout + result.stderr, re.MULTILINE)
-                        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
-                        self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
+            for part, fail, returncode, failed in (
+                ("all", "", 0, set()),
+                ("all", "preference_policy_integration.py", 42, {"preference-policy"}),
+                ("callers", "", 0, set()),
+                ("callers", batch_fail, 1, batch_failed),
+                ("parallel", "", 0, set()),
+                ("parallel", batch_fail, 1, batch_failed),
+            ):
+                with self.subTest(clock_error=clock_error, part=part, fail=fail):
+                    result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
+                    self.assertEqual(result.returncode, returncode, result.stdout + result.stderr)
+                    self.assertEqual(self.failed_records(result, lines, elapsed="unavailable"), failed)
 
 
 if __name__ == "__main__":

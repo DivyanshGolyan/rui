@@ -1,9 +1,9 @@
 name: Release build
-# Promote (promote.yml) and Qualify main (main-qualifier.yml) call this first,
+# Promote (promote.yml, scheduled or by hand) calls this first,
 # beside qualification, with the main SHA they qualify. It numbers the release
 # and builds the archives the qualification tiers test and Release (release.yml)
 # publishes unchanged once every tier is green. It publishes nothing. The
-# archives stay seven days, so Promote can publish a commit Qualify main
+# archives stay seven days, so Promote can publish a commit an earlier run
 # qualified days earlier; past that, Promote qualifies the commit again.
 on:
   workflow_call:

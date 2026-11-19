@@ -42,6 +42,7 @@ const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
+const defaults_report = @import("defaults_report.zig");
 const status_page = @import("status_page.zig");
 const ChatInfo = @import("chat_info.zig");
 const model_capability = @import("model_capability.zig");
@@ -341,7 +342,7 @@ fn signInPath(init: std.process.Init, comptime provider: protocol.Provider, buff
     };
 }
 
-const SetupReader = enum { command_line, conversation, overview };
+const SetupReader = defaults_report.Reader;
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupReader) !void {
     const home = init.environ_map.get("HOME") orelse {
@@ -370,198 +371,76 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
-    // Preferences live in HOME, so a saved Store redirects every Workspace.
+    // F3: take the Host and account snapshots before writing any report bytes.
+    const report_host: defaults_report.Host = if (available_store) |*paths| switch (client.hostStatusAt(init.io, paths, null)) {
+        .ready => |current| .{ .ready = current.capabilities },
+        .unavailable => .unavailable,
+        .owned_unavailable => .owned_unavailable,
+        .incompatible => .incompatible,
+        .access_failure => .access_failure,
+    } else .store_unavailable;
+    var shown: codex_auth.Shown = undefined;
+    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const facts: defaults_report.Facts = .{
+        .changed = changed,
+        .values = values,
+        .store = prospective_store,
+        .saved_store = values.store.len != 0,
+        .store_available = available_store != null,
+        .readiness = &readiness,
+        .host = report_host,
+        .account = account,
+        .reader = reader,
+        .names = signInNames(),
+        .defaults = .{ .permission_mode = product_defaults.permission_mode, .recommended_model = product_defaults.recommended_model },
+    };
     if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
-        notice.writeAll("rui: saved ") catch break :notice;
-        TerminalText.writeShellWord(&notice, values.store.slice()) catch break :notice;
-        notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
+        defaults_report.writeStoreNotice(&notice, &facts) catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     }
-    if (reader == .command_line) return writeDefaultsJson(init.io, .{
-        .changed = changed,
-        .store = prospective_store,
-        .saved_store = values.store.len != 0,
-        .available_store = if (available_store) |*paths| paths.selector() else null,
-        .provider = if (values.provider.len != 0) values.provider.slice() else null,
-        .model = if (values.model.len != 0) values.model.slice() else null,
-        .notifications = values.notifications,
-        .reasoning_effort = values.reasoning_effort,
-        .permission_mode = values.permission_mode,
-        .readiness = &readiness,
-    });
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
-    if (reader == .conversation and changed and available_store != null and nextSessionReady(&values, &readiness)) return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
-    try writeSafeText(init.io, prospective_store orelse "unavailable");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
-    if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
-    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) providerShown(values.provider.slice()) else "not selected");
-    try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
-    try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
-    try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
-    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    var note_buffer: [128]u8 = undefined;
-    try writeSignIns(init, &readiness);
-    const selectable = model_capability.capabilities(&readiness);
-    const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
-        const advice: []const u8 = switch (err) {
-            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-        };
-        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
-        break :blk null;
-    };
-    if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; ChatGPT login: `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
-        .selected => |selected| {
-            const login_command = if (std.meta.stringToEnum(protocol.Provider, selected.provider)) |provider| provider.login() else null;
-            const note: []const u8 = switch (selected.readiness) {
-                .configured => "local credential configured; remote acceptance not checked",
-                .renewal_due => "local credential usable; renewal due at dispatch; remote acceptance not checked",
-                .missing => if (login_command) |command| try std.fmt.bufPrint(&note_buffer, "credential missing; run `{s}`. No fallback", .{command}) else "credential missing. No fallback",
-                .refresh_required => "credential refresh required; login may be required. No fallback",
-                .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
-            };
-            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ providerShown(selected.provider), selected.model, note });
-            try std.Io.File.stdout().writeStreamingAll(init.io, line);
-        },
-    };
-    var host_line: [512]u8 = undefined;
-    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatusAt(init.io, &paths, null)) {
-        .ready => |current| hostProvidersLine(current.capabilities.providers, &host_line),
-        .unavailable => "Host: unavailable; setup does not start it.\n",
-        .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
-        .incompatible => "Host: incompatible; inspect before submitting work.\n",
-        .access_failure => "Host: access failure; inspect Store permissions.\n",
-    } else "Host: unavailable; selected Store unavailable.\n";
-    try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+    if (defaults_report.wantsJson(&facts)) return writeDefaultsJson(init.io, &facts);
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try defaults_report.writeText(&output.interface, &facts);
+    try output.flush();
 }
 
-fn providerShown(saved: []const u8) []const u8 {
-    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return saved;
-    return provider.shown();
-}
-
-fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
-    const stdout = std.Io.File.stdout();
-    const chatgpt = chatgptLines(readiness.get(.chatgpt), readiness.get(.codex));
-    var line: [1024]u8 = undefined;
-    switch (chatgpt.plan) {
-        .none => {},
-        .account => try stdout.writeStreamingAll(init.io, planSignInLine(init, &line)),
-        .text => |text| try stdout.writeStreamingAll(init.io, text),
-    }
-    if (chatgpt.device) |text| try stdout.writeStreamingAll(init.io, text);
-    try stdout.writeStreamingAll(init.io, switch (readiness.get(.openai)) {
-        .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
-        .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
-    });
-}
-
-const ChatgptLines = struct {
-    plan: union(enum) {
-        none,
-        account,
-        text: []const u8,
-    },
-    device: ?[]const u8,
-};
-
-fn chatgptLines(plan: provider_selection.Readiness, device: provider_selection.Readiness) ChatgptLines {
-    const plan_login = comptime protocol.Provider.chatgpt.login().?;
-    const device_login = comptime protocol.Provider.codex.login().?;
-    return .{
-        .plan = switch (plan) {
-            .configured, .renewal_due => .account,
-            .missing => if (device == .missing) .{ .text = "ChatGPT: not signed in; sign in with `" ++ plan_login ++ "` (add --device-code to use a code instead of the browser).\n" } else .none,
-            .refresh_required => .{ .text = "ChatGPT: a renewal did not finish; sign in again with `" ++ plan_login ++ "`.\n" },
-            .credential_error => .{ .text = "ChatGPT: error reading private Rui credential; inspect it before use.\n" },
-        },
-        .device = switch (device) {
-            .missing => null,
-            .configured => "ChatGPT (device code): signed in (remote acceptance not checked).\n",
-            .renewal_due => "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n",
-            .refresh_required => "ChatGPT (device code): a renewal did not finish; sign in again with `" ++ device_login ++ "`.\n",
-            .credential_error => "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n",
-        },
-    };
-}
-
-test "auth status says each ChatGPT way in that exists, and how to sign in when neither does" {
-    const Readiness = provider_selection.Readiness;
-    const signed_in = "account";
-    const plan_renew = "ChatGPT: a renewal did not finish; sign in again with `rui auth login chatgpt`.\n";
-    const plan_error = "ChatGPT: error reading private Rui credential; inspect it before use.\n";
-    const neither = "ChatGPT: not signed in; sign in with `rui auth login chatgpt` (add --device-code to use a code instead of the browser).\n";
-    const device_on = "ChatGPT (device code): signed in (remote acceptance not checked).\n";
-    const device_due = "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n";
-    const device_renew = "ChatGPT (device code): a renewal did not finish; sign in again with `rui auth login chatgpt --device-code`.\n";
-    const device_error = "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n";
-    const cases = [_]struct { Readiness, Readiness, ?[]const u8, ?[]const u8 }{
-        .{ .configured, .configured, signed_in, device_on },
-        .{ .configured, .renewal_due, signed_in, device_due },
-        .{ .configured, .missing, signed_in, null },
-        .{ .configured, .refresh_required, signed_in, device_renew },
-        .{ .configured, .credential_error, signed_in, device_error },
-        .{ .renewal_due, .configured, signed_in, device_on },
-        .{ .renewal_due, .renewal_due, signed_in, device_due },
-        .{ .renewal_due, .missing, signed_in, null },
-        .{ .renewal_due, .refresh_required, signed_in, device_renew },
-        .{ .renewal_due, .credential_error, signed_in, device_error },
-        .{ .missing, .configured, null, device_on },
-        .{ .missing, .renewal_due, null, device_due },
-        .{ .missing, .missing, neither, null },
-        .{ .missing, .refresh_required, null, device_renew },
-        .{ .missing, .credential_error, null, device_error },
-        .{ .refresh_required, .configured, plan_renew, device_on },
-        .{ .refresh_required, .renewal_due, plan_renew, device_due },
-        .{ .refresh_required, .missing, plan_renew, null },
-        .{ .refresh_required, .refresh_required, plan_renew, device_renew },
-        .{ .refresh_required, .credential_error, plan_renew, device_error },
-        .{ .credential_error, .configured, plan_error, device_on },
-        .{ .credential_error, .renewal_due, plan_error, device_due },
-        .{ .credential_error, .missing, plan_error, null },
-        .{ .credential_error, .refresh_required, plan_error, device_renew },
-        .{ .credential_error, .credential_error, plan_error, device_error },
-    };
-    const states = std.enums.values(Readiness).len;
-    try std.testing.expectEqual(states * states, cases.len);
-    for (cases) |case| {
-        const said = chatgptLines(case[0], case[1]);
-        const plan: ?[]const u8 = switch (said.plan) {
-            .none => null,
-            .account => signed_in,
-            .text => |text| text,
-        };
-        if (case[2]) |expected| try std.testing.expectEqualStrings(expected, plan.?) else try std.testing.expectEqual(@as(?[]const u8, null), plan);
-        if (case[3]) |expected| try std.testing.expectEqualStrings(expected, said.device.?) else try std.testing.expectEqual(@as(?[]const u8, null), said.device);
-        inline for (.{ plan, said.device }) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
-    }
-}
-
-fn planSignInLine(init: std.process.Init, buffer: []u8) []const u8 {
-    const plain = "ChatGPT: signed in (remote acceptance not checked).\n";
+fn accountDetails(init: std.process.Init, shown: *codex_auth.Shown) ?defaults_report.Account {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = signInPath(init, .chatgpt, &path_buffer) catch return plain;
-    var shown: codex_auth.Shown = undefined;
-    codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), &shown) catch return plain;
-    if (!shown.status.usable()) return plain;
-    var writer = std.Io.Writer.fixed(buffer);
-    writer.writeAll("ChatGPT: signed in") catch return plain;
-    if (shown.email.len != 0) writer.print(" as {s}", .{shown.email.slice()}) catch return plain;
+    const path = signInPath(init, .chatgpt, &path_buffer) catch return null;
+    codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), shown) catch return null;
+    if (!shown.status.usable()) return null;
+    var result: defaults_report.Account = .{ .email = shown.email.slice() };
     if (shown.expires_at > 0) {
         const day = (std.time.epoch.EpochSeconds{ .secs = @intCast(shown.expires_at) }).getEpochDay();
         const year_day = day.calculateYearDay();
         const month_day = year_day.calculateMonthDay();
         const seconds = @as(u64, @intCast(shown.expires_at)) % std.time.s_per_day;
-        writer.print("; access token expires {d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC and renews by itself", .{ year_day.year, month_day.month.numeric(), month_day.day_index + 1, seconds / 3600, seconds % 3600 / 60 }) catch return plain;
+        result.expiry = .{ .year = @intCast(year_day.year), .month = @intCast(month_day.month.numeric()), .day = @intCast(month_day.day_index + 1), .hour = @intCast(seconds / 3600), .minute = @intCast(seconds % 3600 / 60) };
     }
-    writer.writeAll(" (remote acceptance not checked).\n") catch return plain;
-    return writer.buffered();
+    return result;
+}
+
+/// The provider table's names and sign-in commands, handed to the report core.
+fn signInNames() defaults_report.Names {
+    var names: defaults_report.Names = .{ .shown = undefined, .login = undefined, .choices = comptime joinedProviders("|") };
+    for (std.enums.values(protocol.Provider)) |provider| {
+        names.shown[@backingInt(provider)] = provider.shown();
+        names.login[@backingInt(provider)] = provider.login() orelse "";
+    }
+    return names;
+}
+
+fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
+    var shown: codex_auth.Shown = undefined;
+    const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    var buffer: [1024]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    const names = signInNames();
+    try defaults_report.writeSignIns(&output.interface, readiness, account, &names);
+    try output.flush();
 }
 
 fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
@@ -793,25 +672,6 @@ fn planIssuer(init: std.process.Init, fixture_endpoint: ?[]const u8) !chatgpt_pl
     return .{ .fixture = base };
 }
 
-fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
-    const selectable = model_capability.capabilities(readiness);
-    const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
-    return selection == .selected and selection.selected.readiness.usable();
-}
-
-const DefaultsFacts = struct {
-    changed: bool,
-    store: ?[]const u8,
-    saved_store: bool,
-    available_store: ?[]const u8,
-    provider: ?[]const u8,
-    model: ?[]const u8,
-    notifications: bool,
-    reasoning_effort: ?model_capability.ReasoningEffort,
-    permission_mode: ?cli_value.PermissionMode,
-    readiness: *const provider_selection.Readinesses,
-};
-
 fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort") {
     if (std.mem.eql(u8, text, "default")) return .clear;
     return .{ .set = std.meta.stringToEnum(model_capability.ReasoningEffort, text) orelse {
@@ -820,45 +680,10 @@ fn effortEdit(text: []const u8) !@FieldType(preferences.Edit, "reasoning_effort"
     } };
 }
 
-fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
+fn writeDefaultsJson(io: std.Io, facts: *const defaults_report.Facts) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    try writer.print("{{\"version\":\"{s}\",\"type\":\"defaults\",\"changed\":{},\"store\":", .{ protocol.wire_version, facts.changed });
-    try std.json.Stringify.value(facts.store, .{}, writer);
-    try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"provider\":", .{ if (facts.saved_store) "saved" else "home", facts.available_store != null });
-    try std.json.Stringify.value(facts.provider, .{}, writer);
-    try writer.writeAll(",\"model\":");
-    try std.json.Stringify.value(facts.model, .{}, writer);
-    try writer.print(",\"notifications\":{}", .{facts.notifications});
-    try writer.writeAll(",\"reasoning_effort\":");
-    try std.json.Stringify.value(if (facts.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
-    try writer.writeAll(",\"permission_mode\":");
-    try std.json.Stringify.value(if (facts.permission_mode) |mode| @tagName(mode) else null, .{}, writer);
-    try writer.writeAll(",\"local_credentials\":{");
-    for (std.enums.values(protocol.Provider), 0..) |provider, index|
-        try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
-    try writer.writeAll("},\"next_session\":");
-    if (provider_selection.resolve(&model_capability.capabilities(facts.readiness), null, null, facts.provider, facts.model)) |choice| switch (choice) {
-        .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
-        .selected => |selected| {
-            try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
-            try std.json.Stringify.value(selected.model, .{}, writer);
-            try writer.print(",\"local_credential\":\"{s}\"}}", .{@tagName(selected.readiness)});
-        },
-    } else |err| try writer.print("{{\"status\":\"{s}\"}}", .{switch (err) {
-        error.UnsupportedSelectionProvider => "unsupported_provider",
-        error.UnsupportedSelectionModel => "unsupported_model",
-    }});
-    try writer.writeAll(",\"host\":");
-    if (facts.available_store) |store| switch (client.hostStatus(io, store)) {
-        .ready => |ready| {
-            try writer.writeAll("{\"status\":\"ready\",\"capabilities\":");
-            try std.json.Stringify.value(ready.capabilities, .{}, writer);
-            try writer.writeByte('}');
-        },
-        else => |status| try writer.print("{{\"status\":\"{s}\"}}", .{@tagName(status)}),
-    } else try writer.writeAll("{\"status\":\"store_unavailable\"}");
-    try writer.writeAll("}\n");
+    try defaults_report.writeJson(writer, facts);
     try output.finish();
 }
 
@@ -2051,7 +1876,6 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
 }
 
 const provider_labels = joinedProviders(", ");
-const provider_choices = joinedProviders("|");
 
 fn joinedProviders(comptime separator: []const u8) []const u8 {
     comptime var text: []const u8 = "";
@@ -2079,41 +1903,6 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
             };
         },
         .openai => return if (try api_key.present(try credential_location.default(init.environ_map, .openai, &path_buffer))) .configured else .missing,
-    }
-}
-
-fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
-    if (!protocol.servesModel(routes)) return "Host: ready without a model provider; use `rui host settings --paths` to configure new model work.\n";
-    var line = std.Io.Writer.fixed(buffer);
-    line.writeAll("Host: serves") catch unreachable;
-    var first = true;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) != .unserved) {
-        line.print("{s} {s}", .{ if (first) "" else ",", provider.shown() }) catch unreachable;
-        first = false;
-    };
-    line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
-        if (provider.login()) |command|
-            line.print("; to add {s}, stop and restart it after `{s}`", .{ provider.shown(), command }) catch unreachable
-        else
-            line.print("; {s} needs a sign-in this terminal cannot make yet", .{provider.shown()}) catch unreachable;
-    };
-    line.writeAll(".\n") catch unreachable;
-    return line.buffered();
-}
-
-test "the Host line names a login only for an unserved provider that has one" {
-    var buffer: [512]u8 = undefined;
-    const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
-    try std.testing.expectEqualStrings("Host: serves ChatGPT (device code) (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &buffer));
-    inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
-        var routes = protocol.routesAll(.endpoint);
-        @field(routes, @tagName(unserved)) = .unserved;
-        const said = hostProvidersLine(routes, &buffer);
-        if (unserved.login()) |command|
-            try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
-        else
-            try std.testing.expect(std.mem.indexOf(u8, said, "rui auth login") == null and std.mem.indexOf(u8, said, "cannot make yet") != null);
     }
 }
 

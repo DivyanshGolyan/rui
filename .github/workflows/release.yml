@@ -1,7 +1,7 @@
 name: Release
 # Only a green promotion (promote.yml) calls this, with the main SHA it qualified
 # and the version Release build (release-build.yml) planned and built for it,
-# in that promotion's run or in the Qualify main run that qualified the SHA.
+# in that promotion's run or in the earlier promotion run that qualified the SHA.
 # It publishes the archives that build recorded and the tiers tested; it never rebuilds.
 # Recover a failed publication by rerunning that promotion's failed jobs.
 on:
