@@ -92,7 +92,8 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 `OFF` (D200). A detached Host also reports `settings_digest`, the lowercase hex
 SHA-256 of the frozen settings it started with; restart compares it with the
 target build's check, so a same-build restart happens exactly when saved
-settings changed since the Host started.
+settings changed since the Host started. A foreground `host serve` reports no
+digest, and a same-build restart leaves it running as already current.
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
@@ -182,7 +183,7 @@ Interrupted/blocked writes, a closed reader and early refusal do not replace rea
 Public foreground `host serve --settings -` retains its existing layering and stdin-lifetime policy.
 Bare `rui`, `host start` and `host serve` all use the product default Active Capacity of 100 unless settings override it; `host start --set execution.activeCapacity=N` overrides it for the Host it launches, and `host serve --set execution.activeCapacity=N` overrides it with caller-owned lifetime.
 The Host setting `execution.backgroundAfterMs` defaults to 30,000 milliseconds and applies to every live Host-run Action. It is available in the settings document, generic `--set execution.backgroundAfterMs=N` assignments, and the generated TypeScript Host settings. The TUI uses those Host startup settings; its Session settings do not reconfigure a running Host.
-A running Host keeps the capacity it started with, including across Rui upgrades, until it stops and a new Host starts.
+A running Host keeps the capacity it started with until it stops or restarts; a restart (including an Upgrade restart) rebuilds its settings from its own `--set` flags and settings file over the saved settings as they are then, so a saved capacity change applies and a `--set` capacity is kept.
 When `host start` finds or loses a launch race to a ready Host, it still reports that Host and exits zero; settings apply only to a new Host, never reconfigure the running one, and when the command gave `--settings` or `--set`, stderr says so.
 When `host set` or `host unset` saves while a Host serves the Store, stderr says the running Host keeps its old settings. The saved-settings notice names `rui host restart --all`, which restarts a Host whose saved settings changed even on the same build; `--set` assignments still need `rui host pause` then `rui host start`, since restart reuses the running Host's own `--set` flags.
 Startup raises only its own soft descriptor limit, up to the hard limit, to fit that capacity.

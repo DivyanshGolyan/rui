@@ -432,7 +432,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                 defer build.deinit(private);
                 facts.known_bad = knownBadTarget(build);
             },
-            .reconstruct_sources => facts.sources = if (host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt, plan.observed.facts.active_capacity)) |value| sources: {
+            .reconstruct_sources => facts.sources = if (host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt)) |value| sources: {
                 request = value;
                 break :sources true;
             } else |err| if (err == error.OutOfMemory) return err else false,

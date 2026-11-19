@@ -103,8 +103,9 @@ pub const Reading = enum { unreadable, changed, same };
 pub const Running = @FieldType(Outcome, "already_ready");
 
 /// A running Host on the target executable, with the settings digest it reports
-/// (`null` when it reports none, as a Host started without a frozen frame does).
-/// The same build restarts when that digest differs from the target's checked frame.
+/// (`null` when it reports none, as a foreground `host serve` does). The same
+/// build restarts only when a reported digest differs from the target's checked
+/// frame; a Host that reports none stays as it is.
 pub const Same = struct { running: Running, settings: ?settings_handoff.Digest };
 
 /// What one Host's activation has read and done so far; `null` is not yet.
@@ -188,7 +189,9 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
     if (same) running = switch (facts.current orelse return .confirm_current) {
         .unreadable => return .{ .done = .{ .unconfirmed = .verifying } },
         .changed => return .{ .done = .replacement_observed },
-        .same => |value| value,
+        // A Host that reports no settings (a foreground `host serve`, or a
+        // build before the digest) has nothing to compare: the same build stays.
+        .same => |value| if (value.settings == null) return .{ .done = .{ .already_ready = value.running } } else value,
     };
     if (facts.known_bad orelse return .inspect_target) return .{ .done = .{ .unsupported = .target_capability } };
     if (!(facts.sources orelse return .reconstruct_sources)) return .{ .done = .{ .unsupported = .configuration_unavailable } };
@@ -200,9 +203,7 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
         .ok => |digest| digest,
     };
     // The same build is restarted only when its saved settings changed since it started.
-    if (running) |same_host| if (same_host.settings) |settings| {
-        if (std.mem.eql(u8, &settings, &checked)) return .{ .done = .{ .already_ready = same_host.running } };
-    };
+    if (running) |same_host| if (std.mem.eql(u8, &same_host.settings.?, &checked)) return .{ .done = .{ .already_ready = same_host.running } };
     if (cancelled and facts.before_stop == null) return .{ .done = .cancelled };
     switch (facts.before_stop orelse return .reobserve) {
         .unreadable => return .{ .done = .{ .unconfirmed = .stopping } },
@@ -678,7 +679,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     if (same) running_same = switch (current orelse break :expected .confirm_current) {
                         .unreadable => break :expected .{ .done = .{ .unconfirmed = .verifying } },
                         .changed => break :expected .{ .done = .replacement_observed },
-                        .same => |value| value,
+                        .same => |value| if (value.settings == null) break :expected .{ .done = .{ .already_ready = value.running } } else value,
                     };
                     // 8. The known-bad released target.
                     if (known_bad orelse break :expected .inspect_target) break :expected .{ .done = .{ .unsupported = .target_capability } };
@@ -724,7 +725,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     else => null,
                 } else null;
                 const unchanged = running_settings != null and checked_settings != null and std.mem.eql(u8, &running_settings.?, &checked_settings.?);
-                const restarts = same_executable == false or (same_executable == true and current != null and current.? == .same and !unchanged);
+                const restarts = same_executable == false or (same_executable == true and running_settings != null and !unchanged);
                 const holds = eligible == .managed and eligible.managed.order != .gt and eligible.managed.environment_parses and census == .same and
                     target_failed == null and restarts and known_bad == false and sources == true and check != null and check.? == .ok and
                     before_stop == .same and snapshot == .same;
@@ -741,8 +742,8 @@ test "SH-24 a stop is asked for only after every check before it holds" {
             };
     try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * currents.len * 3 * 3 * checks.len * 4 * 4, count);
     // Per order and `cancelled`: a differing executable restarts for every current (6 * 2 checks),
-    // and the same executable restarts for the running settings unequal to the checked digest (4 of 6 pairs).
-    try std.testing.expectEqual(2 * 2 * (currents.len * 2 + 4), stops);
+    // and the same executable restarts only when a reported digest differs from the checked one (2 pairs).
+    try std.testing.expectEqual(2 * 2 * (currents.len * 2 + 2), stops);
 }
 
 test "SH-81 after the stop every ending names a stage" {

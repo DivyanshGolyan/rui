@@ -474,7 +474,8 @@ def frozen_upgrade_cases(root, binary, releases):
             current = c.status()
             for facts in (direct, current):
                 assert facts["instance"] != previous["instance"] and facts["paused"] is True, (source_kind, facts)
-                assert facts["active_capacity"] == "2", "observed active capacity is projected last"
+                # A restart applies the checked frame whole, capacity included.
+                assert facts["active_capacity"] == "7", facts
                 assert facts["capabilities"]["providers"] == expected_providers, facts
                 assert facts["store"] == previous["store"], facts
             assert direct["instance"] == current["instance"]
@@ -494,7 +495,7 @@ def frozen_upgrade_cases(root, binary, releases):
                 assert "1 restarted" in next_output, next_output
                 next_status = c.status()
                 assert next_status["instance"] != current["instance"] and next_status["paused"] is False, next_status
-                assert next_status["active_capacity"] == "2" and next_status["capabilities"]["providers"] == none, next_status
+                assert next_status["active_capacity"] == "11" and next_status["capabilities"]["providers"] == none, next_status
             print(f"upgrade native: frozen {source_kind} A -> new checked B -> {mutation} C consumed B; full verification passed", flush=True)
 
 

@@ -1478,10 +1478,6 @@ test "Host start refused JSON input allocations erase secret bytes before releas
     try std.testing.expect(!observer.stale);
 }
 
-pub fn capacityAssignment(value: usize, buffer: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buffer, hs.path("execution.activeCapacity") ++ "={d}", .{value});
-}
-
 test "Host start unset retains exact provider sets and selected Store arms" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
@@ -1530,7 +1526,11 @@ pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, a
 /// releases had flag-fill provider policy; prefix that baseline BEFORE explicit
 /// providers, and keep observed runtime capacity authoritative LAST. The caller
 /// owns a wiping arena and has authenticated the running release identity.
-pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sources: Spawn, previous_release: bool, active_capacity: usize) !Spawn {
+/// The running Host's own sources for its replacement: its settings file and
+/// `--set` flags, which then read the saved settings as they are now, so a
+/// restart applies a saved change (capacity included). A Host from before
+/// release 75 gets the provider baseline its retired flags implied.
+pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sources: Spawn, previous_release: bool) !Spawn {
     const baseline = if (previous_release) base: {
         const names = if (sources.settings_file) |file| names: {
             // Never consume stdin or open a cwd-dependent source during upgrade.
@@ -1540,15 +1540,13 @@ pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sour
         } else false;
         break :base @import("serve_grammar.zig").previousProviders(sources.settings_file != null, names);
     } else null;
-    const assignments = try allocator.alloc([]const u8, sources.assignments.len + 1 + @intFromBool(baseline != null));
+    const assignments = try allocator.alloc([]const u8, sources.assignments.len + @intFromBool(baseline != null));
     var offset: usize = 0;
     if (baseline) |value| {
         assignments[0] = value;
         offset = 1;
     }
     @memcpy(assignments[offset..][0..sources.assignments.len], sources.assignments);
-    var buffer: [128]u8 = undefined;
-    assignments[assignments.len - 1] = try allocator.dupe(u8, try capacityAssignment(active_capacity, &buffer));
     return .{ .dir = sources.dir, .settings_file = sources.settings_file, .assignments = assignments };
 }
 
@@ -3011,23 +3009,25 @@ test "Host restart sources preserve previous and current release provider semant
     // Each `served` is what the old Host served: a flag-only fill started
     // from no providers, and a document without `providers` served every
     // built-in entry; named providers added to either.
-    const Case = struct { argv: []const []const u8, previous: bool, served: Served };
+    // `capacity` is what the replacement gets from the Host's own sources:
+    // a retired flag, a settings document, or the default.
+    const Case = struct { argv: []const []const u8, previous: bool, served: Served, capacity: usize = 100 };
     for ([_]Case{
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{}, .capacity = 3 },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true }, .capacity = 3 },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider-endpoint", "http://127.0.0.1:9/responses" }, .previous = true, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true }, .capacity = 2 },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true }, .capacity = 2 },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
         // This release's Host with unset providers keeps the current default.
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true }, .capacity = 2 },
         .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
     }) |case| {
         const running = try @import("serve_grammar.zig").runningSources(arena.allocator(), case.argv);
-        const request = try restartSources(init, arena.allocator(), .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments }, case.previous, 7);
+        const request = try restartSources(init, arena.allocator(), .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments }, case.previous);
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "--store", request.dir });
@@ -3041,7 +3041,7 @@ test "Host restart sources preserve previous and current release provider semant
         defer settings.deinit();
         var failure: @import("start_report.zig").Failure = undefined;
         try fillAt(init, &parsed, dir, settings, &failure);
-        try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
+        try std.testing.expectEqual(case.capacity, settings.execution.active_capacity.value);
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }

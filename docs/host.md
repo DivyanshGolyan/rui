@@ -60,7 +60,7 @@ A failed or unconfirmed restart returns an operational caller error; installer a
 The selected build must report a verified release version; an unversioned source target cannot be activated by the existing lifecycle and is reported without stopping Hosts.
 
 The Upgrade restart may interrupt work in all Sessions across every affected Store, not only the client's selected Store.
-A running Host keeps its configured capacity through the restart.
+A restart keeps the Host's own `--set` flags and settings file and reads its saved settings afresh, so a saved capacity applies; with none saved, the Host gets the default.
 A Host that an earlier release started with its retired flags (`--provider`, `--active-capacity` and the others) restarts with the `--set` assignments that replace them, serving the same providers.
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
@@ -85,7 +85,7 @@ See [Store format and upgrades](contracts/store.md#store-format-and-upgrades) fo
 
 A new Host can run 100 executions at once.
 `rui host start --set execution.activeCapacity=8` starts a new Host with a different capacity.
-A running Host keeps its configured capacity through an Upgrade restart.
+A restart, including an Upgrade restart, applies a capacity saved with `rui host set execution.activeCapacity N`; a capacity given with `--set` at start is kept.
 If you pass `--set` or `--settings` while a Host is running, or another start wins the race to launch one, `host start` connects to that Host unchanged and says so on stderr.
 To change the capacity, pause the Host and start it again.
 
