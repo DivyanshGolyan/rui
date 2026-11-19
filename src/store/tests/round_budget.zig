@@ -102,6 +102,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../schema.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
+        @embedFile("../command_replay.zig"),
         @embedFile("../pass_plan.zig"),
         @embedFile("../queue.zig"),
         @embedFile("../round_order.zig"),

@@ -793,7 +793,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
     def test_store_cores_select_logic_and_store_roots(self):
-        for path in ("src/store/write_batch.zig", "src/store/pass_plan.zig", "src/store/round_order.zig"):
+        for path in ("src/store/command_replay.zig", "src/store/write_batch.zig", "src/store/pass_plan.zig", "src/store/round_order.zig"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertIn("test-logic", result["targets"])
