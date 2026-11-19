@@ -220,14 +220,18 @@ def seed_packages(caller_cache, target, gid):
         return 0
     missing = [entry for entry in sorted(source.iterdir()) if not (Path(target) / entry.name).exists()]
     for entry in missing:
-        copy = Path(target) / entry.name
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.copytree(entry, copy, symlinks=True)
-            share(copy, gid)
-        else:
-            shutil.copy2(entry, copy, follow_symlinks=False)
-            os.chown(copy, -1, gid)
-            os.chmod(copy, 0o640)
+        # Copy beside the cache and rename into it, so an interrupted copy never leaves a partial
+        # package under its hash name, which later runs would skip and Zig would trust.
+        with tempfile.TemporaryDirectory(dir=target, prefix=".seed-") as staging:
+            copy = Path(staging) / entry.name
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, copy, symlinks=True)
+                share(copy, gid)
+            else:
+                shutil.copy2(entry, copy, follow_symlinks=False)
+                os.chown(copy, -1, gid)
+                os.chmod(copy, 0o640)
+            os.rename(copy, Path(target) / entry.name)
     return len(missing)
 
 

@@ -44,6 +44,8 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual((target / "pkg-a/build.zig").read_bytes(), b"kept")
         self.assertEqual((target / "pkg-b/build.zig").read_bytes(), b"b")
         self.assertEqual((target / "pkg-c.tar.gz").read_bytes(), b"c")
+        self.assertEqual(sorted(path.name for path in target.iterdir()), ["pkg-a", "pkg-b", "pkg-c.tar.gz"],
+                         "no staging copy is left beside the packages")
         for copy in (target / "pkg-b", target / "pkg-b/build.zig", target / "pkg-c.tar.gz"):
             self.assertEqual(os.stat(copy).st_gid, gid)
             needed = stat.S_IRGRP | (stat.S_IXGRP if copy.is_dir() else 0)
