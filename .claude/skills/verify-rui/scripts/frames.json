@@ -6342,14 +6342,14 @@
           ]
         },
         {
-          "wait": "isn't served by",
+          "wait": "ChatGPT (device code) isn't served by",
           "empty_composer": true
         }
       ],
       "expect": [
         "Provider unserved witness",
         "gpt-6.1-sol",
-        "isn't served by"
+        "ChatGPT (device code) isn't served by"
       ],
       "absent": [
         "Sending…",

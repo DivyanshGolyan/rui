@@ -95,6 +95,25 @@ test "a Message to an existing Session with require_model is refused only while 
             changed_condition.text = try testingBytesContent(&tmp, "existing-changed", "hello again");
             defer changed_condition.removeTemporaryContent(std.testing.io) catch unreachable;
             try std.testing.expect(storage.submitMessageWithModel(&changed_condition, null, .{}) == .conflict);
+
+            // Stored with the flag, retried without it: also a conflict.
+            var dropped_condition = wire_request.MessageCommand{};
+            try dropped_condition.key.set("existing-served-required");
+            try dropped_condition.session.set(session.slice());
+            dropped_condition.text = try testingBytesContent(&tmp, "existing-dropped", "hello again");
+            defer dropped_condition.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&dropped_condition, null, .{}) == .conflict);
+
+            // A refused key stays refused after the provider is served again; the person sends a new Message.
+            storage.served = protocol.routesAll(.endpoint);
+            var replay = wire_request.MessageCommand{ .require_model = true };
+            try replay.key.set("existing-unserved-required");
+            try replay.session.set(session.slice());
+            replay.text = try testingBytesContent(&tmp, "existing-replay", "hello again");
+            defer replay.removeTemporaryContent(std.testing.io) catch unreachable;
+            const replayed = storage.submitMessageWithModel(&replay, null, .{});
+            try std.testing.expect(replayed == .rejected);
+            try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, replayed.rejected.code);
         }
     }.run);
 }

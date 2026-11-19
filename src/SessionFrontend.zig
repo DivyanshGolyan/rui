@@ -2772,6 +2772,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
         },
         .rejected => |rejected| {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
+            // A Message to an existing Session gets this code only from Store admission's served-provider check (SubmitMessage.decide).
             if (rejected.kind == .message and std.mem.eql(u8, rejected.code.slice(), @tagName(protocol.MessageRejection.model_capability_unavailable))) {
                 try session_notice.writeUnserved(&writer, self.line.provider);
             } else {

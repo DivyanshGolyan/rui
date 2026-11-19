@@ -27,7 +27,7 @@ pub fn writeUnserved(writer: *std.Io.Writer, provider: ?protocol.Provider) !void
     try writer.print("! {s}{s}", .{ if (provider) |known| known.shown() else "This Session's provider", unserved_advice });
 }
 
-const unserved_advice = " isn't served by this Host. Check `rui host settings`, then `rui host pause` and `rui host start`.";
+const unserved_advice = " isn't served by this Host. Check rui host settings, then rui host pause and rui host start.";
 pub const unserved_capacity = blk: {
     var longest: usize = "This Session's provider".len;
     for (std.meta.tags(protocol.Provider)) |provider| longest = @max(longest, provider.shown().len);
@@ -388,8 +388,8 @@ test "a refused chat Message names its unserved provider and the settings fix" {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, .openai);
-    try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check `rui host settings`, then `rui host pause` and `rui host start`.", writer.buffered());
+    try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
     writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, null);
-    try std.testing.expectEqualStrings("! This Session's provider isn't served by this Host. Check `rui host settings`, then `rui host pause` and `rui host start`.", writer.buffered());
+    try std.testing.expectEqualStrings("! This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
 }
