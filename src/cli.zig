@@ -756,6 +756,8 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
+    try upgrade.writeInstalling(&output.interface, &checked);
+    try output.flush();
     var result = upgrade.install(init, allocator, &checked, null, null, &cleanup, &download) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         upgradeDownload(err, &download);
