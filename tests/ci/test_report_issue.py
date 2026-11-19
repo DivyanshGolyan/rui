@@ -501,7 +501,8 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn('repos/o/r/actions/jobs/2/logs', [call[-1] for call in fake.calls])
         steps = re.findall(r'^      - name: (Require every selected .+)$', Path('.github/workflows/check.yml').read_text(),
                            re.M)
-        self.assertEqual(len(steps), 2)
+        # The Linux part check runs in linux (off pull requests) and in admission (on them), plus the Mac check.
+        self.assertEqual(len(steps), 3)
         promotion = {name: re.findall(r'^      - name: (Require every selected .+)$',
                                       Path(f'.github/workflows/{name}').read_text(), re.M)
                      for name in ('qualification-tier.yml', 'promote.yml')}

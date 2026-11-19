@@ -4,6 +4,7 @@ import sys
 
 import live_engines
 import network_variables
+import runtime_leftovers
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -1198,7 +1199,9 @@ def close_stdin(process):
         process.stdin = None
 
 
-def stop_process(process, timeout=10, *, seal_observations=True):
+def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
+    """Reap a Host and dispose its fixture state. `retire=False` leaves its socket and .store hint
+    behind, as a real crash does; the caller's final disposal of the Store then retires them."""
     deadline = time.monotonic() + timeout
     errors = []
     incoming_error = sys.exc_info()[1]
@@ -1220,6 +1223,12 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException as error:
         errors.append(error)
+    if retire:
+        try:
+            if (store := disposed_store(process)) is not None:
+                runtime_leftovers.retire(store)
+        except BaseException as error:
+            errors.append(error)
     diagnostics = getattr(process, "rui_diagnostics", None)
     for close in (observations.close if observations else None, diagnostics.close if diagnostics else None,
                   process.stdout.close if process.stdout else None, process.stderr.close if process.stderr else None):
@@ -1245,6 +1254,19 @@ def stop_process(process, timeout=10, *, seal_observations=True):
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
+
+
+def disposed_store(process):
+    """The Store a Host was started on: its ready field, else its --store or --store-hex argument, else None."""
+    store = getattr(process, "rui_ready_fields", {}).get("store")
+    if store is not None:
+        return store
+    args = [str(argument) for argument in process.args] if isinstance(process.args, (list, tuple)) else []
+    if "--store" in args and args.index("--store") + 1 < len(args):
+        return os.path.realpath(args[args.index("--store") + 1])
+    if "--store-hex" in args and args.index("--store-hex") + 1 < len(args):
+        return os.path.realpath(os.fsdecode(bytes.fromhex(args[args.index("--store-hex") + 1])))
+    return None
 
 
 def _tail(buffer, chunk, limit):
