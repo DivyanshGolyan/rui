@@ -981,7 +981,7 @@ class SelectionTest(unittest.TestCase):
         job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
-        script = dedent(job.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
+        script = Path('tests/ci/require_linux_parts.sh').read_text()
         cases = []
         for targets in ('[]', ''):
             cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
@@ -1026,7 +1026,8 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
-                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)),
+                                         event_name='workflow_call')
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
                                              'needs': needs, 'github': github})
                 if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):

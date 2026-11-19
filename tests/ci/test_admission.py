@@ -27,6 +27,7 @@ RELEASE = ROOT / '.github/workflows/release.yml'
 RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
 TIER = ROOT / '.github/workflows/qualification-tier.yml'
+LINUX_PARTS = ROOT / 'tests/ci/require_linux_parts.sh'
 
 
 def job(text, name):
@@ -136,7 +137,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('screens_required: ${{ steps.shape.outputs.screens_required }}', plan)
         self.assertIn('- name: Require PR Shape\n        id: shape', plan)
         self.assertIn('python3 tests/ci/pr_shape.py "$BASE"', plan)
-        self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 2)
+        self.assertEqual(admission.count("if: ${{ needs.plan.outputs.screens_required == 'true' }}"), 1)
         self.assertIn('sparse-checkout: tests/ci', admission)
         self.assertIn('ref: ${{ needs.plan.outputs.candidate_ref }}', admission)
         self.assertIn('run: python3 tests/ci/pr_shape.py --screens', admission)
@@ -189,7 +190,7 @@ class AdmissionTest(unittest.TestCase):
 
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
-                   LINUX_RESULT='success', MACOS_RESULT='success', PR_JOB='false',
+                   MACOS_RESULT='success', PR_JOB='false',
                    NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
@@ -209,7 +210,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(self.admission(CACHE_SELECTED='true', CACHE_RESULT='success').returncode, 0)
 
     def test_each_required_part_rejects_pending_cancelled_failed_skipped_or_missing(self):
-        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'LINUX_RESULT', 'MACOS_RESULT'):
+        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'MACOS_RESULT'):
             for result in ('queued', 'pending', 'in_progress', 'cancelled', 'failure', 'skipped', ''):
                 with self.subTest(part=part, result=result):
                     self.assertNotEqual(self.admission(**{part: result}).returncode, 0)
@@ -249,7 +250,7 @@ class AdmissionTest(unittest.TestCase):
     def test_documentation_admission_rejects_every_inconsistent_control_or_result(self):
         env = documentation_env()
         self.assertEqual(self.admission(**env).returncode, 0)
-        expected = dict(env, DRAFT='false', PLAN_RESULT='success', LINUX_RESULT='success',
+        expected = dict(env, DRAFT='false', PLAN_RESULT='success',
                         CACHE_SELECTED='false', CACHE_RESULT='skipped')
         for key, good in expected.items():
             if key.endswith('_RESULT'):
@@ -274,7 +275,7 @@ class AdmissionTest(unittest.TestCase):
                     capture_output=True, text=True).returncode, 0)
 
     def test_documentation_linux_requires_exact_skips_and_controls(self):
-        script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
+        script = LINUX_PARTS.read_text()
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', NATIVE_RESULT='skipped', PR_JOB='false', PR_RESULT='skipped',
@@ -298,7 +299,7 @@ class AdmissionTest(unittest.TestCase):
                 self.assertNotEqual(run(missing), 0)
 
     def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
-        script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
+        script = LINUX_PARTS.read_text()
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
                    BUILD_RESULT='skipped', UNIT_RESULT='skipped',
                    NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
@@ -472,11 +473,14 @@ class AdmissionTest(unittest.TestCase):
     def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
         self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
-        required = ('plan', 'policy', 'linux', 'macos', 'cache_execution')
+        # Admission checks every part the linux job checks off pull requests, so it needs their results too.
+        required = ('plan', 'policy', 'macos', 'cache_execution', 'pr_linux', 'linux_build',
+                    'linux_build_unit', 'linux_suites', 'macos_typecheck')
         needs = re.search(r'(?m)^    needs: \[(.*?)\]$', text)[1].split(', ')
         self.assertCountEqual(needs, required)
         for name in required:
             self.assertIn('${{ needs.' + name + '.result }}', text)
+        self.assertNotIn('needs.linux.result', text)
         self.assertIn('${{ github.event.pull_request.draft }}', text)
 
     def test_native_aggregate_requires_real_producers_and_every_suite(self):
@@ -756,7 +760,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
 
     def test_documentation_plan_flows_through_real_linux_and_admission_scripts(self):
         workflow = CHECK.read_text()
-        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        linux = LINUX_PARTS.read_text()
         admission = step_script(job(workflow, 'admission'), 'Require candidate acceptance')
         with PlanFixture() as fixture:
             fixture.write('README.md', 'First sentence. Second sentence.\n')
@@ -790,7 +794,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
 
     def test_draft_quick_plan_cannot_replace_ready_acceptance(self):
         workflow = CHECK.read_text()
-        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        linux = LINUX_PARTS.read_text()
         admission = step_script(job(workflow, 'admission'), 'Require candidate acceptance')
         path = 'build.zig'
         with PlanFixture() as fixture:
@@ -835,7 +839,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
     def test_a_branch_that_merged_main_gets_only_its_own_diffs_pr_tier(self):
         # CI-4: a branch merge alone adds nothing to the PR tier.
         workflow = CHECK.read_text()
-        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        linux = LINUX_PARTS.read_text()
         with PlanFixture() as fixture:
             fixture.git('checkout', '-qb', 'feature')
             fixture.write('README.md', 'Feature documentation.\n')
@@ -910,7 +914,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
 
     def test_compile_only_plan_flows_through_the_real_linux_aggregate(self):
         workflow = CHECK.read_text()
-        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        linux = LINUX_PARTS.read_text()
         with PlanFixture() as fixture:
             fixture.write('README.md', 'Main moved. Same line.\n')
             candidate = fixture.commit()
@@ -938,6 +942,110 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
         on = CHECK.read_text().split('\npermissions:', 1)[0]
         events = re.search(r'types: \[(.*?)\]', on)[1].split(', ')
         self.assertEqual(set(events), {'opened', 'synchronize', 'reopened', 'ready_for_review'})
+
+
+def job_needs(body):
+    match = re.search(r'(?m)^    needs: (?:\[(.*?)\]|(\w+))$', body)
+    return [name.strip() for name in (match[1] or match[2]).split(',')] if match else []
+
+
+def translate(expression, outputs, results):
+    """Rewrite one job-level `if` as Python over the plan outputs and the needs results."""
+    expression = re.sub(r"needs\.plan\.outputs\.(\w+)", lambda match: repr(outputs.get(match[1], '')), expression)
+    expression = re.sub(r"needs\.(\w+)\.result", lambda match: repr(results[match[1]]), expression)
+    expression = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), ('[^']*')\)", r'(\2 in \1)', expression)
+    expression = expression.replace('github.event.repository.private', 'False')
+    expression = expression.replace('!cancelled()', 'True').replace('cancelled()', 'False')
+    expression = expression.replace('always()', 'True').replace('failure()', 'False')
+    expression = expression.replace('&&', ' and ').replace('||', ' or ')
+    return re.sub(r'!(?!=)', ' not ', expression)
+
+
+def jobs_running(workflow, outputs, event):
+    """The jobs of check.yml that run for one plan output and event, from each job's `needs` and `if`.
+
+    The plan's outputs and the event are the only inputs. An `if` without a status function keeps
+    the implicit success() of its needs, so a job behind a skipped need is skipped, as Actions does.
+    """
+    results, runs = {'plan': 'success'}, {'plan'}
+    text = workflow.split('\njobs:', 1)[1]
+
+    def result(name):
+        if name not in results:
+            body = job(workflow, name)
+            for dependency in job_needs(body):
+                result(dependency)
+            needs_ok = all(results[dependency] == 'success' for dependency in job_needs(body))
+            condition = re.search(r'(?m)^    if: \$\{\{ (.*) \}\}$', body)
+            if condition is None:
+                ok = needs_ok
+            else:
+                expression = condition[1].replace('github.event_name', repr(event))
+                # The expressions are this repository's own check.yml conditions, rewritten above.
+                value = bool(eval(translate(expression, outputs, results), {'__builtins__': {}}, {}))
+                status = any(function in expression for function in ('always()', 'cancelled()', 'failure()', 'success()'))
+                ok = value and (status or needs_ok)
+            results[name] = 'success' if ok else 'skipped'
+            if ok:
+                runs.add(name)
+        return results[name]
+
+    for name in re.findall(r'(?m)^  ([a-z_]+):$', text):
+        result(name)
+    return runs
+
+
+class JobGraphTest(unittest.TestCase):
+    def runs(self, fixture, event='pull_request', **kwargs):
+        output = fixture.plan(self, event=event, **kwargs)
+        return jobs_running(CHECK.read_text(), output, event)
+
+    def test_a_pull_request_push_runs_only_the_linux_part_and_admission(self):
+        # Ready, draft and documentation pushes; mac_runner, macOS and the linux summary never run.
+        macos = {'mac_runner', 'macos_build', 'macos_build_unit', 'macos_suites', 'macos', 'linux'}
+        with PlanFixture() as fixture:
+            fixture.write('build.zig', plan_sources()['build.zig'] + '\n// fixture change\n')
+            candidate = fixture.commit()
+            ready = self.runs(fixture, candidate=candidate)
+            self.assertEqual(ready, {'plan', 'pr_linux', 'admission'})
+            draft = self.runs(fixture, candidate=candidate, draft=True)
+            self.assertEqual(draft, {'plan', 'admission'})
+        with PlanFixture() as fixture:
+            fixture.write('README.md', 'First sentence. Second sentence.\n')
+            candidate = fixture.commit()
+            documentation = self.runs(fixture, candidate=candidate)
+            self.assertEqual(documentation, {'plan', 'admission'})
+        for runs in (ready, draft, documentation):
+            self.assertFalse(macos & runs)
+
+    def test_non_pull_request_events_keep_mac_runner_and_the_linux_aggregate(self):
+        with PlanFixture() as fixture:
+            fixture.write('build.zig', plan_sources()['build.zig'] + '\n// fixture change\n')
+            candidate = fixture.commit()
+            dispatched = self.runs(fixture, event='workflow_dispatch', candidate=candidate,
+                                   native_targets=['test-logic'])
+            self.assertTrue({'mac_runner', 'macos_build', 'macos_suites', 'macos', 'linux'} <= dispatched)
+            self.assertFalse({'admission', 'pr_linux'} & dispatched)
+            promoted = self.runs(fixture, event='workflow_call', candidate=candidate, promotion=True)
+            self.assertTrue({'mac_runner', 'macos_build', 'macos_suites', 'linux'} <= promoted)
+            self.assertFalse({'admission', 'pr_linux'} & promoted)
+            compiled = self.runs(fixture, event='workflow_call', candidate=candidate, compile_only=True)
+            self.assertTrue({'mac_runner', 'linux'} <= compiled)
+            self.assertFalse({'admission', 'macos_build', 'macos_suites', 'macos'} & compiled)
+
+    def test_pull_request_gates_are_declared_where_the_graph_test_reads_them(self):
+        text = CHECK.read_text()
+        self.assertIn("if: ${{ github.event_name != 'pull_request' }}", job(text, 'mac_runner'))
+        linux, admission = job(text, 'linux'), job(text, 'admission')
+        self.assertIn("github.event_name != 'pull_request'", linux)
+        self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", admission)
+        # Admission runs the same script over the same environment the linux job uses off pull requests.
+        def linux_step(body):
+            step = body.split('- name: Require every selected Linux part', 1)[1].split('\n      - ', 1)[0]
+            return re.findall(r'(?m)^          ([A-Z_]+): (.*)$', step), step.rsplit('run: ', 1)[1]
+        self.assertEqual(linux_step(linux), linux_step(admission))
+        self.assertEqual(linux_step(admission)[1].strip(), 'bash tests/ci/require_linux_parts.sh')
+        self.assertNotIn('needs.linux.result', admission)
 
 
 class ReleaseFlowTest(unittest.TestCase):
