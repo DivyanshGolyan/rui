@@ -2,7 +2,8 @@ name: PR labels
 on:
   # pull_request_target runs main's labeler, never the PR's code, so fork PRs
   # get labels too. The body names the Goal issue, so edits relabel. Pushes do
-  # not relabel: a PR's labels come from its body, not from its changed files.
+  # not relabel: labels come from the body's Goal, or, with no labelled Goal, the
+  # changed files as of the last body event (a later push waits for an edit).
   pull_request_target:
     types: [opened, edited, reopened]
   # Relabel every open PR, for example after labelling a workstream issue.

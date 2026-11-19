@@ -1005,7 +1005,7 @@ jobs:
               test "$MACOS_SPLIT" = false
               test "$LINUX_MEMORY" = false ;;
             normal)
-              # The single PR job runs policy itself; the linux aggregate requires that job.
+              # The single PR job runs policy itself; admission requires that job.
               case "$PR_JOB" in
                 true) test "$POLICY_RESULT" = skipped ;;
                 false) test "$POLICY_RESULT" = success ;;

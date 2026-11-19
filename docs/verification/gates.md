@@ -183,7 +183,7 @@ The shared build CI owner checks their exit status and keeps execution fresh whi
 Compilation, generated outputs, explicit I/O checks and Zig test protocols keep their existing owners.
 The compiler-backed acceptance regression runs explicitly in the existing compiler-equipped `cache_execution` job alongside the warm-cache execution proof; its explicit `ACCEPTANCE_INPUTS` also select that job and focused local feedback, while it stays outside the five-minute Python policy suite.
 A Selected checks dispatch can supply a JSON `native_targets` array to reproduce an exact native selection through the same producer, matrix and acceptance owners; this diagnostic mode disables retries and quarantine.
-The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
+The `linux` and `macos` statuses fail if any selected job fails or is cancelled; on a pull request `linux` is skipped and `admission` runs the same requirement.
 A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](../../tests/ci/failure_cause.py)), so a red never reads only as an exit code.
 Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
 
@@ -307,7 +307,7 @@ A promotion's rerun also reruns the tier's `qualify / qualified` verdict and Rel
 ## Self-hosted Mac runner
 
 Selected checks decides once per run, promotion included, whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
-Only same-repository pull requests authored by DivyanshGolyan, with both actor and triggering actor allowlisted, and manual dispatches by those actors are eligible.
+Pull requests never run `mac_runner` (they select no native macOS work); manual dispatches by allowlisted actors are eligible.
 The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
 A promotion dispatched by an allowlisted actor routes by the same rule, so hosted macOS capacity no longer gates a release; its Mac suite jobs then share the one runner, and their measurements are not comparable with hosted VMs.
