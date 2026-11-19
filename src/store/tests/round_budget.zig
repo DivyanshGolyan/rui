@@ -42,6 +42,9 @@ const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
 const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
+// An Archived window is one dispatch inside readSessionList: the Store enters once, through readSessionListHeld, and
+// session_list_read.readSessionList serves a window request in that same round. Its budget is measured there.
+const window_dispatch = @embedFile("../domain/session_list_read.zig");
 
 test "every function that enters the Store has a round budget" {
     const sources = .{
@@ -145,6 +148,9 @@ test "every function that enters the Store has a round budget" {
             found.insert(point);
         }
     };
+    try std.testing.expect(std.mem.indexOf(u8, window_dispatch, "if (request.window) |cursor| return readArchivedWindow(") != null);
+    try std.testing.expect(found.contains(.readSessionList));
+    found.insert(.readArchivedWindow);
     try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
     for (fixtures) |seen| try std.testing.expect(seen);
 }
