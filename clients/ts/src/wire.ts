@@ -953,7 +953,9 @@ export interface components {
             workspace?: string;
         };
         ArchivedFirstFields: {
+            position: components["schemas"]["Decimal"];
             admission: components["schemas"]["Decimal"];
+            content: components["schemas"]["ContentValue"];
             line: string | null;
         };
         ArchivedRowFields: {

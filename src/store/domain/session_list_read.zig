@@ -17,6 +17,8 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const command_domain = @import("command.zig");
 const archive_membership = @import("archive_membership.zig");
+const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
 const configuration_domain = @import("configuration.zig");
 const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
@@ -292,8 +294,19 @@ fn firstAdmissionSql(comptime alias: []const u8) []const u8 {
         "(pm.turn_id IS NULL OR pm.admission_id=(SELECT t.first_admission_id FROM turn t WHERE t.session_ref=" ++ alias ++ ".session_ref ORDER BY t.turn_id LIMIT 1))";
 }
 
+/// One column of the first Message, read by its admission (the same rule as firstAdmissionSql).
+fn firstMessageSql(comptime column: []const u8) []const u8 {
+    return comptime "(SELECT " ++ column ++ " FROM message_admission fm JOIN content fc ON fc.content_id=fm.content_id " ++
+        "WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ "))";
+}
+
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
     "(" ++ firstAdmissionSql("session") ++ ") AS first_admission," ++
+    "(SELECT fm.admission_position FROM message_admission fm WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ ")) AS first_position," ++
+    firstMessageSql("fc.byte_length") ++ " AS first_length," ++
+    firstMessageSql("fc.digest") ++ " AS first_digest," ++
+    firstMessageSql("fc.private") ++ " AS first_private," ++
+    firstMessageSql("fc.form") ++ " AS first_form," ++
     "(SELECT substr(@payload(fc),1,512) FROM message_admission fm JOIN content fc ON fc.content_id=fm.content_id " ++
     "WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ ") AND fc.private=0 AND fc.form=0) AS first_line";
 
@@ -303,6 +316,11 @@ const ArchivedWindowRow = struct {
     stopped_at: rsql.Positive,
     label: ?Bounded(tool_presentation.max_label_bytes),
     first_admission: ?rsql.Positive,
+    first_position: ?rsql.Positive,
+    first_length: ?u64,
+    first_digest: ?[32]u8,
+    first_private: ?bool,
+    first_form: ?u8,
     first_line: ?rsql.Blob(512),
 };
 
@@ -396,6 +414,13 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
         const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{
             .admission = admission.get(),
+            .position = (row.first_position orelse return error.CorruptStore).get(),
+            .content = try content_parts.publicValue(&.{
+                .byte_length = row.first_length orelse return error.CorruptStore,
+                .digest = row.first_digest orelse return error.CorruptStore,
+                .private = row.first_private orelse return error.CorruptStore,
+                .form = row.first_form orelse return error.CorruptStore,
+            }, .{ .message = admission.get() }),
             .line = archivedLine(if (row.first_line) |*prefix| prefix else null, &text),
         } else null;
         var values: session_list.ArchivedRow = .{

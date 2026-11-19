@@ -641,14 +641,16 @@ pub const SessionRow = struct {
 
 /// The slim Archived row (ArchivedRow in session_list.zig): the Archived tab's name and age only.
 pub const ArchivedFirstFields = struct {
+    position: u64,
     admission: u64,
+    content: content_value.Value,
     line: ?[]const u8,
 
-    pub const json_shape = .{ "{\"admission\":\"", Hole.decimal, "\",\"line\":", Hole{ .optional_string = session_list.max_last_line_bytes }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_last_line_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const ArchivedFirstFields, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.admission, self.line });
+        try writeShape(out, json_shape, .{ self.position, self.admission, ContentValueJson{ .value = self.content }, self.line });
     }
 };
 
@@ -679,7 +681,9 @@ pub const session_list_reply = struct {
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
     pub const last_tail = facts ++ .{"null}"};
     pub const window_tail = facts ++ .{ "{\"first\":", Hole.optional_id, ",\"last\":", Hole.optional_id, ",\"more_above\":", Hole.boolean, ",\"more_below\":", Hole.boolean, "}}" };
-    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, window_tail });
+    /// A live page carries up to session_list_page_size full rows; a window page up to archived_window_size slim
+    /// rows. The reply bound is the larger of the two, so a window page fits the same budget.
+    pub const max_bytes = shapeBytes(head) + @max(jsonListBytes(session_list_page_size, SessionRow.max_json_bytes), jsonListBytes(session_list.archived_window_size, ArchivedRow.Fields.max_json_bytes)) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, window_tail });
 };
 
 pub const ActivityFacts = activity_facts.Page;
@@ -3188,16 +3192,18 @@ test "Archived window wire: one request field decodes both ways, refuses other c
 
     var row_buffer: [512]u8 = undefined;
     var row_out = std.Io.Writer.fixed(&row_buffer);
+    const digest: [32]u8 = @splat(0);
     const row: ArchivedRow.Fields = .{
         .reference = "k7m2qx",
         .archive_seq = 42,
         .stopped_at = 1700,
         .label = null,
-        .first = .{ .admission = 7, .line = "hello" },
+        .first = .{ .position = 3, .admission = 7, .content = .{ .text = .{ .length = 5, .digest = digest } }, .line = "hello" },
     };
     try row.writeJson(&row_out);
     try std.testing.expectEqualStrings(
-        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"admission\":\"7\",\"line\":\"hello\"}}",
+        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
+            @as([64]u8, @splat('0')) ++ "\"},\"line\":\"hello\"}}",
         row_out.buffered(),
     );
     comptime std.debug.assert(ArchivedRow.Fields.max_json_bytes <= session_list.ArchivedRow.max_json_bytes);

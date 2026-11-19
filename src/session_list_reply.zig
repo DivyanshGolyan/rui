@@ -51,7 +51,7 @@ pub fn Reply(comptime Capture: type) type {
         }
 
         pub fn archivedRow(reply: *@This(), values: *const session_list.ArchivedRow) !void {
-            const first: ?protocol.ArchivedFirstFields = if (values.first) |first| .{ .admission = first.admission, .line = first.line } else null;
+            const first: ?protocol.ArchivedFirstFields = if (values.first) |first| .{ .position = first.position, .admission = first.admission, .content = first.content, .line = first.line } else null;
             const fields: protocol.ArchivedRow.Fields = .{
                 .reference = values.reference,
                 .archive_seq = values.archive_seq,

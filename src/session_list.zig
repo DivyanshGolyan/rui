@@ -155,15 +155,20 @@ pub const ArchivedRow = struct {
     /// Null when the Session has no first Message (the name is the new-Session name).
     first: ?ArchivedFirst,
 
-    /// Bytes of JSON for one slim row at its worst case, escapes included: the protocol shape computes
-    /// 1991 (reference 6, label 100, admission and line 200, the fixed fields). protocol.zig asserts it.
-    pub const max_json_bytes: usize = 2048;
+    /// Bytes of JSON for one slim row at its worst case: the protocol shape computes 2202 (reference, label,
+    /// position and admission ids, the parts content reference with its owner, the line, the fixed fields).
+    /// protocol.zig asserts it.
+    pub const max_json_bytes: usize = 2202;
 };
 
+/// The first Message of an Archived Session: what the overview's first-line read needs (position, admission
+/// and content reference, as the live row's FirstMessage gives it), and the line when it is inline Text.
 pub const ArchivedFirst = struct {
     admission: u64,
-    /// The first display line, cut to `max_last_line_bytes`. Null when the first Message is not inline
-    /// Text (its line needs a parts read) or its line is empty.
+    position: u64,
+    content: content_value.Value,
+    /// The first display line, cut to `max_last_line_bytes`. Null when the first Message is parts-form (its
+    /// line comes from the overview's own first-line read) or its line is empty.
     line: ?[]const u8,
 };
 

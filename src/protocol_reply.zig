@@ -2146,6 +2146,49 @@ pub const JsonContentValue = struct {
     }
 };
 
+/// One slim Archived row as the window reply sends it (protocol.ArchivedRow.Fields): the first Message's
+/// position, admission and content reference, and its inline line when it has one.
+pub const ArchivedRowRead = struct {
+    reference: JsonString(protocol.max_session_bytes),
+    archive_seq: u64,
+    stopped_at: u64,
+    label: ?JsonString(protocol.max_label_bytes),
+    first: ?ArchivedFirstRead,
+
+    pub const ArchivedFirstRead = struct {
+        position: u64,
+        admission: u64,
+        content: content_value.Value,
+        line: ?JsonString(session_list.max_last_line_bytes),
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Wire = struct {
+            reference: JsonString(protocol.max_session_bytes),
+            archive_seq: JsonString(20),
+            stopped_at: JsonString(20),
+            label: ?JsonString(protocol.max_label_bytes),
+            first: ?struct { position: JsonString(20), admission: JsonString(20), content: JsonContentValue, line: ?JsonString(session_list.max_last_line_bytes) },
+        };
+        const wire = try std.json.innerParse(Wire, allocator, source, options);
+        if (!protocol.validSessionId(wire.reference.slice())) return error.InvalidCharacter;
+        if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
+        const first: ?ArchivedFirstRead = if (wire.first) |first| .{
+            .position = ActivityPage.id(first.position, false) catch return error.InvalidCharacter,
+            .admission = ActivityPage.id(first.admission, false) catch return error.InvalidCharacter,
+            .content = first.content.value,
+            .line = first.line,
+        } else null;
+        return .{
+            .reference = wire.reference,
+            .archive_seq = ActivityPage.id(wire.archive_seq, false) catch return error.InvalidCharacter,
+            .stopped_at = ActivityPage.id(wire.stopped_at, false) catch return error.InvalidCharacter,
+            .label = wire.label,
+            .first = first,
+        };
+    }
+};
+
 pub const JsonPeer = struct {
     session: JsonString(protocol.max_session_bytes),
 
@@ -4607,4 +4650,34 @@ test "WIR-4 a public parts reply reads back as the Host writes it and refuses an
     identity.length = 119;
     try file.writePositionalAll(io, wire, 0);
     try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
+}
+
+test "Archived window wire: a slim row reads back with its position, admission, content and line" {
+    const digest: [32]u8 = @splat(0x5a);
+    const identity: content_value.Reference = .{ .length = 7, .digest = digest };
+    const cases = [_]struct { label: ?[]const u8, first: ?protocol.ArchivedFirstFields }{
+        .{ .label = "Review", .first = .{ .position = 1, .admission = 2, .content = .{ .text = identity }, .line = "hello" } },
+        .{ .label = null, .first = .{ .position = 9, .admission = 8, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 8 } } }, .line = null } },
+        .{ .label = null, .first = null },
+    };
+    for (cases) |case| {
+        const row: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = 1700, .label = case.label, .first = case.first };
+        var buffer: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        try row.writeJson(&out);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const decoded = try std.json.parseFromSliceLeaky(ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+        try std.testing.expectEqualStrings("k7m2qx", decoded.reference.slice());
+        try std.testing.expectEqual(@as(u64, 42), decoded.archive_seq);
+        try std.testing.expectEqual(@as(u64, 1700), decoded.stopped_at);
+        if (case.label) |label| try std.testing.expectEqualStrings(label, decoded.label.?.slice()) else try std.testing.expect(decoded.label == null);
+        if (case.first) |first| {
+            const read = decoded.first orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(first.position, read.position);
+            try std.testing.expectEqual(first.admission, read.admission);
+            try std.testing.expectEqualDeep(first.content, read.content);
+            if (first.line) |line| try std.testing.expectEqualStrings(line, read.line.?.slice()) else try std.testing.expect(read.line == null);
+        } else try std.testing.expect(decoded.first == null);
+    }
 }

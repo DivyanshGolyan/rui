@@ -6,6 +6,7 @@ const Store = store_core.Store;
 const testing = @import("testing.zig");
 const fixtures = @import("tests.zig");
 const action = @import("domain/action.zig");
+const content_value = @import("../content_value.zig");
 
 fn archiveCommand(key: []const u8, session: []const u8, archived: bool) !protocol.SessionArchiveCommand {
     var command: protocol.SessionArchiveCommand = .{ .archived = archived };
@@ -697,7 +698,10 @@ test "Session list membership and order equal the state reference for every filt
     }.run);
 }
 
-const WindowRow = struct { reference: [6]u8, key: u64 };
+const WindowRow = struct { reference: [6]u8, key: u64, first: ?WindowFirst = null };
+
+/// What the window carries of a row's first Message: its position, admission, content, and whether a line came inline.
+const WindowFirst = struct { position: u64, admission: u64, content: content_value.Value, has_line: bool };
 
 /// Records one Archived window page: its rows (newest first), and the page's tail.
 const WindowVisitor = struct {
@@ -714,7 +718,8 @@ const WindowVisitor = struct {
 
     pub fn archivedRow(self: *WindowVisitor, archived: *const session_list.ArchivedRow) !void {
         if (self.count == self.rows.len or archived.reference.len != 6) return error.TooManyRows;
-        self.rows[self.count] = .{ .reference = archived.reference[0..6].*, .key = archived.archive_seq };
+        const first: ?WindowFirst = if (archived.first) |first| .{ .position = first.position, .admission = first.admission, .content = first.content, .has_line = first.line != null } else null;
+        self.rows[self.count] = .{ .reference = archived.reference[0..6].*, .key = archived.archive_seq, .first = first };
         self.count += 1;
     }
 
@@ -743,6 +748,49 @@ const WindowVisitor = struct {
 fn readWindow(storage: *Store, cursor: session_list.ArchivedCursor, visitor: *WindowVisitor) !void {
     const request: protocol.ListSessions = .{ .archive = .archived, .window = cursor };
     try storage.readSessionList(&request, visitor);
+}
+
+test "Archived window carries the first Message's position, admission and content, and a line only when it is inline Text" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // A parts-form first Message: its line needs a parts read, so the window carries none.
+            const parts = try testing.configureTestSession(&storage, "window-parts-first");
+            try testing.submitTestMessageParts(&storage, &tmp, "window-parts-message", parts.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            // An inline-Text first Message: its line rides the window.
+            const text = try testing.configureTestSession(&storage, "window-text-first");
+            try testing.submitTestMessage(&storage, &tmp, "window-text-message", "window-text-message", text.slice(), "hello window");
+            var parts_archive = try archiveCommand("window-parts-archive", parts.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&parts_archive, .{}).accepted.completion);
+            var text_archive = try archiveCommand("window-text-archive", text.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&text_archive, .{}).accepted.completion);
+
+            var page: WindowVisitor = .{};
+            try readWindow(&storage, .head, &page);
+            try std.testing.expectEqual(@as(usize, 2), page.count);
+            for (page.rowsSlice()) |row| {
+                const first = row.first orelse return error.TestUnexpectedResult;
+                try std.testing.expect(first.position != 0 and first.admission != 0);
+                const is_parts = std.mem.eql(u8, &row.reference, parts.slice()[0..6]);
+                switch (first.content) {
+                    .parts => |value| {
+                        try std.testing.expect(is_parts);
+                        try std.testing.expect(value.identity.length != 0);
+                        try std.testing.expectEqual(content_value.Owner{ .message = first.admission }, value.owner);
+                    },
+                    .text => |value| {
+                        try std.testing.expect(!is_parts);
+                        try std.testing.expectEqual(@as(u64, "hello window".len), value.length);
+                    },
+                }
+                try std.testing.expectEqual(!is_parts, first.has_line);
+            }
+        }
+    }.run);
 }
 
 test "Archived window pages walk every archived Session once, newest archive first, in both directions" {
