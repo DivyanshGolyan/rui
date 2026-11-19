@@ -1,7 +1,7 @@
 # Rui
 
 Rui runs many agents from your application in one small process.
-Each agent's conversation is saved in your SQLite or MySQL database, so work picks up after a crash.
+Work picks up where it left off after a crash.
 Your application starts agents, gives them tools and reads their answers through a TypeScript client.
 The same runtime also gives you an agent in your terminal.
 
@@ -21,8 +21,6 @@ See the [data and method](docs/waiting-agent-memory.md) for measurement scope an
 - **Safe across crashes.**
   Every step is saved before Rui moves on.
   If Rui stops in the middle of a command, it reports that the command may have run and never runs it again by itself.
-- **Lives in your database.**
-  Rui keeps its conversations in SQLite or in your application's MySQL database.
 - **Your tools.**
   Connect MCP servers or use the built-in Bash and agent tools.
   Agents can start other agents and collect their reports.
