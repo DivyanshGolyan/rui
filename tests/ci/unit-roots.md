@@ -51,7 +51,7 @@ recorded duration as their weight; removed tests contribute no work. Metadata
 and test execution use the same selection. The native root uses the same launcher
 and the same owner, with its own entries in the same file (`store.` names are the
 Store root; every other name is native). Tests that the owner has no timing for
-are hash-placed and charged the median of the table, so one new test adds at most
+are hash-placed and charged the median of that root's own entries, so one new test adds at most
 its own weight to any shard's imbalance before LPT rebalances the known tests.
 Without `RUI_UNIT_SHARD=i/K`, the
 binary exposes its complete root, preserving unsharded measurements and

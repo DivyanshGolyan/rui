@@ -473,7 +473,7 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(Path(f"{record}.native-{index}").read_text(), "prepares=1\n")
         with patch("builtins.print"):
             self.assertEqual(shards.run(self.binary, [], 30, "aggregate", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
-        self.assertEqual(record.read_text(), "prepares=999\n")
+        self.assertEqual(record.read_text(), "prepares=1\n")
 
     def test_native_launch_shards_every_index_with_its_own_namespace_and_no_exclusive_gate(self):
         gate_dir = self.directory
@@ -557,11 +557,10 @@ class CompilerShardTest(unittest.TestCase):
             with self.subTest(index=index):
                 measured = {name: seconds for name, seconds in recorded.items()
                             if name.startswith("store.") == (index == 1)}
-                if not measured:
-                    self.skipTest("no recorded timings for this root yet")
                 self.check_recorded_inventory(index, prefix, measured)
 
     def check_recorded_inventory(self, root_index, prefix, measured):
+        stem = prefix.split(".")[0]
         old_names = sorted(measured)
         current = old_names[1:] + [prefix + "new test missing from measurements"]
         transformed = {prefix + name: seconds for name, seconds in measured.items()}
@@ -571,7 +570,7 @@ class CompilerShardTest(unittest.TestCase):
         stock = (Path(lib) / "compiler/test_runner.zig").read_text()
         with tempfile.TemporaryDirectory(prefix="store shard domain ") as directory:
             root = Path(directory)
-            source = root / "store.zig"
+            source = root / f"{stem}.zig"
             source.write_text("\n".join("test " + json.dumps(name, ensure_ascii=False) + " {}" for name in current))
             (root / "partition.zig").write_text((ROOT / "src/unit_test_partition.zig").read_text())
             (root / "options.zig").write_text(f"pub const root: usize = {root_index};")

@@ -287,16 +287,21 @@ def run(binary, arguments, timeout, mode, environ, output=None):
             if mode in ("run", "native"):
                 child["RUI_UNIT_SHARD"] = f"{index}/{count}"
             if record:
-                # Store records join into the acceptance record. Native records
-                # are informational: a shard that never opens MySQL writes none.
-                path = str(Path(directory) / f"record-{index}") if mode == "run" else record + f".native-{index}"
+                # Store records join into the acceptance record. Native shards write
+                # informational records beside it: a shard that never opens MySQL writes none.
+                if mode == "run":
+                    path = str(Path(directory) / f"record-{index}")
+                elif mode == "native":
+                    path = record + f".native-{index}"
+                else:
+                    path = record
                 Path(path).unlink(missing_ok=True)
                 child[live_engines.MYSQL_RECORD] = path
                 records.append(path)
             label = f"{'Store' if mode == 'run' else 'Native'} shard {index + 1}/{count}" if mode in ("run", "native") else mode
             jobs.append((child, label))
         # Clear previous acceptance before any child starts.
-        if record and mode == "run":
+        if record and mode != "native":
             Path(record).unlink(missing_ok=True)
         results = []
         with cancellation(stop) as caught, live_engines.mysql_lease(environ, exclusive=mode != "native", timeout=timeout, stop=stop) as lock, ThreadPoolExecutor(max_workers=count) as pool:
