@@ -3,6 +3,7 @@
 Disposal through host_process.stop_process and host_launch_fixture.forced_crash_cleanup
 retires the Host's own socket and hint, so a batch that kills Hosts leaves no leftovers.
 """
+import errno
 import importlib.util
 import os
 import pathlib
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
@@ -113,8 +115,154 @@ class RuntimeLeftovers(unittest.TestCase):
             finally:
                 listening.close()
 
+    def test_probe_failure_other_than_refusal_keeps_the_socket(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            path = root / "p.sock"
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(path))
+            server.close()
+            gone = str(root / "gone")
+            path.with_suffix(".store").write_text(gone)
+
+            class Denied:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def settimeout(self, seconds):
+                    pass
+
+                def connect(self, target):
+                    raise PermissionError(errno.EACCES, "denied")
+
+            with mock.patch.object(runtime_leftovers.os_semantics, "unix_stream", Denied):
+                self.assertEqual([], runtime_leftovers.leftovers(root))
+                self.assertEqual([], runtime_leftovers.retire(gone, root))
+            self.assertTrue(path.exists() and path.with_suffix(".store").exists())
+
 
 class HostDisposal(unittest.TestCase):
+    """Every disposal outcome over one domain: which sockets survive, and which hints name a Store
+    that is then gone (a leftover). Each row is a scenario; the runner checks the leftovers it returns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.runtime = pathlib.Path(self.tmp.name) / "runtime"
+        self.runtime.mkdir()
+        self.script = pathlib.Path(self.tmp.name) / "fake_host.py"
+        self.script.write_text(FAKE_HOST)
+        previous = os.environ.get(runtime_leftovers.OVERRIDE)
+        os.environ[runtime_leftovers.OVERRIDE] = str(self.runtime)
+        self.addCleanup(lambda: os.environ.pop(runtime_leftovers.OVERRIDE) if previous is None
+                        else os.environ.__setitem__(runtime_leftovers.OVERRIDE, previous))
+        self.env = dict(os.environ)
+        self.socket = self.runtime / "x.sock"
+
+    def store(self, name):
+        path = pathlib.Path(self.tmp.name) / name
+        path.mkdir()
+        return path.resolve()
+
+    def start(self, store, mode="serve"):
+        args = [sys.executable, str(self.script), "--store", str(store), "--mode", mode]
+        return HOST.start_ready_process(args, env=self.env, isolate_providers=False)[0]
+
+    def kill(self, process):
+        process.kill()
+        process.wait(timeout=10)
+
+    def scenario_live_host_stopped(self):
+        store = self.store("live")
+        HOST.stop_process(self.start(store))
+        shutil.rmtree(store)
+        return []
+
+    def scenario_killed_then_stopped(self):
+        store = self.store("killed")
+        process = self.start(store)
+        self.kill(process)
+        HOST.stop_process(process)
+        shutil.rmtree(store)
+        return []
+
+    def scenario_killed_stopped_without_retire_keeps_socket_and_hint(self):
+        store = self.store("kept")
+        process = self.start(store)
+        self.kill(process)
+        HOST.stop_process(process, retire=False)
+        self.assertTrue(self.socket.exists())
+        shutil.rmtree(store)
+        return [(self.socket, str(store))]
+
+    def scenario_live_host_stopped_without_retire_keeps_socket_and_hint(self):
+        store = self.store("kept-live")
+        HOST.stop_process(self.start(store), retire=False)
+        shutil.rmtree(store)
+        return [(self.socket, str(store))]
+
+    def scenario_exits_before_ready_retired_through_store_argument(self):
+        store = self.store("early")
+        with self.assertRaises(HOST.HostStartError):
+            self.start(store, mode="early")
+        self.assertFalse(self.socket.exists())
+        shutil.rmtree(store)
+        return []
+
+    def scenario_same_store_successor_on_the_socket_path_is_kept(self):
+        store = self.store("same")
+        old = self.start(store)
+        self.kill(old)
+        successor = self.start(store)
+        try:
+            HOST.stop_process(old)
+            self.assertTrue(self.socket.exists())
+            self.assertEqual(str(store), self.socket.with_suffix(".store").read_text())
+            self.assertEqual([], runtime_leftovers.leftovers(self.runtime))
+        finally:
+            HOST.stop_process(successor)
+        shutil.rmtree(store)
+        return []
+
+    def scenario_foreign_hint_is_kept(self):
+        store = self.store("own")
+        other = pathlib.Path(self.tmp.name) / "other-store"
+        process = self.start(store)
+        self.socket.with_suffix(".store").write_text(str(other))
+        HOST.stop_process(process)
+        shutil.rmtree(store)
+        return [(self.socket, str(other))]
+
+    def scenarios(self):
+        return [
+            ("live host stopped", self.scenario_live_host_stopped),
+            ("killed then stopped", self.scenario_killed_then_stopped),
+            ("killed, stopped with retire=False keeps socket and hint", self.scenario_killed_stopped_without_retire_keeps_socket_and_hint),
+            ("live, stopped with retire=False keeps socket and hint", self.scenario_live_host_stopped_without_retire_keeps_socket_and_hint),
+            ("exits before ready, retired through --store", self.scenario_exits_before_ready_retired_through_store_argument),
+            ("same-Store successor on the same socket path is kept", self.scenario_same_store_successor_on_the_socket_path_is_kept),
+            ("foreign hint is kept", self.scenario_foreign_hint_is_kept),
+        ]
+
+    def test_disposal_outcomes(self):
+        for name, scenario in self.scenarios():
+            with self.subTest(name):
+                try:
+                    expected = scenario()
+                    self.assertEqual(expected, runtime_leftovers.leftovers(self.runtime))
+                finally:
+                    for leftover in self.runtime.iterdir():
+                        leftover.unlink()
+
+
+class ForcedCrashCleanup(unittest.TestCase):
+    """forced_crash_cleanup kills and reaps the Hosts it finds, then retires their sockets. Discovery
+    (the process census) is stubbed to the stand-in Host, since the real census needs a Rui executable;
+    the kill, reap and retire are real."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
@@ -128,69 +276,32 @@ class HostDisposal(unittest.TestCase):
                         else os.environ.__setitem__(runtime_leftovers.OVERRIDE, previous))
         self.env = dict(os.environ)
 
-    def store(self, name):
-        path = pathlib.Path(self.tmp.name) / name
-        path.mkdir()
-        return path.resolve()
-
-    def start(self, store, mode="serve"):
-        args = [sys.executable, str(self.script), "--store", str(store), "--mode", mode]
-        return HOST.start_ready_process(args, env=self.env, isolate_providers=False)[0]
-
-    def assert_no_leftovers(self):
-        self.assertEqual([], runtime_leftovers.leftovers(self.runtime))
-
-    def test_live_host_is_retired_by_stop_process(self):
-        store = self.store("store")
-        process = self.start(store)
-        HOST.stop_process(process)
-        shutil.rmtree(store)
-        self.assertFalse((self.runtime / "x.sock").exists())
-        self.assert_no_leftovers()
-
-    def test_killed_host_is_retired_by_stop_process(self):
-        store = self.store("store")
-        process = self.start(store)
-        process.kill()
-        process.wait(timeout=10)
-        HOST.stop_process(process)
-        shutil.rmtree(store)
-        self.assertFalse((self.runtime / "x.sock").exists())
-        self.assert_no_leftovers()
-
-    def test_successor_on_the_same_socket_path_is_kept(self):
-        old_store = self.store("old")
-        new_store = self.store("new")
-        old = self.start(old_store)
-        successor = self.start(new_store)
+    def test_forced_crash_cleanup_retires_the_killed_host(self):
+        saved = sys.argv
+        sys.argv = [saved[0], sys.executable]
         try:
-            HOST.stop_process(old)
-            shutil.rmtree(old_store)
-            self.assertTrue((self.runtime / "x.sock").exists())
-            self.assertEqual(str(new_store), (self.runtime / "x.store").read_text())
-            self.assert_no_leftovers()
+            spec = importlib.util.spec_from_file_location("host_launch_fixture", ROOT / "tests/integration/host_launch_fixture.py")
+            launch = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(launch)
         finally:
-            HOST.stop_process(successor)
-        shutil.rmtree(new_store)
-        self.assert_no_leftovers()
+            sys.argv = saved
+        store = pathlib.Path(self.tmp.name) / "store"
+        store.mkdir()
+        store = store.resolve()
+        process, _ = HOST.start_ready_process([sys.executable, str(self.script), "--store", str(store), "--mode", "serve"],
+                                              env=self.env, isolate_providers=False)
+        socket_path = self.runtime / "x.sock"
+        self.assertTrue(socket_path.exists())
 
-    def test_hint_for_a_different_store_is_kept(self):
-        store = self.store("store")
-        other = pathlib.Path(self.tmp.name) / "other-store"
-        process = self.start(store)
-        (self.runtime / "x.store").write_text(str(other))
-        HOST.stop_process(process)
-        shutil.rmtree(store)
-        self.assertEqual([(self.runtime / "x.sock", str(other))], runtime_leftovers.leftovers(self.runtime))
-        runtime_leftovers.remove(runtime_leftovers.leftovers(self.runtime))
+        def stand_in(named, *, descendants=False):
+            return [(process.pid, str(store))] if process.poll() is None and named == store else []
 
-    def test_host_that_exits_before_ready_is_retired_through_its_store_argument(self):
-        store = self.store("store")
-        with self.assertRaises(HOST.HostStartError):
-            self.start(store, mode="early")
-        self.assertFalse((self.runtime / "x.sock").exists())
+        with mock.patch.object(launch, "matching_hosts", stand_in):
+            launch.forced_crash_cleanup(store)
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(socket_path.exists() or socket_path.with_suffix(".store").exists())
         shutil.rmtree(store)
-        self.assert_no_leftovers()
+        self.assertEqual([], runtime_leftovers.leftovers(self.runtime))
 
 
 if __name__ == "__main__":

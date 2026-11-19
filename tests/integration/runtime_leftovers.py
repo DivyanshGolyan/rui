@@ -46,14 +46,14 @@ def leftovers(directory=None):
 
 
 def answers(path):
+    """True unless the socket is provably dead: refused or absent. Any other probe failure
+    (timeout, permission, ...) cannot prove the socket dead, so it counts as live and is kept."""
     with os_semantics.unix_stream() as probe:
         probe.settimeout(1)
         try:
             probe.connect(str(path))
         except OSError as error:
-            if error.errno in (errno.ECONNREFUSED, errno.ENOENT):
-                return False
-            raise
+            return error.errno not in (errno.ECONNREFUSED, errno.ENOENT)
     return True
 
 
