@@ -603,11 +603,13 @@ CLIENT_LOCALITY_INPUTS = ("src/*.zig", "clients/ts/src/*", "tests/ci/client_loca
 # The CI-code inputs every module declared with the table reads: a change to CI code or to a workflow reruns it.
 CI_CODE_INPUTS = ("tests/ci/*", ".github/*")
 
-# Each module's inputs: the repo files its test file and the tests/ci helpers it imports read (ROOT paths,
-# git-tracked file scans, subprocess-launched fixtures). A module that reads the whole tree, runs
-# test_release (whose git grep reads every tracked file) or calls select() (which reads every tracked file)
-# is not declared, so it always runs. test_docs_only is not declared: its path literals are fixture names in
-# temporary repositories, which the literal guard in test_selection.py would require to be repo inputs.
+# Each module's inputs. Rule: a module is declared only if every repo file it reads is named by a path literal or
+# glob in its own test file. A module that reads through a helper (a tests/ci or tests/integration module that
+# scans the tree, git over the tree, a fixture the module or the script it runs imports, or the build graph) is
+# not declared, so it always runs. test_store_engine_boundary and test_promotion meet the rule: their reads are
+# src/store and their own tests/ci helpers, which CI_CODE_INPUTS covers. test_docs_only is not declared: its path
+# literals are fixture names in temporary repositories, which the literal guard in test_selection.py would require
+# to be repo inputs.
 POLICY_SELF_CHECKS = (
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
@@ -618,29 +620,10 @@ POLICY_SELF_CHECKS = (
     ("test_client_locality", CLIENT_LOCALITY_INPUTS),
     # TLC runs only when a model, its runner or its CI wrapper changes.
     ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
-    # Reads src/**/*.zig and the TypeScript client sources it checks against openapi.json.
-    ("test_host_settings_locality", (*CI_CODE_INPUTS, "src/*", "clients/ts/src/*", "openapi.json")),
-    # Runs only in-process fake repositories and fake steps; reads no repo file.
+    # Runs only in-process fake repositories and fake steps; reads no repo file outside tests/ci.
     ("test_promotion", CI_CODE_INPUTS),
-    # Reads build.zig and build/*.zig through build_files.
-    ("test_coverage", (*CI_CODE_INPUTS, "build.zig", "build/*")),
     # Reads src/store/** only.
     ("test_store_engine_boundary", (*CI_CODE_INPUTS, "src/store*")),
-    # Scans every .zig file in the tree, the Python fixtures under tests/ and the TypeScript test sources.
-    ("test_flake_sources", (*CI_CODE_INPUTS, "*.zig", "tests/*.py", "clients/ts/*")),
-    # Reads the verify-rui script and the terminal screen fixture it loads.
-    ("test_verify_rui_build_here", (*CI_CODE_INPUTS, ".claude/skills/verify-rui/*", "tests/integration/terminal_screen.py")),
-    # Reads the verify-rui script and its frame table, source files it checks, and the integration fixtures it loads.
-    ("test_verify_rui", (*CI_CODE_INPUTS, ".claude/skills/verify-rui/*", "README.md", "src/*", "tests/integration/*")),
-    # Scans every .zig file under src/ and tests/ and reads build.zig, build/*.zig and three integration fixtures.
-    ("test_import_architecture", (*CI_CODE_INPUTS, "src/*", "tests/*.zig", "tests/integration/live_engines.py",
-                                  "tests/integration/network_variables.py", "tests/integration/os_semantics.py",
-                                  "build.zig", "build/*")),
-    # Reads src/**, tests/integration, tests/qualification, tests/formal, research/*.py, release/ and build files.
-    ("test_harness_contracts", (*CI_CODE_INPUTS, "build.zig", "build/*", "release/*", "research/*", "screen-emulator/build.zig",
-                                "src/*", "tests/integration/*", "tests/qualification/*", "tests/formal/*")),
-    # Runs each new module above in a subprocess under a read-audit hook; the reads it guards are the modules' own.
-    ("test_selection.PolicyReadsTest", CI_CODE_INPUTS),
 )
 
 

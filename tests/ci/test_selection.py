@@ -32,23 +32,21 @@ POLICY_UNITS = {
     "driver": "test_selection.FullCheckPartitionTest", "admission": "test_admission",
     "publication": "test_release_publication", "artifact": "test_build_artifact",
     "locality": "test_client_locality", "formal": "test_formal_models",
-    "host_settings": "test_host_settings_locality", "promotion": "test_promotion", "coverage": "test_coverage",
-    "store": "test_store_engine_boundary", "flake": "test_flake_sources",
-    "verify_build": "test_verify_rui_build_here", "verify": "test_verify_rui",
-    "imports": "test_import_architecture", "harness": "test_harness_contracts",
-    "reads": "test_selection.PolicyReadsTest",
+    "promotion": "test_promotion", "store": "test_store_engine_boundary",
 }
-# Declared in the table after the original six; each reads its inputs and therefore carries the CI globs.
-NEW_POLICY_UNITS = ("host_settings", "promotion", "coverage", "store", "flake", "verify_build", "verify", "imports", "harness")
+# Declared in the table after the original six; each reads only the repo paths its table entry names.
+NEW_POLICY_UNITS = ("promotion", "store")
 # One path per unit that the unit's own inputs cover, so a change to that input runs the unit.
 POLICY_PROBES = {
     "driver": "tests/integration/check.sh", "admission": "build.zig", "publication": "tests/ci/release_publication.py",
     "artifact": "tests/ci/build_artifact.py", "locality": "src/cli.zig", "formal": "tests/formal/mysql_ownership/MysqlOwnership.tla",
-    "host_settings": "clients/ts/src/client.ts", "promotion": "tests/ci/promotion.py", "coverage": "build/unit.zig",
-    "store": "src/store/schema.zig", "flake": "src/cli.zig", "verify_build": ".claude/skills/verify-rui/scripts/verify-rui",
-    "verify": "tests/integration/terminal_screen.py", "imports": "tests/integration/mysql_wire_test.zig",
-    "harness": "research/README.md", "reads": "tests/ci/select_tests.py",
+    "promotion": "tests/ci/promotion.py", "store": "src/store/schema.zig",
 }
+# Repo paths in a module's source: the string literals that name a file or directory of the repository.
+REPO_PATH = re.compile(r"(?:src|release|docs|tests|research|clients|screen-emulator|\.github|\.claude)/\S+"
+                       r"|build(?:\.zig\S*|/\S*)|install\.sh|openapi\.json|README\.md")
+
+
 def short_names(units):
     by_unit = {unit: short for short, unit in POLICY_UNITS.items()}
     return [by_unit[unit] for unit in units]
@@ -2611,7 +2609,7 @@ class PolicySelfCheckTableTest(unittest.TestCase):
                 self.assertTrue({"tests/ci/*", ".github/*"} <= set(table[POLICY_UNITS[short]]))
 
     def test_source_only_change_skips_the_modules_that_do_not_read_src(self):
-        run = {"locality", "host_settings", "flake", "imports", "harness", "verify"}
+        run = {"locality"}
         for phase in ("development", "review"):
             with self.subTest(phase=phase):
                 self.assertEqual(self.skipped(["src/session.zig"], phase), set(POLICY_UNITS) - run)
@@ -2638,116 +2636,18 @@ class PolicySelfCheckTableTest(unittest.TestCase):
     def test_no_change_skips_every_declared_unit(self):
         self.assertEqual(self.skipped([]), set(POLICY_UNITS))
 
-
-# Installed in every Python process the guarded module starts (directly, or through the Popen wrapper below).
-# It reads its config from RUI_READ_AUDIT and restores the environment the process was given, so the audit
-# leaves no trace in os.environ. Only the first sitecustomize on the path runs, so it then hands over to the
-# one the process would otherwise load (for example a fixture's own shim).
-READ_AUDIT_SITECUSTOMIZE = """
-import importlib.machinery, importlib.util, json, os, subprocess, sys
-_here = os.path.dirname(os.path.abspath(__file__))
-_raw = os.environ.pop("RUI_READ_AUDIT", None)
-if _raw:
-    _config = json.loads(_raw)
-    if _config["pythonpath"] is None:
-        os.environ.pop("PYTHONPATH", None)
-    else:
-        os.environ["PYTHONPATH"] = _config["pythonpath"]
-    _fd = os.open(_config["log"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    _root = _config["root"]
-
-    def _record(event, args):
-        if event == "import":
-            raw = args[1]
-        elif event == "open":
-            raw = args[0]
-        else:
-            return
-        if not isinstance(raw, (str, bytes, os.PathLike)):
-            return
-        path = os.path.abspath(os.fsdecode(os.fspath(raw)))
-        if path == _root or path.startswith(_root + os.sep):
-            os.write(_fd, (os.path.relpath(path, _root) + chr(10)).encode())
-
-    sys.addaudithook(_record)
-
-    _popen_init = subprocess.Popen.__init__
-
-    def _init(self, args, *rest, **kwargs):
-        program = args[0] if isinstance(args, (list, tuple)) and args else args
-        if isinstance(program, os.PathLike):
-            program = os.fspath(program)
-        if isinstance(program, bytes):
-            program = os.fsdecode(program)
-        if isinstance(program, str) and os.path.basename(program).startswith("python"):
-            base = (os.environ if kwargs.get("env") is None else kwargs["env"]).get("PYTHONPATH")
-            env = dict(os.environ if kwargs.get("env") is None else kwargs["env"])
-            env["PYTHONPATH"] = os.pathsep.join(filter(None, (_config["dir"], base)))
-            env["RUI_READ_AUDIT"] = json.dumps({**_config, "pythonpath": base})
-            kwargs["env"] = env
-        _popen_init(self, args, *rest, **kwargs)
-
-    subprocess.Popen.__init__ = _init
-
-_next = importlib.machinery.PathFinder.find_spec(
-    "sitecustomize", [p for p in sys.path if os.path.abspath(p or ".") != _here])
-if _next is not None and _next.loader is not None:
-    _next.loader.exec_module(importlib.util.module_from_spec(_next))
-"""
-
-# Runs one module's tests in a child process; the hook is installed by the sitecustomize that PYTHONPATH puts first.
-READ_AUDIT_DRIVER = ("import sys, unittest; result = unittest.TextTestRunner(stream=sys.stderr, verbosity=0)"
-                     ".run(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1])); sys.exit(not result.wasSuccessful())")
-
-
-class PolicyReadsTest(unittest.TestCase):
-    """Each new policy module's table entry names every tracked file the module reads.
-
-    Literal scans miss reads made through helpers and globs. This runs each module's tests in a subprocess whose
-    Python processes record every open and every import's source under the repository. Children started through
-    subprocess.Popen get the hook even when they pass a minimal env, because the wrapper in
-    READ_AUDIT_SITECUSTOMIZE gives every Python child the hook directory and config. A cached module is read through
-    its .pyc, which is mapped back to its source. Gaps: non-Python children (git, sh) are not hooked, so their reads
-    of tracked files are accepted (git reads go through `git -C ROOT`); os.system, os.posix_spawn and Python
-    children that bypass Popen are not hooked. Directory listings are not expanded: a listing reveals names, and
-    expanding it would count every top-level file for a listing of the root.
-    """
-
-    def tracked(self):
-        listed = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"])
-        return {path.decode("utf-8", "surrogateescape") for path in listed.split(b"\0") if path}
-
-    def module_reads(self, unit, tmp):
-        Path(tmp, "sitecustomize.py").write_text(READ_AUDIT_SITECUSTOMIZE)
-        log = Path(tmp, "reads.log")
-        pythonpath = os.pathsep.join(filter(None, (str(ROOT / "tests/ci"), str(ROOT / "tests/integration"),
-                                                   os.environ.get("PYTHONPATH"))))
-        config = {"dir": tmp, "log": str(log), "root": str(ROOT), "pythonpath": pythonpath}
-        env = {**os.environ, "RUI_READ_AUDIT": json.dumps(config), "PYTHONPATH": os.pathsep.join((tmp, pythonpath))}
-        result = subprocess.run([sys.executable, "-B", "-c", READ_AUDIT_DRIVER, unit], cwd=ROOT, env=env,
-                                capture_output=True, text=True, timeout=600)
-        return result, {self.source_of(line) for line in log.read_text().splitlines()} if log.exists() else set()
-
-    @staticmethod
-    def source_of(path):
-        """A cached module's bytecode is read in place of its source, so the source is the input it reads."""
-        folder, name = os.path.split(path)
-        if os.path.basename(folder) == "__pycache__" and name.endswith(".pyc"):
-            return os.path.join(os.path.dirname(folder), name.split(".")[0] + ".py")
-        return path
-
-    def test_each_declared_module_reads_only_files_its_table_entry_matches(self):
+    def test_repo_paths_read_by_each_module_match_its_inputs(self):
         table = dict(POLICY_SELF_CHECKS)
-        tracked = self.tracked()
         for short in NEW_POLICY_UNITS:
             unit = POLICY_UNITS[short]
-            with self.subTest(unit=unit), tempfile.TemporaryDirectory() as tmp:
-                result, opened = self.module_reads(unit, tmp)
-                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-                reads = opened & tracked
-                self.assertTrue(reads, f"{unit} recorded no tracked reads; the audit did not run")
-                unmatched = sorted(path for path in reads if not matches(path, table[unit]))
-                self.assertEqual(unmatched, [], f"{unit} reads paths none of its declared inputs match")
+            with self.subTest(unit=unit):
+                source = (Path(__file__).parent / f"{unit}.py").read_text()
+                literals = {node.value for node in ast.walk(ast.parse(source))
+                            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+                # A directory literal is covered when a file under it is an input.
+                unnamed = sorted(value for value in literals if REPO_PATH.fullmatch(value)
+                                 and not (matches(value, table[unit]) or matches(f"{value}/x", table[unit])))
+                self.assertEqual(unnamed, [], f"{unit} names paths none of its declared inputs match")
 
 
 class PolicyPrepushTest(unittest.TestCase):
