@@ -1174,7 +1174,12 @@ test "a saved edit that reaches Active Capacity gets the pause-then-start notice
     var notice: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer notice.deinit();
     try writeRetainedHostNotice(&notice.writer, "/s", .saved_capacity);
-    try std.testing.expectEqualStrings("rui: saved; the running Host keeps its capacity until a new Host starts, and rui host restart keeps it too. Applying settings means pausing this Host and all its work: rui host pause --store /s, then rui host start --store /s\n", notice.written());
+    var word: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer word.deinit();
+    try TerminalText.writeShellWord(&word.writer, "/s");
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "rui: saved; the running Host keeps its capacity until a new Host starts, and rui host restart keeps it too. Applying settings means pausing this Host and all its work: rui host pause --store {0s}, then rui host start --store {0s}\n", .{word.written()});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, notice.written());
 }
 
 fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
