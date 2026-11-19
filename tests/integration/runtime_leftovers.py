@@ -14,7 +14,8 @@ reader against a real crashed Host, so a layout change fails there.
 import errno
 import os
 import pathlib
-import socket
+
+import os_semantics
 
 
 def runtime():
@@ -41,7 +42,7 @@ def leftovers(directory=None):
 
 
 def answers(path):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+    with os_semantics.unix_stream() as probe:
         probe.settimeout(1)
         try:
             probe.connect(str(path))
