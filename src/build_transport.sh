@@ -94,7 +94,7 @@ fi
     exit 1
 }
 
-grep '^# *define OPENSSL_VERSION_STR "3.6.3"' "$prefix/include/openssl/opensslv.h" >/dev/null
+grep '^# *define OPENSSL_VERSION_STR "3.6.5"' "$prefix/include/openssl/opensslv.h" >/dev/null
 grep '^#define NGHTTP2_VERSION "1.71.0"' "$prefix/include/nghttp2/nghttp2ver.h" >/dev/null
 test -f "$prefix/lib/libnghttp2.a"
 test -f "$prefix/lib/libssl.a"

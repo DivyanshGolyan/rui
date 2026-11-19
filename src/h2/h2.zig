@@ -13,7 +13,7 @@ pub const testing = if (@import("builtin").is_test) struct {
 } else struct {};
 
 pub const nghttp2_version = "1.71.0";
-pub const openssl_version = "3.6.3";
+pub const openssl_version = "3.6.5";
 
 pub const max_url_bytes = url_value.max_url_bytes;
 pub const max_host_bytes = url_value.max_host_bytes;

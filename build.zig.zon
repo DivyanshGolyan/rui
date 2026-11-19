@@ -18,11 +18,11 @@
         },
         .nghttp2 = .{
             .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz",
-            .hash = "N-V-__8AAIgi2gDhTopghJsa3wlge0oN1fD9tnXH_0WYb6AB",
+            .hash = "N-V-__8AAIgi2gCNAFzaSP_Qwb8MVv4GhCI5tn9HjmJdBW5y",
         },
         .openssl = .{
-            .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",
-            .hash = "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM",
+            .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz",
+            .hash = "N-V-__8AABKeEghjdSPkvVWHCc8hob18MH3oUBR-e5mVm9TJ",
         },
         .vaxis = .{
             .url = "git+https://github.com/DivyanshGolyan/libvaxis#d2276b086c33395354a3e4dd25fd0cd3b5b1d3d6",

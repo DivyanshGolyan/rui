@@ -41,5 +41,5 @@ cp "$openssl_source"/include/openssl/*.h "$prefix/include/openssl/"
 cp "$build_root"/include/openssl/*.h "$prefix/include/openssl/"
 cp "$nghttp2_source"/lib/includes/nghttp2/*.h "$prefix/include/nghttp2/"
 
-grep '^# *define OPENSSL_VERSION_STR "3.6.3"' "$prefix/include/openssl/opensslv.h" >/dev/null
+grep '^# *define OPENSSL_VERSION_STR "3.6.5"' "$prefix/include/openssl/opensslv.h" >/dev/null
 grep '^#define NGHTTP2_VERSION "1.71.0"' "$prefix/include/nghttp2/nghttp2ver.h" >/dev/null
