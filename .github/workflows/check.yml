@@ -484,8 +484,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(id -u)" != 0
-          binary=$(find .zig-cache/o/ci-compiled -maxdepth 1 -type f -name 'unit-native' | head -1)
-          test -n "$binary" || { echo "error: no unit-native binary in .zig-cache/o/ci-compiled"; exit 1; }
+          binary=$(find .zig-cache/o/ci-compiled -maxdepth 1 -type f -name 'unit-native-tests' | head -1)
+          test -n "$binary" || { echo "error: no unit-native-tests binary in .zig-cache/o/ci-compiled"; exit 1; }
           echo "Measuring $binary; source SHA $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/store_shards.py measure "$binary" --timeout 1800 --output tests/ci/unit_test_times.json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload the measured timing file
