@@ -427,19 +427,10 @@ jobs:
         timeout-minutes: 35
         env:
           RUI_UNIT_SHARD_COUNT: ${{ matrix.k }}
-          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           echo "Native shard count $RUI_UNIT_SHARD_COUNT; source SHA $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py '["test-native"]' --ci-artifacts .zig-cache/o/ci-compiled
-      - name: Retain bounded failed-fixture diagnostics
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: failure-native-shards-k${{ matrix.k }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rui-failure-artifacts
-          retention-days: 3
-          if-no-files-found: ignore
   native_measure:
     # TEMP experiment, not admission-required: records native unit test seconds on the hosted
     # runner with the Store's MySQL 8.4 service, as the Store measurement does, and uploads the
