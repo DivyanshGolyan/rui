@@ -1759,7 +1759,8 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const row = &state.rows.items[at];
         const was = row.*;
         const before = RowPresentation.of(state, row);
-        const was_visible = position(state, row.reference) != null;
+        // The last arrange gave every drawn row a line; rows added by this commit have no node yet.
+        const was_visible = at < state.nodes.items.len and state.nodes.items[at].line != null;
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.creator = incoming.creator;
         row.archive_state = incoming.archive_state;
