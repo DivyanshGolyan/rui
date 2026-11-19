@@ -14,7 +14,7 @@ def generate(source, times=None):
         raise ValueError("Zig's test runner changed: review unit environment initialization")
     source = source.replace(signature,
                             "pub fn main(init: std.process.Init.Minimal) void {\n    unit_environ = init.environ;")
-    timings = "\nconst store_test_times = [_]@import(\"unit_test_partition\").Timing{\n" + "".join(
+    timings = "\nconst unit_test_times = [_]@import(\"unit_test_partition\").Timing{\n" + "".join(
         "    .{ .name = " + json.dumps(name, ensure_ascii=False) + ", .seconds = " + repr(seconds) + " },\n"
         for name, seconds in sorted((times or {}).items())) + "};\n"
     return source.replace(needle, "unitTests()").rstrip() + timings + r'''
@@ -33,7 +33,7 @@ fn unitTests() []const std.builtin.TestFn {
         selected[count] = test_fn;
         count += 1;
     }
-    if (@import("unit_test_options").sharded) {
+    {
         var environ = unit_environ.createMap(std.heap.page_allocator) catch @panic("OOM");
         defer environ.deinit();
         if (environ.get("RUI_UNIT_EXCLUSIVE")) |_| {
@@ -50,7 +50,9 @@ fn unitTests() []const std.builtin.TestFn {
             const names = std.heap.page_allocator.alloc([]const u8, count) catch @panic("OOM");
             defer std.heap.page_allocator.free(names);
             for (selected[0..count], names) |test_fn, *name| name.* = test_fn.name;
-            const placement = partition.assign(std.heap.page_allocator, names, &store_test_times, shard.count) catch @panic("unit shard assignment failed");
+            const owned_times = partition.ownedTimings(std.heap.page_allocator, &unit_test_times, root) catch @panic("OOM");
+            defer std.heap.page_allocator.free(owned_times);
+            const placement = partition.assign(std.heap.page_allocator, names, owned_times, shard.count) catch @panic("unit shard assignment failed");
             defer std.heap.page_allocator.free(placement);
             var shard_count: usize = 0;
             // Exclusive mutations, histories and Handler comparison finish before peers start.

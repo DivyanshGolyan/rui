@@ -222,6 +222,7 @@ Commit corrected whitespace and generated artifacts before publishing.
 Deleted inputs still select their owner checks.
 A receipt records the tree, merge base, mode and each command's exit or explicit CI deferral.
 Dirty trees, failed commands and deferred-only runs cover no push.
+When no receipt covers a push, the hook refuses a pushed commit other than the checkout's HEAD; push from the checkout or worktree that has it checked out.
 A matching receipt reuses local feedback only; it never establishes hosted acceptance or turns a deferred obligation into a pass.
 The hook prints outstanding CI deferrals even when feedback is cached.
 Install it with `python3 tests/ci/prepush.py --install-hook` when setup has not installed it.

@@ -11,7 +11,7 @@ import time
 import model_fixture as fixture
 import h2_fixture
 import host_process
-from host_process import dispose_all, retain_failure_state, start_ready_process
+from host_process import dispose_all, READY_TRANSPORT, retain_failure_state, start_ready_process
 import os_semantics
 from codex_h2_cases import openai_base_url_run, saved_catalog_run, run
 
@@ -95,7 +95,7 @@ def catalog_unusable_trust_run():
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
             "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
         ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
-            required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+            required_fields=READY_TRANSPORT)
         for _ in range(3):
             listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
             assert listed and listed[0]["provider"] == "codex", listed

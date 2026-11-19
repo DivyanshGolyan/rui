@@ -115,7 +115,7 @@ class CompilerProbe(unittest.TestCase):
             after = []
             for index, prefixes in enumerate((("aggregate.test.", "hidden.test."), ("alpha.test.", "alpha.Inner.test."), ("nested.beta.test.",))):
                 options = root / f"options{index}.zig"
-                options.write_text(f"pub const root: usize = {index}; pub const sharded = false;")
+                options.write_text(f"pub const root: usize = {index};")
                 binary = root / f"after{index}"
                 filters = [argument for prefix in prefixes for argument in ("--test-filter", prefix)]
                 subprocess.run([zig, "test", "--test-no-exec", "-fno-llvm", *filters,

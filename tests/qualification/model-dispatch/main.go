@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -392,6 +393,19 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 	return result, errors.Join(workError, host.Stop(measurement.TeardownAllowance))
 }
 
+// h2Pin reads a library pin from the checked-out source, which owns it.
+func h2Pin(repo, name string) (string, error) {
+	source, err := os.ReadFile(filepath.Join(repo, "src", "h2", "h2.zig"))
+	if err != nil {
+		return "", err
+	}
+	match := regexp.MustCompile(`(?m)^pub const ` + name + ` = "([^"]+)";$`).FindSubmatch(source)
+	if match == nil {
+		return "", fmt.Errorf("src/h2/h2.zig declares no %s", name)
+	}
+	return string(match[1]), nil
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: measure-model-dispatch /absolute/path/to/rui")
@@ -400,6 +414,18 @@ func main() {
 	if err := measurement.RequireRuntime(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	repo, err := measurement.RepositoryRoot()
+	if err != nil {
+		panic(err)
+	}
+	nghttp2, err := h2Pin(repo, "nghttp2_version")
+	if err != nil {
+		panic(err)
+	}
+	openssl, err := h2Pin(repo, "openssl_version")
+	if err != nil {
+		panic(err)
 	}
 	started := time.Now()
 	root, err := os.MkdirTemp("/private/tmp", "rui-dispatch-measure-")
@@ -431,7 +457,7 @@ func main() {
 	result := map[string]any{
 		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
 		"artifacts":            root,
-		"transport":            map[string]string{"h2": "rui", "nghttp2": "1.70.0", "openssl": "3.6.3", "resolver": "getaddrinfo-thread"},
+		"transport":            map[string]string{"h2": "rui", "nghttp2": nghttp2, "openssl": openssl, "resolver": "getaddrinfo-thread"},
 		"idle_capacity_growth": idle, "request_growth_and_saved_failure": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
 		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "idle and request-growth cases use loopback H1; overlapping transport uses trusted local TLS/H2, not a live provider", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},

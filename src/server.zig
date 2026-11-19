@@ -1763,6 +1763,16 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
+// Kept out of prepareReply so the configure path pays only its own frame, not
+// the whole switch's frame.
+noinline fn prepareConfigure(host: *Host, fd: *Reply, header: Header, command: *const wire_request.ConfigureCommand) !void {
+    // One bounded receipt per active creating exchange; ordinary exchanges
+    // are limited by Host intake capacity. It lives only through encoding.
+    const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+    defer if (receipt) |value| host.allocator.destroy(value);
+    _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
+}
+
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
@@ -1805,13 +1815,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (host.stopAsked()) wakeListener(host);
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
-        .configure => |*command| {
-            // One bounded receipt per active creating exchange; ordinary exchanges
-            // are limited by Host intake capacity. It lives only through encoding.
-            const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
-            defer if (receipt) |value| host.allocator.destroy(value);
-            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
-        },
+        .configure => |*command| try prepareConfigure(host, fd, header, command),
         .message => |*command| {
             if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
             const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;

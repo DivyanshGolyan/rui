@@ -12,7 +12,7 @@ import time
 
 import codex_fixture as codex
 import h2_fixture
-from host_process import dispose_all, HostDiagnostics, retain_failure_state, start_ready_process
+from host_process import dispose_all, HostDiagnostics, READY_TRANSPORT, retain_failure_state, start_ready_process
 import model_fixture as fixture
 import os_semantics
 
@@ -82,7 +82,7 @@ def run(*, observed=False, intake=100):
         limit = required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - intake) + (2 if observed else 0)
         host, _ = start_ready_process(
             limited(limit), observations="managed" if observed else None,
-            required_fields={"execution": "enabled", "nghttp2": "1.70.0", "intake_capacity": str(intake),
+            required_fields={**READY_TRANSPORT, "intake_capacity": str(intake),
                              "descriptor_requirement": str(limit), "descriptor_limit": str(limit)},
         )
         diagnostics = HostDiagnostics(host)

@@ -291,7 +291,7 @@ The WAL name needs four bytes beyond the database path, within the eight reserve
 Enforce a finite internal SQLite heap, deriving cache/window/statement capacities against whole-Host targets; no separate caller SQLite tuning or artificial database/page-count quota/emergency reserve.
 Large incremental imports must not retain payload-sized dirty-page memory.
 Verify effective spill/cache/heap enforcement, not merely setter success.
-Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration and disabled unused attachment/extension/trigger/worker features.
+Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration, the query planner stability guarantee (plans never depend on bound values, so a cached statement is never re-prepared) and disabled unused attachment/extension/trigger/worker features.
 Required features need concrete consumers.
 
 #### Compound Content values
