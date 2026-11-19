@@ -639,6 +639,8 @@ POLICY_SELF_CHECKS = (
     # Reads src/**, tests/integration, tests/qualification, tests/formal, research/*.py, release/ and build files.
     ("test_harness_contracts", (*CI_CODE_INPUTS, "build.zig", "build/*", "release/*", "research/*", "screen-emulator/build.zig",
                                 "src/*", "tests/integration/*", "tests/qualification/*", "tests/formal/*")),
+    # Runs each new module above in a subprocess under a read-audit hook; the reads it guards are the modules' own.
+    ("test_selection.PolicyReadsTest", CI_CODE_INPUTS),
 )
 
 

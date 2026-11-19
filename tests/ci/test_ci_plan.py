@@ -26,12 +26,14 @@ def selection(documentation=False):
 
 class PlanTest(unittest.TestCase):
     def test_only_a_pull_request_may_skip_policy_self_checks(self):
-        for event_name, promotion, skips in (('pull_request', False, ['test_unchanged']),
-                                             ('push', False, []),
-                                             ('workflow_dispatch', False, []),
-                                             ('workflow_dispatch', True, [])):
-            with self.subTest(event_name=event_name, promotion=promotion):
-                result = plan(selection(), event_name=event_name, draft=False, promotion=promotion,
+        # Every event check.yml can start: pull_request (ready and draft), schedule, workflow_dispatch and promotion.
+        for event_name, draft, promotion, skips in (('pull_request', False, False, ['test_unchanged']),
+                                                    ('pull_request', True, False, ['test_unchanged']),
+                                                    ('schedule', False, False, []),
+                                                    ('workflow_dispatch', False, False, []),
+                                                    ('workflow_dispatch', False, True, [])):
+            with self.subTest(event_name=event_name, draft=draft, promotion=promotion):
+                result = plan(selection(), event_name=event_name, draft=draft, promotion=promotion,
                               change_kind=ChangeKind.NORMAL).outputs
                 self.assertEqual(result['policy_skips'], skips)
 
