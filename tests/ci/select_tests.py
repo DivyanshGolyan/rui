@@ -392,6 +392,15 @@ def yaml_context(lines, index):
     return context
 
 
+def sqlite_pin(source):
+    match = re.search(r'\.sqlite\s*=\s*\.\{[^}]*\}', source or "")
+    return match.group(0) if match else None
+
+
+def sqlite_pin_changed(path, before, after):
+    return sqlite_pin(before) != sqlite_pin(after)
+
+
 def cache_policy_changed(path, before, after):
     pattern = SETUP_CACHE_LINE if path.startswith(".github/actions/") else CACHE_LINE
     old, new = code_lines(before), code_lines(after)
@@ -407,6 +416,7 @@ def cache_policy_changed(path, before, after):
 CONTENT_RULES = {
     "store_format": ((STORE_SCHEMA,), store_format_changed),
     "cache_policy": (CACHE_CONFIG, cache_policy_changed),
+    "sqlite_pin": (("build.zig.zon",), sqlite_pin_changed),
 }
 
 RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
@@ -719,12 +729,12 @@ def own_fixture(target, paths):
     return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
 
 
-def fast_tier(targets, paths, bootstrap_only=False):
+def fast_tier(targets, paths, bootstrap_only=False, store=False):
     """The PR tier of a raw (unnormalized) selection.
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
-    alone selected it; `test-store` only for Store paths) and the fixtures
+    alone selected it; `test-store` only for Store paths or a SQLite pin change) and the fixtures
     whose own sources the diff touches. A fixture the diff reaches only
     through imports runs on main and in promotion, never on the PR.
     """
@@ -734,7 +744,10 @@ def fast_tier(targets, paths, bootstrap_only=False):
         # A bootstrap-only change still compiles and runs one Store-free root through the
         # changed setup and producer; the Store-reaching binaries run on main.
         fast |= {"test-logic"} if bootstrap_only else {"test-native", "test-logic"}
-    if not any(matches(path, STORE_PATHS) for path in paths):
+    if store:
+        # The SQLite pin is Store code in practice: the Store suite runs against the new engine.
+        fast.add("test-store")
+    elif not any(matches(path, STORE_PATHS) for path in paths):
         fast.discard("test-store")
     fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
              if own_fixture(target, paths)}
@@ -831,6 +844,9 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         targets.update(rows)
         native_targets.update(rows - LINUX_ONLY)
         reasons.add("Fixture table: the fixtures whose rows changed")
+    if "sqlite_pin" in content_changed:
+        targets.add("test-store")
+        reasons.add("SQLite pin: the Store suite runs against the new engine")
     source_changes = [contents[path] for path in paths
                       if path.startswith("src/") and not matches(path, TEST_CODE) and path in contents]
     if source_changes:
@@ -868,7 +884,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     product = [path for path in changed if path not in bootstrap]
     bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
-    fast_targets = fast_tier(targets, paths, bootstrap_only)
+    fast_targets = fast_tier(targets, paths, bootstrap_only, store="sqlite_pin" in content_changed)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)

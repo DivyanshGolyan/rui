@@ -102,6 +102,8 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
     try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
     try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
+    // Plans never depend on bound values, so a cached statement stays valid across binds; sqlite.resetCached asserts it.
+    try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_ENABLE_QPSG, 1);
     try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
     if (existing) {
         if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
