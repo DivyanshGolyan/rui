@@ -1623,8 +1623,8 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
         const overflow = try arena.allocator().alloc(u8, editor.area.buffer.len + 1);
         @memset(overflow, 'x');
         const valid = try arena.allocator().dupe(u8, editor.text());
-        // Typing a whole field's worth of keys draws once per key, too slow for a Debug test; start one byte short of full.
-        if (fault == .typed_overflow) try std.testing.expect(editor.set(overflow[0 .. overflow.len - 2], overflow.len - 2) == null);
+        // Sending a whole field's worth of bytes draws once per event, too slow for CI's per-test limit; start one byte short of full.
+        if (fault == .typed_overflow or fault == .paste_overflow) try std.testing.expect(editor.set(overflow[0 .. overflow.len - 2], overflow.len - 2) == null);
         const before = try arena.allocator().dupe(u8, editor.text());
         // Every fault reaches the field as the person's keys, through the drawn view.
         switch (fault) {
@@ -1633,7 +1633,7 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
             .typed_invalid_utf8 => try testingSend(&page, &ctx, "\xff", 90, 28),
             .typed_invalid_scalar => try testingSend(&page, &ctx, "\u{200b}", 90, 28),
             .paste_invalid => try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28),
-            .paste_overflow => try testingSend(&page, &ctx, try std.fmt.allocPrint(arena.allocator(), "\x1b[200~{s}\x1b[201~", .{overflow}), 90, 28),
+            .paste_overflow => try testingSend(&page, &ctx, "\x1b[200~xx\x1b[201~", 90, 28),
         }
         const status = try testingStatusFor(&page, &ctx);
         // A typed overflow keeps the bytes that fit before refusing, as the editor always has.
@@ -1683,6 +1683,7 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
                 try std.testing.expect(editor.rejected == null);
                 try std.testing.expect(std.mem.indexOf(u8, after, "Paste refused") == null);
                 try std.testing.expect(std.mem.indexOf(u8, after, "couldn't be entered") == null);
+                if (fault == .paste_overflow) try std.testing.expect(editor.set(valid, valid.len) == null);
                 try std.testing.expect(try page.freeze(.key, .connect));
             }
         }
