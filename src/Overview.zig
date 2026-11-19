@@ -386,6 +386,8 @@ job_count: usize = 0,
 job: Job = .list,
 answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
+/// The walk in flight began with a since token: a full answer to it is re-walked by the core.
+walk_since: bool = false,
 scratch: ?std.Io.File = null,
 
 opened: view.Reference = undefined,
@@ -1325,6 +1327,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .list => |request| {
             self.traversal = .init(request.since);
             self.traversal.archive = request.archive;
+            self.walk_since = request.since != null;
             if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
             if (self.state.listed_at_ms == null) self.queueHost();
@@ -1508,7 +1511,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
-            const page: view.Page = .of(&self.traversal, &answer.page, &rows);
+            const page: view.Page = .of(&self.traversal, &answer.page, &rows, self.walk_since);
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
         },
@@ -2027,6 +2030,8 @@ const test_now_s: u64 = 1_800_000_000;
 const Seen = struct {
     hosts: usize = 0,
     lists: usize = 0,
+    /// Answers every roster walk in full, so a removed Session leaves the roster (a changed answer never removes one).
+    full_answers: bool = false,
     since: ?protocol.SinceToken = null,
     line: struct { session: view.Reference = @splat(0), position: u64 = 0 } = .{},
     creates: usize = 0,
@@ -2107,7 +2112,9 @@ const fake_operations: Operations = .{
             Seen.now.lists += 1;
             Seen.now.archive_filter = archive;
             Seen.now.since = cursor.since;
-            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
+            // A walk with a since token is answered as a change, as the Host answers a token it still holds.
+            const delta: protocol.ListDelta = if (cursor.since != null and !Seen.now.full_answers) .changed else .full;
+            page.* = .{ .count = Seen.now.listed, .delta = delta, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
                 const since = test_now_s - 10 - at;
                 row.* = .{ .read_version = page.since, .work = fixtureSessionWork(.{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 }) };
@@ -5191,6 +5198,7 @@ test "SUI-41 sidebar stays live and wheels route to their pane" {
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
     Seen.now.listed = 2;
+    Seen.now.full_answers = true;
     overview.state.next_list_ms = 0;
     const revision = overview.state.presentation_revision;
     _ = try service(overview);
@@ -5372,6 +5380,7 @@ test "App list clicks validate present and removed targets with open and closed 
             defer rig.close();
             const overview = rig.overview;
             Seen.now.listed = 2;
+            Seen.now.full_answers = true;
             try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
             try std.testing.expect(try rig.settle() == null);
             defer {
@@ -5615,6 +5624,7 @@ fn sui4SettingsEntry() !void {
             defer rig.close();
             const overview = rig.overview;
             Seen.now.listed = 2;
+            Seen.now.full_answers = true;
             try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
             try std.testing.expect(try rig.settle() == null);
             defer {

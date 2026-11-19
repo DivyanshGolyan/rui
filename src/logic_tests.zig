@@ -318,7 +318,7 @@ test "the overview core reads session list pages as the client decodes them" {
 
     var traversal = protocol_reply.SessionTraversal.init(.{ .instance = @splat(7), .generation = 40 });
     var buffer: [overview_view.max_page_rows]overview_view.Listed = undefined;
-    const read = overview_view.Page.of(&traversal, &page, &buffer);
+    const read = overview_view.Page.of(&traversal, &page, &buffer, true);
     try std.testing.expect(!read.restarts);
     try std.testing.expectEqual(@as(?overview_view.Answer, null), read.answer);
     try std.testing.expectEqualDeep(page.next.?, traversal.cursor);
@@ -346,7 +346,7 @@ test "the overview core reads session list pages as the client decodes them" {
     var full: protocol_reply.SessionListPage = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(9), .generation = 3 }, .next = null };
     full.rows[0] = page.rows[1];
     full.rows[0].read_version = full.since;
-    const restarted = overview_view.Page.of(&traversal, &full, &buffer);
+    const restarted = overview_view.Page.of(&traversal, &full, &buffer, true);
     try std.testing.expect(restarted.restarts);
     try std.testing.expectEqual(overview_view.Answer{ .delta = .full, .since = full.since }, restarted.answer.?);
     _ = try overview_view.step(&state, .{ .list = .{ .page = restarted } });
@@ -537,4 +537,15 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
         try std.testing.expect(merge_allocations <= total);
         try std.testing.expect(render_allocations <= total);
     }
+}
+
+test "a since walk the Host answers in full ends on that page, and a full walk pages on" {
+    var traversal = protocol_reply.SessionTraversal.init(.{ .instance = @splat(7), .generation = 40 });
+    var page: protocol_reply.SessionListPage = .{ .count = 0, .delta = .full, .since = .{ .instance = @splat(9), .generation = 3 }, .next = .{ .after = 8, .ceiling = 20 } };
+    var buffer: [overview_view.max_page_rows]overview_view.Listed = undefined;
+    const ended = overview_view.Page.of(&traversal, &page, &buffer, true);
+    try std.testing.expectEqual(overview_view.Answer{ .delta = .full, .since = page.since }, ended.answer.?);
+    var full_walk = protocol_reply.SessionTraversal.init(null);
+    const paged = overview_view.Page.of(&full_walk, &page, &buffer, false);
+    try std.testing.expectEqual(@as(?overview_view.Answer, null), paged.answer);
 }
