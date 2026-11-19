@@ -10,9 +10,11 @@ import time
 from select_tests import execution_batches
 from build_artifact import pr_ci
 import quarantine
-import runtime_leftovers
 from report_issue import fixtures
 from steps import record_failure
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "integration"))
+import runtime_leftovers  # noqa: E402  (fixture helper beside the fixtures it checks)
 
 RETRIED = "one automatic retry"
 TEST_TIMEOUT = "5m"
@@ -104,7 +106,7 @@ def execute(batch, ci_artifacts):
     if leaked := runtime_leftovers.sweep():
         note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
                 f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
-                "remove its socket and .store hint before deleting the Store.")
+                "remove its socket and .store hint before deleting the Store (docs/verification/testing.md).")
         print(f"::error::{note}", flush=True)
         summarize(note)
         output.append(note + "\n")

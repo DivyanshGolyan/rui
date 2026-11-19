@@ -32,7 +32,6 @@ from urllib.parse import quote
 
 import failure_cause
 import report_issue
-import runtime_leftovers
 from qualification import matrix_targets
 from pr_overlap import repo_from_remote
 from select_tests import FIXTURES
@@ -46,6 +45,7 @@ from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_D
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
+import runtime_leftovers
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -531,12 +531,11 @@ def run(planned, mode, base, red=None):
             results.append({"name": name, "skipped": command.reason})
             continue
         print(f"== {name}: {' '.join(command)}", flush=True)
-        runtime_leftovers.sweep()
         code = subprocess.run(command, cwd=ROOT).returncode
-        if leaked := runtime_leftovers.sweep():
-            print(f"{name} left {len(leaked)} Host sockets whose Store no longer exists (removed): "
-                  f"{runtime_leftovers.describe(leaked)}", flush=True)
-            code = code or 1
+        # Local feedback only cleans: another worktree's run under this uid may own a leak. CI fails it.
+        if removed := runtime_leftovers.sweep():
+            print(f"Removed {len(removed)} leftover Host sockets whose Store no longer exists: "
+                  f"{runtime_leftovers.describe(removed)}", flush=True)
         results.append({"name": name, "command": command, "exit": code})
     tree = before if clean_tree() == before else None
     path = receipt_path()

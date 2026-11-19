@@ -21,6 +21,7 @@ import threading
 from urllib.parse import quote
 
 import live_engines
+import runtime_leftovers
 import settings_fixture
 from terminal_screen import split_pane_row
 
@@ -1134,9 +1135,18 @@ def restart_all_cases(root, binary, releases):
         assert socket_path.exists(), socket_path
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
         assert socket_path.exists(), "Discovery must not reclaim sockets"
-        # The crash left the socket and its hint; the Store is about to be deleted.
-        socket_path.unlink()
-        socket_path.with_suffix(".store").unlink(missing_ok=True)
+        # The harness's leftover reader agrees with platform's layout on a real
+        # crashed Host: not a leftover while its Store exists, one once it is gone.
+        hinted = pathlib.Path(socket_path.with_suffix(".store").read_text())
+        assert socket_path not in [path for path, _ in runtime_leftovers.leftovers()]
+        moved = hinted.with_name(hinted.name + ".moved")
+        hinted.rename(moved)
+        try:
+            assert (socket_path, str(hinted)) in runtime_leftovers.leftovers()
+        finally:
+            moved.rename(hinted)
+        runtime_leftovers.remove([(socket_path, str(hinted))])
+        assert not socket_path.exists()
 
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."

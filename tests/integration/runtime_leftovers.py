@@ -6,6 +6,10 @@ temporary Store, so nothing removes them: on one Mac 2,500 piled up and every
 `rui upgrade` listed them. A leftover is a socket that refuses connections and
 whose `.store` hint names a directory that no longer exists, so no Host can
 serve it. Live Hosts accept, and a Host's own Store directory still exists.
+
+`platform.zig` owns this layout (`runtimeDirectory`, `storeHintPath`,
+`socketStoreIsUnowned`); upgrade_integration's crashed-Host case checks this
+reader against a real crashed Host, so a layout change fails there.
 """
 import errno
 import os
