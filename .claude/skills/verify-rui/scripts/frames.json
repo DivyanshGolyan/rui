@@ -6328,11 +6328,12 @@
           ]
         },
         {
-          "send": {
-            "to": "Unserved night witness",
-            "text": "Unserved send witness",
-            "wait": false
-          }
+          "text": "Unserved send witness"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
         },
         {
           "wait": "isn't served by this Host"
