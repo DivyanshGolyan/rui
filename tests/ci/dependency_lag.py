@@ -2,8 +2,8 @@
 """Keep one deps-behind issue listing pinned dependencies behind upstream (#1893).
 
 Reads the pins in build.zig.zon, asks each tracked upstream for its newest
-release and keeps a single open issue current. Never fails a PR, never opens
-a PR, never closes the issue.
+release and keeps a single open issue current. Never fails its run, never
+opens a PR, never closes the issue.
 """
 import os
 import re
@@ -106,7 +106,7 @@ def body(behind, unchecked, failed, today):
         lines += ["| Dependency | Pinned | Latest |", "| --- | --- | --- |"]
         lines += [f"| {entry.name} | {entry.source.current} | {_link(entry.source, entry.latest)} |"
                   for entry in behind]
-    else:
+    elif not failed:
         lines.append(f"All checked pins are current as of {today}.")
     lines.append("")
     if unchecked:
@@ -160,14 +160,16 @@ def run(api, repo, manifest, fetch_text, today):
             action = f"updated issue #{issue['number']}"
         else:
             action = f"issue #{issue['number']} already current"
-    elif behind:
+    elif behind or failed:
         api("POST", f"repos/{repo}/issues", [("title", TITLE), ("body", text), ("labels[]", ISSUE_LABEL)])
         action = "opened the issue"
     else:
         action = "nothing behind, no issue"
     print(f"behind: {len(behind)} of {checked} checked; not checked: {len(unchecked)}; "
           f"could not check: {len(failed)}; {action}")
-    return 1 if checked and len(failed) == checked else 0
+    if checked and len(failed) == checked:
+        print("::warning::every upstream check failed")
+    return 0
 
 
 def fetch_text(url):

@@ -206,12 +206,28 @@ class RunTest(unittest.TestCase):
         self.assertIn("Could not check: nghttp2 (HTTP 502: bad gateway)", github.writes[-1][2]["body"])
         self.assertIn("::warning::nghttp2", out)
 
-    def test_every_tracked_source_failing_returns_one(self):
+    def test_every_tracked_source_failing_returns_zero_and_lists_each(self):
         github = FakeGitHub(failing={"repos/nghttp2/nghttp2/releases", "repos/openssl/openssl/releases"})
-        fetch = fetch_from({"https://sqlite.org/download.html": OSError("network down")})
-        code, _ = run_quietly(github, "o/r", SMALL, fetch, TODAY)
-        self.assertEqual(code, 1)
-        self.assertEqual(github.writes, [], "no tracked pin was checked, so nothing is reported")
+        code, out = run_quietly(github, "o/r", SMALL, SQLITE_OK, TODAY)
+        self.assertEqual(code, 0)
+        self.assertEqual([write[0] for write in github.writes], ["POST"])
+        body_text = github.writes[0][2]["body"]
+        self.assertIn("Could not check: nghttp2 (HTTP 502: bad gateway)", body_text)
+        self.assertIn("Could not check: openssl (HTTP 502: bad gateway)", body_text)
+        self.assertNotIn("All checked pins are current", body_text)
+        self.assertIn("::warning::every upstream check failed", out)
+
+    def test_only_failures_without_open_issue_opens_one(self):
+        github = FakeGitHub(releases={"openssl/openssl": ["openssl-3.6.5"]},
+                            failing={"repos/nghttp2/nghttp2/releases"})
+        code, out = run_quietly(github, "o/r", SMALL, SQLITE_CURRENT, TODAY)
+        self.assertEqual(code, 0)
+        self.assertEqual([write[0] for write in github.writes], ["POST"])
+        body_text = github.writes[0][2]["body"]
+        self.assertIn("Could not check: nghttp2 (HTTP 502: bad gateway)", body_text)
+        self.assertNotIn("| Dependency |", body_text)
+        self.assertNotIn("The PR that bumps these pins", body_text)
+        self.assertIn("opened the issue", out)
 
     def test_body_marks_failures_and_commit_pins(self):
         text = body([], ["vaxis", "translate_c"], [("sqlite", "timed out")], TODAY)

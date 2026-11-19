@@ -1,9 +1,8 @@
 name: Dependency lag
 on:
-  # Keeps the deps-behind issue current (#1893).
-  schedule:
-    - cron: "30 3 * * 1"
+  # Promote calls this on its first Monday run (#1893); also runnable by hand.
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
   issues: write
