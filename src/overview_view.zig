@@ -1332,7 +1332,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             if (state.listed_at_ms != null or state.list_stale) releaseInitialPresentation(state, &effects);
         },
         .first_line => |result| try firstLine(state, result),
-        .archived => |answer| try archivedAnswer(state, answer),
+        .archived => |answer| try archivedAnswer(state, answer, &effects),
         .clicked => |input| {
             state.launch = .done;
             if (!state.creating()) switch (input.target) {
@@ -1911,7 +1911,7 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
     try arrange(state);
 }
 
-fn archivedAnswer(state: *State, answer: ArchivedAnswer) error{OutOfMemory}!void {
+fn archivedAnswer(state: *State, answer: ArchivedAnswer, effects: *Effects) error{OutOfMemory}!void {
     if (answer.read.epoch != state.archived.epoch) return;
     state.archived.inflight = false;
     const page = answer.page orelse {
@@ -1919,6 +1919,8 @@ fn archivedAnswer(state: *State, answer: ArchivedAnswer) error{OutOfMemory}!void
         return;
     };
     try placeArchived(state, answer.read, page);
+    // Only rows the window now holds are visible in the Archived view, so only they read a line.
+    try readFirstLines(state, effects);
 }
 
 /// Asks for the Archived window page the screen needs next, one at a time: the head when the window is
@@ -5038,47 +5040,43 @@ test "archive row marker survives a clipped name without overlapping the age" {
 
 const window_test_page = 5;
 
-/// The Host for the window domain test: `host` holds the archived Sessions newest first, and an
-/// Archived read answers `window_test_page` rows strictly below its key (or from the head), as the Host does.
+/// The Host for the window tests: `host` holds archived Sessions newest first, and an Archived read answers
+/// up to `rows.len` rows the way the Host does: from the head, strictly below a key, or the nearest rows above one.
 fn hostPage(host: []const Listed, cursor: session_list.ArchivedCursor, rows: []Listed) ArchivedPage {
-    const limit: u64 = switch (cursor) {
-        .head => std.math.maxInt(u64),
-        .below => |key| key,
-        else => unreachable,
-    };
-    var count: usize = 0;
-    for (host) |row| {
-        if (row.archive_seq.? >= limit) continue;
-        if (count == window_test_page) break;
-        rows[count] = row;
-        count += 1;
+    var from: usize = 0;
+    var to: usize = 0;
+    switch (cursor) {
+        .head => to = @min(host.len, rows.len),
+        .below => |key| {
+            while (from < host.len and host[from].archive_seq.? >= key) from += 1;
+            to = @min(host.len, from + rows.len);
+        },
+        .above => |key| {
+            while (to < host.len and host[to].archive_seq.? > key) to += 1;
+            from = to -| rows.len;
+        },
+        .tail => unreachable,
     }
-    var more_below = false;
-    if (count != 0) {
-        const last = rows[count - 1].archive_seq.?;
-        for (host) |row| if (row.archive_seq.? < last) {
-            more_below = true;
-            break;
-        };
-    }
+    const count = to - from;
+    @memcpy(rows[0..count], host[from..to]);
     return .{
         .rows = rows[0..count],
-        .first = if (count != 0) rows[0].archive_seq else null,
-        .last = if (count != 0) rows[count - 1].archive_seq else null,
-        .more_above = false,
-        .more_below = more_below,
+        .first = if (count != 0) host[from].archive_seq else null,
+        .last = if (count != 0) host[to - 1].archive_seq else null,
+        .more_above = from > 0,
+        .more_below = to < host.len,
     };
 }
 
-/// Serves every Archived read the effects ask for, from `host`, until none is left.
-fn serveWindow(state: *State, host: []const Listed, first: Effects) !void {
+/// Serves every Archived read the effects ask for, from `host`, a page of `size` rows, until none is left.
+fn serveWindowWith(comptime size: usize, state: *State, host: []const Listed, first: Effects) !void {
     var effects = first;
     for (0..8) |_| {
         var next: Effects = .{};
         var served = false;
         for (effects.slice()) |effect| switch (effect) {
             .read_archived => |read| {
-                var buffer: [window_test_page]Listed = undefined;
+                var buffer: [size]Listed = undefined;
                 next = try step(state, .{ .archived = .{ .read = read, .page = hostPage(host, read.from, &buffer) } });
                 served = true;
             },
@@ -5088,6 +5086,10 @@ fn serveWindow(state: *State, host: []const Listed, first: Effects) !void {
         effects = next;
     }
     return error.TestWindowDidNotSettle;
+}
+
+fn serveWindow(state: *State, host: []const Listed, first: Effects) !void {
+    return serveWindowWith(window_test_page, state, host, first);
 }
 
 /// The held Archived window equals the Host's rows over the window's key range (all of the Host's rows
@@ -5205,6 +5207,104 @@ test "archived window matches a fresh read over the whole domain" {
         try serveWindow(&state, host[0..count], delta);
         try expectWindowMatchesHost(&state, host[0..count]);
     };
+}
+
+fn lineRead(line: FirstLineRead) bool {
+    return switch (line) {
+        .read => true,
+        else => false,
+    };
+}
+
+/// Expects one `read_first_lines` read per `expected` reference, in order, and no other reads.
+fn expectLineReads(effects: Effects, expected: []const Reference) !void {
+    var seen: usize = 0;
+    for (effects.slice()) |effect| switch (effect) {
+        .read_first_lines => |reads| for (reads.slice()) |read| {
+            try std.testing.expect(seen < expected.len);
+            try std.testing.expectEqualSlices(u8, &expected[seen], &read.reference);
+            seen += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(expected.len, seen);
+}
+
+test "archived window reads the line of a window row that has none, once, and drops the read when the row leaves" {
+    var host: [2]Listed = undefined;
+    host[0] = session("w00010", .{ .stopped = .{ .since = test_now_s - 10, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 10, .first = .{ .position = 0, .admission = 10, .sender = null, .content = null, .line = "inline line" } });
+    host[1] = session("w00009", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 3, .admission = 9, .sender = null, .content = test_first } });
+    var buffer: [window_test_page]Listed = undefined;
+
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    const answered = try step(&state, .{ .archived = .{ .read = effects.slice()[0].read_archived, .page = hostPage(&host, .head, &buffer) } });
+    // Only the window row with content and no inline line reads; the inline row has its line already.
+    try expectLineReads(answered, &.{"w00009".*});
+    try std.testing.expect(lineRead(state.find("w00010".*).?.line));
+    try std.testing.expectEqual(FirstLineRead.requested, state.find("w00009".*).?.line);
+    try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "w00009".*, .admission = 9, .line = "parts line" } }));
+    try std.testing.expect(lineRead(state.find("w00009".*).?.line));
+
+    // A row that leaves the window while its read is pending drops the read: its late answer is not kept.
+    var moved = try opened(&.{});
+    defer moved.deinit();
+    moved.size = .{ .width = 80, .height = 2 };
+    var moved_effects: Effects = .{};
+    try changeArchiveView(&moved, .archived, &moved_effects);
+    const pending = try step(&moved, .{ .archived = .{ .read = moved_effects.slice()[0].read_archived, .page = hostPage(&host, .head, &buffer) } });
+    try expectLineReads(pending, &.{"w00009".*});
+    _ = try step(&moved, .{ .tick = moved.now_ms + list_interval_ms });
+    var live = [_]Listed{session("w00009", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other" })};
+    _ = try respond(&moved, .changed, testToken(2), &live);
+    try std.testing.expectEqual(ArchiveState.active, moved.find("w00009".*).?.archive_state);
+    try std.testing.expectEqual(FirstLineRead.unread, moved.find("w00009".*).?.line);
+    const lines_before = moved.lines.items.len;
+    try expectEffects(&.{}, try step(&moved, .{ .first_line = .{ .reference = "w00009".*, .admission = 9, .line = "late answer" } }));
+    try std.testing.expectEqual(lines_before, moved.lines.items.len);
+    try std.testing.expectEqual(FirstLineRead.unread, moved.find("w00009".*).?.line);
+}
+
+test "archived window scrolls back up after trimming and reads the rows above with an above cursor" {
+    var refs: [20][6]u8 = undefined;
+    for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "a{d:0>5}", .{at}) catch unreachable;
+    var host: [20]Listed = undefined;
+    for (0..20) |index| {
+        const key: u64 = 20 - index;
+        host[index] = session(&refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, host[0..], effects);
+    // Scrolling down trims the window's top, so the held rows no longer start at the Host's newest row.
+    for ([_]usize{ 4, 9, 14 }) |at| {
+        state.selected = .{ .session = host[at].reference };
+        const ticked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        try serveWindow(&state, host[0..], ticked);
+    }
+    try std.testing.expect(!state.archived.at_head);
+    const top = archivedBounds(&state).first.?;
+    // Scrolling back to the top of the window reads the rows above it, with an above cursor.
+    state.selected = .{ .session = state.rows.items[state.order.items[0]].reference };
+    const back = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    var above: usize = 0;
+    for (back.slice()) |effect| switch (effect) {
+        .read_archived => |read| {
+            above += 1;
+            try std.testing.expectEqual(session_list.ArchivedCursor{ .above = top }, read.from);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), above);
+    try serveWindow(&state, host[0..], back);
+    try std.testing.expect(archivedBounds(&state).first.? > top);
+    try expectWindowMatchesHost(&state, host[0..]);
 }
 
 test "archive filter switch keeps the roster and reads the window once per entry" {
@@ -7720,9 +7820,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     const caps_domain = [_]Caps{ .{}, .{ .depth = .none }, .{ .unicode = false } };
     // One owned fixture per outer case; frame allocations are reused per line,
     // keeping the full Cartesian product bounded independently of its size.
-    // Archived rows reach the overview only through the window, so this roster matrix covers live states.
     for (std.enums.values(D.Shape)) |shape| for (std.enums.values(ArchiveFilter)) |filter| for (std.enums.values(ArchiveState)) |archive| {
-        if (archive == .archived) continue;
         var fixture = D.fixtures();
         const total: usize = if (shape == .empty) 0 else fixture.len;
         const pins: usize = switch (shape) {
@@ -7733,6 +7831,11 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         for (fixture[0..total], 0..) |*entry, index| {
             entry.listed.archive_state = archive;
             entry.listed.pin_order = if (index < pins) @intCast(100 - index) else null;
+            if (archive == .archived) {
+                // The Host keys archived rows newest first; fixture order is the Host order.
+                const seq: u64 = @intCast(total - index);
+                entry.listed.archive_seq = seq;
+            }
         }
         if (pins > 1) {
             // Covers the first == null arm of ownership, independently of
@@ -7740,9 +7843,11 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
             fixture[1].listed.first = null;
             fixture[1].listed.from_person_at = null;
         }
-        // Archived Sessions are window rows, never roster rows of a full walk, so a full answer shows only
-        // live Sessions; the window's own rows are covered by the archived view tests.
-        const included = archive != .archived and filter != .archived;
+        const included = switch (filter) {
+            .active => archive != .archived,
+            .archived => archive == .archived,
+            .all => true,
+        };
         const visible_count: usize = if (included) total else 0;
         const gap = visible_count != 0 and pins != 0 and pins < total;
         var expected_buffer: [13]D.Expected = undefined;
@@ -7764,9 +7869,21 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         for (0..total) |index| input[index] = fixture[total - 1 - index].listed;
         var state = try testState();
         defer state.deinit();
-        state.archive = filter;
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
         _ = try respond(&state, .full, testToken(1), input[0..total]);
+        // Archived rows reach the overview through the Archived window only: the Host answers them in one page,
+        // newest first, and the Archived view then holds them. The other filters take the same rows directly.
+        if (archive == .archived) {
+            var host: [12]Listed = undefined;
+            for (0..total) |index| host[index] = fixture[index].listed;
+            var window: Effects = .{};
+            try changeArchiveView(&state, .archived, &window);
+            try serveWindowWith(12, &state, host[0..total], window);
+        }
+        if (filter != .archived or archive != .archived) {
+            state.archive = filter;
+            try arrange(&state);
+        }
         try std.testing.expectEqual(visible_count, state.order.items.len);
 
         var selections: [17]Selection = undefined;
@@ -7881,9 +7998,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    // Recorded by running this same fixture domain against base 03aa26d0 (all archive states, before U5).
-    // U5 re-recorded it over the live states: Archived rows now reach the overview only through the window.
-    try std.testing.expectEqual(@as(u64, 10966045850295712614), bytes_and_styles);
+    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {
