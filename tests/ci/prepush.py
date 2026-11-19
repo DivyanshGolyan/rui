@@ -32,6 +32,7 @@ from urllib.parse import quote
 
 import failure_cause
 import report_issue
+import runtime_leftovers
 from qualification import matrix_targets
 from pr_overlap import repo_from_remote
 from select_tests import FIXTURES
@@ -530,7 +531,13 @@ def run(planned, mode, base, red=None):
             results.append({"name": name, "skipped": command.reason})
             continue
         print(f"== {name}: {' '.join(command)}", flush=True)
-        results.append({"name": name, "command": command, "exit": subprocess.run(command, cwd=ROOT).returncode})
+        runtime_leftovers.sweep()
+        code = subprocess.run(command, cwd=ROOT).returncode
+        if leaked := runtime_leftovers.sweep():
+            print(f"{name} left {len(leaked)} Host sockets whose Store no longer exists (removed): "
+                  f"{runtime_leftovers.describe(leaked)}", flush=True)
+            code = code or 1
+        results.append({"name": name, "command": command, "exit": code})
     tree = before if clean_tree() == before else None
     path = receipt_path()
     path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "red": red, "results": results}, indent=2) + "\n")

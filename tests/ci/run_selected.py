@@ -10,6 +10,7 @@ import time
 from select_tests import execution_batches
 from build_artifact import pr_ci
 import quarantine
+import runtime_leftovers
 from report_issue import fixtures
 from steps import record_failure
 
@@ -88,6 +89,8 @@ def command(batch, ci_artifacts=None):
 
 def execute(batch, ci_artifacts):
     print("Executing: " + " ".join(batch), flush=True)
+    if earlier := runtime_leftovers.sweep():
+        print(f"Removed {len(earlier)} Host sockets left by earlier runs.", flush=True)
     start = time.monotonic()
     output = []
     with subprocess.Popen(command(batch, ci_artifacts), env=dict(os.environ, RUI_UNIT_TEST_TIMEOUT=TEST_TIMEOUT),
@@ -98,6 +101,14 @@ def execute(batch, ci_artifacts):
             sys.stdout.flush()
             output.append(line)
     returncode = process.returncode
+    if leaked := runtime_leftovers.sweep():
+        note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
+                f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
+                "remove its socket and .store hint before deleting the Store.")
+        print(f"::error::{note}", flush=True)
+        summarize(note)
+        output.append(note + "\n")
+        returncode = returncode or 1
     print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {returncode}", flush=True)
     return returncode, "".join(output)
 

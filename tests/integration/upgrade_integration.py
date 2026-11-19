@@ -1134,6 +1134,9 @@ def restart_all_cases(root, binary, releases):
         assert socket_path.exists(), socket_path
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
         assert socket_path.exists(), "Discovery must not reclaim sockets"
+        # The crash left the socket and its hint; the Store is about to be deleted.
+        socket_path.unlink()
+        socket_path.with_suffix(".store").unlink(missing_ok=True)
 
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
