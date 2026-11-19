@@ -2,7 +2,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const SessionPinReply = @import("../command_reply.zig").SessionPinReply;
 const store_core = @import("Store.zig");
-const Store = store_core.Store;
+pub const Store = store_core.Store;
 const testing = @import("testing.zig");
 const fixtures = @import("tests.zig");
 
@@ -27,7 +27,7 @@ pub fn order(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !?u
     return error.TestMissingSession;
 }
 
-fn expectAccepted(reply: SessionPinReply, pinned: bool, replayed: bool) !void {
+pub fn expectAccepted(reply: SessionPinReply, pinned: bool, replayed: bool) !void {
     try std.testing.expect(reply == .accepted);
     try std.testing.expectEqual(pinned, reply.accepted.pinned);
     try std.testing.expectEqual(replayed, reply.accepted.replayed);
@@ -142,61 +142,6 @@ test "Session pin-only commits appear in changed listing without changing creati
             try expectAccepted(storage.pinSession(&pin, .{}), false, false);
             const unpinned = try fixtures.TestingListing.read(&storage, &tmp, .{ .since = changed.since });
             try unpinned.expectReferences(&.{ids[ids.len - 1].slice()[0..protocol.session_id_bytes].*});
-        }
-    }.run);
-}
-
-test "Session pin concurrent commands derive distinct ranks from serialized command sequence" {
-    try testing.forEachEngine(struct {
-        const Worker = struct {
-            storage: *Store,
-            gate: *std.Io.Event,
-            input: protocol.SessionPinCommand,
-            reply: SessionPinReply = .infrastructure_failure,
-
-            fn run(self: *@This()) void {
-                self.gate.waitUncancelable(std.testing.io);
-                self.reply = self.storage.pinSession(&self.input, .{});
-            }
-        };
-
-        fn run(case: *testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var gate: std.Io.Event = .unset;
-            var workers: [4]Worker = undefined;
-            for (&workers, 0..) |*worker, index| {
-                var key: [32]u8 = undefined;
-                const name = try std.fmt.bufPrint(&key, "pin-concurrent-{d}", .{index});
-                const session = try testing.configureTestSession(&storage, name);
-                worker.* = .{ .storage = &storage, .gate = &gate, .input = try command(name, session.slice(), true) };
-                try worker.input.key.set(try std.fmt.bufPrint(&key, "pin-concurrent-write-{d}", .{index}));
-            }
-            var threads: [workers.len]std.Thread = undefined;
-            var started: usize = 0;
-            defer {
-                gate.set(std.testing.io);
-                for (threads[0..started]) |thread| thread.join();
-            }
-            for (&threads, &workers) |*thread, *worker| {
-                thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
-                started += 1;
-            }
-            gate.set(std.testing.io);
-            for (threads[0..started]) |thread| thread.join();
-            started = 0;
-            var ranks: [workers.len]u64 = undefined;
-            for (&workers, &ranks) |*worker, *rank| {
-                try expectAccepted(worker.reply, true, false);
-                rank.* = (try order(&storage, &tmp, worker.input.session.slice())).?;
-                const sequence = try testing.queryU64(&storage, "SELECT command_seq FROM core_command WHERE command_key=?1", .{worker.input.key.slice()});
-                try std.testing.expectEqual(sequence, rank.*);
-            }
-            std.mem.sort(u64, &ranks, {}, std.sort.asc(u64));
-            for (ranks[1..], ranks[0 .. ranks.len - 1]) |rank, previous| try std.testing.expect(rank > previous);
         }
     }.run);
 }

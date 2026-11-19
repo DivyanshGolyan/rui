@@ -3219,6 +3219,10 @@ export interface components {
             creator: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
+            state_change_at: components["schemas"]["Decimal"];
+            subtree_state_change_at: components["schemas"]["Decimal"];
+            descendant_count: components["schemas"]["Decimal"];
+            descendant_needs_you_count: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
             end: components["schemas"]["Decimal"];
             first_message: components["schemas"]["FirstMessage"] | null;

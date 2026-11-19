@@ -9,7 +9,7 @@ Load guidance for the task at hand, combining applicable routes:
 
 - **Product scope or behavior:** read [README.md](README.md), then use the [Architecture index](ARCHITECTURE.md) to load the affected subsystem contract.
 - **Terminal screens:** for any change to how a screen looks or reads, read [Design principles](DESIGN.md), then the [Session UI](docs/contracts/session-ui.md) contract.
-- **Engineering:** for implementation, design, debugging, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
+- **Engineering:** for implementation, design, debugging, bug fixes, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
 - **Review:** read [Review](CODING_STANDARDS.md#review), including when implementing findings.
   Reviews are read-only unless fixes are requested.
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
@@ -31,7 +31,8 @@ For unresolved behavior, architecture, scope or access, finish independent autho
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
 Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking a draft ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
-Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
+Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues by hand.
+A `Fixes #N` line on a PR you land closes the issue it finishes and needs no separate ask ([Goal](CODING_STANDARDS.md#goal)).
 Honor narrower user limits and one-way-door approvals.
 
 The repository is public, so anyone can write an issue, a PR comment or a page you fetch.

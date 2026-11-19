@@ -90,24 +90,31 @@ def screen_evidence(body):
                and "https://github.com/user-attachments/" in line for line in lines)
 
 
+GOAL_LINE = re.compile(r"^(?:Goal:|Fixes(?=[ \t]))")
+
+
+def goal_lines(body):
+    """Text after each visible goal line's prefix. `Fixes #N ...` closes #N on merge; `Goal: #N ...` keeps it open."""
+    return [line[match.end():] for line in visible_lines(body or "") if (match := GOAL_LINE.match(line))]
+
+
 def goal_present(body):
     issue = re.compile(r"(?<![\w/])(?:#[0-9]+|https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+)(?![\w/])")
-    for line in visible_lines(body):
-        if re.match(r"^No issue:[ \t]*\S", line):
-            return True
-        if line.startswith("Goal:"):
-            text = line[len("Goal:"):]
-            for match in issue.finditer(text):
-                explanation = text[:match.start()] + " " + text[match.end():]
-                if len(re.findall(r"\b[^\W_]+\b", explanation)) >= 3:
-                    return True
+    if any(re.match(r"^No issue:[ \t]*\S", line) for line in visible_lines(body)):
+        return True
+    for text in goal_lines(body):
+        for match in issue.finditer(text):
+            explanation = text[:match.start()] + " " + text[match.end():]
+            if len(re.findall(r"\b[^\W_]+\b", explanation)) >= 3:
+                return True
     return False
 
 
 def refusal(changed_paths, body, *, base=None) -> str | None:
     if not goal_present(body):
-        return ("Add a visible line 'Goal: #123 <how this change serves the issue>' "
-                "(or use its full GitHub issue URL), with at least three explanation words, "
+        return ("Add a visible line 'Fixes #123 <how this change finishes the issue>' or "
+                "'Goal: #123 <how this change serves the issue>' (or use its full GitHub issue URL), "
+                "with at least three explanation words, "
                 "or 'No issue: <reason>' to the PR body. Body edits do not re-trigger the check; "
                 "re-run the failed jobs of this run after editing the body; no push needed.")
     if any(path.startswith("src/") for path in changed_paths) and not (

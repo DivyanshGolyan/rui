@@ -312,6 +312,13 @@ jobs:
           cache-part: compiled
           # Only main saves caches; this job runs only for pull requests.
           publish-caches: 'false'
+      - name: Log the CI host and compiled cache match
+        env:
+          BUILD_MATCH: ${{ steps.setup.outputs.build-match }}
+        run: |
+          set -euo pipefail
+          cpu=$(grep -m1 -E '^(model name|CPU implementer)' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//' || true)
+          echo "CI host: cpu=${cpu:-unknown} compiled-cache=${BUILD_MATCH:-miss}"
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

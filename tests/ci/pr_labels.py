@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 from conflict_alert import github, pages
-from pr_shape import visible_lines
+from pr_shape import goal_lines
 
 WORKSTREAMS = ("TUI", "Host parity", "background tasks", "images", "Host consolidation", "Store", "CI", "drift")
 CI_TOOLING = (".github/", "tests/ci/")
@@ -25,12 +25,11 @@ def unavailable(error):
 
 
 def goal_issues(body, repo):
-    """Issue numbers named on visible Goal: lines, in order."""
+    """Issue numbers named on visible goal lines (Goal: or Fixes), in order."""
     issue = re.compile(r"(?<![\w/])(?:#([0-9]+)|https://github\.com/" + re.escape(repo) + r"/issues/([0-9]+))(?![\w/])")
     numbers = []
-    for line in visible_lines(body or ""):
-        if line.startswith("Goal:"):
-            numbers += [int(match[1] or match[2]) for match in issue.finditer(line)]
+    for text in goal_lines(body):
+        numbers += [int(match[1] or match[2]) for match in issue.finditer(text)]
     return list(dict.fromkeys(numbers))
 
 

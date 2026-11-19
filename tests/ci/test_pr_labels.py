@@ -42,6 +42,8 @@ class PrLabelsTest(unittest.TestCase):
         self.assertEqual(goal_issues(body, REPO), [3, 4])
         self.assertEqual(goal_issues("Goal: https://github.com/x/y/issues/9 elsewhere", REPO), [])
         self.assertEqual(goal_issues(None, REPO), [])
+        self.assertEqual(goal_issues("Fixes #6 by doing the thing\nGoal: #7 serves the workstream", REPO), [6, 7])
+        self.assertEqual(goal_issues("<!-- Fixes #8 hidden -->\nFixesx #9 no", REPO), [])
 
     def test_nearest_labelled_ancestor_wins(self):
         api = FakeGitHub({10: (["active"], 20), 20: (["host parity"], 30), 30: (["drift"], None)})

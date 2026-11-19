@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
+const session_id = @import("../session_id.zig");
 const store_path = @import("../store_path.zig");
 const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
@@ -16,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 83;
+pub const schema_version: u32 = 84;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -62,6 +63,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
     .{ .schema_version = 82, .digest = 0x367836567791809e },
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
+    .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -825,6 +827,11 @@ pub const migrations = [_]Migration{
             "CREATE INDEX conversation_entry_activity_assistant ON conversation_entry(session_ref,entry_kind,session_position)",
             "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
         },
+    },
+    .{
+        .from = 83,
+        .sqlite = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
+        .mysql = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
     },
 };
 
@@ -1877,6 +1884,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
+    .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
@@ -2141,10 +2149,19 @@ fn renderedObjects(comptime dialect: rsql.Dialect) []const Object {
     }
 }
 
+pub const mysql_recursive_limit: u64 = blk: {
+    var ids: u64 = 1;
+    for (0..session_id.bytes) |_| ids = std.math.mul(u64, ids, session_id.alphabet.len) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    const limit = std.math.add(u64, ids, 1) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    if (limit > std.math.maxInt(u32)) @compileError("Session ID domain exceeds MySQL recursion capacity");
+    break :blk limit;
+};
+
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_offered_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION cte_max_recursion_depth={d}", .{mysql_recursive_limit}),
     "SET SESSION autocommit=1",
 };
 
@@ -3665,6 +3682,42 @@ test "schema 83 migration creates constrained action values" {
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET ordinal=0"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET handle='invalid'"));
+}
+
+test "schema 84 adds a canonical creator index without changing Sessions" {
+    const step = migrations[83 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 83), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (comptime objects(dialect)) |object| {
+            if (!std.mem.eql(u8, object.name, "session_creator")) continue;
+            try std.testing.expectEqualStrings(object.sql, statements[0]);
+            break;
+        } else return error.MissingCreatorIndex;
+    }
+    try std.testing.expect(comptime mysqlCanForceIndex("session_creator"));
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 83) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_sessions AS SELECT * FROM session");
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_sessions EXCEPT SELECT * FROM session)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM session EXCEPT SELECT * FROM old_sessions)"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM session INDEXED BY session_creator WHERE creator_ref=?1");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
 }
 
 // Export each schema value once per collect binary, under a stable symbol name.

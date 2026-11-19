@@ -20,6 +20,18 @@ PUBLISH = (ROOT / "release/publish.sh").read_text()
 POLICY = release.download_policy((ROOT / "src/download_policy.zig").read_text())
 
 
+def installer_exit_witnesses(retry_codes):
+    """One curl exit code per distinct installer path, instead of all 256.
+
+    Every code outside the retry set takes the same path (exit with that code),
+    so each retry code, its neighbours (which catch an off-by-one pattern) and
+    the range ends stand for their classes. Each run spawns a shell (~12 ms).
+    """
+    witnesses = {0, 1, 255, *retry_codes}
+    witnesses.update(code + step for code in retry_codes for step in (-1, 1))
+    return sorted(code for code in witnesses if 0 <= code <= 255)
+
+
 def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
@@ -388,7 +400,7 @@ exit "$TEST_CODE"
                 output.write_text(release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, current))
                 for elapsed, enough in ((current.download_seconds - threshold - 1, True),
                                         (current.download_seconds - threshold, False)):
-                    for code in range(256):
+                    for code in installer_exit_witnesses(codes):
                         log.unlink(missing_ok=True)
                         env = {**os.environ, "HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin",
                                "TEST_LOG": str(log), "TEST_CODE": str(code), "TEST_ELAPSED": f"{elapsed}.1"}

@@ -45,6 +45,7 @@ from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_D
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
+import runtime_leftovers
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -168,10 +169,22 @@ def red_record(name, command):
     return {"name": name, "command": command}
 
 
-def local_red_checks(planned, mysql):
+# Rui fixtures refuse root (tests/integration/host_process.py), and cloud machines push as root, so a
+# replayed fixture runs at HEAD as the non-root lane user .agents/as-fixture-user creates.
+FIXTURE_LANE = "prepush"
+
+
+def as_fixture_user(command, euid=None):
+    euid = os.geteuid() if euid is None else euid
+    if euid != 0 or command[:3] != ["zig", "build", "-j1"] or command[3] not in FIXTURES:
+        return command
+    return [str(ROOT / fixture_user.COMMAND), FIXTURE_LANE, "--ref", "HEAD", "--", *command]
+
+
+def local_red_checks(planned, mysql, euid=None):
     for name, command in planned:
         if not isinstance(command, NeedsMySQL):
-            yield name, command
+            yield name, command if isinstance(command, Skipped) else as_fixture_user(command, euid)
         elif mysql:
             yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
         else:
@@ -302,7 +315,7 @@ def red_revision():
     return digest.hexdigest()
 
 
-def previous_red(available):
+def previous_red(available, euid=None):
     try:
         repository = repo_from_remote(os.environ.get(REMOTE_URL) or git("remote", "get-url", "origin"))
         refs = os.environ.get(REMOTE_REFS, "").split()
@@ -326,10 +339,11 @@ def previous_red(available):
                 continue
             identities.append(identity)
             planned.extend(derived)
-        if any(isinstance(command, NeedsMySQL) for _, command in planned):
+        needs_mysql = any(isinstance(command, NeedsMySQL) for _, command in planned)
+        if needs_mysql:
             environment = [os.environ.get(variable) for variable in live_engines.VARIABLES]
             identities.append(hashlib.sha256(json.dumps(environment).encode()).hexdigest())
-            planned = list(local_red_checks(planned, mysql_reachable(os.environ)))
+        planned = list(local_red_checks(planned, needs_mysql and mysql_reachable(os.environ), euid))
         return identities if any(identity is not None for identity in identities) else None, planned
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
         red_warning(error)
@@ -530,7 +544,12 @@ def run(planned, mode, base, red=None):
             results.append({"name": name, "skipped": command.reason})
             continue
         print(f"== {name}: {' '.join(command)}", flush=True)
-        results.append({"name": name, "command": command, "exit": subprocess.run(command, cwd=ROOT).returncode})
+        code = subprocess.run(command, cwd=ROOT).returncode
+        # Local feedback only cleans: another worktree's run under this uid may own a leak. CI fails it.
+        if removed := runtime_leftovers.sweep():
+            print(f"Removed {len(removed)} leftover Host sockets whose Store no longer exists: "
+                  f"{runtime_leftovers.describe(removed)}", flush=True)
+        results.append({"name": name, "command": command, "exit": code})
     tree = before if clean_tree() == before else None
     path = receipt_path()
     path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "scope": "local-feedback", "red": red, "results": results}, indent=2) + "\n")

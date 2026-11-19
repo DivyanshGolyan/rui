@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("Store.zig").Store;
+pub const Store = @import("Store.zig").Store;
 const testing = @import("testing.zig");
 const schema = @import("schema.zig");
 const validStoreId = @import("../store_id.zig").valid;
@@ -12,7 +12,7 @@ const protocol = @import("../protocol.zig");
 const os = @import("os");
 const change_ring = @import("../change_ring.zig");
 const dialect = @import("mysql_dialect_check.zig");
-var mutex: std.Io.Mutex = .init;
+pub var mutex: std.Io.Mutex = .init;
 var root: wire.Connection = undefined;
 var opened = false;
 const Database = struct {
@@ -26,7 +26,7 @@ pub fn available() !bool {
     return (try dialect.rootConfig()) != null;
 }
 
-fn connection() !*wire.Connection {
+pub fn connection() !*wire.Connection {
     if (!opened) {
         const config = try dialect.rootConfig() orelse return error.MysqlRequired;
         var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -35,7 +35,6 @@ fn connection() !*wire.Connection {
         opened = true;
         for (schema.mysql_session) |sql| try run(sql);
         try run("SET SESSION sql_log_bin=0");
-        try run("SET SESSION cte_max_recursion_depth=1000000");
     }
     return &root;
 }
@@ -60,7 +59,7 @@ fn run(sql: []const u8) !void {
     try drain(&root, null);
 }
 
-fn database(storage: *Store) []const u8 {
+pub fn database(storage: *Store) []const u8 {
     return std.mem.sliceTo(&storage.engine.mysql.state.testing_database, 0);
 }
 
@@ -265,7 +264,7 @@ pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     return readU64(&root);
 }
 
-fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
+pub fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
     try root.query("SELECT @@global." ++ name);
     const Row = struct { value: protocol.Bounded(32) };
     var columns: rows.Columns(Row) = undefined;
@@ -283,7 +282,7 @@ fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
     return result orelse error.MysqlFixtureFailed;
 }
 
-fn setGlobal(comptime name: []const u8, value: []const u8) !void {
+pub fn setGlobal(comptime name: []const u8, value: []const u8) !void {
     const numeric = value.len != 0 and for (value) |c| {
         if (!std.ascii.isDigit(c)) break false;
     } else true;
@@ -666,28 +665,41 @@ const transition = @import("transition.zig");
 const TestingAsk = @import("tests.zig").TestingAsk;
 const TestingScript = @import("tests.zig").TestingScript;
 const Mysql = @import("engine/Mysql.zig");
-const live_noop = rsql.Write(.{
+pub const live_noop = rsql.Write(.{
     .sql = "UPDATE store_owner SET epoch=epoch WHERE owner_key=1",
     .Args = struct {},
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.LiveGuard } },
 });
-const live_guard = rsql.Write(.{
+pub const live_guard = rsql.Write(.{
     .sql = "UPDATE store_owner SET commit_seq=commit_seq WHERE owner_key=1",
     .Args = struct {},
     .expect = .{ .exact = .{ .rows = 2, .otherwise = error.LiveGuard } },
 });
-const live_insert = rsql.Write(.{
+pub const live_insert = rsql.Write(.{
     .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),0)",
     .Args = struct { id: u64, digest: [32]u8, length: u64 = 0 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.LiveGuard } },
 });
 
-fn openLive(storage: *Store, tmp: *std.testing.TmpDir) !void {
+pub fn openLive(storage: *Store, tmp: *std.testing.TmpDir) !void {
     if (!try available()) return error.SkipZigTest;
     try open(storage, tmp, std.testing.io, .{});
 }
 
-fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
+test "store.mysql owned connection permits every legal creator depth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const owned = &storage.engine.mysql.state.connection;
+    try owned.query("SELECT @@session.cte_max_recursion_depth AS value");
+    try std.testing.expectEqual(schema.mysql_recursive_limit, try readU64(owned));
+    try owned.query("WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<1001) SELECT max(value) AS value FROM sequence");
+    try std.testing.expectEqual(@as(u64, 1001), try readU64(owned));
+}
+
+pub fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     const mysql = &storage.engine.mysql;
     try mysql.bind(S, &args, 0);
     try mysql.startPass();
@@ -697,7 +709,7 @@ fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     return changed;
 }
 
-fn handlerReads(storage: *Store) !u64 {
+pub fn handlerReads(storage: *Store) !u64 {
     const source = &storage.engine.mysql.state.connection;
     try source.query("SHOW SESSION STATUS LIKE 'Handler_read%'");
     const Row = struct { name: protocol.Bounded(64), value: protocol.Bounded(32) };
@@ -792,81 +804,6 @@ test "Store target MySQL tail failure releases the connection and ownership lock
     defer storage.close() catch unreachable;
     try std.testing.expect(storage.hostTools().set_id != 0);
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-}
-
-test "store.mysql live CLIENT_FOUND_ROWS counts an unchanged matched UPDATE" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const before = try queryU64(&storage, "SELECT epoch FROM store_owner WHERE owner_key=1", .{});
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try std.testing.expectEqual(before, try queryU64(&storage, "SELECT epoch FROM store_owner WHERE owner_key=1", .{}));
-    try std.testing.expect(!storage.isFenced());
-}
-
-test "store.mysql live reused savepoint replaces its position and preserves earlier writes" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const mysql = &storage.engine.mysql;
-    defer if (mysql.inTransaction()) mysql.control(.rollback) catch unreachable;
-    try mysql.control(.begin);
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000001, .digest = protocol.contentDigest("before-savepoint") });
-    try mysql.control(.savepoint);
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000002, .digest = protocol.contentDigest("before-replaced-savepoint") });
-    try mysql.control(.savepoint);
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000003, .digest = protocol.contentDigest("after-replaced-savepoint") });
-    try mysql.control(.rollback_to);
-    try mysql.control(.release);
-    try mysql.control(.commit);
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id IN (9000001,9000002)", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000003", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try std.testing.expect(!storage.isFenced());
-}
-
-test "store.mysql live first Access guard survives a later duplicate and keeps failedOn identity" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const duplicate: live_insert.Args = .{ .id = 9000010, .digest = protocol.contentDigest("duplicate-after-guard") };
-    _ = try liveWrite(&storage, live_insert, duplicate);
-    const Guarded = struct {
-        pub const Guards = error{LiveGuard};
-        storage: *Store,
-        duplicate: live_insert.Args,
-        queries: u64 = 0,
-        sent: ?u64 = null,
-
-        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
-            if (ran != 0) return .done;
-            b.queries = b.storage.engine.mysql.state.connection.queries;
-            r.write(live_guard, .{});
-            r.write(live_insert, b.duplicate);
-            return .round;
-        }
-
-        pub fn failed(b: *@This()) void {
-            b.sent = b.storage.engine.mysql.state.connection.queries - b.queries;
-        }
-    };
-    {
-        const entry = try store_core.enter(&storage, .none);
-        defer entry.release();
-        var guarded: Guarded = .{ .storage = &storage, .duplicate = duplicate };
-        try std.testing.expectError(error.LiveGuard, TestingScript(Guarded).run(&entry, &guarded));
-        try std.testing.expectEqual(@as(?u64, 1), guarded.sent);
-    }
-    try std.testing.expect(!storage.engine.inTransaction());
-    try std.testing.expect(storage.engine.mysql.state.connection.isReady());
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try std.testing.expect(!storage.isFenced());
 }
 
 test "store.mysql live abandoning an Access drains an already-sent large content chunk" {
@@ -1065,7 +1002,7 @@ test "store.mysql live every message carries the session settings, so none relie
 
 const Drop = @TypeOf(@as(@import("engine/Mysql.zig").State, undefined).testing_drop);
 
-fn commitLosing(storage: *Store, drop: Drop) !struct { id: u64, result: anyerror!void } {
+pub fn commitLosing(storage: *Store, drop: Drop) !struct { id: u64, result: anyerror!void } {
     const Losing = struct {
         pub const Guards = error{LiveGuard};
         storage: *Store,
@@ -1090,98 +1027,14 @@ fn commitLosing(storage: *Store, drop: Drop) !struct { id: u64, result: anyerror
     return .{ .id = id, .result = result };
 }
 
-test "store.mysql live a connection lost around COMMIT reconnects and reports what landed" {
-    for ([_]Drop{ .before_commit, .after_commit }) |drop| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var storage: Store = undefined;
-        try openLive(&storage, &tmp);
-        defer storage.close() catch {};
-        const state = storage.engine.mysql.state;
-        const old_connection = state.connection_id;
-        const got = try commitLosing(&storage, drop);
-        const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
-        switch (drop) {
-            .before_commit => {
-                try std.testing.expectEqual(@as(?anyerror, error.StoreConnectionLost), state.failure);
-                try std.testing.expectError(error.CanonicalRollbackFailed, got.result);
-                try std.testing.expectEqual(@as(u64, 0), rows_saved);
-            },
-            .after_commit => {
-                try got.result;
-                try std.testing.expectEqual(@as(u64, 1), rows_saved);
-            },
-            .none, .next_pass => unreachable,
-        }
-        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
-        try std.testing.expect(state.connection_id != old_connection);
-        var second: Store = undefined;
-        try std.testing.expectError(error.StoreLocked, open(&second, &tmp, std.testing.io, .{}));
-        if (drop == .after_commit) {
-            try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-            try std.testing.expect(!storage.isFenced());
-        }
-    }
-}
-
-test "store.mysql live a reconnect onto a server admission refuses does not resume" {
-    if (!try available()) return error.SkipZigTest;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch {};
-    const old = old: {
-        mutex.lockUncancelable(std.testing.io);
-        defer mutex.unlock(std.testing.io);
-        _ = try connection();
-        const old = try globalValue("innodb_flush_log_at_trx_commit");
-        try setGlobal("innodb_flush_log_at_trx_commit", "2");
-        break :old old;
-    };
-    defer {
-        mutex.lockUncancelable(std.testing.io);
-        defer mutex.unlock(std.testing.io);
-        setGlobal("innodb_flush_log_at_trx_commit", old.slice()) catch @panic("cannot restore innodb_flush_log_at_trx_commit");
-    }
-    const got = try commitLosing(&storage, .after_commit);
-    try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
-    try std.testing.expectError(error.CanonicalRollbackFailed, got.result);
-    try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.testing_shape.reconnects);
-}
-
-test "store.mysql live a reconnect never ends a session that does not hold the Store's lock" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch {};
-    var other_tmp = std.testing.tmpDir(.{});
-    defer other_tmp.cleanup();
-    var other: Store = undefined;
-    try openLive(&other, &other_tmp);
-    defer other.close() catch {};
-    storage.engine.mysql.state.connection_id = other.engine.mysql.state.connection_id;
-    const got = try commitLosing(&storage, .after_commit);
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&other, live_noop, .{}));
-    try std.testing.expect(!other.isFenced());
-    const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
-    if (got.result) |_| {
-        try std.testing.expectEqual(@as(u64, 1), rows_saved);
-    } else |err| {
-        try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
-        try std.testing.expectEqual(error.CanonicalRollbackFailed, err);
-    }
-}
-
-const live_count = rsql.Read(.{
+pub const live_count = rsql.Read(.{
     .sql = "SELECT count(*) AS n FROM content WHERE content_id=?1",
     .Args = struct { id: u64 },
     .Row = struct { n: u64 },
     .cardinality = .one,
 });
 
-fn commitThenCount(storage: *Store, id: u64) !u64 {
+pub fn commitThenCount(storage: *Store, id: u64) !u64 {
     const mysql = &storage.engine.mysql;
     try mysql.queueCommit();
     try mysql.bind(live_count, &.{ .id = id }, 0);
@@ -1189,7 +1042,7 @@ fn commitThenCount(storage: *Store, id: u64) !u64 {
     return countAfterCommit(storage);
 }
 
-fn countAfterCommit(storage: *Store) !u64 {
+pub fn countAfterCommit(storage: *Store) !u64 {
     const mysql = &storage.engine.mysql;
     if (!try mysql.nextRow()) return error.TestUnexpectedResult;
     var row: live_count.Row = undefined;
@@ -1199,106 +1052,7 @@ fn countAfterCommit(storage: *Store) !u64 {
     return row.n;
 }
 
-test "store.mysql live a COMMIT and the reads after it share one message" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const mysql = &storage.engine.mysql;
-    const state = mysql.state;
-    try mysql.control(.begin);
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000400, .digest = protocol.contentDigest("commit-then-read") });
-    const seq = state.commit_seq;
-    const queries = state.connection.queries;
-    try std.testing.expectEqual(@as(u64, 1), try commitThenCount(&storage, 9000400));
-    try std.testing.expectEqual(queries + 1, state.connection.queries);
-    try std.testing.expectEqual(seq + 1, state.commit_seq);
-    try std.testing.expect(!mysql.inTransaction());
-    try std.testing.expectEqual(state.commit_seq, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
-    try mysql.control(.begin);
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try mysql.control(.commit);
-    try std.testing.expectEqual(seq + 2, state.commit_seq);
-    try std.testing.expect(!storage.isFenced());
-}
-
-test "store.mysql live a connection lost after COMMIT's OK keeps the commit and never runs it again" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch {};
-    const mysql = &storage.engine.mysql;
-    const state = mysql.state;
-    state.armed = true;
-    try mysql.control(.begin);
-    _ = try liveWrite(&storage, live_insert, .{ .id = 9000410, .digest = protocol.contentDigest("lost-after-commit") });
-    const seq = state.commit_seq;
-    try mysql.queueCommit();
-    try mysql.bind(live_count, &.{ .id = 9000410 }, 0);
-    try mysql.startPass();
-    try std.testing.expectEqual(seq + 1, state.commit_seq);
-    state.connection.disconnect();
-    try std.testing.expectError(error.StoreConnectionLost, countAfterCommit(&storage));
-    try std.testing.expect(!mysql.defersFence());
-    try std.testing.expect(!mysql.recover());
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{@as(u64, 9000410)}));
-    try std.testing.expectEqual(seq + 1, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
-}
-
-test "store.mysql live a COMMIT lost with reads after it answers them once it landed, and saves nothing otherwise" {
-    const Case = struct { drop: Drop, armed: bool };
-    for ([_]Case{
-        .{ .drop = .before_commit, .armed = false },
-        .{ .drop = .before_commit, .armed = true },
-        .{ .drop = .after_commit, .armed = false },
-        .{ .drop = .after_commit, .armed = true },
-    }, 0..) |case, index| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var storage: Store = undefined;
-        try openLive(&storage, &tmp);
-        defer storage.close() catch {};
-        const mysql = &storage.engine.mysql;
-        const state = mysql.state;
-        const id: u64 = 9000420 + index;
-        state.armed = case.armed;
-        try mysql.control(.begin);
-        _ = try liveWrite(&storage, live_insert, .{ .id = id, .digest = protocol.contentDigest("lost with reads") });
-        const seq = state.commit_seq;
-        state.testing_drop = case.drop;
-        const got = commitThenCount(&storage, id);
-        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
-        switch (case.drop) {
-            .before_commit => {
-                try std.testing.expectError(error.StoreConnectionLost, got);
-                try std.testing.expectEqual(seq, state.commit_seq);
-                try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
-                try std.testing.expectEqual(case.armed, mysql.defersFence());
-                try std.testing.expectEqual(case.armed, mysql.recover());
-                if (!case.armed) continue;
-                try mysql.control(.begin);
-                _ = try liveWrite(&storage, live_insert, .{ .id = id, .digest = protocol.contentDigest("lost with reads") });
-                try std.testing.expectEqual(@as(u64, 1), try commitThenCount(&storage, id));
-            },
-            .after_commit => {
-                try std.testing.expectEqual(@as(u64, 1), try got);
-                try std.testing.expect(!mysql.defersFence());
-                try std.testing.expect(!mysql.recover());
-            },
-            .none, .next_pass => unreachable,
-        }
-        try std.testing.expectEqual(seq + 1, state.commit_seq);
-        try std.testing.expectEqual(seq + 1, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
-        try std.testing.expect(!mysql.inTransaction());
-        try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-        try std.testing.expect(!storage.isFenced());
-    }
-}
-
-fn insertHeld(storage: *Store, id: u64) !void {
+pub fn insertHeld(storage: *Store, id: u64) !void {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
     var insert: LiveInsert = .{ .storage = storage, .id = id };
@@ -1339,25 +1093,6 @@ const LiveInsert = struct {
         return entry.finishTransaction(Expected, .{}, TestingScript(LiveInsert).run(entry, b));
     }
 };
-
-test "store.mysql live a write whose connection was lost with nothing saved runs again, unseen" {
-    for ([_]Drop{ .next_pass, .before_commit }) |drop| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var storage: Store = undefined;
-        try openLive(&storage, &tmp);
-        defer storage.close() catch {};
-        const state = storage.engine.mysql.state;
-        const id: u64 = 9000100;
-        state.testing_drop = drop;
-        try storage.queue().write(insertHeld, .{ &storage, id });
-        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
-        try std.testing.expect(!storage.isFenced());
-        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
-        try storage.queue().write(insertHeld, .{ &storage, id + 1 });
-        try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
-    }
-}
 
 fn insertTouching(storage: *Store, id: u64, other: u64) !void {
     const entry = try store_core.enter(storage, .none);
@@ -1576,67 +1311,7 @@ test "store.mysql live a lone write whose fence fails saves nothing, though COMM
     try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000500", .{}));
 }
 
-test "store.mysql live a batch that loses its connection mid-pass runs every write again" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch {};
-    const state = storage.engine.mysql.state;
-    const Writer = struct {
-        result: anyerror!void = {},
-        fn hold() error{}!void {}
-        fn write(self: *@This(), s: *Store, id: u64) void {
-            self.result = s.queue().write(insertHeld, .{ s, id });
-        }
-    };
-    try storage.queue().callHeld(Writer.hold, .{});
-    var writers: [2]Writer = .{ .{}, .{} };
-    var threads: [2]std.Thread = undefined;
-    for (&threads, &writers, 0..) |*thread, *writer, index| {
-        thread.* = try std.Thread.spawn(.{}, Writer.write, .{ writer, &storage, 9000300 + index });
-        @import("queue.zig").waitQueued(storage.queue(), index + 1);
-    }
-    state.testing_drop = .next_pass;
-    storage.queue().release();
-    for (threads) |thread| thread.join();
-    for (writers) |writer| try writer.result;
-    try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
-    try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(u64, 2), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id IN (9000300,9000301)", .{}));
-}
-
-test "store.mysql live a write that loses its connection twice fences" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch {};
-    const state = storage.engine.mysql.state;
-    state.testing_drop_armed = true;
-    const Twice = struct {
-        fn held(s: *Store, id: u64) !void {
-            if (!s.engine.mysql.state.armed) s.engine.mysql.state.testing_drop = .next_pass;
-            return insertHeld(s, id);
-        }
-    };
-    if (storage.queue().write(Twice.held, .{ &storage, 9000200 })) |_| return error.TestUnexpectedResult else |_| {}
-    try std.testing.expect(storage.isFenced());
-}
-
-test "store.mysql live GET_LOCK excludes a second Store on the same database" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    var second: Store = undefined;
-    try std.testing.expectError(error.StoreLocked, open(&second, &tmp, std.testing.io, .{}));
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try std.testing.expect(!storage.isFenced());
-}
-
-fn liveBackupFence(comptime column: []const u8) !void {
+pub fn liveBackupFence(comptime column: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1649,14 +1324,6 @@ fn liveBackupFence(comptime column: []const u8) !void {
     try std.testing.expectError(error.OwnershipLost, liveWrite(&storage, live_noop, .{}));
     try std.testing.expectEqual(error.OwnershipLost, storage.engine.mysql.state.failure.?);
     try std.testing.expectError(error.OwnershipLost, storage.engine.mysql.check());
-}
-
-test "store.mysql live epoch backup fence works while GET_LOCK remains held" {
-    try liveBackupFence("epoch");
-}
-
-test "store.mysql live commit sequence backup fence works while GET_LOCK remains held" {
-    try liveBackupFence("commit_seq");
 }
 
 const live_touch = rsql.Write(.{
@@ -2164,42 +1831,4 @@ test "store.mysql live lone single writes guard their shared COMMIT and payload 
     }
     needs_close = false;
     try storage.close();
-}
-
-test "store.mysql touch oracle observes and clears uncommitted entry writes without changing rollback" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    const Head = @import("tests.zig").TestingRound.head;
-    var head: Head.Row = undefined;
-    const mysql = &storage.engine.mysql;
-    try mysql.bind(Head, &.{ .session_ref = session.slice() }, 0);
-    try mysql.startPass();
-    try std.testing.expect(try mysql.nextRow());
-    try mysql.decodeRow(Head.Row, &head);
-    try std.testing.expect(!try mysql.nextRow());
-    mysql.endStatement();
-    try mysql.finishPass();
-    try store_core.begin(&storage);
-    defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
-    const forgotten_touch = rsql.Write(.{
-        .sql = "UPDATE session SET label='oracle uncommitted' WHERE session_ref=@session(?1)",
-        .Args = struct { session: rsql.SessionHead },
-        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-    });
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, forgotten_touch, .{ .session = head.head }));
-    try std.testing.expect(storage.engine.mysql.state.begin == .sent);
-    const missing = store_core.untouchedForTesting(&storage);
-    try std.testing.expectEqual(true, missing != null);
-    try std.testing.expectEqualStrings(session.slice(), &missing.?);
-    clearTouchOracleForTesting(&storage);
-    try std.testing.expect(storage.engine.inTransaction());
-    try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
-    try store_core.rollbackAfterError(&storage, .{});
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }

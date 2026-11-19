@@ -136,6 +136,16 @@ Response `session_list` has up to eight `sessions`, then `delta`, a new `since` 
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable decimal-string `pin_order`, derived from the current pin Command; nullable `parent` (the lifecycle attachment reference, otherwise `null`); required nullable `creator` (the immutable creation-provenance reference, including detached children); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](inspection.md#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 A non-null `creator` is a canonical six-character Session reference; malformed IDs reject during decoding rather than becoming null.
 Listing reads `creator` from the Store's [Session provenance](sessions.md#session-provenance), independently of the lifecycle `parent` field.
+Each row also has four required decimal strings: `state_change_at`, `subtree_state_change_at`, `descendant_count`, and `descendant_needs_you_count`.
+`state_change_at` is the latest durable semantic work transition for that Session, including queued input, Turn execution, a completed approval episode, and applicable settled, stopped, or owed work.
+A partial approval decision and automatic tool completion do not advance it.
+An automatic compaction before the first input projection uses the saved admission time until the input is projected.
+`subtree_state_change_at` is the maximum of that clock for the Session and its eligible creator descendants.
+The counts exclude the Session itself. `descendant_needs_you_count` counts descendants whose shared work state is approval or Bash with a pending approval.
+The requested Workspace and archive filters apply at each creator link. An excluded Session cuts that link, while a pin does not.
+Page boundaries do not limit the descendants included in a row.
+The MySQL Store connection sets its recursive-query limit to one more than the number of valid Session IDs, including after reconnect.
+The TypeScript `SessionSummary` exposes these four values as decimal strings without numeric conversion.
 Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
 It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
 Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
@@ -145,7 +155,7 @@ These derived facts join the existing row-settings read, adding no list-page rou
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
-`changed` returns only the Sessions in the request's scope whose rows may have changed since the token, read fresh, in reference order, eight per page; its continuation carries the same `since`, the first page's `through` and the last `after_reference`, and a continuation the hint no longer covers restarts as a `full` first page.
+`changed` returns the Sessions in the request's scope whose rows may have changed since the token, including eligible creator ancestors of changed Sessions, read fresh, in reference order, eight per page; its continuation carries the same `since`, the first page's `through` and the last `after_reference`, and a continuation the hint no longer covers restarts as a `full` first page.
 `full` is the ordinary traversal in creation order, when `since` is absent, too old or from another Host opening (a Host opens its Store once, so an opening is one Host instance); its continuation carries `after`/`ceiling` without `since`.
 Each page's token covers its own rows, and a traversal reports its first page's token.
 A reply may include Sessions that did not change; it never omits one that did.
@@ -165,10 +175,10 @@ The one exception is in memory: the Host keeps a fixed ring of its most recent 4
 A Workspace's key is the `created_seq` of its first Session, stored on each of its Sessions when it is created; Workspaces are immutable and Sessions are not deleted, so the key never changes.
 A writer reads it with one seek when it first touches a Session, inside its own transaction, so a failed read fails that entry point and fences the Store like any other canonical read; nothing is read after the commit.
 An entry point that touches more than four Sessions, or rolls back after changing rows (a Session it created no longer exists), forgets everything before it.
-A `changed` page reads the asked Workspace's key with one seek, makes one pass over the ring's entries in memory, and then reads only the rows it shows, at most eight; Sessions in other Workspaces never reach SQLite, however many changed.
+A `changed` page reads the requested Workspace key with one seek, then walks the fixed ring in batches to find changed Sessions and their eligible creator ancestors. It returns at most eight rows, while reads for each row include eligible descendant facts. Changes in other Workspaces do not seed those reads.
 Like the [history memo](model-io.md#history-memo), the ring is derived, never durable and never read by recovery: it is a hint that answers `since`, may report spurious changes, restarts with the Host, orders nothing a reader can observe and grants nothing; overflow or restart degrades to `full`.
 In test builds, SQLite triggers record every Session whose rows an entry point changed, and the Store panics when that entry point did not record it.
-Each row's work, first Message and `from_person_at` are derived under the same Store lock from that Session's own indexed rows, by a fixed number of seeks that does not grow with its history.
+Each row's work, first Message and `from_person_at` are derived under the same Store lock from that Session's indexed rows. The list clock examines gated Action groups in the latest Turn. Creator rollups use the creator index and fixed-size work batches, and can re-expand the eligible creator tree for each batch; database work grows with the membership and query shape. A page of up to eight Sessions without descendants uses one additional membership read round.
 Nothing is cached or persisted as a Session phase.
 `end` says where a forward activity read resumes.
 Full or current inspection of a chosen reference remains a separate observation.

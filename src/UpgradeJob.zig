@@ -270,12 +270,12 @@ test "joined installation cancellation retains the actual publication receipt" {
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try job.writeReport(&writer);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Upgraded to Rui 0.60.1. Complete build: /synthetic/installed") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installation was not rolled back") != null);
     var receipt_bytes: [4096]u8 = undefined;
     var receipt = std.Io.Writer.fixed(&receipt_bytes);
     try job.writeReceipt(&receipt);
-    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Upgraded to Rui 0.60.1. Complete build: /synthetic/installed") != null);
     try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installation was not rolled back") != null);
     job.result = null;
 }
@@ -402,7 +402,7 @@ test "a successful receipt keeps the check's PATH advice: a shadowed or missing 
         var writer = std.Io.Writer.fixed(&bytes);
         try job.writeReceipt(&writer);
         const out = writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, out, "Installation unchanged") != null or std.mem.indexOf(u8, out, "Installed Rui") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "Installation unchanged") != null or std.mem.indexOf(u8, out, "Upgraded to Rui") != null);
         const advice = std.mem.indexOf(u8, out, "/usr/bin/rui") != null;
         try std.testing.expectEqual(state != .selected, advice);
     }
