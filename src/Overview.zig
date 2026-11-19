@@ -8434,11 +8434,14 @@ test "named launch waits for sign-in before choosing its binding" {
     var ops = fake_operations;
     ops.list = Listing.list;
     var cancellation: client.Cancellation = .{};
-    // A provider without a model resolves to no default, so the launch names a binding that sign-in has not yet saved.
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "openai" }, ops, &cancellation);
+    // `rui --provider openai` names a binding with no model. cli.zig drops that binding, so the
+    // launch has no default and sign-in is open; sign-in then saves the binding the launch chooses.
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .selectors = .{ .provider = "openai" }, .sign_in = true }, ops, &cancellation);
     defer rig.close();
+    try std.testing.expectEqual(view.LaunchIntent.named, launchIntent(rig.overview.options));
     try std.testing.expectEqual(@as(?view.Default, null), rig.overview.state.default);
-    _ = try view.step(&rig.overview.state, .{ .launch_start = .named });
+    try std.testing.expect(rig.overview.root.input.layer.signInOpen());
+    _ = try view.step(&rig.overview.state, .{ .launch_start = launchIntent(rig.overview.options) });
     var shown = try rig.shown(140, 40);
     defer shown.deinit();
     var ctx = rig.context();
@@ -8452,7 +8455,12 @@ test "named launch waits for sign-in before choosing its binding" {
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     try std.testing.expectEqual(.waiting, rig.overview.state.launch);
     try std.testing.expect(rig.overview.state.hidesOverview());
-    try rig.overview.appNext(&ctx, try rig.overview.event(.{ .defaults_saved = view.Default.of("openai", "gpt-6-sol") }));
+    try std.testing.expectEqual(@as(?view.Default, null), rig.overview.state.default);
+    var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+    try activation.binding.provider.set("openai");
+    try activation.binding.model.set("gpt-6-sol");
+    try activation.store.set("/store");
+    try signedIn(rig.overview, &ctx, activation);
     try rig.overview.appNext(&ctx, try rig.overview.event(.launch_poll));
     _ = try rig.settle();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);

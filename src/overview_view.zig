@@ -6858,57 +6858,106 @@ test "launch core reopens newest active empty Session" {
     try expectEffects(&.{}, try step(&state, .launch_poll));
 }
 
-test "launch core reopens the empty Session that the binding read at poll time resolves to" {
-    const Store = enum { none, same, other_provider, other_model };
-    const Intent = enum { defaults, named };
+/// Store rows for the launch core's domain. The matching row for `luna` is
+/// older than a newer non-matching row in `behind_newer_other`; the archived
+/// and populated rows match `luna` but must never be reopened.
+const LaunchStore = enum { none, same, other_provider, other_model, behind_newer_other, archived_and_populated };
+
+fn launchStoreRows(store: LaunchStore, buffer: *[2]Listed) []const Listed {
+    switch (store) {
+        .none => return buffer[0..0],
+        .same => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            return buffer[0..1];
+        },
+        .other_provider => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            return buffer[0..1];
+        },
+        .other_model => {
+            buffer[0] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-sol" });
+            return buffer[0..1];
+        },
+        .behind_newer_other => {
+            buffer[0] = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0].created_at = 1;
+            buffer[1] = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" });
+            buffer[1].created_at = 2;
+            return buffer[0..2];
+        },
+        .archived_and_populated => {
+            buffer[0] = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived, .provider = .codex, .model = "gpt-6-luna" });
+            buffer[0].created_at = 3;
+            buffer[1] = session("dddddd", .{ .idle = ago(1) }, .{ .provider = .codex, .model = "gpt-6-luna" });
+            buffer[1].created_at = 4;
+            return buffer[0..2];
+        },
+    }
+}
+
+const LaunchKind = enum { defaults, named };
+
+fn bindingIs(poll: ?Default, want: Default) bool {
+    return if (poll) |resolved| resolved.eql(&want) else false;
+}
+
+/// The reference the core must reopen for this store and launch, or null for create.
+fn launchReopen(store: LaunchStore, intent: LaunchKind, binding: ?Default) ?[6]u8 {
     const luna = Default.of("codex", "gpt-6-luna").?;
     const sol = Default.of("codex", "gpt-6-sol").?;
     const other_provider = Default.of("openai", "gpt-6-luna").?;
-    // A null start models first-run sign-in: the binding is set after launch_start.
-    // A null poll is a named launch still waiting for sign-in; `defaults_saved`
-    // then supplies `sol`, and the next poll decides.
+    return switch (store) {
+        .none, .archived_and_populated => null,
+        .same => if (intent == .defaults or bindingIs(binding, luna)) "bbbbbb".* else null,
+        .other_provider => if (intent == .defaults or bindingIs(binding, other_provider)) "bbbbbb".* else null,
+        .other_model => if (intent == .defaults or bindingIs(binding, sol)) "bbbbbb".* else null,
+        .behind_newer_other => switch (intent) {
+            .defaults => "bbbbbb".*,
+            .named => if (bindingIs(binding, luna)) "aaaaaa".* else null,
+        },
+    };
+}
+
+test "launch core reopens the empty Session that the binding read at poll time resolves to" {
+    const luna = Default.of("codex", "gpt-6-luna").?;
+    const sol = Default.of("codex", "gpt-6-sol").?;
+    // Bindings arrive only as `defaults_saved` events, which a null save leaves unchanged.
+    // A named launch with no binding yet waits for sign-in; the poll-time binding is what
+    // the later `defaults_saved` supplies, and that poll decides.
     const at_starts = [_]?Default{ null, sol };
     const at_polls = [_]?Default{ null, luna, sol };
-    for (std.enums.values(Intent)) |intent| for (at_starts) |at_start| for (at_polls) |at_poll| for (std.enums.values(Store)) |store| {
-        const row: ?Listed = switch (store) {
-            .none => null,
-            .same => session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-luna" }),
-            .other_provider => session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .openai, .model = "gpt-6-luna" }),
-            .other_model => session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null, .provider = .codex, .model = "gpt-6-sol" }),
-        };
-        const stored: ?Default = switch (store) {
-            .none => null,
-            .same => luna,
-            .other_provider => other_provider,
-            .other_model => sol,
-        };
-        var state = if (row) |listed| try opened(&.{listed}) else try opened(&.{});
+    for (std.enums.values(LaunchKind)) |intent| for (at_starts) |at_start| for (at_polls) |at_poll| for (std.enums.values(LaunchStore)) |store| {
+        var buffer: [2]Listed = undefined;
+        var state = try opened(launchStoreRows(store, &buffer));
         defer state.deinit();
-        state.default = at_start;
+        if (at_start) |start| _ = try step(&state, .{ .defaults_saved = start });
         _ = try step(&state, .{ .launch_start = switch (intent) {
             .defaults => .defaults,
             .named => .named,
         } });
-        state.default = at_poll;
         _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
-        var binding = at_poll;
-        var effects = try step(&state, .launch_poll);
-        if (intent == .named and binding == null) {
-            // Still waiting for sign-in: no effect, overview stays hidden.
-            try expectEffects(&.{}, effects);
+        if (intent == .named and at_start == null) {
+            // Still waiting for sign-in: a poll and a null save both leave the overview hidden with no effect.
+            try expectEffects(&.{}, try step(&state, .launch_poll));
             try std.testing.expectEqual(.waiting, state.launch);
             try std.testing.expect(state.hidesOverview());
+            _ = try step(&state, .{ .defaults_saved = null });
             try expectEffects(&.{}, try step(&state, .launch_poll));
-            binding = sol;
-            _ = try step(&state, .{ .defaults_saved = binding });
-            effects = try step(&state, .launch_poll);
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
         }
-        const reopens = switch (intent) {
-            .defaults => store != .none,
-            .named => if (binding) |resolved| if (stored) |want| resolved.eql(&want) else false else false,
-        };
-        if (reopens) {
-            try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, effects);
+        if (at_poll) |saved| _ = try step(&state, .{ .defaults_saved = saved });
+        if (intent == .named and state.default == null) {
+            // Still waiting: no effect until a binding is saved.
+            try expectEffects(&.{}, try step(&state, .launch_poll));
+            try std.testing.expectEqual(.waiting, state.launch);
+            try std.testing.expect(state.hidesOverview());
+            continue;
+        }
+        const binding = state.default;
+        const effects = try step(&state, .launch_poll);
+        if (launchReopen(store, intent, binding)) |reference| {
+            try expectEffects(&.{ .{ .open = reference }, .list_models }, effects);
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
         } else {
             try expectEffects(&.{.{ .create = binding }}, effects);
