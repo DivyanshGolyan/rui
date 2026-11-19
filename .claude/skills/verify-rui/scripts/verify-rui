@@ -852,15 +852,40 @@ def tap_main(args):
 
 DEFAULT_SERVE = ("codex",)
 SERVABLE_PROVIDERS = ("codex", "openai", "chatgpt")
+LAUNCH_ATTEMPTS = 5
+
+
+def host_status(run):
+    """`rui host status` for this run's Store: (command result, ready, parsed status or None)."""
+    result = run.rui_cmd("host", "status", "--store", run.store, log=False)
+    ready = result.returncode == 0 and "unavailable" not in result.stdout + result.stderr
+    try:
+        body = json.loads(result.stdout) if ready else None
+    except ValueError:
+        body = None
+    return result, ready, body
+
+
+def served_providers(body):
+    """The providers a ready Host serves; a provider reported as unserved is not served."""
+    providers = (body or {}).get("capabilities", {}).get("providers", {})
+    return {name for name, value in providers.items() if value != "unserved"}
+
+
+def holds_store(run, pid):
+    """Whether process `pid` has this run's Store open."""
+    held = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True).stdout
+    return any(line[1:].startswith(str(run.store)) for line in held.splitlines())
 
 
 def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_SERVE):
-    """Start this run's Host from the options saved at `new`; return its ready status.
+    """Start this run's Host serving exactly `serve`; return its ready status.
 
-    `serve` is the provider set the Host serves; each one answers from the fixture."""
+    Success needs this child alive, holding the Store, and serving exactly the requested providers.
+    A child that loses the Store to another Host (for example one the TUI starts after a pause) is
+    stopped; whatever serves the Store is paused and the launch is retried, up to LAUNCH_ATTEMPTS."""
     options = run.meta["host_options"]
-    # The first launch of a run records its options; restarts and restores reuse them.
-    run.meta.setdefault("host_launch", {"restartable": restartable, "without_preload": without_preload})
+    expected = set(serve)
     provider_sets = []
     for provider in serve:
         provider_sets += ["--set", f"providers.{provider}.endpoint={run.meta['fixture_url']}",
@@ -876,39 +901,60 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
         host_env[key] = value
     if without_preload:
         host_env.pop("LD_PRELOAD", None)
-    host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
-                            stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
-                            start_new_session=True)
-    run.own("host", host.pid, argv=host_argv)
-    deadline = time.monotonic() + 30
-    while True:
-        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
-        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
-            return status
-        if host.poll() is not None or time.monotonic() > deadline:
-            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
-        time.sleep(0.1)
-
-
-def host_launch_options(run):
-    """The launch options this run's Host was first started with."""
-    return dict(run.meta.get("host_launch", {"restartable": False, "without_preload": False}))
+    for attempt in range(1, LAUNCH_ATTEMPTS + 1):
+        stop_host(run)
+        host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
+                                stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
+                                start_new_session=True)
+        run.own("host", host.pid, argv=host_argv)
+        verdict = None
+        deadline = time.monotonic() + 30
+        while verdict is None:
+            if host.poll() is not None:
+                verdict = f"child exited rc={host.poll()}"
+            else:
+                result, ready, body = host_status(run)
+                if ready and not holds_store(run, host.pid):
+                    verdict = "another Host serves this Store"
+                elif ready and served_providers(body) != expected:
+                    verdict = f"serves {sorted(served_providers(body))}, expected {sorted(expected)}"
+                elif ready:
+                    append_jsonl(run.evidence / "host-launch.jsonl", {"attempt": attempt, "pid": host.pid, "verdict": "ready",
+                                                                      "instance": body.get("instance"),
+                                                                      "served": sorted(served_providers(body))})
+                    return result
+                elif time.monotonic() > deadline:
+                    verdict = "not ready within 30 s"
+                else:
+                    time.sleep(0.1)
+        if host.poll() is None:
+            host.terminate()
+            try:
+                host.wait(10)
+            except subprocess.TimeoutExpired:
+                host.kill()
+        append_jsonl(run.evidence / "host-launch.jsonl", {"attempt": attempt, "pid": host.pid, "verdict": verdict})
+    die(f"could not start a Host serving {sorted(expected)} on this Store after {LAUNCH_ATTEMPTS} attempts; "
+        f"see {run.evidence / 'host-launch.jsonl'}")
 
 
 def stop_host(run):
-    """Pause the run's owned Host and wait for it to exit; return the stopped owned records."""
-    old = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
-           and process_start(r["pid"])[0] == r["lstart"]]
-    # A Host that is already stopped is simply started again.
-    stop = run.rui_cmd("host", "pause", "--store", run.store) if old else None
-    if stop and stop.returncode != 0:
-        die(f"host pause failed: {stop.stderr}")
-    deadline = time.monotonic() + 15
-    while any(process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"] for r in old):
-        if time.monotonic() > deadline:
-            die("old Host did not exit after host pause")
-        time.sleep(0.1)
-    return old
+    """Pause whatever Host serves this run's Store and confirm none is ready; return the owned records stopped."""
+    stopped = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
+               and process_start(r["pid"])[0] == r["lstart"]]
+    for _ in range(LAUNCH_ATTEMPTS):
+        _, ready, _ = host_status(run)
+        if not ready:
+            return stopped
+        pause = run.rui_cmd("host", "pause", "--store", run.store)
+        if pause.returncode != 0:
+            die(f"host pause failed: {pause.stderr}")
+        deadline = time.monotonic() + 15
+        while host_status(run)[1]:
+            if time.monotonic() > deadline:
+                die("a Host still serves this Store after host pause")
+            time.sleep(0.1)
+    die("a Host kept serving this Store after repeated pauses")
 
 
 def cmd_restart_host(args):
@@ -2377,7 +2423,7 @@ def validate_scenario(data, sizes=None):
                     f"{name}: invalid empty_composer (wait boolean only)")
             require("shot_clock_advance" not in step or action == "sleep" and type(step["shot_clock_advance"]) is int and step["shot_clock_advance"] >= 0, f"{name}: shot_clock_advance requires nonnegative whole seconds on a sleep")
             require("shot_settle_message" not in step or action == "host" and step[action] == "suspend" and step["shot_settle_message"] is True, f"{name}: shot_settle_message requires Host suspension")
-            require("serve" not in step or action == "host" and step[action] == "restart", f"{name}: serve requires a Host restart step")
+            require("serve" not in step or action == "host" and step[action] in ("restart", "serves"), f"{name}: serve requires a Host restart or serves step")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2398,12 +2444,13 @@ def validate_scenario(data, sizes=None):
             elif action == "sleep":
                 require(duration(value), f"{name}: invalid sleep")
             elif action == "host":
-                require(value in ("pause", "start", "suspend", "resume", "restart"), f"{name}: invalid host action")
+                require(value in ("pause", "start", "suspend", "resume", "restart", "serves"), f"{name}: invalid host action")
+                require(value != "serves" or "serve" in step, f"{name}: serves requires the provider set")
                 require(value != "suspend" or not suspended, f"{name}: Host already suspended")
                 require(value != "resume" or suspended, f"{name}: Host is not suspended")
                 require(value not in ("pause", "start", "restart") or not suspended, f"{name}: resume Host before pause/start/restart")
                 require(value != "restart" or not state.get("upgrade"), f"{name}: Host restart is not supported in upgrade states")
-                if value == "restart" and "serve" in step:
+                if value in ("restart", "serves") and "serve" in step:
                     served = step["serve"]
                     require(isinstance(served, list) and bool(served) and len(set(served)) == len(served)
                             and all(provider in SERVABLE_PROVIDERS for provider in served),
@@ -2967,6 +3014,12 @@ def frame_steps(run, terminal, steps, exiting=False):
                 frame_host_suspension(run, True)
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
+        elif step["host"] == "serves":
+            # Read-only proof that the Host serving this Store now serves exactly the named providers.
+            _, ready, body = host_status(run)
+            served = served_providers(body)
+            if not ready or served != set(step["serve"]):
+                raise FrameFailure(f"Host serves {sorted(served) if ready else 'nothing'}, expected {sorted(step['serve'])}")
         elif step["host"] == "restart":
             serve = tuple(step.get("serve", DEFAULT_SERVE))
             frame_restart_host(run, serve)
@@ -2980,11 +3033,11 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_restart_host(run, serve):
-    """Restart the run's Host serving `serve`, with the options of its first launch."""
+    """Restart the run's Host serving exactly `serve`."""
     # Set before stopping: a failed restart still gets restored by frame_restore_served.
     run.frame_served = tuple(serve)
     stop_host(run)
-    launch_host(run, serve=tuple(serve), **host_launch_options(run))
+    launch_host(run, serve=tuple(serve))
 
 
 def frame_restore_served(run):
@@ -2993,7 +3046,7 @@ def frame_restore_served(run):
         return
     run.frame_served = None
     stop_host(run)
-    launch_host(run, **host_launch_options(run))
+    launch_host(run)
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):

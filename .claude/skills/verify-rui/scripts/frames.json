@@ -6320,6 +6320,12 @@
         },
         {
           "wait": "Provider unserved witness"
+        },
+        {
+          "host": "serves",
+          "serve": [
+            "openai"
+          ]
         }
       ],
       "expect": [
