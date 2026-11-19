@@ -37,7 +37,7 @@ def main():
              "--set", f"providers.codex.endpoint={url}", "--set", f"providers.openai.endpoint={url}"],
             env={**env, "RUI_OPENAI_KEY_FILE": str(key),
                  "RUI_CODEX_CREDENTIAL_FILE": str(config / "codex.json")},
-            required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+            required_fields=host_process.READY_TRANSPORT)
         configured = subprocess.run(
             [str(fixture.RUI), "defaults", "configure", "--store", str(store),
              "--provider", "codex", "--model", "gpt-5.5"],

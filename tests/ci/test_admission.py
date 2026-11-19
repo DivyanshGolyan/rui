@@ -629,7 +629,9 @@ class CandidatePlanTest(unittest.TestCase):
         'build hub': (['build.zig'], {'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic'}),
+        # Without the manifest's text the SQLite pin may have changed, so the Store suite runs too.
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),

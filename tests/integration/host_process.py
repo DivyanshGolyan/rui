@@ -388,6 +388,10 @@ WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)
 STORE_SCHEMA = int(_owned("src/store/schema.zig", r"^pub const schema_version: u32 = (\d+);$", "schema_version"))
 
 
+NGHTTP2_VERSION = _owned("src/h2/h2.zig", r'^pub const nghttp2_version = "([^"]+)";$', "nghttp2_version")
+READY_TRANSPORT = {"execution": "enabled", "nghttp2": NGHTTP2_VERSION}
+
+
 def assert_caller_error(stderr, context, code, not_sent=True):
     text = stderr.decode() if isinstance(stderr, bytes) else stderr
     ending = (" Nothing was captured or sent." if not_sent else "") + f" [{code}]\n"
@@ -528,6 +532,22 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
         else:
             clock.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
+
+
+def retire_settled(store, timeout=2):
+    """Retire a disposed Host's socket, waiting briefly for it to stop accepting.
+
+    A Host run under a wrapper such as strace --kill-on-exit dies only after the
+    reaped wrapper does, so its socket can still accept for a moment. A socket
+    that keeps accepting is a successor serving the same Store and stays.
+    """
+    def settled():
+        runtime_leftovers.retire(store)
+        return not runtime_leftovers.hinted(store)
+    try:
+        wait_for(settled, f"Host socket for {store} to retire", timeout=timeout, drain=False)
+    except WaitTimeout:
+        pass
 
 
 def wait_for_execution_release(inspect, deadline):
@@ -1226,7 +1246,7 @@ def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
     if retire:
         try:
             if (store := disposed_store(process)) is not None:
-                runtime_leftovers.retire(store)
+                retire_settled(store)
         except BaseException as error:
             errors.append(error)
     diagnostics = getattr(process, "rui_diagnostics", None)
