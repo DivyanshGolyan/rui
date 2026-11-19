@@ -723,6 +723,8 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
         try Native.exec(storage, "SET @rui_creator_ddl=NULL");
     }
+    // Format 84's creator index covers creator_ref, so it goes before the column.
+    try Native.exec(storage, if (storage.engine == .mysql) "DROP INDEX session_creator ON session" else "DROP INDEX session_creator");
     try Native.exec(storage, "ALTER TABLE session DROP COLUMN creator_ref");
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
