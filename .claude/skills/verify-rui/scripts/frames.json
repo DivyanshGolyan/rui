@@ -6342,6 +6342,34 @@
       ]
     },
     {
+      "name": "signin-paste-refused-night",
+      "note": "Settings > Sign-in API key form after a refused bracketed paste (over the 1024-byte key limit): the key field locks and Connect is blocked",
+      "theme": "night",
+      "open": "overview",
+      "steps": [
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "What shall we work on?"},
+        {"keys": ["End", "Enter"]},
+        {"wait": "Notifications"},
+        {"keys": ["Down", "Down", "Down", "Down", "Enter"]},
+        {"wait": "Welcome to Rui"},
+        {"mouse": {"at": "API key", "do": "click"}},
+        {"wait": "Connect with an API key"},
+        {"text": "\u001b[200~kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\u001b[201~"},
+        {"wait": "Paste refused in API key"}
+      ],
+      "expect": [
+        "Paste refused in API key. Press Enter or edit it to continue.",
+        "Connect with an API key",
+        "[ Connect ]"
+      ],
+      "absent_sidebar_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ]
+    },
+    {
       "name": "chatfeed-night-empty",
       "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
       "theme": "night",
