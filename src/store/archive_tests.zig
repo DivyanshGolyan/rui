@@ -693,15 +693,30 @@ test "Session list membership and order equal the state reference for every filt
     }.run);
 }
 
-// Each archiving candidate is planned on MySQL through its own index. MySQL has no partial index, so the
-// marker states the `_lead` column (or the functional key for the unique open-turn index). The plan must
-// not scan the table. Runs only when the MySQL engine is live (forEachEngine skips it otherwise).
-test "MySQL plans each archiving candidate through its index" {
+// Each archiving candidate and each archiving page is planned on MySQL. The pages are planned with literal
+// bounds, so the plan is the one the live list reads. A page must not scan session, and its candidate's index
+// must be used. MySQL has no partial index: the marker states the `_lead` column. Runs only when MySQL is
+// live (forEachEngine skips it otherwise).
+fn bindLiterals(comptime sql: []const u8, comptime values: []const []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var rest: []const u8 = sql;
+        for (values) |value| {
+            const at = std.mem.indexOfScalar(u8, rest, '?') orelse @compileError("bindLiterals: missing parameter");
+            out = out ++ rest[0..at] ++ value;
+            rest = rest[at + 1 ..];
+        }
+        return out ++ rest;
+    }
+}
+
+test "MySQL plans each archiving candidate and page through its index" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             if (case.engine != .mysql) return;
             const rsql = @import("rsql.zig");
             const membership = @import("domain/archive_membership.zig");
+            const session_list_read = @import("domain/session_list_read.zig");
             const mysql_testing = @import("mysql_testing.zig");
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -718,6 +733,18 @@ test "MySQL plans each archiving candidate through its index" {
                 errdefer std.debug.print("MySQL plan for {s}:\n{s}", .{ candidate.sql, plan });
                 try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
                 try std.testing.expect(std.mem.indexOf(u8, plan, candidate.index) != null);
+            }
+            const pages = [_]struct { source: []const u8, index: []const u8 }{
+                .{ .source = session_list_read.live_turn_source, .index = "turn_outcome_unpositioned" },
+                .{ .source = session_list_read.live_action_source, .index = "action_operation_unaccepted" },
+            };
+            for (pages) |page| {
+                const literal = comptime bindLiterals(rsql.sentTemplate(page.source).prepared(), &.{ "0", "1000" });
+                var buffer: [8192]u8 = undefined;
+                const plan = try mysql_testing.planText(&storage, literal, &buffer);
+                errdefer std.debug.print("MySQL plan for page {s}:\n{s}", .{ page.source, plan });
+                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan on s") == null);
+                try std.testing.expect(std.mem.indexOf(u8, plan, page.index) != null);
             }
         }
     }.run);
