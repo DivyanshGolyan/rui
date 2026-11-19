@@ -312,19 +312,23 @@ const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_c
     "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key" ++ report_domain.first_admission_join ++
     " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id ";
 
+/// The statement sources, with `@index` marks as written (the MySQL plan test renders them).
+pub const archived_newest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
+    "WHERE session.archive_seq<?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
+    "ORDER BY session.archive_seq DESC LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+pub const archived_oldest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
+    "WHERE session.archive_seq>?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
+    "ORDER BY session.archive_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+
 pub const archived_newest_page = rsql.Read(.{
-    .sql = "SELECT " ++ archived_columns ++ archived_window_join ++
-        "WHERE session.archive_seq<?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
-        "ORDER BY session.archive_seq DESC LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit}),
+    .sql = archived_newest_source,
     .Args = struct { below: u64 },
     .Row = ArchivedWindowRow,
     .cardinality = .each,
 });
 
 pub const archived_oldest_page = rsql.Read(.{
-    .sql = "SELECT " ++ archived_columns ++ archived_window_join ++
-        "WHERE session.archive_seq>?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
-        "ORDER BY session.archive_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit}),
+    .sql = archived_oldest_source,
     .Args = struct { above: u64 },
     .Row = ArchivedWindowRow,
     .cardinality = .each,

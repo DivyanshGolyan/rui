@@ -1120,7 +1120,7 @@ test "MySQL plans each archiving candidate and page through its index" {
                 .{ .source = session_list_read.live_turn_source, .index = "turn_outcome_unpositioned" },
                 .{ .source = session_list_read.live_action_source, .index = "action_operation_unaccepted" },
             };
-            const window_pages = [_][]const u8{ session_list_read.archived_newest_page.sql, session_list_read.archived_oldest_page.sql };
+            const window_pages = [_][]const u8{ session_list_read.archived_newest_source, session_list_read.archived_oldest_source };
             inline for (window_pages) |source| {
                 const literal = comptime bindLiterals(rsql.sentTemplate(source).prepared(), &.{"1000"});
                 var buffer: [16384]u8 = undefined;
