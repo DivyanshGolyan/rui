@@ -1,6 +1,5 @@
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
-const client_defaults = @import("client_defaults.zig");
 const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
@@ -137,7 +136,7 @@ pub const Query = struct {
             if (entry.providers.contains(one)) break one;
         } else unreachable;
         return .{
-            .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
+            .effort = self.effort orelse defaults.effort,
             .provider = provider,
             .current = if (defaults.model) |model| std.mem.eql(u8, model, entry.id) else false,
         };
@@ -376,29 +375,29 @@ fn plainRow(menu: *const Menu, id: []const u8, defaults: Defaults) Row {
     return Query.parse("").row(entryOf(menu, id), defaults).?;
 }
 
-test "a row would save the saved effort and sign-in where its model offers them, else the model's own" {
+test "a row previews only typed or saved effort and keeps provider selection" {
     var menu = try pickerMenu();
     defer menu.deinit(std.testing.allocator);
     const Case = struct { id: []const u8, effort: ?ReasoningEffort, provider: Provider };
     const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .openai, .effort = .none };
     for ([_]Case{
         .{ .id = "gpt-6.1-terra", .effort = .none, .provider = .openai },
-        .{ .id = "gpt-6.1-sol", .effort = .low, .provider = .openai },
-        .{ .id = "gpt-6-astra", .effort = .low, .provider = .codex },
-        .{ .id = "gpt-5.5-pro", .effort = .medium, .provider = .codex },
+        .{ .id = "gpt-6.1-sol", .effort = .none, .provider = .openai },
+        .{ .id = "gpt-6-astra", .effort = .none, .provider = .codex },
+        .{ .id = "gpt-5.5-pro", .effort = .none, .provider = .codex },
         .{ .id = "ft:custom", .effort = .none, .provider = .openai },
-        .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
-        .{ .id = "openai/gpt-4.1", .effort = null, .provider = .openai },
+        .{ .id = "azure/gpt-5-pro", .effort = .none, .provider = .openai },
+        .{ .id = "openai/gpt-4.1", .effort = .none, .provider = .openai },
     }) |case| {
         const row = plainRow(&menu, case.id, saved);
         try std.testing.expectEqual(case.effort, row.effort);
         try std.testing.expectEqual(case.provider, row.provider);
     }
     for ([_]Case{
-        .{ .id = "gpt-6.1-sol", .effort = .low, .provider = .codex },
-        .{ .id = "gpt-5.5-pro", .effort = .medium, .provider = .codex },
-        .{ .id = "ft:custom", .effort = .low, .provider = .openai },
-        .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
+        .{ .id = "gpt-6.1-sol", .effort = null, .provider = .codex },
+        .{ .id = "gpt-5.5-pro", .effort = null, .provider = .codex },
+        .{ .id = "ft:custom", .effort = null, .provider = .openai },
+        .{ .id = "azure/gpt-5-pro", .effort = null, .provider = .openai },
     }) |case| {
         const row = plainRow(&menu, case.id, .{});
         try std.testing.expectEqual(case.effort, row.effort);
@@ -463,11 +462,11 @@ test "a word narrows to the rows whose ID holds it or that offer the effort or s
     try expectRows(&menu, "astra api", &.{});
     try expectRows(&menu, "6.1-terra q", &.{});
     try expectRows(&menu, "qwen max", &.{"alibaba/qwen-max"});
-    try std.testing.expectEqual(@as(?ReasoningEffort, null), Query.parse("qwen max").row(entryOf(&menu, "alibaba/qwen-max"), .{ .effort = .low }).?.effort);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .max), Query.parse("qwen max").row(entryOf(&menu, "alibaba/qwen-max"), .{ .effort = .low }).?.effort);
     try expectRows(&menu, "mistral medium", &.{"auto/mistralai/mistral-medium-3.5"});
     const mistral = entryOf(&menu, "auto/mistralai/mistral-medium-3.5");
-    try std.testing.expectEqual(@as(?ReasoningEffort, .high), Query.parse("mistral medium").row(mistral, .{ .effort = .high }).?.effort);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .none), Query.parse("mistral medium").row(mistral, .{ .effort = .xhigh }).?.effort);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), Query.parse("mistral medium").row(mistral, .{ .effort = .high }).?.effort);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), Query.parse("mistral medium").row(mistral, .{ .effort = .xhigh }).?.effort);
     var all: usize = 0;
     for (menu.entries) |entry| all += @intFromBool(Query.parse(" ").row(entry, .{}) != null);
     var chat_count: usize = 0;

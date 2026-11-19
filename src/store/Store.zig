@@ -43,6 +43,7 @@ const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
 const write_batch = @import("write_batch.zig");
+const pass_plan = @import("pass_plan.zig");
 const transition = @import("transition.zig");
 const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
@@ -563,8 +564,17 @@ pub const Store = struct {
         call: *const fn (context: *anyopaque, session: []const u8) void,
     };
 
+    /// The optional receipt is owned by the caller and must outlive the reply.
+    pub fn configureWithCreationCommittedInto(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?CreationCommitted, receipt: ?*command_reply.CreationConfiguration, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, committed, receipt, faults });
+    }
+
     pub fn configureWithCreationCommitted(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?CreationCommitted, faults: Faults) error{OutOfMemory}!ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, committed, faults });
+        return self.configureWithCreationCommittedInto(command, preset, initial_skills, reload_capture, allocator, committed, null, faults);
+    }
+
+    pub fn configureInto(self: *Store, command: *const content_custody.ConfigureCommand, receipt: *command_reply.CreationConfiguration, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.configureWithCreationCommittedInto(command, null, null, null, std.heap.c_allocator, null, receipt, faults);
     }
 
     fn configureHeld(
@@ -575,6 +585,7 @@ pub const Store = struct {
         reload_capture: ?*const skills_domain.Capture,
         allocator: std.mem.Allocator,
         committed: ?CreationCommitted,
+        receipt: ?*command_reply.CreationConfiguration,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
         var reply: ConfigureReply = undefined;
@@ -589,6 +600,7 @@ pub const Store = struct {
             .allocator = allocator,
             .committed = committed,
             .reply = &reply,
+            .receipt = receipt,
         }, faults) catch |err| {
             stderr.print("rui: Store configure transition failed: {s}\n", .{@errorName(err)});
             switch (err) {
@@ -626,7 +638,16 @@ pub const Store = struct {
     }
 
     pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, null), faults });
+        return self.submitMessageCapturedSkillsInto(command, committed, initial_skills, captured_skill, null, faults);
+    }
+
+    /// The optional receipt is owned by the caller and must outlive the reply.
+    pub fn submitMessageCapturedSkillsInto(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, receipt: ?*command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.submitMessageQueued(command, committed, initial_skills, captured_skill, null, receipt, faults);
+    }
+
+    pub fn submitMessageWithModelInto(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, receipt: *command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.submitMessageCapturedSkillsInto(command, committed, null, null, receipt, faults);
     }
 
     pub fn submitMessageParts(self: *Store, command: *const content_custody.MessageCommand, loan: @import("../InputCapture.zig").Loan, committed: ?MessageCommitted, faults: Faults) !MessageReply {
@@ -642,8 +663,22 @@ pub const Store = struct {
         captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) !MessageReply {
+        return self.submitMessagePartsCapturedSkillsInto(command, loan, committed, initial_skills, captured_skill, null, faults);
+    }
+
+    /// Receipt storage is caller-owned and must outlive the reply.
+    pub fn submitMessagePartsCapturedSkillsInto(
+        self: *Store,
+        command: *const content_custody.MessageCommand,
+        loan: @import("../InputCapture.zig").Loan,
+        committed: ?MessageCommitted,
+        initial_skills: ?*const skills_domain.Initial,
+        captured_skill: ?*const skills_domain.MessageCapture,
+        receipt: ?*command_reply.CreationConfiguration,
+        faults: Faults,
+    ) !MessageReply {
         var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
+        return self.submitMessageQueued(command, committed, initial_skills, captured_skill, &saving, receipt, faults);
     }
 
     /// Fixture adapter for a compound Message and its captured skills.
@@ -658,6 +693,10 @@ pub const Store = struct {
         return self.submitMessagePartsCapturedSkills(command, loan, null, initial_skills, captured_skill, .{});
     }
 
+    fn submitMessageQueued(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, saving: ?*content_parts.Saving, receipt: ?*command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, saving, receipt, faults });
+    }
+
     fn submitMessageWithModelHeld(
         self: *Store,
         command: *const content_custody.MessageCommand,
@@ -665,6 +704,7 @@ pub const Store = struct {
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.MessageCapture,
         saving: ?*content_parts.Saving,
+        receipt: ?*command_reply.CreationConfiguration,
         faults: Faults,
     ) MessageReply {
         var reply: MessageReply = undefined;
@@ -679,6 +719,7 @@ pub const Store = struct {
             .captured = captured_skill,
             .parts_saving = saving,
             .reply = &reply,
+            .receipt = receipt,
         }, faults) catch {
             reply = .infrastructure_failure;
         };
@@ -871,16 +912,19 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
-    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
-        return self.queue().run(publicConversationPageHeld, .{ self, request, out });
+    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
+        // Allocated before entry: a failed allocation must not fence the Store.
+        const reads = try row_allocator.create([PublicConversationPage.capacity]reads_domain.PublicRowRead);
+        defer row_allocator.destroy(reads);
+        return self.queue().run(publicConversationPageHeld, .{ self, request, out, reads });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, reads: *[PublicConversationPage.capacity]reads_domain.PublicRowRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out));
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, reads));
     }
 
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
@@ -1893,7 +1937,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19048)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15880 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2280,7 +2324,7 @@ fn recoverRerun(context: *anyopaque) bool {
         };
         return true;
     }
-    if (mysql.state.failure) |err| if (err == error.StoreConnectionLost or err == error.OwnershipLost or err == error.CommitOutcomeUnknown) {
+    if (mysql.state.failure) |err| if (pass_plan.fences(err)) {
         _ = @errorName(fence(self, err));
     };
     return false;
@@ -2345,7 +2389,7 @@ pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage)
 
 pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
-    try self.publicConversationPage(&request, &page);
+    try self.publicConversationPage(&request, &page, std.testing.allocator);
     return page;
 }
 

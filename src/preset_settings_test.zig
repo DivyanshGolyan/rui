@@ -37,6 +37,8 @@ test "settings presets resolve MCP tools through the same tool set as configure"
             for ([_]bool{ false, true }) |available| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &workspace_buffer)];
                 var storage: store.Store = undefined;
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{
                     .served = routes,
@@ -46,6 +48,8 @@ test "settings presets resolve MCP tools through the same tool set as configure"
 
                 var direct: wire_request.ConfigureCommand = .{};
                 try direct.key.set("mcp-direct");
+                direct.configuration.workspace.state = .value;
+                try direct.configuration.workspace.value.set(workspace);
                 direct.configuration.model.state = .value;
                 try direct.configuration.model.value.set("model-a");
                 direct.configuration.reasoning_effort.state = .explicit_null;
@@ -59,10 +63,12 @@ test "settings presets resolve MCP tools through the same tool set as configure"
                 var request: wire_request.ConfigureCommand = .{ .preset = .{} };
                 try request.key.set("mcp-preset");
                 try request.preset.?.set("reader");
+                request.configuration.workspace = direct.configuration.workspace;
                 var resolved: wire_request.ConfigureCommand = .{ .key = request.key };
                 var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer memory.deinit();
                 try std.testing.expect(try core_tools.parseAgentSpec(memory.allocator(), settings.presets.specs[0].spec, &resolved.configuration) == .accepted);
+                resolved.configuration.workspace = request.configuration.workspace;
                 const preset = try storage.configureWithPreset(&resolved, &.{ .request_digest = request.presetRequestDigest() }, .{});
                 if (available) {
                     try std.testing.expect(ordinary == .accepted);

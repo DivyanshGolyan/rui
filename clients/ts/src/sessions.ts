@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -15,28 +16,30 @@ type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
 export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
-/** The Session settings the Host takes today. */
+/** Session settings. The Host resolves omitted creation settings. */
 export interface AgentSpec {
-	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
+	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** May change within the Session's fixed provider. */
+	/** Creation requires a model, supplied directly or by a preset. May change within the fixed provider. */
 	model: string;
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
 	/** Configured allowed tool names, such as `bash` and `web_search`. */
-	tools: readonly string[];
+	tools?: readonly string[];
 	/** Loaded tool intent within `tools`; each Operation freezes its effective model offer. */
 	loadedTools?: readonly string[];
 	/** Tokens reserved for model output; null clears the override. */
 	outputReservation?: number | null;
-	permissionMode: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
-	effort: Schemas["AgentSpec"]["effort"];
-	/** Compact the conversation at this many tokens. */
-	compactAt: number;
+	permissionMode?: "ask" | "bypass";
+	/** Reasoning effort. `null` requests the Host default for the selected model. */
+	effort?: Schemas["AgentSpec"]["effort"];
+	/** Compact the conversation at this many tokens. `null` requests the Host default. */
+	compactAt?: number | null;
+	/** Soft creation preferences, used when no stronger setting applies. */
+	preferences?: { reasoningEffort?: NonNullable<Schemas["AgentSpec"]["effort"]>; permissionMode?: "ask" | "bypass" };
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
@@ -44,11 +47,19 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Creation needs a complete spec, or a named preset with explicit overrides. */
-export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
-	/** Create an attached child, inheriting provider, workspace and Bash environment. */
-	parent?: string;
-};
+type CreationSettings = (AgentSpec & { preset?: never }) | (Partial<AgentSpec> & { preset: string });
+
+/** Creation needs a model, directly or from a preset. Roots carry a Workspace; children inherit it. */
+export type SessionCreate = CreationSettings & (
+	| { workspace: string; parent?: never }
+	| { preset: string; parent?: never }
+	| {
+		/** Create an attached child, inheriting provider, Workspace and Bash environment. */
+		parent: string;
+		workspace?: never;
+		provider?: never;
+	}
+);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
@@ -148,6 +159,10 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),
 		...(spec.label === undefined ? {} : { label: spec.label }),
+		...(spec.preferences === undefined ? {} : { preferences: {
+			...(spec.preferences.reasoningEffort === undefined ? {} : { reasoning_effort: spec.preferences.reasoningEffort }),
+			...(spec.preferences.permissionMode === undefined ? {} : { permission_mode: spec.preferences.permissionMode }),
+		} }),
 	};
 }
 
@@ -216,6 +231,12 @@ export class Session {
 	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
 	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
 		return readContentBytes(this.#link, this.id, entry);
+	}
+
+	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */
+	async readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
+		if (entry.content?.type !== "parts") throw new TypeError("entry content is not parts");
+		return readPartBytes(this.#link, this.id, entry.content.owner, ordinal);
 	}
 
 	/** A Current report's summary (D12). A separate ending is not reported. */

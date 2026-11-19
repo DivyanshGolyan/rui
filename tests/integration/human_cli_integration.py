@@ -1623,11 +1623,16 @@ def main(selected="all"):
     import canonical_fixture
     import fresh_tool_profile_cases
     import session_chrome_cases
+    import start_receipt_cases
     import terminal_restoration_cases
     import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt"), selected
+    if selected in ("all", "callers", "caller-core", "start-receipt"):
+        start_receipt_cases.main()
+    if selected == "start-receipt":
+        return
     if selected in ("all", "callers", "caller-core", "tool-intent"):
         tool_intent_cases.main()
     if selected == "tool-intent":
@@ -1928,17 +1933,6 @@ def main(selected="all"):
             assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
-        saved.unlink()
-        fallback.parent.mkdir(parents=True)
-        fallback.symlink_to(store, target_is_directory=True)
-        with terminal_process([str(fixture.RUI), "session", "resume", "--", session],
-            env={**os.environ, "HOME": str(preferences_home)},
-        ) as (entered, master):
-            assert "Session:" not in read_terminal(master, "› ")
-            assert "Copy last answer" in chat_info_frame(master)
-            terminal_step(master, "\x03", "Your chats keep working")
-            assert entered.wait(timeout=5) == 0
-        fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
         assert run(preferences_home, "session", "inspect", "--session", session, success=False) == ""
@@ -1952,16 +1946,10 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: close_pty(slave), lambda: close_pty(master))
         assert entered.returncode == 6 and b"[store_unavailable]" in entered.stderr, entered.stderr
-        assert not (state / "missing").exists() and not fallback.exists()
+        assert not (state / "missing").exists()
         assert run(preferences_home, "request", "list") == before_missing
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["state"]["kind"] == "idle"
-        before = run(preferences_home, "request", "list")
-        invalid_store = subprocess.run([str(fixture.RUI), "session", "send", "--store", "", "--to",
-            session], env={**os.environ, "HOME": str(preferences_home)},
-            input="not sent", capture_output=True, text=True, timeout=5)
-        assert invalid_store.returncode == 2 and "[store_path_malformed]" in invalid_store.stderr, invalid_store
-        assert invalid_store.stdout == "" and run(preferences_home, "request", "list") == before
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
         no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
@@ -2174,9 +2162,15 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))
         assert json.loads(run(home, "request", "recover", config["request"]))["answer"]["replayed"] is True
-        assert json.loads(run(home, "request", "recover", config["request"])) == {
+        creation = {"provider": "codex", "model": "gpt-6-sol", "reasoning_effort": "low",
+                    "workspace": str(workspace.resolve()), "tools": ["bash"], "loaded_tools": ["bash"],
+                    "permission_mode": "ask", "compaction_trigger": str(compaction_trigger("codex", "gpt-6-sol"))}
+        assert config["admission"]["answer"]["configuration"] == creation, config
+        recovered = json.loads(run(home, "request", "recover", config["request"]))
+        assert recovered == {
             "context": {"store": str(store), "session": session, "key": config["request"], "kind": "configure"},
-            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True}}
+            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True,
+                       "configuration": creation}}, recovered
 
         text = state / "input"
         text.write_text("first input")

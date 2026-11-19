@@ -47,7 +47,7 @@ rui host restart --all
 
 `--all` is required; this command does not accept `--store` yet.
 It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
-Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
+Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved, inspected or checked fails before any stop, and the Host keeps running; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
 A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
 For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.

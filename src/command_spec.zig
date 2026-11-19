@@ -39,7 +39,9 @@ pub const Spec = struct {
 
     pub fn replyShapes(comptime self: Spec, comptime Wire: type) type {
         const r = self.Reply(Wire);
-        return Shapes(if (@hasDecl(r, "accepted_skills"))
+        return Shapes(if (@hasDecl(r, "accepted_create"))
+            (if (@hasDecl(r, "accepted_skills")) .{ r.accepted, r.accepted_create, r.accepted_skills, r.rejected } else if (@hasDecl(r, "rejected_parts")) .{ r.accepted, r.accepted_create, r.rejected, r.rejected_parts } else .{ r.accepted, r.accepted_create, r.rejected })
+        else if (@hasDecl(r, "accepted_skills"))
             .{ r.accepted, r.accepted_skills, r.rejected }
         else if (@hasDecl(r, "rejected_parts"))
             .{ r.accepted, r.rejected, r.rejected_parts }

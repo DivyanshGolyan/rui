@@ -432,6 +432,9 @@ RULES = (
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "WIR-4 published request schemas and generated wire contract"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
+    (("clients/ts/test/fixtures/empty-creation.ts", "clients/ts/test/fixtures/preferences-bridge.ts"),
+     ("settings-integration",), ("settings-integration",),
+     "Three-client creation parity uses the TypeScript helper against both Store engines"),
     (("tests/integration/mcp_sdk/*",), ("settings-integration", "ts-client"), ("settings-integration", "ts-client"),
      "The MCP SDK servers a settings document starts"),
     (("src/mcp/*", "src/http1/*"), ("settings-integration",), ("settings-integration",),
@@ -611,7 +614,7 @@ POLICY_SELF_CHECKS = (
 
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
                             "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
-                            "model-picker-integration", "read-image-integration",
+                            "model-picker-integration", "read-image-integration", "settings-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator",
                             "peer-integration"})

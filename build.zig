@@ -21,6 +21,11 @@ pub fn build(b: *std.Build) void {
         @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
+    // Host tools (generators, translate-c) run on the build host. CI builds them for the same baseline CPU as
+    // the products so their cache snapshots are reusable across runners; local builds keep the host's native
+    // CPU. The check above makes CI's target the native platform with the baseline CPU. Dependencies share
+    // graph.host, so this must come before any b.dependency call.
+    if (ci_mode) b.graph.host = target;
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
         .policy = "baseline",
         .arch = @tagName(target.result.cpu.arch),
@@ -374,11 +379,11 @@ pub fn build(b: *std.Build) void {
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
     upgrade_step.dependOn(&upgrade_integration.step);
 
-    const settings_integration = b.addSystemCommand(&.{"python3"});
+    const settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     settings_integration.addFileArg(b.path("tests/integration/settings_integration.py"));
     settings_integration.addFileArg(release_safe);
     settings_integration.addArg("--require-mcp-sdk");
-    const mysql_settings_integration = b.addSystemCommand(&.{"python3"});
+    const mysql_settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     mysql_settings_integration.addFileArg(b.path("tests/integration/settings_mysql_integration.py"));
     mysql_settings_integration.addFileArg(release_safe);
     mysql_settings_integration.addFileArg(ci.path(mysql_launch_admin));

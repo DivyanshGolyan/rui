@@ -671,7 +671,7 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 });
 
 test("presets and configure encode one spec including loaded tools and output reservation", async () => {
-	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["web_search", "find_tools"], loadedTools: ["find_tools"], outputReservation: 42, permissionMode: "ask" as const, instructions: "rules", outputSchema: { type: "object" } };
+	const spec = { workspace: "/caller", model: "custom", effort: null, compactAt: 1000, tools: ["web_search", "find_tools"], loadedTools: ["find_tools"], outputReservation: 42, permissionMode: "ask" as const, instructions: "rules", outputSchema: { type: "object" } };
 	const options = { presets: { review: spec } };
 	let configuration: unknown;
 	const sessions = new Sessions({ async exchange(_path, build) {

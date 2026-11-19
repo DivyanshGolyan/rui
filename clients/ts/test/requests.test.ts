@@ -5,6 +5,7 @@ import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } fr
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import { RuiRequestError } from "../src/errors.ts";
+import type { HostSettings } from "../src/settings.ts";
 
 test("configuration preserves omitted, null and value states and normalizes tools", async () => {
 	const requests: components["schemas"]["ConfigureRequest"][] = [];
@@ -58,6 +59,23 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 		execution: { status: "partial", dispatch_fenced: false, custody_occupied: "0", scratch_used_bytes: "0", unavailable: ["structured_output"] },
 	};
 }
+
+type CommandObservation = Extract<components["schemas"]["ObserveCommandReply"], { observation: unknown }>["observation"];
+type PendingMessageWork = Extract<CommandObservation, { kind: "message"; work: unknown }>["work"];
+
+function messageWorkTypeContract(work: PendingMessageWork): void {
+	const { attention: _attention, ...withoutAttention } = work;
+	const { group: _group, ...withoutGroup } = work;
+	const { actions: _actions, ...withoutActions } = work;
+	// @ts-expect-error Message work always carries the Host's attention, even when null.
+	const missingAttention: PendingMessageWork = withoutAttention;
+	// @ts-expect-error Message work always carries the Host's group.
+	const missingGroup: PendingMessageWork = withoutGroup;
+	// @ts-expect-error Message work always carries the Host's valid actions.
+	const missingActions: PendingMessageWork = withoutActions;
+	void [missingAttention, missingGroup, missingActions];
+}
+void messageWorkTypeContract;
 
 const idleWork: CurrentReport["work"] = {
 	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
@@ -221,7 +239,7 @@ test("interrupt treats only resolved or mismatched targets as no effect", async 
 
 
 test("creation sends explicit settings without Host client defaults", async () => {
-	const spec: SessionSpec = { model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" };
+	const spec = { workspace: "/caller", model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" } satisfies SessionSpec;
 	const link: Link = {
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
@@ -232,7 +250,7 @@ test("creation sends explicit settings without Host client defaults", async () =
 			assert.deepEqual(request.configuration.tools, []);
 			assert.deepEqual(request.configuration.permissionMode, "ask");
 			assert.deepEqual(request.configuration.provider, undefined);
-			assert.deepEqual(request.configuration.workspace, undefined);
+			assert.equal(request.configuration.workspace, "/caller");
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -258,14 +276,37 @@ test("model updates serialize without changing omitted settings", async () => {
 	assert.equal(calls, 1);
 });
 
+test("settings resets forward null to the Host without completing omitted settings", async () => {
+	const update: SessionUpdate = { effort: null, compactAt: null };
+	let calls = 0;
+	const link: Link = {
+		async exchange(path, build) {
+			calls++;
+			assert.equal(path, "/v1/configure");
+			const request = JSON.parse(build("store"));
+			assert.equal(request.session, "existing-session");
+			assert.equal(request.key, "reset-defaults");
+			assert.deepEqual(request.configuration, { effort: null, compactAt: null });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+		},
+	};
+	await new Session(link, "existing-session").update(update, { idempotencyKey: "reset-defaults" });
+	assert.equal(calls, 1);
+});
+
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
-	// @ts-expect-error creation must specify reasoning, even when explicitly null
 	const missingEffort: SessionSpec = withoutEffort;
-	// @ts-expect-error compaction is never nullable
+	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
+	// @ts-expect-error creation needs an explicit model
+	const missingModel: SessionSpec = {};
+	// @ts-expect-error presets must supply their model
+	const missingPresetModel: HostSettings = { presets: { review: {} } };
+	// @ts-expect-error an explicit null model cannot request the Host default
+	const nullModel: SessionSpec = { model: null };
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, nullCompaction, sparse];
+	void [missingEffort, minimal, missingModel, missingPresetModel, nullModel, nullCompaction, sparse];
 }
 void sessionTypeContract;
 
@@ -286,10 +327,25 @@ test("creation can name a preset without inventing missing fields", async () => 
 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
-	// @ts-expect-error neither a full spec nor a preset
+	void sessions.create({ preset: "review", workspace: "/caller" }, { idempotencyKey: "preset-workspace" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol" }, { idempotencyKey: "empty-settings" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", instructions: "Do this" }, { idempotencyKey: "partial" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol" }, { idempotencyKey: "child" });
+	void sessions.create({ parent: "p4rent", preset: "review" }, { idempotencyKey: "child-preset" });
+	// @ts-expect-error a root needs a model unless a preset supplies it
+	void sessions.create({ workspace: "/caller" }, { idempotencyKey: "missing-root-model" });
+	// @ts-expect-error a child needs a model unless a preset supplies it
+	void sessions.create({ parent: "p4rent" }, { idempotencyKey: "missing-child-model" });
+	// @ts-expect-error root creation always carries the caller's Workspace
 	void sessions.create({}, { idempotencyKey: "empty" });
-	// @ts-expect-error a partial spec needs a preset
-	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
+	// @ts-expect-error disabling Bash does not make the root Workspace optional
+	void sessions.create({ model: "gpt-6.1-sol", tools: [] }, { idempotencyKey: "no-tools" });
+	// @ts-expect-error a child inherits its Workspace
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
+	// @ts-expect-error a child inherits its provider
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", provider: "openai" }, { idempotencyKey: "child-provider" });
+	// @ts-expect-error an explicit null model is never valid
+	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null
 	void sessions.create({ preset: null }, { idempotencyKey: "null" });
 	// @ts-expect-error presets only seed creation
@@ -304,7 +360,7 @@ test("unknown tool refusals preserve MCP advisory detail through request errors"
 		const detail = code === "mcp_server_unavailable" ? message : "spec.tools: lookup is not a known tool";
 		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: detail } })) };
 		const session = new Session(link, "abc123");
-		const spec: SessionSpec = { model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" };
+		const spec = { workspace: "/caller", model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" } satisfies SessionSpec;
 		for (const request of [
 			() => new Sessions(link).create(spec, { idempotencyKey: "create" }),
 			() => session.update({ tools: ["lookup"] }),

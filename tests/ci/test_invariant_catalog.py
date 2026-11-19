@@ -1,11 +1,21 @@
 """CI-86: Invariant identifiers uniquely name their rows across catalogs."""
 import re
 import unittest
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
-CATALOGS = Path(__file__).resolve().parents[2] / 'docs/invariants'
+ROOT = Path(__file__).resolve().parents[2]
+CATALOGS = ROOT / 'docs/invariants'
+ROW = re.compile(r"^\|\s*([A-Z]+-\d+)\s*\|")
+TEST = re.compile(r'^\s*test\s*[\( ]\s*"([^"\n]+)"', re.MULTILINE)
+
+
+def catalog_rows():
+    for path in sorted(CATALOGS.glob('*.md')):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if ROW.match(line):
+                yield path, number, [cell.strip() for cell in line.split('|')]
 
 
 def duplicate_ids(text):
@@ -27,3 +37,23 @@ class InvariantCatalogTest(unittest.TestCase):
         catalogs = sorted(path for path in CATALOGS.rglob('*.md') if path.name != 'README.md')
         duplicates = duplicate_ids('\n'.join(path.read_text() for path in catalogs))
         self.assertEqual(duplicates, [], f'duplicate invariant IDs: {", ".join(duplicates)}')
+
+    def test_named_migrated_owners_exist_once(self):
+        """CI-87: Migrated owner names identify one source test."""
+        # Unmigrated catalog rows name future owners without an ID prefix.
+        # Enforce the ID-prefixed owners that the migration has landed.
+        tests = defaultdict(list)
+        for root, suffix in ((ROOT / 'src', '*.zig'), (ROOT / 'clients/ts/test', '*.ts')):
+            for path in root.rglob(suffix):
+                for name in TEST.findall(path.read_text()):
+                    tests[name].append(path.relative_to(ROOT))
+        for path, number, cells in catalog_rows():
+            identity = cells[1]
+            owner = re.search(r"`(" + re.escape(identity) + r" [^`]+)`", cells[5])
+            if owner:
+                name = owner.group(1)
+                self.assertEqual(1, len(tests[name]), f"{path}:{number}: {name}: {tests[name]}")
+
+
+if __name__ == '__main__':
+    unittest.main()

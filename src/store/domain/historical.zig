@@ -1105,7 +1105,7 @@ const selected_base_sql = newestBaseSql("current.session_ref", "current.admissio
 
 pub fn effortBeforeSql(comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8, comptime own_floor: []const u8, comptime first_effort: []const u8) []const u8 {
     const floor = replay_recipe.Recipe.floorSql(model, "effort_base_model.model", "effort_base.history_floor", own_floor);
-    const anchor = replay_recipe.Recipe.anchorSql(model, "effort_base_model.model", "(SELECT min(anchor.session_position) FROM model_output_item anchor WHERE anchor.operation_id=effort_base.operation_id AND anchor.session_ref=" ++ session ++ " AND anchor.item_kind=4)");
+    const anchor = replay_recipe.Recipe.anchorSql(model, "effort_base_model.model", "(SELECT min(anchor.session_position) FROM model_output_item anchor @index(model_output_compaction_anchor) WHERE anchor.operation_id=effort_base.operation_id AND anchor.session_ref=" ++ session ++ " AND anchor.item_kind=4)");
     return "(SELECT CASE WHEN retained.operation_id IS NOT NULL THEN " ++ operation_effort.effectiveSql("retained") ++ " WHEN first_effort.operation_id IS NOT NULL THEN first_effort.reasoning_effort ELSE " ++ first_effort ++ " END FROM session effort_seed " ++
         "LEFT JOIN model_operation effort_base ON effort_base.operation_id=" ++ newestBaseSql(session, boundary) ++ " AND effort_base.session_ref=" ++ session ++ " " ++
         "LEFT JOIN session_revision effort_base_model ON effort_base_model.session_ref=effort_base.session_ref AND effort_base_model.revision=effort_base.settings_revision " ++

@@ -1276,7 +1276,7 @@ def saved_settings_served(root, env):
         assert started.returncode == 0, started.stderr
         sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
         create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
-                  "session": "", "preset": "review", "configuration": {"label": None}}
+                  "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         created = post(sock, "configure", create)
         assert created["answer"]["status"] == "accepted", created
         inspected = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session",

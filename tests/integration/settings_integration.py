@@ -19,6 +19,8 @@ import host_process
 import model_fixture as model
 import os_semantics
 from preset_creation_cases import preset_creation
+from empty_creation_cases import empty_creation
+from preferences_bridge_cases import preferences_bridge
 from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
@@ -471,7 +473,7 @@ def main(network, ci):
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
-              "session": "", "preset": "review", "configuration": {"label": None}}
+              "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
     created = post(sock, "configure", create)
     assert created["answer"]["status"] == "accepted", created
     session = created["answer"]["session"]
@@ -479,6 +481,7 @@ def main(network, ci):
     assert replayed["answer"]["replayed"] is True and replayed["answer"]["session"] == session, replayed
     saved = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session", "store": str(store), "session": session})["session"]
     assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+    assert saved["workspace"] == str(root), saved
     assert saved["compaction_trigger_override"] == "100000", saved
     assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
     unknown = post(sock, "configure", dict(create, key="preset:unknown", preset="missing"))
@@ -489,12 +492,19 @@ def main(network, ci):
     assert host.wait(timeout=30) == 0, output(host)
 
     preset_creation(RUI, root / "cli-presets", good["store"], os.environ)
+    empty_creation(RUI, root / "empty-creation", good["store"], os.environ)
+
+    for sparse in ({name: value for name, value in preset.items() if name != "effort"}, dict(preset, tools=["bash"])):
+        accepted = launch(frame(dict(good, presets={"review": sparse})))
+        wait_for_host(sock, store, accepted)
+        host_process.close_stdin(accepted)
+        assert accepted.wait(timeout=30) == 0, output(accepted)
 
     for presets in [
         {"Bad": preset},
         {"a" * 64: dict(preset, **{"\x01" * 64: None})},
-        {"review": {name: value for name, value in preset.items() if name != "effort"}},
-        {"review": dict(preset, tools=["bash"])},
+        {"review": dict(preset, effort=[])},
+        {"review": dict(preset, tools=[None])},
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))), expected_exit=2)
         assert refused["code"] == "settings_invalid", refused
@@ -551,6 +561,7 @@ def main(network, ci):
     held.close()
     silent.close()
     sdk_tool_set(root, good, network, ci)
+    preferences_bridge(RUI, root / "preferences-bridge", {"sqlite": {"dir": str(root / "preferences-store")}}, os.environ)
     print(f"settings document: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four document refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 

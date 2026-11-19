@@ -175,3 +175,19 @@ test "a caller that cannot ask gets the saved provider, else the product default
     snapshot.intent.provider = "codex";
     try std.testing.expectEqualStrings("codex", (try snapshot.resolveUnprompted()).provider.slice());
 }
+
+test "unprompted selection fills the product binding unless saved or explicit choices replace it" {
+    var snapshot: Snapshot = .{ .intent = .{}, .defaults = .{} };
+    var binding = try snapshot.resolveUnprompted();
+    try std.testing.expectEqualStrings(product_defaults.provider, binding.provider.slice());
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, binding.model.slice());
+    try snapshot.defaults.provider.set("openai");
+    try snapshot.defaults.model.set("saved-model");
+    binding = try snapshot.resolveUnprompted();
+    try std.testing.expectEqualStrings("openai", binding.provider.slice());
+    try std.testing.expectEqualStrings("saved-model", binding.model.slice());
+    snapshot.intent = .{ .provider = "codex", .model = "chosen-model" };
+    binding = try snapshot.resolveUnprompted();
+    try std.testing.expectEqualStrings("codex", binding.provider.slice());
+    try std.testing.expectEqualStrings("chosen-model", binding.model.slice());
+}

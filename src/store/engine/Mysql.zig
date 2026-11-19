@@ -9,6 +9,7 @@ const row_decoder = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const content = @import("mysql_content.zig");
 const mysql_open = @import("mysql_open.zig");
+const pass_plan = @import("../pass_plan.zig");
 const Mysql = @This();
 const Failure = engine.Failure;
 const allocator = std.heap.page_allocator;
@@ -165,12 +166,7 @@ pub fn close(self: *Mysql) error{StoreCloseFailed}!void {
     if (failed) return error.StoreCloseFailed;
 }
 
-fn fences(err: Failure) bool {
-    return switch (err) {
-        error.StoreConnectionLost, error.CommitOutcomeUnknown, error.OwnershipLost => true,
-        else => false,
-    };
-}
+const fences = pass_plan.fences;
 
 pub fn check(self: *Mysql) Failure!void {
     if (self.state.failure) |err| {

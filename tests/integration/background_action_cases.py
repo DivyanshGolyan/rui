@@ -107,6 +107,7 @@ def prove_native_background(state, *, deadline=None):
                     assert current["work"]["latest_outcome"]["code"] == "completed" and current["work"]["first_action"] == identity, current
                     assert any(item["turn"] == current["work"]["turn"] and item["outcome"] == "completed" for item in current["recent_messages"]), current
                     assert [item["action"] for item in current["actionable_permissions"]] == [identity], current
+                    assert current["work"]["actions"]["decide"] == identity, current
                     allow(case, store, "allow", session, identity)
                     wait_for(lambda: (workspace / "ready").exists(), "approval after original Turn closed")
                     pid = int((workspace / "launches").read_text())
