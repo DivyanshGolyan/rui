@@ -165,7 +165,13 @@ func exitedTestHost(t *testing.T, stdout io.ReadCloser) *Host {
 }
 
 func TestRetireSocketRemovesOnlyARefusingSocketHintedToTheStore(t *testing.T) {
-	directory := t.TempDir()
+	// t.TempDir nests the test name under TMPDIR, which overflows sun_path (104 bytes on
+	// macOS) on CI's long darwin TMPDIR; a short directory keeps every socket path bindable.
+	directory, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
 	store := filepath.Join(directory, "store")
 	other := filepath.Join(directory, "other")
 	listen := func(name string, keep bool) string {
