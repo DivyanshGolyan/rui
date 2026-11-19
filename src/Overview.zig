@@ -128,6 +128,7 @@ pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
+    window: *const fn (*Self, client.Requests, session_list.ArchivedCursor, *protocol_reply.ArchivedWindowPage) anyerror!?protocol_reply.ReadFailure,
     first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
@@ -137,7 +138,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .window = windowPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
 
 pub const Left = struct {
     session: view.Reference,
@@ -283,6 +284,7 @@ const Job = union(enum) {
     host,
     start_host,
     list,
+    archived: view.ArchivedRead,
     lines: view.Reads,
     create: CreationSnapshot,
     stop: view.Reference,
@@ -295,7 +297,7 @@ const Job = union(enum) {
 
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
-            .host, .list, .lines, .models => .cancel_read,
+            .host, .list, .archived, .lines, .models => .cancel_read,
             .start_host, .create, .stop, .archive, .pin, .defaults => .settle_effect,
         };
     }
@@ -313,6 +315,7 @@ const Answer = union(enum) {
     host: HostRead,
     start_host: struct { read: HostRead, launch: HostLaunch },
     page: protocol_reply.SessionListPage,
+    archived: protocol_reply.ArchivedWindowPage,
     lines: [view.max_first_line_reads]Line,
     reply: Reply,
     menu: model_picker.Menu,
@@ -383,7 +386,6 @@ job_count: usize = 0,
 job: Job = .list,
 answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
-traversal_archive: protocol.SessionArchiveFilter = .active,
 scratch: ?std.Io.File = null,
 
 opened: view.Reference = undefined,
@@ -1282,12 +1284,12 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .new_session => next = .new_session,
         .list => |since| {
             self.traversal = .init(since);
-            self.traversal_archive = self.state.listing_archive.?;
             if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
             if (self.state.listed_at_ms == null) self.queueHost();
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
+        .read_archived => |read| self.queue(.{ .archived = read }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => {
@@ -1369,6 +1371,10 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         .list => {
             self.answer = .{ .page = undefined };
             if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
+        },
+        .archived => |read| {
+            self.answer = .{ .archived = undefined };
+            if (try self.ops.window(self, requests, read.from, &self.answer.archived)) |failure| return failure.err();
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
@@ -1464,6 +1470,12 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             const page: view.Page = .of(&self.traversal, &answer.page, &rows);
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
+        },
+        .archived => |read| {
+            outcome catch return self.event(.{ .archived = .{ .read = read, .page = null } });
+            var rows: [session_list.archived_window_size]view.Listed = undefined;
+            const page = view.ArchivedPage.of(&answer.archived, &rows);
+            return self.event(.{ .archived = .{ .read = read, .page = page } });
         },
         .lines => |reads| for (reads.slice(), answer.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
@@ -1883,8 +1895,34 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     const file = self.scratch.?;
     var sink: Sink = .{ .io = self.init.io, .file = file };
     var buffer: client.ReplyBuffer = .{};
-    const reply = try requests.listSessionsFiltered(self.options.store, null, self.traversal_archive, cursor, &sink, &buffer);
+    // The roster walks the live tab. A delta also asks for the archived Sessions that changed, so the
+    // window can take them; they are routed, never held as roster rows.
+    const archive: protocol.SessionArchiveFilter = if (cursor.since != null) .all else .active;
+    const reply = try requests.listSessionsFiltered(self.options.store, null, archive, cursor, &sink, &buffer);
     switch (try protocol_reply.SessionListReply.decode(self.init.io, file, null, cursor, reply)) {
+        .page => |value| page.* = value,
+        .failure => |failure| return failure,
+    }
+    return null;
+}
+
+/// One Archived window page: a single round trip, one job.
+fn windowPage(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+    const Sink = struct {
+        io: std.Io,
+        file: std.Io.File,
+        at: u64 = 0,
+
+        pub fn feed(sink: *@This(), bytes: []const u8) !void {
+            try sink.file.writePositionalAll(sink.io, bytes, sink.at);
+            sink.at += bytes.len;
+        }
+    };
+    const file = self.scratch.?;
+    var sink: Sink = .{ .io = self.init.io, .file = file };
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try requests.listArchivedWindow(self.options.store, cursor, &sink, &buffer);
+    switch (try protocol_reply.ArchivedWindowReply.decode(self.init.io, file, cursor, reply)) {
         .page => |value| page.* = value,
         .failure => |failure| return failure,
     }
@@ -2017,10 +2055,16 @@ const fake_operations: Operations = .{
             return .{ .observation = .{ .ready = .{ .facts = .{ .instance = @splat(1), .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } } } };
         }
     }.host,
+    .window = struct {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            page.* = .{};
+            return null;
+        }
+    }.window,
     .list = struct {
-        fn list(self: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
-            Seen.now.archive_filter = self.traversal_archive;
+            Seen.now.archive_filter = if (cursor.since != null) .all else .active;
             Seen.now.since = cursor.since;
             page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
@@ -3787,7 +3831,7 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     try std.testing.expectEqual(HostState.stopped, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     overview.state.listing = true;
-    overview.state.listing_archive = overview.state.archive;
+    overview.state.listing_wanted = true;
     try std.testing.expect(try overview.event(.{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 } } } } }) == null);
     try std.testing.expect(!overview.state.holdsHost());
     try std.testing.expectEqual(HostState.paused, overview.hostState());
@@ -4377,6 +4421,45 @@ fn sui4NestedKeys() !void {
     }
 }
 
+test "overview Archived window effect runs one job and its reply becomes the window event" {
+    const Window = struct {
+        var calls: usize = 0;
+        var last: session_list.ArchivedCursor = .head;
+
+        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            _ = self;
+            _ = requests;
+            calls += 1;
+            last = cursor;
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = .{
+                .reference = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable,
+                .archive_seq = 42,
+                .stopped_at = test_now_s,
+                .label = null,
+                .first = .{ .admission = 4, .line = protocol.Bounded(session_list.max_last_line_bytes).from("Archived line") catch unreachable },
+            };
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.window = Window.window;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Window.calls);
+    try std.testing.expectEqual(session_list.ArchivedCursor.head, Window.last);
+    try std.testing.expect(overview.state.find("k7m2qx".*) != null);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.inflight);
+    try std.testing.expect(overview.state.archived.at_head);
+}
+
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
@@ -4394,8 +4477,19 @@ test "overview archive effects preserve server filter, pending visibility, and r
             return null;
         }
     };
+    // The Archived window answers the one archived Session the listing names, as the Host's window would.
+    const Windowing = struct {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            page.* = .{ .count = 0 };
+            if (Listing.archive_state != .archived) return null;
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = .{ .reference = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .admission = 4, .line = null } };
+            return null;
+        }
+    };
     var ops = fake_operations;
     ops.list = Listing.list;
+    ops.window = Windowing.window;
     Listing.archive_state = .active;
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
@@ -4423,7 +4517,8 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
+    // Roster deltas ask for changed archived Sessions too (the window takes them); the window itself is a read.
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .stopped, .input = .unarchive } });
     try std.testing.expect(try rig.settle() == null);
@@ -4434,10 +4529,11 @@ test "overview archive effects preserve server filter, pending visibility, and r
     Listing.archive_state = .active;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+    // The restored Session is a live roster row now: the roster keeps it while the window lets it go.
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 

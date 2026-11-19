@@ -1564,7 +1564,7 @@ pub const SessionListPage = struct {
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 pin_order: ?JsonString(20),
                 reference: JsonString(protocol.max_session_bytes),
-                // The Archived key. Live rows carry null; the overview does not read it until the Archived window client.
+                // The Archived key: null exactly while the Session is active (archiving and archived rows carry it).
                 archive_seq: ?JsonString(20),
                 parent: ?JsonString(protocol.session_id_bytes),
                 creator: ?JsonString(protocol.session_id_bytes),
@@ -1600,6 +1600,7 @@ pub const SessionListPage = struct {
                 .archive_state = wire.archive_state.value,
                 .pin_order = if (wire.pin_order) |rank| try ActivityPage.id(rank, false) else null,
                 .reference = wire.reference.value,
+                .archive_seq = if (wire.archive_seq) |key| try ActivityPage.id(key, false) else null,
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .creator = if (wire.creator) |creator| creator.value else null,
                 .workspace = wire.workspace.value,
@@ -1627,6 +1628,7 @@ pub const SessionListPage = struct {
                 .peers = .{ .from_person_at = if (wire.peers.from_person_at) |at| try ActivityPage.id(at, false) else null },
             };
             if (row.state_change_at < row.created_at or row.subtree_state_change_at < row.state_change_at or row.descendant_needs_you_count > row.descendant_count) return error.InvalidCharacter;
+            if ((row.archive_state == .active) != (row.archive_seq == null)) return error.InvalidCharacter;
             if (wire.first_message) |first| row.first_message = first.value;
             if (wire.last_line) |last| {
                 row.last_line = .{ .position = try ActivityPage.id(last.position, false), .text = if (last.text) |text| text.value else null };
@@ -1743,6 +1745,126 @@ pub const SessionListPage = struct {
             if (index != 0) try writer.writeAll(",");
             try row.writeJson(writer);
         }
+    }
+};
+
+/// One Archived window page (`delta` "window"): slim rows, newest archive first, with the page's edge keys.
+pub const ArchivedWindowPage = struct {
+    pub const Row = struct {
+        reference: protocol.Bounded(protocol.max_session_bytes),
+        archive_seq: u64,
+        stopped_at: u64,
+        label: ?protocol.Bounded(protocol.max_label_bytes),
+        first: ?struct { admission: u64, line: ?protocol.Bounded(session_list.max_last_line_bytes) },
+    };
+
+    const JsonRow = struct {
+        value: Row,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonRow {
+            const Wire = struct {
+                reference: JsonString(protocol.max_session_bytes),
+                archive_seq: JsonString(20),
+                stopped_at: JsonString(20),
+                label: ?JsonString(protocol.max_label_bytes),
+                first: ?struct { admission: JsonString(20), line: ?JsonString(session_list.max_last_line_bytes) },
+            };
+            const wire = try std.json.innerParse(Wire, allocator, source, options);
+            if (!protocol.validSessionId(wire.reference.slice())) return error.InvalidCharacter;
+            if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
+            return .{ .value = .{
+                .reference = wire.reference.value,
+                .archive_seq = try ActivityPage.id(wire.archive_seq, false),
+                .stopped_at = try ActivityPage.id(wire.stopped_at, true),
+                .label = if (wire.label) |label| label.value else null,
+                .first = if (wire.first) |first| .{ .admission = try ActivityPage.id(first.admission, false), .line = if (first.line) |line| line.value else null } else null,
+            } };
+        }
+    };
+
+    rows: [session_list.archived_window_size]Row = undefined,
+    count: usize = 0,
+    since: protocol.SinceToken = .{ .instance = @splat(0), .generation = 0 },
+    first: ?u64 = null,
+    last: ?u64 = null,
+    more_above: bool = false,
+    more_below: bool = false,
+
+    /// Reads the reply to `window` and refuses anything the Host could not have answered for that cursor.
+    pub fn read(io: std.Io, file: std.Io.File, bytes: u64, cursor: session_list.ArchivedCursor) !ArchivedWindowPage {
+        if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
+        const Rows = JsonArray(JsonRow, session_list.archived_window_size);
+        const Wire = struct {
+            version: JsonString(8),
+            type: JsonString(32),
+            sessions: Rows,
+            delta: JsonEnum(protocol.ListDelta),
+            since: JsonString(protocol.SinceToken.max_bytes),
+            next: ?struct {
+                first: ?JsonString(20) = null,
+                last: ?JsonString(20) = null,
+                more_above: bool,
+                more_below: bool,
+            },
+        };
+        var input_buffer: [protocol.content_window_bytes]u8 = undefined;
+        var file_reader = file.reader(io, &.{});
+        var body = file_reader.interface.limited(.limited64(bytes), &input_buffer);
+        var storage: [2 * protocol.max_workspace_bytes + protocol.content_window_bytes]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        var reader = std.json.Reader.init(fixed.allocator(), &body.interface);
+        defer reader.deinit();
+        const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &reader, .{ .ignore_unknown_fields = true }) catch return error.InvalidSessionPage;
+        if (body.remaining != .nothing) return error.InvalidSessionPage;
+        if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("session_list")) return error.InvalidSessionPage;
+        if (wire.delta.value != .window) return error.InvalidSessionPage;
+        const next = wire.next orelse return error.InvalidSessionPage;
+        var result: ArchivedWindowPage = .{
+            .count = wire.sessions.count,
+            .since = protocol.SinceToken.parse(wire.since.slice()) catch return error.InvalidSessionPage,
+            .more_above = next.more_above,
+            .more_below = next.more_below,
+        };
+        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json.value;
+        for (result.rows[0..result.count], 0..) |*row, index| {
+            if (index != 0 and row.archive_seq >= result.rows[index - 1].archive_seq) return error.InvalidSessionPage;
+            if (row.archive_seq == 0 or row.archive_seq > std.math.maxInt(i64)) return error.InvalidSessionPage;
+            for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
+        }
+        if (result.count != 0) {
+            result.first = result.rows[0].archive_seq;
+            result.last = result.rows[result.count - 1].archive_seq;
+        }
+        if ((next.first != null) != (result.count != 0) or (next.last != null) != (result.count != 0)) return error.InvalidSessionPage;
+        if (next.first) |first| if (try ActivityPage.id(first, false) != result.first.?) return error.InvalidSessionPage;
+        if (next.last) |last| if (try ActivityPage.id(last, false) != result.last.?) return error.InvalidSessionPage;
+        // The page's side is fixed by the cursor: head has nothing above it, tail nothing below, and a keyed
+        // read keeps every row on its own side of the key.
+        switch (cursor) {
+            .head => if (result.more_above) return error.InvalidSessionPage,
+            .tail => if (result.more_below) return error.InvalidSessionPage,
+            .below => |key| {
+                if (!result.more_above) return error.InvalidSessionPage;
+                for (result.rows[0..result.count]) |row| if (row.archive_seq >= key) return error.InvalidSessionPage;
+            },
+            .above => |key| {
+                if (!result.more_below) return error.InvalidSessionPage;
+                for (result.rows[0..result.count]) |row| if (row.archive_seq <= key) return error.InvalidSessionPage;
+            },
+        }
+        return result;
+    }
+};
+
+pub const ArchivedWindowReply = union(enum) {
+    page: ArchivedWindowPage,
+    failure: ReadFailure,
+
+    pub fn decode(io: std.Io, file: std.Io.File, cursor: session_list.ArchivedCursor, reply: ReportReply) !ArchivedWindowReply {
+        return switch (reply) {
+            .report => |report| .{ .page = try ArchivedWindowPage.read(io, file, report.bytes, cursor) },
+            .command => |command| .{ .failure = try decodeReadFailure(command, false) },
+        };
     }
 };
 
