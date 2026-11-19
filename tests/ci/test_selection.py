@@ -2205,9 +2205,10 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                 dispose_all(*(lambda fd=fd: os.close(fd) for fd in releases))
             return result, invocations.read_text().splitlines()
 
-    def records(self, result):
-        return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
-                          result.stdout + result.stderr, re.MULTILINE)
+    def records(self, result, elapsed=r"\d+\.\d{3}s"):
+        found = re.findall(rf"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=({elapsed})$",
+                           result.stdout + result.stderr, re.MULTILINE)
+        return [(name, status, value.removesuffix("s")) for name, status, value in found]
 
     def test_slow_interpreter_startup_is_not_a_driver_failure(self):
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
@@ -2473,8 +2474,8 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
         self.assertIn("dispatch_integration.py release", lines)
         self.assertIn("human_cli_integration.py:callers release", lines)
 
-    def failed_records(self, result, lines):
-        records = self.records(result)
+    def failed_records(self, result, lines, elapsed=r"\d+\.\d{3}s"):
+        records = self.records(result, elapsed)
         self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
         self.assertTrue({status for _, status, _ in records} <= {"0", "42"}, result.stdout + result.stderr)
         return {name for name, status, _ in records if status == "42"}
@@ -2506,7 +2507,8 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                           "host-stop"}
         for part, fail, failed in (
             ("callers", callers_batch, callers_failed),
-            ("parallel", f"{callers_batch} dispatch_integration.py native", callers_failed | {"dispatch", "native"}),
+            ("parallel", f"{callers_batch} dispatch_integration.py native admission_integration.sh",
+             callers_failed | {"dispatch", "native", "admission", "admission-debug"}),
             ("callers", "host_launch_integration.py host_process_test.py host_allocator_test.py",
              {"host-launch", "host-process", "host-allocator"}),
         ):
@@ -2544,19 +2546,23 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
 
     def test_clock_failure_preserves_fixture_results(self):
         # Each clock mode runs with no failure and with failing fixtures. The serial part stops at its failing
-        # fixture; the batch parts run every member and exit 1.
+        # fixture, so only preference-policy is reached; the batch parts run every member, and host-launch is
+        # isolated, so both fail. Each member's record is checked by name, not as a set of statuses.
         batch_fail = "preference_policy_integration.py host_launch_integration.py"
+        batch_failed = {"preference-policy", "host-launch"}
         for clock_error in ("start", "finish"):
-            for part, fail, returncode in (("all", "", 0), ("all", "preference_policy_integration.py", 42),
-                                           ("callers", "", 0), ("callers", batch_fail, 1),
-                                           ("parallel", "", 0), ("parallel", batch_fail, 1)):
+            for part, fail, returncode, failed in (
+                ("all", "", 0, set()),
+                ("all", "preference_policy_integration.py", 42, {"preference-policy"}),
+                ("callers", "", 0, set()),
+                ("callers", batch_fail, 1, batch_failed),
+                ("parallel", "", 0, set()),
+                ("parallel", batch_fail, 1, batch_failed),
+            ):
                 with self.subTest(clock_error=clock_error, part=part, fail=fail):
                     result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
                     self.assertEqual(result.returncode, returncode, result.stdout + result.stderr)
-                    records = re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=unavailable$",
-                                         result.stdout + result.stderr, re.MULTILINE)
-                    self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
-                    self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
+                    self.assertEqual(self.failed_records(result, lines, elapsed="unavailable"), failed)
 
 
 if __name__ == "__main__":
