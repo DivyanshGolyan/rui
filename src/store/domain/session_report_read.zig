@@ -243,7 +243,6 @@ const actionable_permissions = rsql.Read(.{
 });
 
 pub const current_failures = .{
-    .{ report_domain.full_compound_value, error.SessionReadFailed },
     .{ archive_state, error.SessionReadFailed },
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
@@ -260,7 +259,6 @@ fn runCurrent(a: *ReadAccess) !void {
 
 const CurrentFacts = struct {
     archive: archive_state.Result = null,
-    compound: report_domain.full_compound_value.Result = null,
     instructions: content_domain.content_metadata.Row = undefined,
     output_schema: content_domain.content_metadata.Row = undefined,
     counts: SessionCounts,
@@ -307,7 +305,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     a.read(metadata, .{ .content_id = @intCast(instructions_id) }, &facts.instructions);
     if (current.output_schema_id) |content_id| a.read(metadata, .{ .content_id = @intCast(content_id) }, &facts.output_schema);
     a.read(archive_state, .{ .session = session_ref }, &facts.archive);
-    if (profile == .full) a.read(report_domain.full_compound_value, .{ .session = session_ref }, &facts.compound);
     facts.counts.queue(a);
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
@@ -316,7 +313,6 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
-    if (facts.compound) |compound| try report_domain.verifyFullCompound(a, compound);
     try pressure.advance(&facts.compaction, a);
     try facts.work.advance();
 
@@ -349,10 +345,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);
-    const first_message = if (facts.first_row) |*found| report_domain.firstMessage(found, admission) catch |err| {
-        if (err == error.InputPartsNotSupported) try report_domain.verifyFirstMessage(a, found);
-        return err;
-    } else null;
+    const first_message = if (facts.first_row) |*found| try report_domain.firstMessage(found, admission) else null;
     const selected = if (facts.active.row) |*row| row else if (facts.queued.row) |*row| row else null;
     const values: session_report.Current = .{
         .reference = session_ref,
@@ -415,10 +408,6 @@ fn readList(
     const ran = runCurrent(a);
     if (rows.failure) |err| return err;
     try ran;
-    if (rows.unsupported) |value| {
-        try @import("content_parts.zig").verify(a, value);
-        return error.InputPartsNotSupported;
-    }
 }
 
 const ValuesError = error{CorruptStore};
@@ -428,22 +417,8 @@ fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type
     return struct {
         watched: Watcher,
         failure: ?(ValuesError || VisitError) = null,
-        unsupported: ?content_domain.Value = null,
 
         pub fn visit(read: *@This(), row: *const Row) bool {
-            if (comptime Row == resolved_actions.Row) {
-                if (row.result_private or row.result_form > 1) {
-                    read.failure = error.CorruptStore;
-                    return false;
-                }
-                if (row.result_form == 1) {
-                    read.unsupported = content_domain.Value.of(row.result_id.get(), row.result_form, row.result_length, row.result_digest) catch {
-                        read.failure = error.CorruptStore;
-                        return false;
-                    };
-                    return false;
-                }
-            }
             read.visitOne(row) catch |err| {
                 read.failure = err;
                 return false;
@@ -506,7 +481,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .call_ordinal = row.call_ordinal,
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
-            .result = .{ .text = .{ .length = row.result_length, .digest = row.result_digest } },
+            .result = try @import("content_parts.zig").publicValue(&.{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, .{ .action = row.action_id.get() }),
             .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };

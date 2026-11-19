@@ -643,13 +643,7 @@ pub const Store = struct {
         faults: Faults,
     ) !MessageReply {
         var saving = try content_parts.Saving.init(.{ .captured = loan });
-        var reply = self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
-        switch (reply) {
-            .accepted => |*value| value.form = std.meta.activeTag(saving.reference),
-            .rejected => |*value| value.form = std.meta.activeTag(saving.reference),
-            else => {},
-        }
-        return reply;
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
     }
 
     /// Fixture adapter for a compound Message and its captured skills.
@@ -832,17 +826,10 @@ pub const Store = struct {
             out.* = .{ .not_modified = token };
             return;
         }
-        var pending: ?content_domain.Value = null;
-        try self.queue().run(observeCommandHeld, .{ self, key, since, out, &pending });
-        if (pending) |value| {
-            const mapped = try @import("../os/pages.zig").Mapped(content_parts.Cursor).map();
-            defer mapped.unmap();
-            mapped.value.init(value);
-            while (try self.observeCommandPart(mapped.value)) {}
-        }
+        return self.queue().run(observeCommandHeld, .{ self, key, since, out });
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed, pending: *?content_domain.Value) !void {
+    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         const generation = self.commitGeneration();
@@ -853,38 +840,11 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation, pending));
+        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
-    }
-
-    pub fn observeCommandPart(self: *Store, cursor: *content_parts.Cursor) !bool {
-        return self.queue().run(observeCommandPartHeld, .{ self, cursor });
-    }
-
-    fn observeCommandPartHeld(self: *Store, cursor: *content_parts.Cursor) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.none, observeCommandPartStep(&access, cursor));
-    }
-
-    fn observeCommandPartStep(access: *ReadAccess, cursor: *content_parts.Cursor) !bool {
-        const progress = try cursor.step(access);
-        // The first pass certifies the complete manifest and index. The cursor's
-        // second pass is for callers that export each part, not observation.
-        if (cursor.certified) return false;
-        return switch (progress) {
-            .raw, .part => true,
-            .rows => blk: {
-                try store_access.runAs(access, error.CorruptStore);
-                break :blk true;
-            },
-            .certified, .done => false,
-        };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -989,7 +949,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
+        return entry.finish(Ordinary.activity_content, reads_domain.openActivityContent(&access, request));
     }
 
     pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
@@ -1109,19 +1069,15 @@ pub const Store = struct {
     }
 
     pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.bytes, out });
+        return self.queue().run(readActionHeld, .{ self, request, out });
     }
 
-    pub fn readActionForTool(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.model_tool, out });
-    }
-
-    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, projection: action_read_domain.Projection, out: *@import("../action_read.zig").Read) !void {
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, projection, out));
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1972,13 +1928,15 @@ fn destroyRing(ring: *change_ring.Ring) void {
 
 pub const Ordinary = struct {
     pub const none = error{};
-    const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
-    const content = error{ ContentNotFound, InputPartsNotSupported };
-    const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
+    const page = error{ SessionNotFound, InvalidCursor };
+    const content = error{ContentNotFound};
+    const activity_content = content || error{ContentIsParts};
+    /// A text route on a parts value refuses it as ordinary: the parts routes serve it.
+    const public_content = error{ ContentNotFound, RangeOutOfBounds, ContentIsParts };
     const public_parts = error{ ContentNotFound, ContentIsText };
     const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};
-    pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{ HistoricalPending, InputPartsNotSupported };
@@ -2065,7 +2023,7 @@ pub const Entry = struct {
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (ordinary or err == error.InputPartsNotSupported) return err;
+            if (ordinary) return err;
             return fence(self.store, err);
         };
     }

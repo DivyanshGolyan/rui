@@ -1919,11 +1919,13 @@ test "interrupt regression: Message promotion watches running calls and ignores 
     }.run);
 }
 
-test "compound Action Resolution read verifies the whole value before declining parts" {
+test "EXR-10 an Action read projects a compound Resolution as its owned parts value without walking it" {
+    // The read does no manifest work: damage behind the manifest identity is the parts list's
+    // to certify (INS-9), so every case projects the same value and the Store stays serving.
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Damage = enum { none, missing_last, extra_part, wrong_identity, nested_value, private_part, manifest_bytes };
-            inline for ([_]bool{ false, true }) |model_tool| for (std.enums.values(Damage)) |damage| {
+            for (std.enums.values(Damage)) |damage| {
                 errdefer std.debug.print("compound Resolution damage {s} failed\n", .{@tagName(damage)});
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -1935,6 +1937,12 @@ test "compound Action Resolution read verifies the whole value before declining 
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleTwoActionsForTesting(&storage, &tmp, model, "resolution-corruption-calls");
                 const binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30_000, .{})).?.permit.binding;
+                if (damage == .none) {
+                    var input: action_domain.ActionExecutionInput = undefined;
+                    try storage.readActionExecutionInput(.bash, binding, &input);
+                    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "first", "starting")) == .accepted);
+                    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "second", "雪")) == .accepted);
+                }
                 // The final row is beyond the Cursor's first relational page.
                 var text: [17][24]u8 = undefined;
                 var parts: [17]store_testing.MessagePart = undefined;
@@ -1961,16 +1969,31 @@ test "compound Action Resolution read verifies the whole value before declining 
                     },
                     .manifest_bytes => try store_testing.zeroContent(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code IS NOT NULL"),
                 }
+                const length = try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{value});
                 var result: @import("../../action_read.zig").Read = undefined;
-                const request: @import("../../action_read.zig").Request = .{ .session = session, .action_id = binding.action_id };
-                if (model_tool) {
-                    if (damage == .none) {
-                        try storage.readActionForTool(&request, &result);
-                        try std.testing.expect(result.status == .resolved_parts);
-                    } else try std.testing.expectError(error.CorruptStore, storage.readActionForTool(&request, &result));
-                } else try std.testing.expectError(if (damage == .none) error.InputPartsNotSupported else error.CorruptStore, storage.readAction(&request, &result));
-                try std.testing.expectEqual(damage != .none, storage.isFenced());
-            };
+                var request: @import("../../action_read.zig").Request = .{
+                    .session = session,
+                    .action_id = binding.action_id,
+                    .after = if (damage == .none) 1 else 0,
+                };
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .resolved_parts);
+                const projected = result.status.resolved_parts.content;
+                try std.testing.expectEqual(@import("../../content_value.zig").Owner{ .action = binding.action_id }, projected.parts.owner);
+                try std.testing.expectEqual(length, projected.parts.identity.length);
+                if (damage == .none) {
+                    try std.testing.expectEqual(@as(usize, 1), result.values.count);
+                    try std.testing.expectEqual(@as(u64, 2), result.values.next);
+                    try std.testing.expect(!result.values.more);
+                    const item = result.values.items[0];
+                    try std.testing.expectEqual(@as(u64, 2), item.ordinal);
+                    try std.testing.expectEqualStrings("second", item.key.slice());
+                    try std.testing.expectEqualStrings("雪", result.values.bytes[item.start..][0..item.length]);
+                }
+                request.offset = 1;
+                try std.testing.expectError(error.InvalidCursor, storage.readAction(&request, &result));
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }
@@ -2277,7 +2300,7 @@ test "action value pages preserve delivery state" {
                     after = result.values.next;
                 }
                 try std.testing.expectEqual(@as(u64, 20), after);
-                try storage.readActionForTool(&.{ .session = session, .action_id = action_id, .after = after }, result);
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .after = after }, result);
                 try std.testing.expectEqual(@as(usize, 0), result.values.count);
                 try std.testing.expectEqual(after, result.values.next);
                 try std.testing.expect(!result.values.more);

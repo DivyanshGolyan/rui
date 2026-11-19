@@ -70,7 +70,8 @@ FIXTURES = {
                                  ("src/store/domain/public_parts.zig", "src/protocol.zig", "src/protocol_reply.zig",
                                   "src/cli_args.zig", RUI, HOST)),
     "read-image-integration": ((I + "read_image_integration.py",), (),
-                               ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
+                               ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig",
+                                "src/session_reads.zig", "src/part_text.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
@@ -610,7 +611,7 @@ POLICY_SELF_CHECKS = (
 
 SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integration", "canonical-failure-integration",
                             "host-launch-integration", "upgrade-integration", "human-cli-integration", "overview-integration",
-                            "model-picker-integration",
+                            "model-picker-integration", "read-image-integration",
                             "skills-integration", "bash-recovery-integration", "renderer-contracts-selftest",
                             "direct-pty", "direct-pty-controls", "input-equivalence", "screen-emulator",
                             "peer-integration"})

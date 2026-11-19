@@ -4,6 +4,7 @@ const std = @import("std");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const report_domain = @import("../domain/report.zig");
+const public_parts = @import("../domain/public_parts.zig");
 const store_testing = @import("../testing.zig");
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -61,17 +62,26 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
-test "SH-68 compound observations certify content without holding the queue" {
+test "SH-68 compound observations project identity and parts listing certifies content" {
     const sqlite = @import("../sqlite.zig");
-    const cases = [_][:0]const u8{
-        "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
-        "UPDATE content SET byte_length=byte_length+1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
-        "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
-        "UPDATE content SET form=255 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
-        "UPDATE core_command SET primary_content_id=(SELECT min(part_content_id) FROM content_part) WHERE command_key='observe-parts'",
-        "UPDATE content_part SET part_content_id=(SELECT content_id FROM content WHERE private=0 AND form=0 ORDER BY content_id LIMIT 1) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts') AND ordinal=0",
+    const cases = [_]struct { mutation: [:0]const u8, listing_error: ?anyerror = null }{
+        .{
+            .mutation = "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+            .listing_error = error.CorruptStore,
+        },
+        .{
+            .mutation = "UPDATE content SET byte_length=byte_length+1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+            .listing_error = error.ContentReadFailed,
+        },
+        .{
+            .mutation = "UPDATE content_part SET part_content_id=(SELECT second.part_content_id FROM content_part second WHERE second.content_id=content_part.content_id AND second.ordinal=1) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts') AND ordinal=0",
+            .listing_error = error.CorruptStore,
+        },
+        .{ .mutation = "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')" },
+        .{ .mutation = "UPDATE content SET form=255 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')" },
+        .{ .mutation = "UPDATE core_command SET primary_content_id=(SELECT min(part_content_id) FROM content_part) WHERE command_key='observe-parts'" },
     };
-    for (cases, 0..) |mutation, index| {
+    for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -79,15 +89,29 @@ test "SH-68 compound observations certify content without holding the queue" {
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "observe-parts-config");
         try store_testing.submitTestMessageParts(&storage, &tmp, "observe-parts", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
-        const before = try store_testing.observeCommandForTesting(&storage, "observe-parts");
-        try std.testing.expectEqual(.parts, before.kind.message.?.form);
+        const before = (try store_testing.observeCommandForTesting(&storage, "observe-parts")).kind.message.?;
+        try std.testing.expect(before.content == .parts);
+        try std.testing.expectEqualDeep(@import("../../content_value.zig").Owner{ .message = before.queue.?.admission_id }, before.content.parts.owner);
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
-        try sqlite.exec(storage.sqliteDatabase(), mutation);
-        if (index == 1) {
-            try std.testing.expectError(error.ContentReadFailed, store_testing.observeCommandForTesting(&storage, "observe-parts"));
+        try sqlite.exec(storage.sqliteDatabase(), case.mutation);
+        if (case.listing_error) |expected| {
+            const observation = try store_testing.observeCommandForTesting(&storage, "observe-parts");
+            try std.testing.expectEqual(.accepted, observation.status);
+            const content = observation.kind.message.?.content;
+            try std.testing.expect(content == .parts);
+            try std.testing.expectEqualDeep(before.content.parts.owner, content.parts.owner);
+            try std.testing.expect(!storage.isFenced());
+
+            var reader = try public_parts.Reader.init(session, content.parts.owner);
+            defer reader.deinit();
+            try std.testing.expectError(expected, finishPartsCertification(&storage, &reader));
         } else {
             try std.testing.expectError(error.CorruptStore, store_testing.observeCommandForTesting(&storage, "observe-parts"));
         }
         try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "observe-parts"));
     }
+}
+
+fn finishPartsCertification(storage: *Store, reader: *public_parts.Reader) !void {
+    while ((try storage.readPublicParts(reader)) == .pending) {}
 }

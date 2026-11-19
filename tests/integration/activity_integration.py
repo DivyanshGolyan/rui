@@ -265,7 +265,7 @@ def main():
             saved.close()
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
-                "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
+                "queued": json.loads((pathlib.Path(__file__).resolve().parents[2] / "src/codecs/fixtures/activity/empty-queue.json").read_text()),
                 "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "attention": None, "group": "done",
                     "actions": {"stop": False, "interrupt": None, "decide": None}, "last_line": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,

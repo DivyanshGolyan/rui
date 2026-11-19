@@ -13,7 +13,9 @@ import time
 
 import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state
+import human_cli_fixture as human
 import model_fixture as fixture
+from terminal_process import terminal_process
 import os_semantics
 from bash_fixture import action_for, allow, rows
 
@@ -196,6 +198,19 @@ def prove_case(root, name):
         host_process.wait_for_execution_release(
             lambda remaining: fixture.command("session", "inspect", "--store", store, "--session", session,
                                               timeout=remaining)["execution"], deadline)
+        if name == "ask-missing":
+            # The Session holding an image Resolution opens in the TUI, which shows its placeholder.
+            home = state / "home"
+            home.mkdir()
+            with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
+                                  env={**os.environ, "HOME": str(home)}) as (entered, master):
+                human.read_terminal(master, "continued", composer=True)
+                os.write(master, b"\x0f")
+                screen = human.read_terminal(master, "[image 1: PNG 1x1, 0.1 KB]", composer=True)
+                assert "continued" in screen, screen
+                human.terminal_step(master, "\x03", "Your chats keep working while you are away.")
+                assert entered.wait(timeout=5) == 0
+            print("read_image ask-missing: Session resumed in the TUI with its image placeholder")
         if expected == "succeeded":
             # The provider proves typed delivery; inspect the committed
             # Resolution after releasing the Store lease.

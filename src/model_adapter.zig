@@ -2227,7 +2227,7 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     try std.testing.expectEqual(.accepted, observed.status);
     try std.testing.expectEqual(.queued, observed.kind.message.?.queue.?.state);
     var reader: store.ContentReader = undefined;
-    reader.open(try setup.storage.openContent(observed.kind.message.?.content));
+    reader.open(try setup.storage.openContent(observed.kind.message.?.content.text));
     defer reader.close();
     var actual: [text.len + 1]u8 = undefined;
     const count = try reader.read(0, &actual);
@@ -5160,7 +5160,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     const prepared = try skill_owner.prepareMessage(arena, std.testing.allocator, std.testing.io, &setup.storage, &invoke, null);
     const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &prepared.captured.?, .{});
     try std.testing.expect(admitted_message == .accepted);
-    try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.length);
+    try std.testing.expectEqual(@as(u64, typed.len), admitted_message.accepted.content.text.length);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     var binding = try admitted.permit.consume();
     var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
@@ -5245,7 +5245,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
     const invoke_replay = setup.storage.submitMessageCapturedSkills(&invoke, null, null, null, .{});
     try std.testing.expect(invoke_replay == .accepted and invoke_replay.accepted.replayed);
-    try std.testing.expectEqualSlices(u8, &admitted_message.accepted.content.digest, &invoke_replay.accepted.content.digest);
+    try std.testing.expectEqualSlices(u8, &admitted_message.accepted.content.text.digest, &invoke_replay.accepted.content.text.digest);
     const report = try skillReportForTesting(&setup, session.slice());
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "\"turn\":null") != null);

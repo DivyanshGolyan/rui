@@ -30,12 +30,55 @@ def wait_message(store, key):
     return observation, answer
 
 
-def cli_observation(store, receipt, observation):
-    # CLI-19: inspect and wait expose the same multipart identity as admission.
-    assert receipt["input"]["type"] == "parts", receipt
-    assert observation["input"] == receipt["input"], (observation, receipt)
-    waited = fixture.command("request", "wait", "--store", store, "--key", "message", "--timeout-seconds", "15")
-    assert waited["observation"]["input"] == receipt["input"], waited
+def cli_observation(store, receipt, observation, expected_parts):
+    # CLI-19: inspect and wait retain the admitted multipart identity and its readable owner.
+    admitted_input = receipt["input"]
+    admission = receipt["answer"]["admission"]
+    session = receipt["context"]["session"]
+    assert admitted_input["type"] == "parts" and admitted_input["owner"] == {"message": admission}, receipt
+    waited = fixture.command("request", "wait", "--store", store, "--key", receipt["context"]["key"],
+                             "--timeout-seconds", "15")["observation"]
+    for observed in (observation, waited):
+        assert (observed["kind"], observed["status"], observed["state"], observed["target"]) == (
+            "message", "accepted", "completed", session), observed
+        assert observed["queue"]["admission"] == admission, observed
+        assert observed["input"] == admitted_input, (observed, receipt)
+
+    selectors = ["--store", str(store), "--session", waited["target"],
+                 "--admission", waited["input"]["owner"]["message"]]
+    listed = fixture.command("session", "list-parts", *selectors)
+    assert listed["value"] == admitted_input, (listed, receipt)
+    assert [(part["ordinal"], part["type"], part.get("mime")) for part in listed["parts"]] == [
+        (str(ordinal), kind, mime) for ordinal, (kind, mime, _) in enumerate(expected_parts)
+    ], listed
+    for ordinal, (_, _, content) in enumerate(expected_parts):
+        read = subprocess.run([str(fixture.RUI), "session", "read-part", *selectors, "--part", str(ordinal)],
+                              capture_output=True, timeout=15)
+        assert read.returncode == 0, (ordinal, read.stderr)
+        assert read.stdout == content, (ordinal, len(read.stdout), len(content))
+
+
+def rejected_image(store, record, part_args, accepted):
+    # CLI-19: a rejected multipart receipt identifies the request, but has no admitted owner.
+    target = "zzzzzz" if accepted["context"]["session"] != "zzzzzz" else "zzzzzy"
+    key = "rejected-image"
+    result = fixture.command("session", "send", "--store", store, "--to", target,
+                             "--record", record, "--key", key, *part_args, input="", expect=3)
+    assert result["answer"] == {
+        "status": "rejected", "replayed": False, "session": target, "code": "unknown_session",
+    }, result
+    assert result["input"] == {field: accepted["input"][field] for field in ("type", "bytes", "sha256")}, result
+    replay = fixture.command("request", "recover", "--store", store, "--record", record,
+                             "--kind", "message", expect=3)
+    assert replay["answer"] == {**result["answer"], "replayed": True}, replay
+    assert replay["input"] == result["input"], (replay, result)
+    inspected = fixture.observe(store, key)
+    waited = fixture.command("request", "wait", "--store", store, "--key", key,
+                             "--timeout-seconds", "15")["observation"]
+    for observed in (inspected, waited):
+        assert (observed["kind"], observed["status"], observed["state"], observed["target"], observed["code"]) == (
+            "message", "rejected", "rejected", target, "unknown_session"), observed
+        assert "input" not in observed, observed
 
 
 def run_case(root, provider, operation):
@@ -73,27 +116,39 @@ def run_case(root, provider, operation):
                 "--record", state / "configure.json", "--key", "configure",
                 "--workspace", workspace, "--provider", provider, "--model", "gpt-6-sol", "--tools", "none")
             args = ["session", "send", *common, "--to", configured["context"]["session"]]
-        args += ["--text", "before", "--image", first, "--text-file", text_file, "--image", second, "--text", "after"]
+        part_args = ["--text", "before", "--image", first, "--text-file", text_file,
+                     "--image", second, "--text", "after"]
+        args += part_args
+        record = state / "message.json"
+        receipt = None
         if provider == "codex" and operation == "send":
             lost = subprocess.run([str(fixture.RUI), *map(str, args), "--test-drop-reply", "after-commit"],
                                   text=True, input="", capture_output=True, timeout=15)
-            assert lost.returncode != 0, lost
-            record = state / "message.json"
-            frozen = record.read_bytes()
-            first.unlink()
-            second.unlink()
-            text_file.unlink()
-            result = fixture.command("request", "recover", "--store", store,
-                                     "--record", record, "--kind", "message")
-            assert result["answer"]["replayed"] is True, result
-            assert result["context"]["key"] == "message" and record.read_bytes() == frozen, result
+            assert lost.returncode == 4, lost
         else:
-            result = fixture.command(*args)
-        assert result["answer"]["status"] == "accepted", result
-        session = result["context"]["session"]
+            receipt = fixture.command(*args, input="")
+            assert receipt["answer"]["status"] == "accepted" and receipt["answer"]["replayed"] is False, receipt
+            if provider == "codex" and operation == "start":
+                rejected_image(store, state / "rejected.json", part_args, receipt)
+
+        frozen = record.read_bytes()
+        first.unlink()
+        second.unlink()
+        text_file.unlink()
+        replay = fixture.command("request", "recover", "--store", store, "--record", record, "--kind", "message")
+        assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
+        assert replay["context"]["key"] == "message" and record.read_bytes() == frozen, replay
+        if receipt is not None:
+            assert replay["context"] == receipt["context"], (replay, receipt)
+            assert replay["answer"] == {**receipt["answer"], "replayed": True}, (replay, receipt)
+            assert replay["input"] == receipt["input"], (replay, receipt)
+
         observation, answer_bytes = wait_message(store, "message")
         assert observation["state"] == "completed" and answer_bytes == b"received", observation
-        cli_observation(store, result, observation)
+        cli_observation(store, replay, observation, [
+            ("text", None, b"before"), ("image", "image/png", png), ("text", None, b"middle"),
+            ("image", "image/jpeg", jpeg), ("text", None, b"after"),
+        ])
         assert len(endpoint.requests) == 2, endpoint.requests
         assert endpoint.requests[0] == endpoint.requests[1], endpoint.requests
         right = json.loads(endpoint.requests[1])

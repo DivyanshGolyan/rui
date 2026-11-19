@@ -408,24 +408,12 @@ fn importRangeSlot(a: anytype, io: std.Io, range: content_custody.Range, slot: C
     return id;
 }
 
-pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
-
 pub const content_metadata = rsql.Read(.{
     .sql = "SELECT byte_length,digest,private,form FROM content WHERE content_id=?1",
     .Args = struct { content_id: u64 },
     .Row = struct { byte_length: u64, digest: [32]u8, private: bool, form: u8 = 0 },
     .cardinality = .one,
 });
-
-pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
-    return .{ .length = row.byte_length, .digest = row.digest, .private = row.private };
-}
-
-pub fn publicMetadata(row: *const content_metadata.Row) error{ CorruptStore, ContentIsParts }!ContentMetadata {
-    if (row.private) return error.CorruptStore;
-    if (try parts.Form.decode(row.form) == .parts) return error.ContentIsParts;
-    return metadataOf(row);
-}
 
 pub fn HashedWindow(comptime window_bytes: usize) type {
     return struct {

@@ -120,12 +120,12 @@ pub const QueuedJson = struct {
     value: *const activity_facts.Queued,
 
     pub const openapi_name = "Queued";
-    pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"oldest_position\":\"", H.decimal, "\",\"newest_admission\":\"", H.decimal, "\",\"newest_position\":\"", H.decimal, "\"}" };
+    pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"oldest_position\":\"", H.decimal, "\",\"newest_admission\":\"", H.decimal, "\",\"newest_position\":\"", H.decimal, "\",\"newest_content\":", H{ .optional_json = protocol.ContentValueJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const QueuedJson, out: *std.Io.Writer) !void {
         const queued = self.value;
-        try writeShape(out, json_shape, .{ queued.count, queued.oldest_position, queued.newest_admission, queued.newest_position });
+        try writeShape(out, json_shape, .{ queued.count, queued.oldest_position, queued.newest_admission, queued.newest_position, if (queued.newest_content) |value| protocol.ContentValueJson{ .value = value } else null });
     }
 };
 
@@ -170,11 +170,11 @@ pub const SearchHitJson = struct {
     value: *const Search.Hit,
 
     pub const openapi_name = "ActivitySearchFactsHit";
-    pub const json_shape = .{ "{\"snippet\":", H{ .string = 160 }, ",\"offset\":\"", H.decimal, "\",\"length\":\"", H.decimal, "\"}" };
+    pub const json_shape = .{ "{\"snippet\":", H{ .string = 160 }, ",\"offset\":\"", H.decimal, "\",\"length\":\"", H.decimal, "\",\"part\":", H.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const SearchHitJson, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.value.snippet.slice(), self.value.offset, self.value.length });
+        try writeShape(out, json_shape, .{ self.value.snippet.slice(), self.value.offset, self.value.length, if (self.value.part) |part| @as(?u64, part) else null });
     }
 };
 
@@ -232,7 +232,7 @@ test "activity search reply bounds preserve snippets and nullable continuation" 
     var buffer: [max_search_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     try writeSearch(&out, &facts);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\"}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\",\"part\":null}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
     facts.count = 0;
     facts.next = null;
     out = std.Io.Writer.fixed(&buffer);
