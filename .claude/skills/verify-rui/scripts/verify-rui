@@ -859,6 +859,8 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
 
     `serve` is the provider set the Host serves; each one answers from the fixture."""
     options = run.meta["host_options"]
+    # The first launch of a run records its options; restarts and restores reuse them.
+    run.meta.setdefault("host_launch", {"restartable": restartable, "without_preload": without_preload})
     provider_sets = []
     for provider in serve:
         provider_sets += ["--set", f"providers.{provider}.endpoint={run.meta['fixture_url']}",
@@ -886,6 +888,11 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
         if host.poll() is not None or time.monotonic() > deadline:
             die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
         time.sleep(0.1)
+
+
+def host_launch_options(run):
+    """The launch options this run's Host was first started with."""
+    return dict(run.meta.get("host_launch", {"restartable": False, "without_preload": False}))
 
 
 def stop_host(run):
@@ -2395,6 +2402,7 @@ def validate_scenario(data, sizes=None):
                 require(value != "suspend" or not suspended, f"{name}: Host already suspended")
                 require(value != "resume" or suspended, f"{name}: Host is not suspended")
                 require(value not in ("pause", "start", "restart") or not suspended, f"{name}: resume Host before pause/start/restart")
+                require(value != "restart" or not state.get("upgrade"), f"{name}: Host restart is not supported in upgrade states")
                 if value == "restart" and "serve" in step:
                     served = step["serve"]
                     require(isinstance(served, list) and bool(served) and len(set(served)) == len(served)
@@ -2960,27 +2968,32 @@ def frame_steps(run, terminal, steps, exiting=False):
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
         elif step["host"] == "restart":
-            # Stop the fixture-owned Host, then start it serving only the named providers.
-            stop_host(run)
-            launch_host(run, serve=tuple(step.get("serve", DEFAULT_SERVE)))
-            run.frame_served = tuple(step.get("serve", DEFAULT_SERVE))
-            append_jsonl(run.evidence / "frames-host-restart.jsonl", {"t_ns": now_ns(), "wall": wall(),
-                                                                     "serve": list(step.get("serve", DEFAULT_SERVE))})
+            serve = tuple(step.get("serve", DEFAULT_SERVE))
+            frame_restart_host(run, serve)
+            append_jsonl(run.evidence / "frames-host-restart.jsonl", {"t_ns": now_ns(), "wall": wall(), "serve": list(serve)})
         else:
             launch_host(run)
+            run.frame_served = None
         if not exiting and terminal.status is not None:
             raise FrameFailure(f"Rui exited with status {terminal.status} before the state was reached")
     return exiting
 
 
+def frame_restart_host(run, serve):
+    """Restart the run's Host serving `serve`, with the options of its first launch."""
+    # Set before stopping: a failed restart still gets restored by frame_restore_served.
+    run.frame_served = tuple(serve)
+    stop_host(run)
+    launch_host(run, serve=tuple(serve), **host_launch_options(run))
+
+
 def frame_restore_served(run):
-    """Return a Host that a state restarted with another provider set to the default set."""
-    served = getattr(run, "frame_served", None)
-    if served is None or served == DEFAULT_SERVE:
+    """Stop a Host that a state restarted with another provider set and start the default set."""
+    if getattr(run, "frame_served", None) is None:
         return
     run.frame_served = None
     stop_host(run)
-    launch_host(run)
+    launch_host(run, **host_launch_options(run))
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
