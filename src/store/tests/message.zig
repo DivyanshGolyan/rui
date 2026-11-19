@@ -567,7 +567,7 @@ test "refused peer creation activity keeps invalid targets absent" {
     }.run);
 }
 
-test "Message replay fences when stored content disagrees with the accepted input" {
+test "ADM-29 Message replay fences when stored content disagrees with the accepted input" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const corruptions = [_]enum { form, private, digest }{ .form, .private, .digest };
@@ -602,7 +602,7 @@ test "Message replay fences when stored content disagrees with the accepted inpu
     }.run);
 }
 
-test "accepted Message observation leaves manifest certification to the parts list" {
+test "ADM-30 accepted Message observation leaves manifest certification to the parts list" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

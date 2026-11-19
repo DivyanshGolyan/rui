@@ -287,7 +287,7 @@ pub const ActivityPage = struct {
         else
             queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
                 queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1 or
-                !ownedBy(queued.newest_content orelse return error.InvalidActivityPage, .{ .message = queued.newest_admission })) return error.InvalidActivityPage;
+                !mutation_answer.matchesMessageAdmission(queued.newest_content orelse return error.InvalidActivityPage, queued.newest_admission)) return error.InvalidActivityPage;
         page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
@@ -316,14 +316,6 @@ pub const ActivityPage = struct {
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
-    /// A Message value is text, or parts owned by that Message's admission.
-    fn ownedBy(value: content_value.Value, owner: content_value.Owner) bool {
-        return switch (value) {
-            .text => true,
-            .parts => |parts| std.meta.eql(parts.owner, owner),
-        };
-    }
-
     fn textOf(value: JsonContentValue) !content_value.Reference {
         return value.text() catch error.InvalidActivityPage;
     }

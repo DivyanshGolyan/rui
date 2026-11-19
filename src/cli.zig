@@ -4037,7 +4037,7 @@ test "session start mutation receipt adds configuration without changing send" {
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
 }
 
-test "Message mutation JSON preserves accepted parts owners and rejected receipts" {
+test "ADM-28 Message mutation JSON renders accepted parts with their owner and rejected receipts without one" {
     const wire_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\"";
     const accepted = ",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
     const rejected = ",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
