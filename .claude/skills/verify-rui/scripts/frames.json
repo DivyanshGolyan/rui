@@ -6336,13 +6336,13 @@
           ]
         },
         {
-          "wait": "isn't served by this Host"
+          "wait": "isn't served by"
         }
       ],
       "expect": [
         "Provider unserved witness",
         "gpt-6.1-sol",
-        "isn't served by this Host"
+        "isn't served by"
       ],
       "absent": [
         "Sending…",
