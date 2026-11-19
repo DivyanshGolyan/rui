@@ -1997,14 +1997,30 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                        HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
                        RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
-                # One real slow start: the driver's own interpreter probe. Every later start is normal.
+                # One real slow start per interpreter role, each claimed by an O_EXCL marker. check.sh runs
+                # three kinds of python3 -: the version probe (first no-argv start, never reads the clock),
+                # then run_timed's started probe (no arguments, reads the clock) and record probe (four
+                # arguments, reads the clock). The version and started probes both have len(sys.argv) 1, so
+                # the version role is claimed at startup, before any clock read; started and record are claimed
+                # at their clock read, which only they make.
                 (root / "sitecustomize.py").write_text(
-                    "import os, time\n"
-                    "try:\n"
-                    "    os.close(os.open(os.path.join(os.environ['GATE_DIR'], 'slow-start'), os.O_CREAT | os.O_EXCL))\n"
-                    "except FileExistsError:\n"
-                    "    pass\n"
-                    f"else:\n    time.sleep({python_delay!r})\n")
+                    "import os, sys, time\n"
+                    f"DELAY = {python_delay!r}\n"
+                    "GATE = os.environ['GATE_DIR']\n"
+                    "REAL_MONOTONIC_NS = time.monotonic_ns\n"
+                    "def claim(role):\n"
+                    "    try:\n"
+                    "        os.close(os.open(os.path.join(GATE, 'slow-' + role), os.O_CREAT | os.O_EXCL))\n"
+                    "    except FileExistsError:\n"
+                    "        return False\n"
+                    "    return True\n"
+                    "if len(sys.argv) == 1 and claim('version'):\n"
+                    "    time.sleep(DELAY)\n"
+                    "def delayed_monotonic_ns():\n"
+                    "    if claim('started' if len(sys.argv) == 1 else 'record'):\n"
+                    "        time.sleep(DELAY)\n"
+                    "    return REAL_MONOTONIC_NS()\n"
+                    "time.monotonic_ns = delayed_monotonic_ns\n")
                 env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
@@ -2119,14 +2135,17 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             except BaseException as cleanup:
                                 failure.add_note(f"driver kill failed: {cleanup!r}")
                         try:
-                            process.wait(timeout=max(0, disposal_deadline - clock.monotonic()))
+                            # A real watchdog for the leader's reap. The disposal budget is on the injected
+                            # clock, so it is not a real timeout; the leader was just SIGKILLed and reaps at once.
+                            process.wait(timeout=30)
                             failure.add_note(f"driver_pid={process.pid}, returncode={process.returncode}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver reap failed: {cleanup!r}")
                         try:
                             # A group that survives its leader can hold these pipes open, so the drain is a
-                            # real watchdog, not part of the disposal budget. Killed groups close them at once.
-                            stdout, stderr = process.communicate(timeout=2)
+                            # real watchdog, not part of the disposal budget. Killed groups close them at once;
+                            # 10 s real is loose enough for a slow host and still bounds a surviving group.
+                            stdout, stderr = process.communicate(timeout=10)
                             failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver disposal failed: {cleanup!r}")
@@ -2156,7 +2175,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
         self.assertEqual(lines[-1], "host_allocator_test.py release")
-        self.assertEqual(self.records(result)[-1][:2], ("host-allocator", "42"))
+        records = self.records(result)
+        self.assertEqual(records[-1][:2], ("host-allocator", "42"))
+        # Every case is timed, not only the last one: a bound on any probe reads elapsed=unavailable.
+        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
 
     def test_driver_deadline_reaps_and_preserves_the_original_failure(self):
         for part, options, error, message, held in (
@@ -2209,6 +2231,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
         for fault in ("diagnostic", "retirement"):
             with self.subTest(fault=fault):
+                rejected = None
                 try:
                     with patch.object(Path, "read_text", diagnostic_failure) if fault == "diagnostic" else patch(
                             "os.killpg", side_effect=PermissionError("injected group retirement failure")):
@@ -2223,10 +2246,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
                                   else "driver group retirement unconfirmed", notes)
                 finally:
-                    if fault == "retirement" and rejected.exception.__notes__:
-                        pid = int(rejected.exception.__notes__[0].split("=")[1])
-                        self.wait_for_group_retirement(pid, time.monotonic() + 30)
-                        for note in rejected.exception.__notes__:
+                    # Every subtest reaps its driver group, whichever fault it injected, so a slow real
+                    # retirement cannot leak the group. The 30 s wait is a real watchdog, not the fake budget.
+                    raised = getattr(rejected, "exception", None)
+                    if raised is not None and raised.__notes__:
+                        driver = re.search(r"driver_pid=(\d+)", "\n".join(raised.__notes__))
+                        if driver:
+                            self.wait_for_group_retirement(int(driver[1]), time.monotonic() + 30)
+                        for note in raised.__notes__:
                             if note.startswith("retained driver root: "):
                                 shutil.rmtree(note.removeprefix("retained driver root: "))
 
