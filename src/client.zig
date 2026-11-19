@@ -797,7 +797,10 @@ pub const UpgradeCandidate = struct {
     directory: ?[]const u8 = null,
     pid: ?c_int = null,
     generation: ?u64 = null,
-    result: union(enum) { observed: HostControlObservation, failed: anyerror },
+    /// `stale`: a socket that refused or vanished while a complete same-user
+    /// process census found no Host serving it (#1855). Its Host state is
+    /// still unconfirmed, so nothing acts on it; it is only counted.
+    result: union(enum) { observed: HostControlObservation, failed: anyerror, stale },
 
     pub fn deinit(self: UpgradeCandidate, allocator: std.mem.Allocator) void {
         if (self.socket) |path| allocator.free(path);
@@ -915,7 +918,22 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         };
         try appendUpgradeCandidate(allocator, &candidates, candidate);
     }
+    markStaleUpgradeSockets(candidates.items);
     return candidates.toOwnedSlice(allocator);
+}
+
+/// Call only after a complete process census. A Host process resolving to a
+/// socket has replaced that socket's own candidate, so a socket-only candidate
+/// that refused or vanished has no live owner: a leftover, not a failed Host.
+/// Any other failure (a live but unreadable socket, a wrong wire) stays failed.
+fn markStaleUpgradeSockets(candidates: []UpgradeCandidate) void {
+    for (candidates) |*candidate| {
+        if (candidate.socket == null or candidate.pid != null or candidate.result != .failed) continue;
+        switch (candidate.result.failed) {
+            error.ConnectionRefused, error.FileNotFound => candidate.result = .stale,
+            else => {},
+        }
+    }
 }
 
 /// Process generation and retirement are independent of runtime/Store leases.
@@ -6246,6 +6264,24 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expectEqual(@as(c_int, 42), candidates.items[0].result.observed.pid);
     try std.testing.expectEqual(@as(?c_int, 43), candidates.items[1].pid);
     try std.testing.expect(candidates.items[1].socket == null);
+}
+
+test "#1855 only a socket-only refusal or vanished socket becomes a stale leftover" {
+    var observation: HostControlObservation = .{ .profile = .current, .facts = std.mem.zeroes(protocol_reply.HostInfoFacts), .pid = 42 };
+    try observation.host_directory.set("/host");
+    var candidates = [_]UpgradeCandidate{
+        .{ .socket = "/refused.sock", .result = .{ .failed = error.ConnectionRefused } },
+        .{ .socket = "/vanished.sock", .result = .{ .failed = error.FileNotFound } },
+        .{ .socket = "/old-wire.sock", .result = .{ .failed = error.WrongWireVersion } },
+        .{ .socket = "/silent.sock", .result = .{ .failed = error.Timeout } },
+        .{ .socket = "/live.sock", .directory = "/host", .pid = 42, .result = .{ .observed = observation } },
+        // A Host process resolved to this socket, so the refusal has a live owner.
+        .{ .socket = "/owned.sock", .pid = 43, .result = .{ .failed = error.ConnectionRefused } },
+        .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } },
+    };
+    markStaleUpgradeSockets(&candidates);
+    const stale = [_]bool{ true, true, false, false, false, false, false };
+    for (candidates, stale) |candidate, expected| try std.testing.expectEqual(expected, candidate.result == .stale);
 }
 
 test "upgrade process retirement covers macOS zombie generations and living cleanup tails" {

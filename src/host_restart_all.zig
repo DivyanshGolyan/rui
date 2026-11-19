@@ -77,6 +77,9 @@ pub const Entry = struct {
 
 pub const Batch = struct {
     entries: []Entry = &.{},
+    /// Leftover sockets with no running Host (#1855): one summary line, never
+    /// a per-Host failure or a failed exit.
+    stale: usize = 0,
     version: ?release.Version = null,
     failure: ?anyerror = null,
 
@@ -129,11 +132,23 @@ pub const Batch = struct {
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
             .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
         };
+        try self.writeStale(writer);
         try writeTotals(self.totals(), writer);
     }
 
+    fn writeStale(self: *const Batch, writer: *std.Io.Writer) !void {
+        if (self.stale == 0) return;
+        try writer.print("Skipped {d} leftover Host {s}: {s} connections and no running Host process serves {s}; nothing there was stopped or started.\n", if (self.stale == 1)
+            .{ self.stale, "socket", "it refused", "it" }
+        else
+            .{ self.stale, "sockets", "each refused", "them" });
+    }
+
     pub fn writeWarning(self: *const Batch, writer: *std.Io.Writer) !void {
-        if (self.entries.len == 0 and self.failure == null) return writer.writeAll("No running Hosts discovered now; Hosts running after publication will also be considered.\n");
+        if (self.entries.len == 0 and self.failure == null) {
+            try writer.writeAll("No running Hosts discovered now; Hosts running after publication will also be considered.\n");
+            return self.writeStale(writer);
+        }
         try writer.print("Upgrade restarts every running Host it can safely activate, interrupting work across ALL Sessions in those Stores. Discovered {d} Hosts:\n", .{self.entries.len});
         for (self.entries) |entry| switch (entry.state) {
             .observed => {
@@ -143,6 +158,7 @@ pub const Batch = struct {
             .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
         };
+        try self.writeStale(writer);
     }
 };
 
@@ -157,8 +173,13 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
+    var stale: usize = 0;
     for (candidates) |candidate| {
         try process.check(cancellation);
+        if (candidate.result == .stale) {
+            stale += 1;
+            continue;
+        }
         try entries.ensureUnusedCapacity(allocator, 1);
         var entry: Entry = .{
             .socket = if (candidate.socket) |path| try allocator.dupe(u8, path) else null,
@@ -172,6 +193,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         }
         entry.directory = if (candidate.directory) |path| try allocator.dupe(u8, path) else null;
         entry.state = switch (candidate.result) {
+            .stale => unreachable,
             .failed => |err| .{ .failed = try .of(allocator, .discovery, err) },
             .observed => |facts| state: {
                 entry.store = try allocator.dupe(u8, facts.facts.store.slice());
@@ -186,7 +208,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         };
         entries.appendAssumeCapacity(entry);
     }
-    return .{ .entries = try entries.toOwnedSlice(allocator) };
+    return .{ .entries = try entries.toOwnedSlice(allocator), .stale = stale };
 }
 
 pub const Options = struct {
@@ -502,4 +524,37 @@ test "restart reports a positively identified Host without a socket or directory
     try writeEntryFailure(&writer, &entry, entry.state.failed);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Host process 42") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "HostServeStoreMissing") != null);
+}
+
+test "#1855 leftover sockets are one summary line and never a failed exit" {
+    var live = [_]Entry{.{ .socket = "/live.sock", .store = "/store", .state = .{ .outcome = .{ .already_ready = .{ .instance = @splat(1), .pid = 42 } } } }};
+    var old_wire = [_]Entry{.{ .socket = "/old.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "WrongWireVersion" } } }};
+    const Case = struct { batch: Batch, warning: []const u8, result: []const u8, failed: usize };
+    const one = "Skipped 1 leftover Host socket: it refused connections and no running Host process serves it; nothing there was stopped or started.\n";
+    const many = "Skipped 212 leftover Host sockets: each refused connections and no running Host process serves them; nothing there was stopped or started.\n";
+    const none = "No running Hosts discovered now; Hosts running after publication will also be considered.\n";
+    const header = "Upgrade restarts every running Host it can safely activate, interrupting work across ALL Sessions in those Stores. Discovered 1 Hosts:\n";
+    const ready = "/store: already on 0.1.2\n";
+    const unreadable = "Store unknown (socket /old.sock): failed at discovery: Host state is unconfirmed (WrongWireVersion); inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n";
+    for ([_]Case{
+        .{ .batch = .{}, .warning = none, .result = "No running Hosts.\n", .failed = 0 },
+        .{ .batch = .{ .entries = &live }, .warning = header ++ ready, .result = ready ++ "1 Hosts: 0 restarted, 1 already current, 0 left unchanged, 0 failed.\n", .failed = 0 },
+        .{ .batch = .{ .stale = 1 }, .warning = none ++ one, .result = one ++ "No running Hosts.\n", .failed = 0 },
+        .{ .batch = .{ .stale = 212 }, .warning = none ++ many, .result = many ++ "No running Hosts.\n", .failed = 0 },
+        .{ .batch = .{ .entries = &live, .stale = 212 }, .warning = header ++ ready ++ many, .result = ready ++ many ++ "1 Hosts: 0 restarted, 1 already current, 0 left unchanged, 0 failed.\n", .failed = 0 },
+        .{ .batch = .{ .entries = &old_wire, .stale = 212 }, .warning = header ++ unreadable ++ many, .result = unreadable ++ many ++ "1 Hosts: 0 restarted, 0 already current, 0 left unchanged, 1 failed.\n", .failed = 1 },
+    }) |case| {
+        var batch = case.batch;
+        batch.version = .{ .schema = 1, .patch = 2 };
+        var warning: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer warning.deinit();
+        try batch.writeWarning(&warning.writer);
+        try std.testing.expectEqualStrings(case.warning, warning.written());
+        var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer result.deinit();
+        try batch.write(&result.writer);
+        try std.testing.expectEqualStrings(case.result, result.written());
+        try std.testing.expectEqual(case.failed, batch.totals().failed);
+        try std.testing.expectEqual(case.failed != 0, batch.hasGuidance());
+    }
 }
