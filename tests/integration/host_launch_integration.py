@@ -1568,11 +1568,17 @@ def main():
                 env=env, capture_output=True, text=True, timeout=30)
             assert saved.returncode == 0 and saved.stdout == "", saved
             assert saved.stderr == "\nrui: saved; the running Host keeps its old settings until a new Host starts. " + remedy, saved.stderr
-            assert instance(status(held_store, env), 3) == before
+            unset = subprocess.run([RUI, "host", "unset", "--store", str(held_store), "execution.activeCapacity"],
+                env=env, capture_output=True, text=True, timeout=30)
+            assert unset.returncode == 0 and unset.stdout == "" and unset.stderr == saved.stderr, unset
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
             stop_process(held)
+        assert wait_for_processes(held_store, 0) == []
+        for edit in (["set", "execution.activeCapacity", "7"], ["unset", "execution.activeCapacity"]):
+            quiet = subprocess.run([RUI, "host", edit[0], "--store", str(held_store), *edit[1:]], env=env, capture_output=True, text=True, timeout=30)
+            assert quiet.returncode == 0 and quiet.stdout == "" and quiet.stderr == "", quiet
 
         new_host_provider_policy(root, env)
         detached_settings_checks(root, env)

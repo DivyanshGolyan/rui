@@ -1152,10 +1152,13 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
 const Retained = enum { assignments, saved };
 
 fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
+    // Each selector byte escapes to at most 4 bytes, and the notice names it twice.
     var bytes: [8 * protocol.max_store_bytes + 512]u8 = undefined;
     var notice = std.Io.Writer.fixed(&bytes);
+    notice.writeByte('\n') catch return;
     writeRetainedHostNotice(&notice, selector, retained) catch return;
-    stderr.diagnostic("{s}", .{notice.buffered()});
+    // Not `diagnostic`: its fixed buffer would drop a notice with a long Store path.
+    stderr.diagnosticBytes(notice.buffered());
 }
 
 /// The one notice that a running Host keeps its settings, and the commands that apply new ones.
