@@ -23,8 +23,8 @@ def artifacts(expires="2026-11-20T12:00:00Z", drop=(), expired=()):
     return [{"name": name, "expired": name in expired, "expires_at": expires} for name in ARTIFACTS if name not in drop]
 
 
-class QualifyMainTest(unittest.TestCase):
-    """CI-68: Qualify main qualifies main HEAD once, from the last green record, and records its verdict."""
+class RecordTest(unittest.TestCase):
+    """CI-68: the main-qualified record reads its newest Actions status, and its verdict and description."""
 
     def test_whole_domain(self):
         # The record each commit's statuses hold, newest status first.
@@ -40,23 +40,6 @@ class QualifyMainTest(unittest.TestCase):
         for case, (statuses, expected) in records.items():
             with self.subTest(record=case):
                 self.assertEqual(mq.parse(statuses), expected)
-
-        # Commits after stable D, newest (HEAD) first, with their records: (base, needed).
-        def of(states):
-            return lambda sha: mq.Record(states[sha], "1", "") if sha in states else None
-        batches = {
-            "no verdict, green ancestor": ([A, B, C], {B: "failure", C: "success"}, (C, True)),
-            "no verdict, nothing green": ([A, B], {B: "failure"}, (D, True)),
-            "pending head again": ([A, B], {A: "pending", B: "success"}, (B, True)),
-            "unfinished head again": ([A, B], {A: "error", B: "success"}, (B, True)),
-            "green head waits": ([A, B], {A: "success"}, (D, False)),
-            "red head waits": ([A, B], {A: "failure"}, (D, False)),
-            "head's own green is not its base": ([A], {}, (D, True)),
-            "stable holds head": ([], {}, (D, False)),
-        }
-        for case, (commits, states, expected) in batches.items():
-            with self.subTest(batch=case):
-                self.assertEqual(mq.batch(commits, D, of(states)), expected)
 
         verdicts = {
             ("success", "success", "success", "success"): "success",
@@ -164,6 +147,19 @@ class PromotionChoiceTest(unittest.TestCase):
         with self.subTest(choose="stable holds HEAD"):
             self.assertEqual(mq.choose(A, "", [], lambda commit: None, lambda own, commit: None),
                              (A, None, "stable already holds it"))
+        # A scheduled run never refuses: a red HEAD promotes nothing, and an unrecorded or green HEAD proceeds.
+        scheduled = {
+            "red HEAD skips": ({A: "failure"}, None, (None, None, f"{A} failed qualification in run 41; "
+                                                       "the next scheduled run waits for a fix on main")),
+            "green HEAD publishes": ({A: "success"}, None, (A, published, None)),
+            "HEAD without a record qualifies": ({}, None, (A, None, "no green record")),
+        }
+        for case, (states, reason, expected) in scheduled.items():
+            with self.subTest(scheduled=case):
+                def record(commit):
+                    return mq.Record(states[commit], "41", "0.80.0") if commit in states else None
+                self.assertEqual(mq.choose(A, "", [A, B, C], record, lambda own, commit: reason, scheduled=True),
+                                 expected)
 
 
 if __name__ == "__main__":

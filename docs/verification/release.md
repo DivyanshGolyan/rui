@@ -5,17 +5,17 @@
 ## Landing cadence
 
 `main` is the integration branch; `stable` and the latest release are what users run.
-PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; [Qualify main](#qualify-main) runs the expensive tier on `main` every three hours, and a manual promotion publishes a qualified commit to users.
+PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; [scheduled promotion](#scheduled-promotion) runs the expensive tier on `main` every three hours and publishes a green HEAD to users, and a manual promotion publishes a qualified commit.
 GitHub must require pull requests and the GitHub Actions `admission` check on `main`, with no bypass; it does not require an up-to-date base.
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
 Nothing runs on `main` per merge.
-Two PRs that pass alone but break `main` together, by compilation or by a test, and a break the PR tier does not select, are caught by [Qualify main](#qualify-main) within one three-hour tick, which bisects to the commit that broke it.
+Two PRs that pass alone but break `main` together, by compilation or by a test, and a break the PR tier does not select, are caught by [scheduled promotion](#scheduled-promotion) within one three-hour tick, which bisects to the commit that broke it and publishes nothing while HEAD is red.
 The owner accepted, on 18 Nov 2026, that the fast PR tier lets more breaks reach `main` and that they are found there within hours.
 A changed head requires current candidate checks before merge.
 
 Before admission, a Store schema edit compiles every native and Store unit partition unfiltered on the exact candidate.
-A branch that merged main gets only what its candidate's own diff selects; Qualify main and Promote compile every partition on main, so a merge that breaks only a unit partition is found there.
+A branch that merged main gets only what its candidate's own diff selects; Scheduled and manual promotions compile every partition on main, so a merge that breaks only a unit partition is found there.
 `ci_plan.py` widens `linux_compile_targets` with `test` only when the selected `test`, `check` or `check-full` closure does not already cover those partitions.
 The single PR job compiles that selection; execution targets and live-engine obligations stay selected independently.
 This is compilation, not execution of every unit test, and does not add portable `test-logic` unless that root is selected separately.
@@ -26,7 +26,7 @@ Required producers must succeed even when no product execution target was select
 The owner accepted on 18 Nov 2026 that a defect only those checks catch now surfaces at promotion, which bisects the batch, rather than on the PR; in the five days measured these checks took about 48% of PR runner-minutes.
 The selector still computes the [Mac paths](../../tests/ci/platform_boundary.py) and the upgrade and `typecheck-macos` obligations; on a PR they only keep a change out of the documentation lane.
 Promotion selects them over its whole batch: native Mac runs its core targets plus the batch's selection, `typecheck-macos`, cache execution and Linux memory run when the batch touches their paths.
-Qualify main applies that selection to each batch since its last green qualification, so every merge that touches compile inputs is type-checked for macOS within hours.
+Scheduled promotion applies that selection to each batch since `stable`, so every merge that touches compile inputs is type-checked for macOS within hours.
 Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
 The [previous installed-release upgrade](../../.github/workflows/previous-release-upgrade.yml) runs on both systems in every promotion.
 In the same job and suite, `--running-host` starts the pinned v0.69.1 release on a private Store, saves a completed provider answer and Session configuration, and leaves the Host running while the candidate's rendered `release/install.sh` runs.
@@ -49,32 +49,36 @@ Draft checks never satisfy `admission`.
 Local `prepush.py` supplies cheap feedback only; [landing](../agents/landing.md#publish-and-merge) keeps current-candidate admission and clean Codex evidence as merge gates.
 Correctness failures are fixed on the PR before it reaches `main`.
 
-### Qualify main
+### Scheduled promotion
 
-[Qualify main](../../.github/workflows/main-qualifier.yml) runs every three hours, and by `gh workflow run main-qualifier.yml --ref main`, when main HEAD has no `main-qualified` verdict yet.
-It calls the [qualification tier](../../.github/workflows/qualification-tier.yml) that Promote calls (described below) on main HEAD, over the batch since the newest first-parent commit with a green `main-qualified` record, else since `stable`, so a failing step bisects only the commits since `main` was last known green.
-A failing job files or updates one `main-red` issue per cause, with the bisect's verdict on it.
+[Promote](../../.github/workflows/promote.yml) runs every three hours, with empty inputs, so it promotes main HEAD.
+When [stable](#promote) already holds HEAD it does nothing.
+When HEAD has a red `main-qualified` record it skips quietly, since the failing run already filed its issues.
+Otherwise it qualifies HEAD, or publishes the archives of HEAD's green record, exactly as a manual promotion does below, and a green HEAD that main has moved past since the last release becomes a release without anyone dispatching it.
+The batch runs from `stable`, the last promoted commit, so a failing step bisects the commits since the last release.
+A failing job files or updates one `main-red` issue per cause, with the bisect's verdict on it; a manual promotion files `promotion-red` instead.
+Setting the repository variable `SCHEDULED_RELEASES` to `paused` (`gh variable set SCHEDULED_RELEASES --body paused`) holds scheduled publication: scheduled runs still qualify HEAD and record its verdict, and a manual promotion publishes a green record's archives; deleting the variable resumes it.
 Every run records its verdict as the `main-qualified` commit status of HEAD, whose target is the run: green only when every tier passed, red when one failed, and unfinished when a tier was cancelled, which the next tick qualifies again.
 [main_qualified.py](../../tests/ci/main_qualified.py) alone writes and reads that record and names the batch.
-It never publishes, merges or reverts.
-Runs never overlap: a newer `main` waits for the next tick, and a tick whose HEAD already has a verdict does nothing, so an idle `main` costs one short job per tick.
+Runs never overlap: the `promote` concurrency group queues a newer run behind the current one, so an idle `main` whose HEAD is already in `stable` costs one short job per tick.
 A rerun of its failed jobs records the rerun's verdict on the same SHA.
-Qualify main and a promotion of the same SHA run their tiers separately; neither cancels the other's.
+Scheduled and manual runs share that queue, so neither cancels a running promotion, but GitHub keeps only one waiting run per group: a newer tick or dispatch replaces a waiting one.
+A scheduled tick that replaces a waiting dispatch promotes main HEAD, as a default dispatch would; dispatch again after the running promotion when the replaced one named a `sha`.
 
 ### Promote
 
-[Promote](../../.github/workflows/promote.yml) is the only path to a release, and it starts only by manual dispatch on `main`: `gh workflow run promote.yml --ref main`.
+[Promote](../../.github/workflows/promote.yml) is the only path to a release. It starts on the [schedule](#scheduled-promotion) for main HEAD, and by hand on `main`: `gh workflow run promote.yml --ref main`.
 It publishes main HEAD by default; `-f sha=<commit>` names a first-parent `main` commit after `stable`, and `-f sha=qualified` the newest one with a green record.
 When that commit's `main-qualified` record is green, its run still holds the release archives, and the release plan still gives the version that run built, Promote publishes those archives at once and qualifies nothing.
-A red record refuses: fix forward and promote a later commit, or promote an earlier green one.
-Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so Qualify main skips it.
-Promote and Qualify main share one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues; its callers differ only in the batch, the issue label (`promotion-red` or `main-red`) and runner routing (only Promote passes the runner-status token), and only Promote publishes after it. Its jobs appear as `qualify / <job>`.
+A red record refuses a manual promotion: fix forward and promote a later commit, or promote an earlier green one.
+Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so the next scheduled run skips it.
+Promote is the sole caller of the one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues under the label Promote passes (`main-red` on schedule, `promotion-red` by hand), and Promote publishes after it. Its jobs appear as `qualify / <job>`.
 Promote qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, Linux `mysql-wire-integration`, the upgrade check on both systems and the renderer contracts.
 A failing suite, upgrade or contract job bisects each step that failed, on the same runner, by replaying that step's recorded command: once at HEAD, then by binary search over the batch's first-parent commits.
 A step is one suite batch, one upgrade check or one contract; a suite job stops at its first failed batch, and [steps.py](../../tests/ci/steps.py) runs every upgrade check and contract even after one fails.
 Each step's verdict names the first commit where it fails, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdicts are retained with the run.
 Two steps broken by different commits get different verdicts, but a suite batch with several causes names only its earliest; the job's issues carry every verdict line.
-The run then files one `promotion-red` issue per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the verdict on it.
+The run then files one `promotion-red` issue (`main-red` when scheduled) per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the verdict on it.
 A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
 A bisect never turns a promotion green, and a promotion never merges or reverts.
 From the start, beside the suites, [Release build](../../.github/workflows/release-build.yml) numbers the release and builds the cold versioned archives of main HEAD; it publishes nothing.
@@ -89,9 +93,8 @@ Promote when something users need has landed; with a green record that takes min
 A batch of about 22 merges costs at most five replays of a failing target to bisect.
 No completion callback or global open-issue hold owns `stable`.
 
-Qualify main is the only scheduled CI workflow; it qualifies but never publishes.
+[Scheduled promotion](#scheduled-promotion) is the only scheduled CI workflow, and the schedule is the only automatic trigger of a release.
 Manual qualification and resource campaigns remain diagnostics, not a second release authority.
-There is no automatic promotion trigger.
 Record recurring failures by fixture and assertion, preserve their counterexamples, and close them through the fixing commit.
 An unrelated issue does not freeze publication of qualified main commits.
 Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes.
@@ -99,7 +102,7 @@ Keep cleanup and resource bounds, and do not retry failed required acceptance to
 
 ## Release publication
 
-[Release](../../.github/workflows/release.yml) runs only inside a green [promotion](#promote) and publishes the immutable main SHA qualified for it, from the archives the qualifying run's [Release build](../../.github/workflows/release-build.yml) made and its tiers tested: the promotion's own run, or the Qualify main or earlier promotion run its green record names.
+[Release](../../.github/workflows/release.yml) runs only inside a green [promotion](#promote) and publishes the immutable main SHA qualified for it, from the archives the qualifying run's [Release build](../../.github/workflows/release-build.yml) made and its tiers tested: the promotion's own run, or the earlier scheduled or manual promotion run its green record names.
 Release build records `SHA256SUMS` for every archive and npm tarball when it packs them; publication checks the downloaded files against that record and publishes it, so a byte that changed after the tests cannot ship.
 Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
@@ -113,7 +116,7 @@ Do not rerun the promotion for it: push to each named PR, or rerun that PR's `po
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
 A newer main SHA gets a newer version; one release covers a whole promotion batch.
 Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe, in Release build before qualification.
-Its archives live as run artifacts for seven days, so a promotion's failed jobs must be rerun within that window, and a commit Qualify main qualified publishes without rebuilding for that long, less two hours' margin; after that Promote qualifies main HEAD again.
+Its archives live as run artifacts for seven days, so a promotion's failed jobs must be rerun within that window, and a commit an earlier promotion qualified publishes without rebuilding for that long, less two hours' margin; after that Promote qualifies main HEAD again.
 The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Apple Silicon.
 Each build must report the version and exact SHA from `rui --version`.
 The Linux executables are stripped, and their debug info ships as a separate `-debug` archive that crash traces read once it is extracted beside them.

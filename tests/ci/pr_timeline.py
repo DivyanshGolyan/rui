@@ -25,7 +25,7 @@ Adjacent durations are signed minutes: stages can occur out of the listed order,
 and a missing endpoint stays blank rather than bridging to a different stage.
 
 Red-main minutes read the issues that record a red main instead of judging
-runs again: main is red while a `main-red` issue Qualify main filed
+runs again: main is red while a `main-red` issue scheduled Promote filed
 (report_issue.py, one per cause, open until its fix closes it) or a
 "Main build red" issue the retired main build filed (the ci-red label and
 RED_MAIN_MARKER in its body) is open: from its creation, through its own
@@ -55,10 +55,10 @@ from report_issue import LABEL as CI_RED_LABEL
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
 RED_MAIN_KNOWN_FROM = "2026-11-13T11:56:38Z"
-# The retired main build's one issue (main_build.py until Qualify main replaced it).
+# The retired main build's one issue (main_build.py until the qualification tier replaced it).
 RED_MAIN_MARKER = "<!-- main-build-red -->"
 RED_MAIN_TITLE = "Main build red"
-# Qualify main's per-cause issues (main-qualifier.yml).
+# Scheduled Promote's per-cause issues (promote.yml, qualification-tier.yml).
 RED_MAIN_LABEL = "main-red"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")

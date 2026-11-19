@@ -59,7 +59,7 @@ class PlanTest(unittest.TestCase):
             ('promotion', 'workflow_dispatch', False, True),
         )
         normal_linux = ['check', 'test-native', 'transport-h2-integration']
-        # CI-69: promotion, and so Qualify main, runs every check the PR tier skips, whatever the batch touched.
+        # CI-69: promotion, scheduled or by hand, runs every check the PR tier skips, whatever the batch touched.
         promoted_linux = ['admission-debug-integration', 'check-full', 'host-status-integration',
                           'mysql-wire-integration', 'rsql-table', 'stack-frames', 'test-logic', 'transport-h2-integration']
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
