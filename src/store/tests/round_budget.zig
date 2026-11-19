@@ -178,7 +178,7 @@ test "creating configuration with a receipt keeps the configure round budget" {
             var meter: RoundMeter = .{ .storage = &storage };
             meter.start();
             const reply = try storage.configureInto(&create, &receipt, .{});
-            meter.stop(.configure);
+            try meter.stop(.configure);
             try std.testing.expect(reply == .accepted and reply.accepted.configuration != null);
             const measured = meter.measured.get(.configure).?;
             try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
@@ -208,7 +208,7 @@ test "creating Message with a receipt keeps the no-output creation rounds" {
             try message.key.set("budget-message-no-receipt");
             meter.start();
             const without = storage.submitMessageWithModel(&message, null, .{});
-            meter.stop(.submitMessageWithModel);
+            try meter.stop(.submitMessageWithModel);
             try std.testing.expect(without == .accepted and without.accepted.configuration == null);
             const baseline = meter.measured.get(.submitMessageWithModel).?;
             var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
@@ -216,7 +216,7 @@ test "creating Message with a receipt keeps the no-output creation rounds" {
             var receipt_meter: RoundMeter = .{ .storage = &storage };
             receipt_meter.start();
             const with = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
-            receipt_meter.stop(.submitMessageWithModel);
+            try receipt_meter.stop(.submitMessageWithModel);
             try std.testing.expect(with == .accepted and with.accepted.configuration != null);
             const measured = receipt_meter.measured.get(.submitMessageWithModel).?;
             try std.testing.expectEqual(baseline.rounds, measured.rounds);

@@ -1283,8 +1283,10 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
 
 pub const RoundMeter = struct {
     storage: *Store,
-    /// Set on an unrepeated leg, where no counter moves back: a window that does is a failure, not a wrapped count.
-    checked: bool = false,
+    /// Checked by default: no counter may move back over a window, since nothing resets them on an unrepeated leg, so a
+    /// wrapped difference there would hide a count that was never taken. Only a run-again leg, which reconnects and
+    /// restarts the connection's query count, opts out (SH-110's rerun leg).
+    checked: bool = true,
     rounds_before: u16 = 0,
     content_before: u16 = 0,
     shape_before: QueryShape = .{},
@@ -1323,11 +1325,10 @@ pub const RoundMeter = struct {
             return delta;
         }
 
-        /// Asserts that no count went back over a window: on an unrepeated leg nothing resets them, so a wrapped
-        /// difference there would hide a count that was never taken.
-        pub fn assertForward(after: QueryShape, before: QueryShape) void {
+        /// Fails when a count went back over a window, so one test fails rather than the test binary.
+        pub fn checkForward(after: QueryShape, before: QueryShape) error{CounterWentBack}!void {
             inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
-                std.debug.assert(@field(after, name) >= @field(before, name));
+                if (@field(after, name) < @field(before, name)) return error.CounterWentBack;
         }
 
         pub fn expected(shape: QueryShape) u64 {
@@ -1341,13 +1342,13 @@ pub const RoundMeter = struct {
         meter.shape_before = QueryShape.snapshot(meter.storage);
     }
 
-    pub fn stop(meter: *RoundMeter, point: EntryPoint) void {
-        std.debug.assert(meter.measured.get(point) == null);
+    pub fn stop(meter: *RoundMeter, point: EntryPoint) error{ WindowRepeated, CounterWentBack }!void {
+        if (meter.measured.get(point) != null) return error.WindowRepeated;
         const shape = QueryShape.snapshot(meter.storage);
         if (meter.checked) {
-            std.debug.assert(meter.storage.testing_content_work.rounds >= meter.rounds_before);
-            std.debug.assert(meter.storage.testing_content_work.content_rounds >= meter.content_before);
-            shape.assertForward(meter.shape_before);
+            if (meter.storage.testing_content_work.rounds < meter.rounds_before) return error.CounterWentBack;
+            if (meter.storage.testing_content_work.content_rounds < meter.content_before) return error.CounterWentBack;
+            try shape.checkForward(meter.shape_before);
         }
         meter.measured.set(point, .{
             .rounds = meter.storage.testing_content_work.rounds -% meter.rounds_before,

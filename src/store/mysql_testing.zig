@@ -54,6 +54,12 @@ fn drain(source: anytype, changes: ?*i64) !void {
     if (failed) return error.MysqlFixtureFailed;
 }
 
+/// Reads the rest of a result the caller gave up on, so the next caller starts on a ready connection. A connection that
+/// cannot be read to its end is lost, and the next call reports that.
+fn drainAfterFailure() void {
+    while (!root.isReady()) _ = root.next() catch return;
+}
+
 fn run(sql: []const u8) !void {
     try root.query(sql);
     try drain(&root, null);
@@ -246,6 +252,14 @@ pub fn untouchedForTesting(storage: *Store, touched: *const change_ring.Touched)
     return missing;
 }
 
+/// Runs SQL on the Store's own connection, so it sees the Store's transaction and savepoints. `rawExec` runs on the
+/// fixture's root connection, which is a different session.
+pub fn storeRawExec(storage: *Store, sql: []const u8) !void {
+    const source = &storage.engine.mysql.state.connection;
+    try source.query(sql);
+    try drain(source, null);
+}
+
 pub fn rawExec(storage: *Store, sql: []const u8) !void {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
@@ -263,6 +277,8 @@ pub fn tableRows(storage: *Store, arena: std.mem.Allocator, table: []const u8) !
     try use(storage);
     const text = try std.fmt.allocPrint(arena, "SELECT * FROM `{s}`", .{table});
     try root.query(text);
+    // The connection is shared: a failed read leaves it mid-stream unless the rest of the result is read out here.
+    errdefer drainAfterFailure();
     var names: std.ArrayList([]const u8) = .empty;
     var table_rows: std.ArrayList([]const ?[]const u8) = .empty;
     var count: usize = 0;

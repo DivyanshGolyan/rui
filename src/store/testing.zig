@@ -1039,12 +1039,13 @@ fn sqliteField(statement: *sqlite.c.sqlite3_stmt, column: c_int, arena: std.mem.
 /// - the clock readings (`clock_columns`), `store_meta` selector and id, `model_catalog_source.fetched_at`, the
 ///   random `action_value.handle` and the command input's digest (`core_command.input_digest`, which hashes text
 ///   carrying the run's references) are masked, keeping only whether each is NULL;
-/// - `session_forward.forward_id` is masked: it comes from the Store's in-memory identity counter, which a rolled-back
-///   attempt does not rewind, so the rerun leg's row gets a later number;
+/// - `session_forward.forward_id` is masked only when `mask_forward_id` says so (the rerun leg, against a SQLite digest
+///   masked the same way): the identity a forward takes is burned when its insert writes no row, and a recovery reloads
+///   the counter from the table, so the run that reconnected numbers its surviving row differently (see `masked`);
 /// - MySQL's generated `*_lead` helper columns are dropped, and tables only MySQL has (`store_owner`,
 ///   `content_chunk`) are outside the digest. A MySQL content's bytes come from its chunks, a SQLite content's from
 ///   its payload, since ContentReader would refuse a parts-form content (its digest is not a hash of its bytes).
-pub fn logicalDigest(storage: *Store) ![32]u8 {
+pub fn logicalDigest(storage: *Store, mask_forward_id: bool) ![32]u8 {
     const schema = @import("schema.zig");
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -1058,7 +1059,7 @@ pub fn logicalDigest(storage: *Store) ![32]u8 {
         const table = try tableRows(storage, arena, object.name);
         const kept = comptime sqliteColumns(object.sql);
         var encoded: std.ArrayList([]const u8) = .empty;
-        for (table.rows) |row| try encoded.append(arena, try logicalRow(arena, &ordinals, &content_digests, object.name, table.names, row, kept));
+        for (table.rows) |row| try encoded.append(arena, try logicalRow(arena, &ordinals, &content_digests, object.name, table.names, row, kept, mask_forward_id));
         std.mem.sort([]const u8, encoded.items, {}, lessBytes);
         hasher.update(object.name);
         hashLength(&hasher, encoded.items.len);
@@ -1162,7 +1163,7 @@ fn canonicalText(arena: std.mem.Allocator, ordinals: *const Ordinals, bytes: []c
     return out.toOwnedSlice(arena);
 }
 
-fn logicalRow(arena: std.mem.Allocator, ordinals: *const Ordinals, content_digests: *const Digests, table: []const u8, names: []const []const u8, row: []const ?[]const u8, kept: []const []const u8) ![]const u8 {
+fn logicalRow(arena: std.mem.Allocator, ordinals: *const Ordinals, content_digests: *const Digests, table: []const u8, names: []const []const u8, row: []const ?[]const u8, kept: []const []const u8, mask_forward_id: bool) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     const is_content = std.mem.eql(u8, table, "content");
     for (names, row) |name, field| {
@@ -1180,7 +1181,7 @@ fn logicalRow(arena: std.mem.Allocator, ordinals: *const Ordinals, content_diges
                 if (content_digests.get(copy[at + 8 ..][0..32].*)) |canonical| @memcpy(copy[at + 8 ..][0..32], &canonical);
             }
             value = copy;
-        } else if (masked(table, name, names, row)) {
+        } else if (masked(table, name, names, row, mask_forward_id)) {
             value = if (field == null) null else "masked";
         } else if (field) |bytes| {
             value = try canonicalText(arena, ordinals, bytes);
@@ -1233,13 +1234,17 @@ const clock_columns = [_][]const u8{
     "stopped_at",  "obligation_since",
 };
 
-fn masked(table: []const u8, name: []const u8, names: []const []const u8, row: []const ?[]const u8) bool {
+fn masked(table: []const u8, name: []const u8, names: []const []const u8, row: []const ?[]const u8, mask_forward_id: bool) bool {
     // A digest of the command's input, which carries the run's session references: a digest of text this digest
     // cannot rebuild from the rows.
     if (std.mem.eql(u8, table, "core_command") and std.mem.eql(u8, name, "input_digest")) return true;
-    // The identity a forward takes from the Store's in-memory counter, which a rolled-back attempt does not rewind: the
-    // run-again leg's row carries a later number. Every other column of the row is still compared.
-    if (std.mem.eql(u8, table, "session_forward") and std.mem.eql(u8, name, "forward_id")) return true;
+    // Burned identity: `forward.queue` takes a forward_id before its INSERT ... SELECT, which writes no row when the
+    // session has no parent or the same forward is already queued (the second queue of a source, in the journey). The
+    // counter keeps that number, so later forwards number one higher than the rows show. A recovery reloads the counter
+    // from the table maximum and drops the burned number, so the rerun leg's surviving forward takes a lower number.
+    // In the journey no other identity diverges between the legs. Masked only where the caller says so (the rerun leg,
+    // compared with a SQLite digest masked the same way); every other column is still compared.
+    if (mask_forward_id and std.mem.eql(u8, table, "session_forward") and std.mem.eql(u8, name, "forward_id")) return true;
     // A random handle the Store draws for each published value (32 hex digits), so it differs per run by design.
     if (std.mem.eql(u8, table, "action_value") and std.mem.eql(u8, name, "handle")) return true;
     for (clock_columns) |clock| if (std.mem.eql(u8, name, clock)) return true;
