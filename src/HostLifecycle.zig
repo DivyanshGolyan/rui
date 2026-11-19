@@ -26,6 +26,7 @@ pub const Progress = struct {
     }
 };
 pub const Limitation = activation.Limitation;
+pub const TargetStep = activation.TargetStep;
 
 pub const ActivationOutcome = activation.Outcome;
 
@@ -401,8 +402,11 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                     try environment.put(entry[0..equal], entry[equal + 1 ..]);
                 }
                 const path = try std.fmt.allocPrint(arena.allocator(), "{s}/bin/rui", .{target});
-                // #1791: an error here escapes, and restart-all reports it as an unconfirmed start.
-                executable = try std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator());
+                executable = std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator()) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    facts.target_failed = .resolving;
+                    continue;
+                };
                 facts.same_executable = std.mem.eql(u8, executable, plan.snapshot.executable);
             },
             .confirm_current => facts.current = if (client.observeHostForUpgradeProfile(init.io, plan.sources.request.dir, plan.observed.profile, null)) |value|
@@ -413,7 +417,18 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
             else |_|
                 .unreadable,
             .inspect_target => {
-                var build = try Installation.inspectBuild(private, init.io, init.environ_map.get("HOME") orelse return error.HomeNotFound, target, cancellation);
+                const home = init.environ_map.get("HOME") orelse {
+                    facts.target_failed = .inspecting;
+                    continue;
+                };
+                var build = Installation.inspectBuild(private, init.io, home, target, cancellation) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.Cancelled => return .cancelled,
+                    else => {
+                        facts.target_failed = .inspecting;
+                        continue;
+                    },
+                };
                 defer build.deinit(private);
                 facts.known_bad = knownBadTarget(build);
             },
@@ -424,7 +439,6 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
             .check_target => {
                 const check_argv = try arguments(arena.allocator(), executable, request, .check);
                 const result = process.runIn(private, init.io, check_argv, cancellation, settings_handoff.max_bytes, .fromSeconds(300), context) catch |err| {
-                    // #1793: a check that could not run is reported as a configuration limit.
                     facts.check = if (err == error.Cancelled) .cancelled else .unavailable;
                     continue;
                 };
