@@ -1,14 +1,17 @@
 name: Promote
-# Manual only. Publish a qualified main commit and advance stable to it.
-# By default the commit is main HEAD; `sha` names an earlier first-parent main
-# commit after stable, or `qualified` the newest one with a green
-# main-qualified record. A commit Qualify main (main-qualifier.yml) or an
-# earlier promotion qualified green publishes that run's archives at once.
+# Runs every three hours and by hand. Publish a qualified main commit and
+# advance stable to it. On schedule the commit is main HEAD (inputs are empty,
+# so `inputs.sha` is ''); when stable already holds it, the run does nothing.
+# A HEAD with a red main-qualified record is skipped quietly, since the failing
+# run already filed its issues. By hand, the commit is main HEAD by default;
+# `sha` names an earlier first-parent main commit after stable, or `qualified`
+# the newest one with a green main-qualified record. A commit that a scheduled
+# or earlier promotion qualified green publishes that run's archives at once.
 # Otherwise, only for main HEAD, Promote runs the same qualification tier
 # (qualification-tier.yml) over the batch since stable, the last promoted
 # release, and Release publishes the archives it built and tested. A failing
 # job bisects the batch with its own command; the run never merges. A red
-# record refuses.
+# record refuses a manual promotion.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +20,8 @@ on:
         type: string
         required: false
         default: ''
+  schedule:
+    - cron: '17 */3 * * *'
 
 permissions:
   contents: read
@@ -55,9 +60,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MAIN_SHA: ${{ github.sha }}
           CHOSEN: ${{ inputs.sha }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
         run: |
           set -euo pipefail
-          outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN")
+          outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN" $( [ "$SCHEDULED" = true ] && echo --scheduled ))
           echo "$outputs" >> "$GITHUB_OUTPUT"
           echo "$outputs"
   qualify:
@@ -77,7 +83,8 @@ jobs:
     with:
       base: ${{ needs.batch.outputs.base }}
       head: ${{ needs.batch.outputs.head }}
-      red-label: promotion-red
+      # Scheduled runs file main-red, which the main-is-red timeline reads; manual promotions file promotion-red.
+      red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}
     # Only the runner-status token, so promotion's Mac routing can see rui-mac.
     secrets:
       MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
@@ -87,7 +94,9 @@ jobs:
     # qualified SHA. It rebuilds nothing. The commit is qualified when the
     # batch reused a green record or this run's tier recorded success.
     needs: [batch, qualify]
-    if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && (needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}
+    # The repository variable SCHEDULED_RELEASES=paused holds scheduled publication;
+    # scheduled runs still qualify and record, and a manual promotion publishes.
+    if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && (needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && !(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}
     permissions:
       contents: write
       actions: write

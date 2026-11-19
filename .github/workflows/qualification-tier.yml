@@ -1,6 +1,6 @@
 name: Qualification tier
-# The one owner of main's full qualification tier and its verdict. Qualify main
-# (main-qualifier.yml) and Promote (promote.yml) both call it for the batch
+# The one owner of main's full qualification tier and its verdict. Promote
+# (promote.yml, scheduled and by hand) is its one caller, for the batch
 # BASE..HEAD of main: release archives built cold first, beside the Linux and
 # macOS suites; the upgrade check and renderer contracts test those archives.
 # It records the verdict as HEAD's main-qualified status with the caller's run,

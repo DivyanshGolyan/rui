@@ -227,11 +227,11 @@ class AdapterTest(unittest.TestCase):
         tier = (ROOT / ".github/workflows/qualification-tier.yml").read_text()
         self.assertRegex(tier.split("\npermissions:", 1)[0], r"(?m)^      MAC_RUNNER_STATUS_TOKEN:\n        required: false$")
         token = ["MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}"]
-        # Runner routing is the one input the callers differ in: Promote may route
-        # to rui-mac, Qualify main passes no token and stays hosted.
+        # Runner routing is the one input the tier's callers may pass: Promote passes the token so a dispatched
+        # promotion's macOS jobs may route to rui-mac, and the tier's own check passes it on. A scheduled
+        # event is not admitted to rui-mac, so its jobs stay hosted whatever the token holds.
         for path, job, uses, expected in ((".github/workflows/qualification-tier.yml", "selected", "check.yml", token),
-                                          (".github/workflows/promote.yml", "qualify", "qualification-tier.yml", token),
-                                          (".github/workflows/main-qualifier.yml", "qualify", "qualification-tier.yml", [])):
+                                          (".github/workflows/promote.yml", "qualify", "qualification-tier.yml", token)):
             with self.subTest(caller=path):
                 text = (ROOT / path).read_text()
                 body = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]

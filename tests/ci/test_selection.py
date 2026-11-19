@@ -351,14 +351,15 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
+    def test_only_promote_is_scheduled_and_only_promote_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
                 scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
-                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
-                self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
+                self.assertEqual(len(scheduled), path.name == "promote.yml")
+                if path.name != "promote.yml":
+                    self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
         removed = ("daily-macos.yml", "cold-acceptance.yml",

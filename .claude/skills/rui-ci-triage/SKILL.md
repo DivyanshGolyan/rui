@@ -1,6 +1,6 @@
 ---
 name: rui-ci-triage
-description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission, Qualify main, Promote or Release fails, or a job stalls, times out or shows cancelled.
+description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission, scheduled or manual Promote, or Release fails, or a job stalls, times out or shows cancelled.
 ---
 
 # rui-ci-triage
@@ -30,7 +30,7 @@ Read each failed job's own failing step before calling it derivative.
 The required `admission` job can fail because an upstream acceptance job failed or was cancelled.
 Read that upstream failure rather than blaming the aggregate.
 A Promote run whose step has failed is red even while its bisect step keeps the run in progress (up to four hours); report it as red at once.
-Qualify main runs Promote's tier and bisect on `main` every three hours and files `main-red` issues; triage its runs as a promotion's.
+A scheduled Promote run is Promote's tier and bisect on `main` every three hours; it files `main-red` issues, and you triage its runs as a promotion's.
 A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names.
 A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../docs/verification/release.md#release-publication) says which, and what recovers each.
 

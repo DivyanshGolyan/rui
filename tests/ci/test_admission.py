@@ -26,7 +26,6 @@ PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
 RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
-QUALIFIER = ROOT / '.github/workflows/main-qualifier.yml'
 TIER = ROOT / '.github/workflows/qualification-tier.yml'
 
 
@@ -951,11 +950,11 @@ class ReleaseFlowTest(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
-    def test_only_a_manual_promotion_publishes_main(self):
-        # One tier builds and judges the archives for Qualify main and Promote; only Promote publishes them.
+    def test_only_promote_publishes_main(self):
+        # One tier builds and judges the archives for Promote, scheduled or by hand; only Promote publishes them.
         for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['qualification-tier.yml']),
                                    (UPGRADE, ['qualification-tier.yml']), (RENDERER, ['qualification-tier.yml']),
-                                   (TIER, ['main-qualifier.yml', 'promote.yml'])):
+                                   (TIER, ['promote.yml'])):
             release = workflow.read_text().split('\npermissions:', 1)[0]
             self.assertIn('  workflow_call:', release)
             # The upgrade check and renderer contracts also run by hand for diagnosis.
@@ -966,32 +965,32 @@ class ReleaseFlowTest(unittest.TestCase):
                        if f'uses: ./.github/workflows/{workflow.name}' in path.read_text()]
             self.assertCountEqual(callers, expected)
         promote = PROMOTE.read_text()
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]), ['workflow_dispatch'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]),
+                         ['workflow_dispatch', 'schedule'])
         selected = CHECK.read_text().split('\npermissions:', 1)[0]
         self.assertIn('  pull_request:', selected)
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
 
-    def test_main_qualifier_runs_promotions_tier_and_records_without_publishing(self):
+    def test_scheduled_promotion_qualifies_main_head_and_files_main_red(self):
+        self.assertFalse((ROOT / '.github/workflows/main-qualifier.yml').exists())
         self.assertFalse((ROOT / '.github/workflows/main-build.yml').exists())
-        text = QUALIFIER.read_text()
+        text = PROMOTE.read_text()
         on = text.split('\npermissions:', 1)[0]
         self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
         self.assertIn('  workflow_dispatch:', on)
         self.assertNotRegex(on, r'push:|pull_request')
-        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-qualifier\n  cancel-in-progress: false$')
-        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write|secrets')
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify'])
-        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
-        self.assertIn('main_qualified.py batch --head "$HEAD_SHA"', job(text, 'batch'))
+        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: promote\n  cancel-in-progress: false$')
+        batch = job(text, 'batch')
+        self.assertIn("github.ref == 'refs/heads/main'", batch)
+        self.assertIn("SCHEDULED: ${{ github.event_name == 'schedule' }}", batch)
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', batch)
+        self.assertEqual(batch.count('--scheduled'), 1)
+        self.assertIn('$( [ "$SCHEDULED" = true ] && echo --scheduled )', batch)
         qualify = job(text, 'qualify')
-        for line in ('uses: ./.github/workflows/qualification-tier.yml', "if: ${{ needs.batch.outputs.needed == 'true' }}",
-                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
-                     'red-label: main-red'):
-            self.assertIn(line, qualify)
-        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
-                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
-        # Promote and Qualify main on one SHA never cancel each other's tiers.
+        self.assertIn('uses: ./.github/workflows/qualification-tier.yml', qualify)
+        self.assertIn("red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}", qualify)
+        # Promote's scheduled and manual runs on one SHA never cancel each other's tiers.
         self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
@@ -1061,14 +1060,15 @@ class ReleaseFlowTest(unittest.TestCase):
         for line in ('uses: ./.github/workflows/qualification-tier.yml',
                      "if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}",
                      'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
-                     'red-label: promotion-red'):
+                     "red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}"):
             self.assertIn(line, qualify)
         self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
                                                    'checks': 'read', 'statuses': 'write', 'issues': 'write'})
         release = job(text, 'release')
         self.assertIn('needs: [batch, qualify]', release)
         self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
-                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}", release)
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && "
+                      "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
         self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
                       " || needs.qualify.outputs.version }}", release)
