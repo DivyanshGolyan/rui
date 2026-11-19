@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 86;
+pub const schema_version: u32 = 87;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -65,7 +65,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
-    .{ .schema_version = 86, .digest = 0xaf3fc29f874e6c4a },
+    .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
+    .{ .schema_version = 87, .digest = 0x0000000000000000 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -853,6 +854,27 @@ pub const migrations = [_]Migration{
     .{
         .from = 85,
         .sqlite = &.{
+            "UPDATE tool_set_member SET tool_record_id=(SELECT min(keep.tool_record_id) FROM tool_record keep JOIN tool_record cur ON cur.tool_record_id=tool_set_member.tool_record_id WHERE keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id)",
+            "DELETE FROM tool_record WHERE tool_record_id NOT IN (SELECT min(tool_record_id) FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record RENAME TO tool_record_85",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record_85",
+            "DROP TABLE tool_record_85",
+        },
+        .mysql = &.{
+            "UPDATE tool_set_member member JOIN tool_record cur ON cur.tool_record_id=member.tool_record_id JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id SET member.tool_record_id=keep.keep_id",
+            "DELETE cur FROM tool_record cur JOIN (SELECT min(tool_record_id) AS keep_id,name,owner,server,description_content_id,input_schema_content_id FROM tool_record GROUP BY name,owner,server,description_content_id,input_schema_content_id) keep ON keep.name=cur.name AND keep.owner=cur.owner AND keep.server=cur.server AND keep.description_content_id=cur.description_content_id AND keep.input_schema_content_id=cur.input_schema_content_id WHERE cur.tool_record_id<>keep.keep_id",
+            "SET @rui_read_only_ddl=NULL",
+            "SET @rui_read_only_ddl=IF((SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tool_record' AND COLUMN_NAME='read_only')=0,'DO 0',(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP INDEX name, DROP COLUMN read_only, ADD UNIQUE(name,owner,server,description_content_id,input_schema_content_id)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND cc.CHECK_CLAUSE LIKE '%read_only%'))",
+            "PREPARE rui_read_only FROM @rui_read_only_ddl",
+            "EXECUTE rui_read_only",
+            "DEALLOCATE PREPARE rui_read_only",
+            "SET @rui_read_only_ddl=NULL",
+        },
+    },
+    .{
+        .from = 86,
+        .sqlite = &.{
             "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
             "CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL",
         },
@@ -1190,12 +1212,11 @@ pub const tables = [_]Table{
                 .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
-            .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "read_only", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),

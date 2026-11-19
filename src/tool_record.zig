@@ -110,7 +110,6 @@ pub const Record = struct {
     input_schema: []const u8 = "",
     owner: Owner,
     server: []const u8 = "",
-    read_only: bool = false,
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -126,7 +125,6 @@ pub fn recordDigest(member: *const Record) [32]u8 {
         .name = member.name,
         .owner = member.owner,
         .server = member.server,
-        .read_only = member.read_only,
         .description = content_string.digest(member.description),
         .input_schema = content_string.digest(member.input_schema),
     }).digest();
@@ -136,7 +134,6 @@ pub const RecordIdentity = struct {
     name: []const u8,
     owner: Owner,
     server: []const u8,
-    read_only: bool = false,
     description: [32]u8,
     input_schema: [32]u8,
 
@@ -148,7 +145,6 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
-        if (self.read_only) hashField(&hash, "read_only");
         return hash.finalResult();
     }
 };
@@ -266,7 +262,7 @@ pub const HostToolSet = struct {
 };
 
 pub fn validServer(each: *const Record) bool {
-    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0 and !each.read_only;
+    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0;
 }
 
 pub const max_host_tool_records = 1024;
@@ -463,7 +459,7 @@ pub fn selectDigests(records: []const Record, snapshots: anytype, out: [][32]u8)
 // A snapshot serves only the exact record it was generated from. A changed record is hashed
 // normally, so an out-of-date snapshot cannot change a tool's persistent identity.
 fn sameRecord(a: *const Record, b: anytype) bool {
-    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.read_only == b.read_only and
+    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and
         std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
         std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
 }
@@ -517,18 +513,17 @@ test "EXR-65 tool identities survive matching, stale and missing digest snapshot
     const Snapshot = @import("tool_digests_generated.zig").Entry;
     const base: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
     const expected = recordDigest(&base);
-    const snapshot: Snapshot = .{ .record = .{ .name = base.name, .owner = .mcp, .server = base.server, .description = base.description, .input_schema = base.input_schema, .read_only = base.read_only }, .digest = expected };
+    const snapshot: Snapshot = .{ .record = .{ .name = base.name, .owner = .mcp, .server = base.server, .description = base.description, .input_schema = base.input_schema }, .digest = expected };
     const snapshots = [_]Snapshot{snapshot};
     var selected: [2][32]u8 = undefined;
     selectDigests(&.{base}, &snapshots, selected[0..1]);
     try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
 
-    var changes: [5]Record = .{ base, base, base, base, base };
+    var changes: [4]Record = .{ base, base, base, base };
     changes[0].name = "fetch_other";
     changes[1].description = "Fetch another page.";
     changes[2].input_schema = "{}";
     changes[3].server = "other";
-    changes[4].read_only = true;
     for (changes) |changed| {
         selectDigests(&.{changed}, &snapshots, selected[0..1]);
         try std.testing.expectEqualSlices(u8, &recordDigest(&changed), &selected[0]);
@@ -560,16 +555,6 @@ test "EXR-65 tool identities survive matching, stale and missing digest snapshot
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
     const old = recordDigest(&before);
     try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
-    var read = before;
-    read.read_only = true;
-    try std.testing.expect(validServer(&read));
-    try std.testing.expect(!std.mem.eql(u8, &old, &recordDigest(&read)));
-    const identity: RecordIdentity = .{ .name = read.name, .owner = read.owner, .server = read.server, .read_only = true, .description = content_string.digest(read.description), .input_schema = content_string.digest(read.input_schema) };
-    try std.testing.expectEqualSlices(u8, &recordDigest(&read), &identity.digest());
-    inline for (.{ Owner.rui, Owner.provider }) |owner| {
-        const invalid: Record = .{ .name = "invalid", .owner = owner, .read_only = true };
-        try std.testing.expect(!validServer(&invalid));
-    }
 }
 
 test "MCP missing tools tool set resolution covers every empty-server combination" {

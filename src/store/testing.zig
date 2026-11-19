@@ -1030,6 +1030,320 @@ pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
         "WHERE abs(-9223372036854775808) IS NOT NULL");
 }
 
+/// Test-only: while armed, a COMMIT on a SQLite Store fails (the commit hook refuses it), so an injected commit
+/// failure leaves the transaction rolled back.
+pub fn failCommits(storage: *Store, armed: bool) void {
+    const hook: ?*const fn (?*anyopaque) callconv(.c) c_int = if (armed) refuseCommit else null;
+    _ = sqlite.c.sqlite3_commit_hook(storage.sqliteDatabase(), hook, null);
+}
+
+fn refuseCommit(_: ?*anyopaque) callconv(.c) c_int {
+    return 1;
+}
+
+/// Test-only: one table as `SELECT *` returns it on either engine. Each field is its bytes, null for SQL NULL.
+pub const TableRows = struct { names: []const []const u8, rows: []const []const ?[]const u8 };
+
+pub fn tableRows(storage: *Store, arena: std.mem.Allocator, table: []const u8) !TableRows {
+    if (storage.engine == .mysql) return mysql_testing.tableRows(storage, arena, table);
+    return sqliteTableRows(storage.sqliteDatabase(), arena, table);
+}
+
+fn sqliteTableRows(database: *sqlite.c.sqlite3, arena: std.mem.Allocator, table: []const u8) !TableRows {
+    const text = try std.fmt.allocPrintSentinel(arena, "SELECT * FROM \"{s}\"", .{table}, 0);
+    const statement = try sqlite.prepare(database, text);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    const count: usize = @intCast(sqlite.c.sqlite3_column_count(statement));
+    const names = try arena.alloc([]const u8, count);
+    for (names, 0..) |*name, i| name.* = try arena.dupe(u8, std.mem.span(sqlite.c.sqlite3_column_name(statement, @intCast(i))));
+    var rows: std.ArrayList([]const ?[]const u8) = .empty;
+    while (true) switch (sqlite.c.sqlite3_step(statement)) {
+        sqlite.c.SQLITE_ROW => {
+            const fields = try arena.alloc(?[]const u8, count);
+            for (fields, 0..) |*field, i| field.* = try sqliteField(statement, @intCast(i), arena);
+            try rows.append(arena, fields);
+        },
+        sqlite.c.SQLITE_DONE => break,
+        else => return error.SqliteExecFailed,
+    };
+    return .{ .names = names, .rows = try rows.toOwnedSlice(arena) };
+}
+
+/// Integers are their decimal text, which is what MySQL's text protocol sends for them; text and blobs are their bytes.
+fn sqliteField(statement: *sqlite.c.sqlite3_stmt, column: c_int, arena: std.mem.Allocator) !?[]const u8 {
+    return switch (sqlite.c.sqlite3_column_type(statement, column)) {
+        sqlite.c.SQLITE_NULL => null,
+        sqlite.c.SQLITE_INTEGER => try std.fmt.allocPrint(arena, "{d}", .{sqlite.c.sqlite3_column_int64(statement, column)}),
+        sqlite.c.SQLITE_FLOAT => try std.fmt.allocPrint(arena, "{x}", .{@as(u64, @bitCast(sqlite.c.sqlite3_column_double(statement, column)))}),
+        sqlite.c.SQLITE_TEXT, sqlite.c.SQLITE_BLOB => blk: {
+            const len: usize = @intCast(sqlite.c.sqlite3_column_bytes(statement, column));
+            if (len == 0) break :blk "";
+            const bytes: [*]const u8 = if (sqlite.c.sqlite3_column_type(statement, column) == sqlite.c.SQLITE_BLOB)
+                @ptrCast(sqlite.c.sqlite3_column_blob(statement, column))
+            else
+                @ptrCast(sqlite.c.sqlite3_column_text(statement, column));
+            break :blk try arena.dupe(u8, bytes[0..len]);
+        },
+        else => error.CorruptStore,
+    };
+}
+
+/// Test-only logical-row digest (design C10): every table of the SQLite schema, row by row, as one hash that does not
+/// depend on how a run numbered, timed or keyed its rows. What is normalised, and why:
+/// - session references become their creation order (`created_seq`) wherever they appear, and content is hashed as
+///   its stored bytes with those references replaced (`content.digest` becomes that hash);
+/// - the clock readings (`clock_columns`), `store_meta` selector and id, `model_catalog_source.fetched_at`, the
+///   random `action_value.handle` and the command input's digest (`core_command.input_digest`, which hashes text
+///   carrying the run's references) are masked, keeping only whether each is NULL;
+/// - `session_forward.forward_id` is masked only when `mask_forward_id` says so (the rerun leg, against a SQLite digest
+///   masked the same way): the identity a forward takes is burned when its insert writes no row, and a recovery reloads
+///   the counter from the table, so the run that reconnected numbers its surviving row differently (see `masked`);
+/// - MySQL's generated `*_lead` helper columns are dropped, and tables only MySQL has (`store_owner`,
+///   `content_chunk`) are outside the digest. A MySQL content's bytes come from its chunks, a SQLite content's from
+///   its payload, since ContentReader would refuse a parts-form content (its digest is not a hash of its bytes).
+pub fn logicalDigest(storage: *Store, mask_forward_id: bool) ![32]u8 {
+    const schema = @import("schema.zig");
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ordinals = try sessionOrdinals(storage, arena);
+    var payloads = try contentPayloads(storage, arena);
+    var content_digests = try contentDigests(storage, arena, &ordinals, &payloads);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    inline for (comptime schema.objects(.sqlite)) |object| {
+        if (object.kind != .table) continue;
+        const table = try tableRows(storage, arena, object.name);
+        const kept = comptime sqliteColumns(object.sql);
+        var encoded: std.ArrayList([]const u8) = .empty;
+        for (table.rows) |row| try encoded.append(arena, try logicalRow(arena, &ordinals, &content_digests, object.name, table.names, row, kept, mask_forward_id));
+        std.mem.sort([]const u8, encoded.items, {}, lessBytes);
+        hasher.update(object.name);
+        hashLength(&hasher, encoded.items.len);
+        for (encoded.items) |row| {
+            hashLength(&hasher, row.len);
+            hasher.update(row);
+        }
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn lessBytes(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn hashLength(hasher: *std.crypto.hash.sha2.Sha256, length: usize) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, length, .little);
+    hasher.update(&bytes);
+}
+
+const Ordinals = std.AutoHashMap([6]u8, u64);
+
+fn sessionOrdinals(storage: *Store, arena: std.mem.Allocator) !Ordinals {
+    const sessions = try tableRows(storage, arena, "session");
+    const ref_at = columnIndex(sessions.names, "session_ref");
+    const seq_at = columnIndex(sessions.names, "created_seq");
+    const Pair = struct { ref: []const u8, seq: u64 };
+    const pairs = try arena.alloc(Pair, sessions.rows.len);
+    for (sessions.rows, pairs) |row, *pair| {
+        const ref = row[ref_at] orelse return error.CorruptStore;
+        if (ref.len != 6) return error.CorruptStore;
+        pair.* = .{ .ref = ref, .seq = try std.fmt.parseInt(u64, row[seq_at] orelse return error.CorruptStore, 10) };
+    }
+    std.mem.sort(Pair, pairs, {}, struct {
+        fn lessThan(_: void, a: Pair, b: Pair) bool {
+            return a.seq < b.seq;
+        }
+    }.lessThan);
+    var ordinals: Ordinals = .init(arena);
+    for (pairs, 1..) |pair, ordinal| try ordinals.put(pair.ref[0..6].*, ordinal);
+    return ordinals;
+}
+
+/// Each content's stored bytes by content id. Read from the engine's own storage, not ContentReader: a parts-form
+/// content's digest is not a hash of its bytes, so ContentReader would refuse it and fence the Store.
+fn contentPayloads(storage: *Store, arena: std.mem.Allocator) !std.AutoHashMap(i64, []const u8) {
+    var payloads: std.AutoHashMap(i64, []const u8) = .init(arena);
+    if (storage.engine != .mysql) {
+        const content = try tableRows(storage, arena, "content");
+        const id_at = columnIndex(content.names, "content_id");
+        const payload_at = columnIndex(content.names, "payload");
+        for (content.rows) |row| try payloads.put(try std.fmt.parseInt(i64, row[id_at] orelse return error.CorruptStore, 10), row[payload_at] orelse return error.CorruptStore);
+        return payloads;
+    }
+    const chunks = try tableRows(storage, arena, "content_chunk");
+    const id_at = columnIndex(chunks.names, "content_id");
+    const index_at = columnIndex(chunks.names, "chunk_index");
+    const bytes_at = columnIndex(chunks.names, "bytes");
+    const Chunk = struct { id: i64, index: u64, bytes: []const u8 };
+    const ordered = try arena.alloc(Chunk, chunks.rows.len);
+    for (chunks.rows, ordered) |row, *chunk| chunk.* = .{
+        .id = try std.fmt.parseInt(i64, row[id_at] orelse return error.CorruptStore, 10),
+        .index = try std.fmt.parseInt(u64, row[index_at] orelse return error.CorruptStore, 10),
+        .bytes = row[bytes_at] orelse return error.CorruptStore,
+    };
+    std.mem.sort(Chunk, ordered, {}, struct {
+        fn lessThan(_: void, a: Chunk, b: Chunk) bool {
+            return a.id < b.id or (a.id == b.id and a.index < b.index);
+        }
+    }.lessThan);
+    var index: usize = 0;
+    while (index < ordered.len) {
+        const id = ordered[index].id;
+        var joined: std.ArrayList(u8) = .empty;
+        while (index < ordered.len and ordered[index].id == id) : (index += 1) try joined.appendSlice(arena, ordered[index].bytes);
+        try payloads.put(id, try joined.toOwnedSlice(arena));
+    }
+    return payloads;
+}
+
+fn columnIndex(names: []const []const u8, name: []const u8) usize {
+    for (names, 0..) |column, i| if (std.mem.eql(u8, column, name)) return i;
+    @panic("logicalDigest: a table lost a column the digest names");
+}
+
+fn canonicalText(arena: std.mem.Allocator, ordinals: *const Ordinals, bytes: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (i + 6 <= bytes.len) if (ordinals.get(bytes[i..][0..6].*)) |ordinal| {
+            try out.appendSlice(arena, try std.fmt.allocPrint(arena, "#{d}", .{ordinal}));
+            i += 6;
+            continue;
+        };
+        try out.append(arena, bytes[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(arena);
+}
+
+fn logicalRow(arena: std.mem.Allocator, ordinals: *const Ordinals, content_digests: *const Digests, table: []const u8, names: []const []const u8, row: []const ?[]const u8, kept: []const []const u8, mask_forward_id: bool) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const is_content = std.mem.eql(u8, table, "content");
+    for (names, row) |name, field| {
+        // MySQL adds generated index helpers (`*_lead`) that SQLite does not have: not part of the logical rows.
+        if (!contains(kept, name)) continue;
+        if (is_content and std.mem.eql(u8, name, "payload")) continue;
+        var value: ?[]const u8 = field;
+        if (is_content and std.mem.eql(u8, name, "digest")) {
+            value = try canonicalDigest(arena, content_digests, field);
+        } else if (std.mem.eql(u8, name, "field_metadata")) {
+            // Three (length, digest) entries, each digest a content's: the digest as its canonical content's.
+            const copy = try arena.dupe(u8, field orelse return error.CorruptStore);
+            var at: usize = 0;
+            while (at + 40 <= copy.len) : (at += 40) {
+                if (content_digests.get(copy[at + 8 ..][0..32].*)) |canonical| @memcpy(copy[at + 8 ..][0..32], &canonical);
+            }
+            value = copy;
+        } else if (masked(table, name, names, row, mask_forward_id)) {
+            value = if (field == null) null else "masked";
+        } else if (field) |bytes| {
+            value = try canonicalText(arena, ordinals, bytes);
+        }
+        if (value) |bytes| {
+            try out.append(arena, 1);
+            try appendLength(arena, &out, bytes.len);
+            try out.appendSlice(arena, bytes);
+        } else try out.append(arena, 0);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// The column names of a rendered CREATE TABLE: the indented definitions that are not table constraints.
+fn sqliteColumns(comptime sql: []const u8) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var names: []const []const u8 = &.{};
+        var lines = std.mem.splitScalar(u8, sql, '\n');
+        _ = lines.next();
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] != ' ') continue;
+            const body = std.mem.trimStart(u8, line, " ");
+            const end = std.mem.indexOfAny(u8, body, " (,") orelse continue;
+            const word = body[0..end];
+            const constraint = for ([_][]const u8{ "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT" }) |keyword| {
+                if (std.mem.eql(u8, word, keyword)) break true;
+            } else false;
+            if (!constraint) names = names ++ &[_][]const u8{word};
+        }
+        return names;
+    }
+}
+
+fn contains(names: []const []const u8, name: []const u8) bool {
+    for (names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
+    return false;
+}
+
+fn appendLength(arena: std.mem.Allocator, out: *std.ArrayList(u8), length: usize) !void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, length, .little);
+    try out.appendSlice(arena, &bytes);
+}
+
+/// Clock readings: each Store's run takes its own. Kept as NULL or not, so a missing time still differs.
+const clock_columns = [_][]const u8{
+    "admitted_at", "attempt_at",       "background_at", "changed_at",  "created_at",  "decided_at",      "delivered_at",
+    "fetched_at",  "outcome_at",       "published_at",  "recorded_at", "resolved_at", "retry_due_at_ms", "retry_scheduled_at",
+    "stopped_at",  "obligation_since",
+};
+
+fn masked(table: []const u8, name: []const u8, names: []const []const u8, row: []const ?[]const u8, mask_forward_id: bool) bool {
+    // A digest of the command's input, which carries the run's session references: a digest of text this digest
+    // cannot rebuild from the rows.
+    if (std.mem.eql(u8, table, "core_command") and std.mem.eql(u8, name, "input_digest")) return true;
+    // Burned identity: `forward.queue` takes a forward_id before its INSERT ... SELECT, which writes no row when the
+    // session has no parent or the same forward is already queued (the second queue of a source, in the journey). The
+    // counter keeps that number, so later forwards number one higher than the rows show. A recovery reloads the counter
+    // from the table maximum and drops the burned number, so the rerun leg's surviving forward takes a lower number.
+    // In the journey no other identity diverges between the legs. Masked only where the caller says so (the rerun leg,
+    // compared with a SQLite digest masked the same way); every other column is still compared.
+    if (mask_forward_id and std.mem.eql(u8, table, "session_forward") and std.mem.eql(u8, name, "forward_id")) return true;
+    // A random handle the Store draws for each published value (32 hex digits), so it differs per run by design.
+    if (std.mem.eql(u8, table, "action_value") and std.mem.eql(u8, name, "handle")) return true;
+    for (clock_columns) |clock| if (std.mem.eql(u8, name, clock)) return true;
+    if (std.mem.eql(u8, table, "store_meta") and std.mem.eql(u8, name, "meta_value")) {
+        const key = row[columnIndex(names, "meta_key")] orelse return false;
+        return std.mem.eql(u8, key, "store_selector") or std.mem.eql(u8, key, "store_id");
+    }
+    return false;
+}
+
+/// Each content's raw digest mapped to the digest of its stored bytes with session references replaced: what a
+/// content's digest means in the logical rows, whatever the run's references were.
+const Digests = std.AutoHashMap([32]u8, [32]u8);
+
+fn contentDigests(storage: *Store, arena: std.mem.Allocator, ordinals: *const Ordinals, payloads: *const std.AutoHashMap(i64, []const u8)) !Digests {
+    const content = try tableRows(storage, arena, "content");
+    const id_at = columnIndex(content.names, "content_id");
+    const length_at = columnIndex(content.names, "byte_length");
+    const digest_at = columnIndex(content.names, "digest");
+    var digests: Digests = .init(arena);
+    for (content.rows) |row| {
+        const raw = row[digest_at] orelse return error.CorruptStore;
+        if (raw.len != 32) return error.CorruptStore;
+        const id = try std.fmt.parseInt(i64, row[id_at] orelse return error.CorruptStore, 10);
+        const length = try std.fmt.parseInt(usize, row[length_at] orelse return error.CorruptStore, 10);
+        // An empty content has no MySQL chunk; its bytes are empty all the same.
+        const bytes = payloads.get(id) orelse if (length == 0) "" else return error.CorruptStore;
+        if (bytes.len != length) return error.CorruptStore;
+        const canonical = try canonicalText(arena, ordinals, bytes);
+        var hashed: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(canonical, &hashed, .{});
+        try digests.put(raw[0..32].*, hashed);
+    }
+    return digests;
+}
+
+fn canonicalDigest(arena: std.mem.Allocator, digests: *const Digests, field: ?[]const u8) ![]const u8 {
+    const raw = field orelse return error.CorruptStore;
+    if (raw.len != 32) return error.CorruptStore;
+    const canonical = digests.get(raw[0..32].*) orelse return error.CorruptStore;
+    return arena.dupe(u8, &canonical);
+}
+
 pub const Blob = struct { bytes: []const u8 };
 
 fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {

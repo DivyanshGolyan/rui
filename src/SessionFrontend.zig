@@ -8572,11 +8572,15 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
                     }
                     try activity_reply.writePage(&out, &facts);
                 }
-                var header: [512]u8 = undefined;
-                var writer = peer.writer(io, &.{});
-                try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, out.buffered().len, extra }));
+                // One write: the reader may refuse the head alone and close, so a body sent
+                // in a second write could meet a closed peer depending on scheduling.
+                var response: [512 + buffer.len]u8 = undefined;
+                var reply = std.Io.Writer.fixed(&response);
+                try reply.print("HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, out.buffered().len, extra });
                 const body = out.buffered();
-                try writer.interface.writeAll(if (failing and host.fault == .truncated) body[0..1] else body);
+                try reply.writeAll(if (failing and host.fault == .truncated) body[0..1] else body);
+                var writer = peer.writer(io, &.{});
+                try writer.interface.writeAll(reply.buffered());
             }
             return host.frontend.reader.completed();
         }

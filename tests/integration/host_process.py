@@ -388,6 +388,10 @@ WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)
 STORE_SCHEMA = int(_owned("src/store/schema.zig", r"^pub const schema_version: u32 = (\d+);$", "schema_version"))
 
 
+NGHTTP2_VERSION = _owned("src/h2/h2.zig", r'^pub const nghttp2_version = "([^"]+)";$', "nghttp2_version")
+READY_TRANSPORT = {"execution": "enabled", "nghttp2": NGHTTP2_VERSION}
+
+
 def assert_caller_error(stderr, context, code, not_sent=True):
     text = stderr.decode() if isinstance(stderr, bytes) else stderr
     ending = (" Nothing was captured or sent." if not_sent else "") + f" [{code}]\n"
@@ -1277,7 +1281,8 @@ def disposed_store(process):
     store = getattr(process, "rui_ready_fields", {}).get("store")
     if store is not None:
         return store
-    args = [str(argument) for argument in process.args] if isinstance(process.args, (list, tuple)) else []
+    argv = getattr(process, "args", None)
+    args = [str(argument) for argument in argv] if isinstance(argv, (list, tuple)) else []
     if "--store" in args and args.index("--store") + 1 < len(args):
         return os.path.realpath(args[args.index("--store") + 1])
     if "--store-hex" in args and args.index("--store-hex") + 1 < len(args):

@@ -125,6 +125,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../sqlite_tests/search_activity.zig"),
         @embedFile("../sqlite_tests/session_list.zig"),
         @embedFile("../sqlite_tests/skills_migration.zig"),
+        @embedFile("../sqlite_tests/tool_record_hint.zig"),
         @embedFile("../sqlite_tests/tool_set.zig"),
         @embedFile("../sqlite_tests/tool_set_migration.zig"),
         @embedFile("../tests.zig"),
