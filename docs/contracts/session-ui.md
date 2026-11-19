@@ -66,6 +66,7 @@ New Session from a conversation follows the frontend’s existing new-chat depar
 Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
+The Archived tab draws a window of archived Sessions, newest archive first, read from the Host one page at a time: entering it reads the head when nothing is held, and scrolling near an edge reads the next page by key. The overview holds only the window's rows and a margin, never the whole archive. The live roster stays held across tab switches, so switching back to Sessions shows it at once and emits no list read.
 Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
 The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
