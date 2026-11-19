@@ -742,12 +742,10 @@ def fast_tier(targets, paths, bootstrap_only=False, store=False):
     fast = targets & PR_UNIT_ROOTS
     if targets & WHOLE_SUITE_GATES:
         # A bootstrap-only change still compiles and runs one Store-free root through the
-        # changed setup and producer; the Store-reaching binaries run on main.
+        # changed setup and producer; the other Store-reaching binaries run on main.
         fast |= {"test-logic"} if bootstrap_only else {"test-native", "test-logic"}
-    if store:
-        # The SQLite pin is Store code in practice: the Store suite runs against the new engine.
-        fast.add("test-store")
-    elif not any(matches(path, STORE_PATHS) for path in paths):
+    # A SQLite pin change keeps test-store: the Store suite is the engine's test.
+    if not (store or any(matches(path, STORE_PATHS) for path in paths)):
         fast.discard("test-store")
     fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
              if own_fixture(target, paths)}
