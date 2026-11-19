@@ -136,7 +136,7 @@ FIXTURES = {
                                  ("src/Overview.zig", "src/SessionFrontend.zig", "src/model_picker_view.zig")),
     "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
-                               "src/cli_args.zig", "src/slash_commands.zig")),
+                               "src/cli_invocation.zig", "src/cli_args.zig", "src/slash_commands.zig")),
 }
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
 TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",

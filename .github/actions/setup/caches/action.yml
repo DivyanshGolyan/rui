@@ -26,6 +26,9 @@ outputs:
   build-hit:
     description: Whether the build cache restored an exact key
     value: ${{ steps.build-cache.outputs.cache-hit }}
+  packages-hit:
+    description: Whether the packages cache restored its exact key
+    value: ${{ steps.packages-cache.outputs.cache-hit }}
 runs:
   using: composite
   steps:

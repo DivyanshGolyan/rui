@@ -12,8 +12,8 @@
 | CLI-19 | Product | Request inspect and wait report the admitted multipart input identity unchanged. | CLI admission and request observation | `cli_image_integration.py:cli_observation` | docs/contracts/inspection.md |
 | CLI-21 | Product | Native Message input refuses ambiguous or empty compositions and preserves scalar stdin bytes and implicit stdin order. | CLI and fake provider | `cli_image_integration.py:cli_rules` | docs/contracts/cli.md |
 | CLI-20 | Surface | Message operand flags retain their order and unknown or incomplete flags are refused. | CLI grammar parser | `CLI-20 preserve interleaving for start and send` | docs/contracts/cli.md |
-| CLI-1 | Surface | Help succeeds without Host, credentials, terminal or state changes for every documented command scope. | CLI parse/help output | `help_is_independent`: table root, resource and operation help with absent prerequisites; check output, status and untouched temporary state. | docs/contracts/cli.md:97 |
-| CLI-2 | Surface | Invalid invocation is refused before capture or transmission with a useful field-specific repair. | CLI parser and diagnostic | `CLI-2 invalid_input_is_local`: table duplicate, conflicting, unknown and missing operands, stdin conflicts, model syntax and part selectors; check refusal and repair before dispatch. | docs/contracts/cli.md:41, 76, 97 |
+| CLI-1 | Module | Help succeeds without Host, credentials, terminal or state changes for every documented command scope. | `cli_invocation.next` | `CLI-1 help is decided by argv alone` | docs/contracts/cli.md:97 |
+| CLI-2 | Surface | Invalid invocation is refused before capture or transmission with a useful field-specific repair. | `cli_invocation.next` and CLI parser | `CLI-2 invalid invocation is refused before effects` | docs/contracts/cli.md:41, 76, 97 |
 | CLI-3 | Surface | Message and instruction stdin retains exact bytes and empty input has its documented meaning. | CLI parse/capture API | `stdin_content_is_exact`: table UTF-8, NUL, trailing newlines and empty Message/instructions; compare captured bytes or refusal. | docs/contracts/cli.md:76 |
 | CLI-4 | Surface | Fresh, preset, attached and addressed configuration preserve their respective explicit inputs and resolution rules. | CLI captured mutation | `configuration_intent`: table creation/update/preset/parent and sparse overrides; compare captured spec and absence of unwanted defaults or preflight. | docs/contracts/cli.md:41 |
 | CLI-5 | Host | Session start atomically admits configuration and first Message, and replay returns the original allocation and outcome. | start wire and keyed observation | `start_is_atomic_and_idempotent`: table accepted, rejected, replay and conflicting inputs; check receipt, Session and Message through public reads. | docs/contracts/cli.md:61 |
@@ -65,6 +65,7 @@ Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation v
 
 ## Legacy tests these replace
 
+- Scoped help, syntax refusals and retired-name variants in `human_cli_integration.py:help_case`: CLI-1–CLI-2; the process witnesses remain.
 - Saved-defaults encoding and edit cases in `tests/integration/human_cli_integration.py:preference_edits`: CLI-22 and CLI-23; conflicting CLI option refusals and the on-disk configure witness remain.
 
 - CLI grammar/help/refusal blocks in `src/cli_args.zig:306` and `src/caller_exit.zig`: CLI-1–CLI-4, CLI-7, CLI-13. Preserve unrelated feature ownership until migrated.
