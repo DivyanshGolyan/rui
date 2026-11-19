@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
-import { ContentIsPartsError, RuiRequestError, type RequestAnswer } from "./errors.ts";
+import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
@@ -210,19 +210,17 @@ export class Session {
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
-	readContent(entry: Pick<FeedEntry, "position" | "ordinal"> & { content?: ContentValue | null }): Promise<string> {
-		if (entry.content?.type === "parts") throw new ContentIsPartsError();
+	readContent(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<string> {
 		return readContent(this.#link, this.id, entry);
 	}
 
 	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
-	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal"> & { content?: ContentValue | null }): Promise<Buffer> {
-		if (entry.content?.type === "parts") throw new ContentIsPartsError();
+	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
 		return readContentBytes(this.#link, this.id, entry);
 	}
 
-	/** Read the exact bytes of a part of a feed entry. */
-	readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
+	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */
+	async readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
 		if (entry.content?.type !== "parts") throw new TypeError("entry content is not parts");
 		return readPartBytes(this.#link, this.id, entry.content.owner, ordinal);
 	}
