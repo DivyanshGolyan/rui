@@ -974,6 +974,17 @@ pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
         "WHERE abs(-9223372036854775808) IS NOT NULL");
 }
 
+/// Test-only: while armed, a COMMIT on a SQLite Store fails (the commit hook refuses it), so an injected commit
+/// failure leaves the transaction rolled back.
+pub fn failCommits(storage: *Store, armed: bool) void {
+    const hook: ?*const fn (?*anyopaque) callconv(.c) c_int = if (armed) refuseCommit else null;
+    _ = sqlite.c.sqlite3_commit_hook(storage.sqliteDatabase(), hook, null);
+}
+
+fn refuseCommit(_: ?*anyopaque) callconv(.c) c_int {
+    return 1;
+}
+
 pub const Blob = struct { bytes: []const u8 };
 
 fn bindFixtureArgs(statement: *sqlite.c.sqlite3_stmt, args: anytype) !void {

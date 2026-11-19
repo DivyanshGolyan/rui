@@ -559,6 +559,32 @@ fn sh5_store_mysql_live_reused_savepoint_replaces_its() !void {
 }
 
 // Moved from src/store/pin_tests.zig: "Session pin concurrent commands derive distinct ranks from serialized command sequence"
+// SH-5 on SQLite: a savepoint reused inside one transaction replaces its position, as the MySQL leg asserts.
+fn sh5_store_sqlite_reused_savepoint_replaces_its(case: *store_testing.Case) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    defer if (storage.engine.inTransaction()) storage.engine.control(.rollback) catch unreachable;
+    const insert = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,0,zeroblob(0),0)";
+    const before = protocol.contentDigest("before-savepoint");
+    const replaced = protocol.contentDigest("before-replaced-savepoint");
+    const after = protocol.contentDigest("after-replaced-savepoint");
+    try storage.engine.control(.begin);
+    try store_testing.sqliteExec(storage.sqliteDatabase(), insert, .{ @as(u64, 9000001), store_testing.Blob{ .bytes = &before } });
+    try storage.engine.control(.savepoint);
+    try store_testing.sqliteExec(storage.sqliteDatabase(), insert, .{ @as(u64, 9000002), store_testing.Blob{ .bytes = &replaced } });
+    try storage.engine.control(.savepoint);
+    try store_testing.sqliteExec(storage.sqliteDatabase(), insert, .{ @as(u64, 9000003), store_testing.Blob{ .bytes = &after } });
+    try storage.engine.control(.rollback_to);
+    try storage.engine.control(.release);
+    try storage.engine.control(.commit);
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id IN (9000001,9000002)", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000003", .{}));
+    try std.testing.expect(!storage.isFenced());
+}
+
 fn sh5_session_pin_concurrent_commands_derive_distinct_ranks(case: *store_testing.Case) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1331,7 +1357,23 @@ fn sh3_canonical_step_faults_fence_rather_than_reading(case: *store_testing.Case
         const unprepared = route == .view and storage.engine == .sqlite;
         try std.testing.expectError(if (route == .result) error.ResultReadFailed else if (unprepared) error.StatementPrepareFailed else error.OperationReadFailed, result);
         try std.testing.expect(storage.isFenced());
+        // A later entry is refused, so the fence reaches every writer and not only the one that met the fault.
+        try std.testing.expectError(error.StoreFenced, storage.commandResult("step-fault-message"));
     }
+}
+
+// Negative control for SH-3 (SH-4's ordinary outcomes): an unknown command is a declared refusal that leaves the
+// Store serving, so the fence checks above are not satisfied by any refusal.
+fn sh3_an_ordinary_outcome_leaves_the_store_serving(case: *store_testing.Case) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try std.testing.expectError(error.ResultNotFound, storage.commandResult("step-fault-missing"));
+    try std.testing.expect(!storage.isFenced());
+    _ = try configureTestSession(&storage, "step-fault-control");
+    try std.testing.expect(!storage.isFenced());
 }
 
 // Moved from src/store/tests/session_list.zig: "a list Action step fault keeps its named error and fences"
@@ -1513,7 +1555,6 @@ fn sh109_store_mysql_touch_oracle_observes_and_clears() !void {
 
 // Moved from src/store/tests/round_budget.zig: "each Store entry point takes its round budget on its common path"
 fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void {
-    if (case.rerun) return;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1579,9 +1620,10 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
             failed = true;
             continue;
         };
-        if (measured.rounds != round_budgets.get(point)) failed = true;
-        if (measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
-        if (case.engine == .mysql) {
+        // A run-again leg writes more rounds by design (tests/action.zig:479), so rounds are asserted on the other legs.
+        if (!case.rerun and measured.rounds != round_budgets.get(point)) failed = true;
+        if (!case.rerun and measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
+        if (case.engine == .mysql and !case.rerun) {
             std.testing.expectEqual(measured.shape.expected(), measured.shape.queries) catch {
                 std.debug.print("{s}: COM_QUERY shape differs\n", .{@tagName(point)});
                 failed = true;
@@ -1598,7 +1640,7 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
                 measured.content_rounds,
                 contentRoundBudget(case.engine, point),
             });
-            if (case.engine == .mysql) std.debug.print(
+            if (case.engine == .mysql and !case.rerun) std.debug.print(
                 "  COM_QUERY {d} = Access passes {d} + identity passes {d} + content queries {d} + controls {d} + prefix-only passes {d} (expected {d})\n",
                 .{
                     measured.shape.queries,
@@ -2469,6 +2511,139 @@ fn sh27_store_mysql_live_commit_sequence_backup_fence() !void {
     try mt.liveBackupFence("commit_seq");
 }
 
+// Design C2 on SQLite and SH-115: a transition whose COMMIT is refused saves nothing it queued, and its caller
+// hears the refusal. MySQL has no injected COMMIT refusal: its failed COMMITs are lost answers, owned by SH-2.
+fn sh115_a_transition_s_commit_failure_saves_nothing(case: *store_testing.Case) !void {
+    if (case.engine == .mysql) return;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "transition-refused-commit");
+    const before: TestingDatingState = try .of(&storage);
+    store_testing.failCommits(&storage, true);
+    const result = transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .commit }, .{});
+    store_testing.failCommits(&storage, false);
+    try std.testing.expect(std.meta.isError(result));
+    try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
+    try std.testing.expect(!storage.engine.inTransaction());
+}
+
+const cardinality_one = rsql.Read(.{
+    .sql = "SELECT next_position FROM session",
+    .Args = struct {},
+    .Row = struct { next_position: u64 },
+    .cardinality = .one,
+});
+const cardinality_optional = rsql.Read(.{
+    .sql = "SELECT next_position FROM session",
+    .Args = struct {},
+    .Row = struct { next_position: u64 },
+    .cardinality = .optional,
+});
+const cardinality_at_most = rsql.Read(.{
+    .sql = "SELECT next_position FROM session",
+    .Args = struct {},
+    .Row = struct { next_position: u64 },
+    .cardinality = .{ .at_most = 2 },
+});
+const cardinality_each = rsql.Read(.{
+    .sql = "SELECT next_position FROM session",
+    .Args = struct {},
+    .Row = struct { next_position: u64 },
+    .cardinality = .each,
+});
+
+// Runs one read through its own Access, so the read's own check decides the answer.
+fn runCardinalityRead(storage: *Store, comptime S: type, destination: *S.Result) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: store_access.Access(.read, error{}) = .open(&entry);
+    defer a.deinit();
+    a.read(S, .{}, destination);
+    try a.run();
+}
+
+const CardinalityVisitor = struct {
+    visited: u64 = 0,
+
+    pub fn visit(self: *CardinalityVisitor, _: *const cardinality_each.Row) bool {
+        self.visited += 1;
+        return true;
+    }
+};
+
+// Owner of SH-116: a read answers the rows its cardinality names and nothing else, on every engine.
+fn sh116_a_read_answers_the_rows_its_cardinality_names(case: *store_testing.Case) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var one: cardinality_one.Result = undefined;
+    var optional: cardinality_optional.Result = undefined;
+    var at_most: cardinality_at_most.Result = undefined;
+    var visitor: CardinalityVisitor = .{};
+    // No Session yet: .one needs a row, .optional and .at_most take none, and .each visits none.
+    try std.testing.expectError(error.CorruptStore, runCardinalityRead(&storage, cardinality_one, &one));
+    try runCardinalityRead(&storage, cardinality_optional, &optional);
+    try std.testing.expectEqual(@as(?cardinality_optional.Row, null), optional);
+    try runCardinalityRead(&storage, cardinality_at_most, &at_most);
+    try std.testing.expectEqual(@as(usize, 0), at_most.len);
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        a.readEach(cardinality_each, .{}, 1, &visitor);
+        try a.run();
+    }
+    try std.testing.expectEqual(@as(u64, 0), visitor.visited);
+    // One Session: every cardinality takes its one row.
+    _ = try configureTestSession(&storage, "cardinality-one");
+    try runCardinalityRead(&storage, cardinality_one, &one);
+    try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{}), one.next_position);
+    try runCardinalityRead(&storage, cardinality_optional, &optional);
+    try std.testing.expect(optional != null);
+    try runCardinalityRead(&storage, cardinality_at_most, &at_most);
+    try std.testing.expectEqual(@as(usize, 1), at_most.len);
+    // Two Sessions: .one, .optional and .at_most 2 refuse the second row where a single one is named, and .each's limit
+    // stops it at one row.
+    _ = try configureTestSession(&storage, "cardinality-two");
+    try std.testing.expectError(error.CorruptStore, runCardinalityRead(&storage, cardinality_one, &one));
+    try std.testing.expectError(error.CorruptStore, runCardinalityRead(&storage, cardinality_optional, &optional));
+    try runCardinalityRead(&storage, cardinality_at_most, &at_most);
+    try std.testing.expectEqual(@as(usize, 2), at_most.len);
+    visitor = .{};
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        a.readEach(cardinality_each, .{}, 1, &visitor);
+        try a.run();
+    }
+    try std.testing.expectEqual(@as(u64, 1), visitor.visited);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "SH-115 a transition saves nothing it queued when its commit fails" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try sh115_a_transition_s_commit_failure_saves_nothing(case);
+        }
+    }.run);
+}
+
+test "SH-116 a read answers the rows its cardinality names and nothing else" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try sh116_a_read_answers_the_rows_its_cardinality_names(case);
+        }
+    }.run);
+}
+
 test "SH-103 a transition saves all it queued when it commits and nothing otherwise" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -2485,6 +2660,7 @@ test "SH-5 concurrent commands derive distinct ranks, and a reused savepoint pre
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             if (case.engine == .mysql and !case.rerun) try sh5_store_mysql_live_reused_savepoint_replaces_its();
+            if (case.engine == .sqlite) try sh5_store_sqlite_reused_savepoint_replaces_its(case);
             try sh5_session_pin_concurrent_commands_derive_distinct_ranks(case);
         }
     }.run);
@@ -2552,6 +2728,7 @@ test "SH-3 a read step the engine fails fences the Store" {
         fn run(case: *store_testing.Case) !void {
             try sh3_canonical_step_faults_fence_rather_than_reading(case);
             try sh3_a_list_action_step_fault_keeps_its(case);
+            try sh3_an_ordinary_outcome_leaves_the_store_serving(case);
         }
     }.run);
 }

@@ -1315,7 +1315,8 @@ pub const RoundMeter = struct {
         pub fn since(after: QueryShape, before: QueryShape) QueryShape {
             var delta: QueryShape = undefined;
             inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
-                @field(delta, name) = @field(after, name) - @field(before, name);
+                // A run-again leg can move a counter back, so the difference wraps; only the unrepeated legs assert it.
+                @field(delta, name) = @field(after, name) -% @field(before, name);
             return delta;
         }
 
@@ -1333,8 +1334,8 @@ pub const RoundMeter = struct {
     pub fn stop(meter: *RoundMeter, point: EntryPoint) void {
         std.debug.assert(meter.measured.get(point) == null);
         meter.measured.set(point, .{
-            .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
-            .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
+            .rounds = meter.storage.testing_content_work.rounds -% meter.rounds_before,
+            .content_rounds = meter.storage.testing_content_work.content_rounds -% meter.content_before,
             .shape = QueryShape.snapshot(meter.storage).since(meter.shape_before),
         });
     }
