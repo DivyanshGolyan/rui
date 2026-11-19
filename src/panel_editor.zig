@@ -8,7 +8,8 @@ pub fn event(editor: *Editor, input: vaxis.vxfw.Event, pasting: bool, failure: *
     switch (outcome) {
         .refused => |why| {
             failure.* = " · text couldn't be entered";
-            if (why.endsLine()) {
+            // A pastes_only editor owns its lock; the owner must not clear it here.
+            if (why.endsLine() and editor.lock == .every_refusal) {
                 editor.release();
             }
         },
