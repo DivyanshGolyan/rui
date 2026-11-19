@@ -6355,7 +6355,9 @@
         {"wait": "Paste refused in API key"}
       ],
       "expect": [
-        "Paste refused in API key. Press Enter or edit it to continue.",
+        "Paste refused in API key.",
+        "Press Enter or edit it to",
+        "continue.",
         "Connect with an API key",
         "[ Connect ]"
       ],
