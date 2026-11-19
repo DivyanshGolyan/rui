@@ -417,6 +417,19 @@ test "a tools/list page lists its tools and leaves out invalid ones" {
     try std.testing.expectError(error.UnknownResultType, readList("{\"resultType\":\"partial\",\"tools\":[]}"));
 }
 
+test "a tool lists the same with or without a readOnlyHint" {
+    const hinted = try readList("{\"tools\":[{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}");
+    const plain = try readList("{\"tools\":[{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"inputSchema\":{\"type\":\"object\"}}]}");
+    var hinted_tools = Tools.init(hinted);
+    var plain_tools = Tools.init(plain);
+    const a = hinted_tools.next().?.tool;
+    const b = plain_tools.next().?.tool;
+    try std.testing.expectEqualStrings(b.name, a.name);
+    try std.testing.expectEqualStrings(b.description.?, a.description.?);
+    try std.testing.expectEqualStrings(b.input_schema, a.input_schema);
+    try std.testing.expectEqualDeep(b, a);
+}
+
 test "a tools/call result carries content, structured content and isError" {
     const done = try readCall("{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"72F\"}],\"structuredContent\":{\"t\":72},\"isError\":false}");
     try std.testing.expect(!done.is_error);
