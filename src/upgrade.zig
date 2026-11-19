@@ -377,12 +377,30 @@ pub fn hasGuidance(result: *const Result) bool {
     return result.hosts.hasGuidance();
 }
 
+/// The line between the check report and the result, so a download never
+/// leaves the check's closing notes standing as the run's answer (#1854).
+pub fn writeInstalling(writer: *std.Io.Writer, checked: *const Check) !void {
+    var facts = checked.facts(.install);
+    facts.resumed = true;
+    if (upgrade_run.holdsRelease(facts)) {
+        const selected = facts.selection.?.ok.released;
+        return writer.print("Rui 0.{d}.{d} is already selected; publishing it again and checking running Hosts...\n", .{ selected.schema, selected.patch });
+    }
+    try writer.print("Installing Rui 0.{d}.{d}...\n", .{ checked.candidate.version.schema, checked.candidate.version.patch });
+}
+
+/// The first line is the verdict: upgraded or unchanged, before any Host detail.
 pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
-    try writer.writeAll(switch (result.installation) {
-        .installed => "Installed Rui. Complete build: ",
-        .unchanged => "Installation unchanged. Selected complete build: ",
-    });
     const receipt = result.installation.receipt();
+    try writer.writeAll(switch (result.installation) {
+        .installed => "Upgraded to Rui",
+        .unchanged => "Installation unchanged at Rui",
+    });
+    if (receipt.selected_version) |version| try writer.print(" 0.{d}.{d}", .{ version.schema, version.patch });
+    try writer.writeAll(switch (result.installation) {
+        .installed => ". Complete build: ",
+        .unchanged => ". Selected complete build: ",
+    });
     try field(writer, receipt.selected_after);
     if (!std.mem.eql(u8, receipt.operation_build, receipt.selected_after)) {
         try writer.writeAll("\nThis operation prepared/published: ");
@@ -451,6 +469,32 @@ test "upgrade result report embeds the Host lines and its rollback note follows 
                 try std.testing.expectEqual(hasGuidance(&result), std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
             }
         }
+    }
+}
+
+test "#1854 a non-interactive install says it is installing, then opens its result with the verdict" {
+    const candidate: release.ReleaseCandidate = .{ .version = .{ .schema = 83, .patch = 0 }, .tag = "v0.83.0", .archive_name = "fixture", .archive_url = "fixture", .checksum_url = "fixture", .sha256 = @splat(0) };
+    for ([_]struct { selected: release.Version, says: []const u8 }{
+        .{ .selected = .{ .schema = 82, .patch = 0 }, .says = "Installing Rui 0.83.0...\n" },
+        .{ .selected = .{ .schema = 83, .patch = 0 }, .says = "Rui 0.83.0 is already selected; publishing it again and checking running Hosts...\n" },
+        .{ .selected = .{ .schema = 84, .patch = 1 }, .says = "Rui 0.84.1 is already selected; publishing it again and checking running Hosts...\n" },
+    }) |case| {
+        const checked: Check = .{ .candidate = candidate, .selected = .{ .released = .{ .build = "/selected", .version = case.selected } }, .home = "/home", .store = "/store", .running_executable = "/rui" };
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try writeInstalling(&output.writer, &checked);
+        try std.testing.expectEqualStrings(case.says, output.written());
+    }
+    const receipt: Installation.Receipt = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 83, .patch = 0 } };
+    for ([_]struct { installation: Installation.InstallationOutcome, first: []const u8 }{
+        .{ .installation = .{ .installed = receipt }, .first = "Upgraded to Rui 0.83.0. Complete build: /b\n" },
+        .{ .installation = .{ .unchanged = receipt }, .first = "Installation unchanged at Rui 0.83.0. Selected complete build: /b\n" },
+    }) |case| {
+        const result: Result = .{ .installation = case.installation, .store = "/store" };
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try writeResult(&output.writer, &result);
+        try std.testing.expect(std.mem.startsWith(u8, output.written(), case.first));
     }
 }
 
