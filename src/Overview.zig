@@ -392,10 +392,49 @@ started: ?view.Reference = null,
 screen_fresh: bool = true,
 screen_ready: bool = false,
 
+/// Maps the command line to the one launch choice. Named-ness comes only from
+/// the selectors, never from the binding, which is read at poll time.
+pub fn launchIntent(options: Options) view.LaunchIntent {
+    if (options.open != null) return .explicit_session;
+    if (options.restoration != null) return .restoring;
+    if (options.selectors.namesBinding()) return .named;
+    return .defaults;
+}
+
+test "launch intent maps the command line to one launch choice" {
+    const payload: handoff.Payload = undefined;
+    const selector_cases = [_]struct { provider: ?[]const u8, model: ?[]const u8 }{
+        .{ .provider = null, .model = null },
+        .{ .provider = "codex", .model = null },
+        .{ .provider = null, .model = "gpt-6-luna" },
+        .{ .provider = "codex", .model = "gpt-6-luna" },
+    };
+    for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |restore| for (selector_cases) |case| {
+        const options: Options = .{
+            .store = "/store",
+            .workspace = "/work",
+            .home = "/home",
+            .directory = "/requests",
+            .selectors = .{ .provider = case.provider, .model = case.model },
+            .open = if (open) "abcdef".* else null,
+            .restoration = if (restore) &payload else null,
+        };
+        const expected: view.LaunchIntent = if (open)
+            .explicit_session
+        else if (restore)
+            .restoring
+        else if (case.provider != null or case.model != null)
+            .named
+        else
+            .defaults;
+        try std.testing.expectEqual(expected, launchIntent(options));
+    };
+}
+
 pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
-    _ = try view.step(&self.state, .{ .launch_start = .{ .explicit_session = options.open != null, .restoring = options.restoration != null } });
+    _ = try view.step(&self.state, .{ .launch_start = launchIntent(options) });
     try self.restoreRelaunch();
     const screen = try init.gpa.create(SessionScreen);
     defer init.gpa.destroy(screen);
@@ -8394,7 +8433,7 @@ test "wide launch draws late listing after presentation deadline without flashin
             for (overview.retired.items) |retired| overview.disposeSession(retired.left);
             overview.retired.deinit(std.testing.allocator);
         }
-        _ = try overview.event(.{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try overview.event(.{ .launch_start = .defaults });
         _ = try overview.event(.{ .presentation_start = 1000 });
         {
             var frame = try rig.shown(140, 40);
@@ -8470,7 +8509,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer rig.close();
-    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .defaults });
     var shown = try rig.shown(140, 40);
     defer shown.deinit();
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New chat"));
@@ -8492,11 +8531,61 @@ test "wide launch waits for listing and opens the newest empty Session without c
     try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
 }
 
+test "named launch waits for sign-in before choosing its binding" {
+    const Listing = struct {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
+            const row = &page.rows[0];
+            row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
+            row.reference.set(listed_references[0]) catch unreachable;
+            row.workspace.set("/work") catch unreachable;
+            row.provider = .codex;
+            row.model.set("gpt-6-luna") catch unreachable;
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    var cancellation: client.Cancellation = .{};
+    // `rui --provider openai` names a binding with no model. cli.zig drops that binding, so the
+    // launch has no default and sign-in is open; sign-in then saves the binding the launch chooses.
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .selectors = .{ .provider = "openai" }, .sign_in = true }, ops, &cancellation);
+    defer rig.close();
+    try std.testing.expectEqual(view.LaunchIntent.named, launchIntent(rig.overview.options));
+    try std.testing.expectEqual(@as(?view.Default, null), rig.overview.state.default);
+    try std.testing.expect(rig.overview.root.input.layer.signInOpen());
+    _ = try view.step(&rig.overview.state, .{ .launch_start = launchIntent(rig.overview.options) });
+    var shown = try rig.shown(140, 40);
+    defer shown.deinit();
+    var ctx = rig.context();
+    defer {
+        for (ctx.cmds.items) |command| if (command == .set_title) std.testing.allocator.free(command.set_title);
+        ctx.cmds.deinit(std.testing.allocator);
+    }
+    _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
+    _ = try rig.settle();
+    try rig.overview.appNext(&ctx, try rig.overview.event(.launch_poll));
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+    try std.testing.expectEqual(.waiting, rig.overview.state.launch);
+    try std.testing.expect(rig.overview.state.hidesOverview());
+    try std.testing.expectEqual(@as(?view.Default, null), rig.overview.state.default);
+    var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+    try activation.binding.provider.set("openai");
+    try activation.binding.model.set("gpt-6-sol");
+    try activation.store.set("/store");
+    try signedIn(rig.overview, &ctx, activation);
+    try rig.overview.appNext(&ctx, try rig.overview.event(.launch_poll));
+    _ = try rig.settle();
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+    try std.testing.expectEqualStrings("openai", Seen.now.creation.provider.?.slice());
+    try std.testing.expectEqualStrings("gpt-6-sol", Seen.now.creation.model.?.slice());
+}
+
 test "narrow launch and later widening do not open a chat" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
-    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .defaults });
     var narrow = try rig.shown(46, 30);
     defer narrow.deinit();
     _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
@@ -8535,7 +8624,7 @@ test "wide launch creates a focused empty chat and Escape returns to overview" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
     defer rig.close();
-    _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try view.step(&rig.overview.state, .{ .launch_start = .defaults });
     const overview = rig.overview;
     overview.hooks.scratch = Scratch.scratch;
     defer {
@@ -8588,7 +8677,7 @@ test "launch threshold follows split width and explicit resume never starts a ne
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = if (is_resume) "k7m2qx".* else null }, fake_operations, &cancellation);
         defer rig.close();
-        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = is_resume, .restoring = false } });
+        _ = try view.step(&rig.overview.state, .{ .launch_start = if (is_resume) .explicit_session else .defaults });
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expectEqual(!is_resume and width >= Root.split_at, rig.overview.state.launch == .waiting);
@@ -8609,7 +8698,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
-        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try view.step(&rig.overview.state, .{ .launch_start = .defaults });
         var shown = try rig.shown(140, 40);
         defer shown.deinit();
         _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
@@ -8642,7 +8731,7 @@ test "wide launch shows stopped Host recovery and failed listing" {
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
-        _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try view.step(&rig.overview.state, .{ .launch_start = .defaults });
         var shown = try rig.shown(140, 40);
         defer shown.deinit();
         try std.testing.expect(rig.overview.state.hidesOverview());

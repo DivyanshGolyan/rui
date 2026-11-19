@@ -29,6 +29,9 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     p['change_kind'] = kind.value
     draft_run = event_name == 'pull_request' and draft
     p['draft_run'] = draft_run
+    # Only a pull request's changed paths may skip a policy self-check; main and Promote run them all.
+    if event_name != 'pull_request' or promotion:
+        p['policy_skips'] = []
     ready_pr = event_name == 'pull_request' and not draft_run
     quarantine = ('promotion' if promotion
                   else 'admission' if p['retry'] else 'off')

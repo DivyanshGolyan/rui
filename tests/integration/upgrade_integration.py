@@ -23,6 +23,7 @@ import time
 from urllib.parse import quote
 
 import live_engines
+import runtime_leftovers
 import settings_fixture
 from terminal_screen import split_pane_row
 
@@ -1160,6 +1161,18 @@ def restart_all_cases(root, binary, releases):
         assert socket_path.exists(), socket_path
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
         assert socket_path.exists(), "Discovery must not reclaim sockets"
+        # The harness's leftover reader agrees with platform's layout on a real
+        # crashed Host: not a leftover while its Store exists, one once it is gone.
+        hinted = pathlib.Path(socket_path.with_suffix(".store").read_text())
+        assert socket_path not in [path for path, _ in runtime_leftovers.leftovers()]
+        moved = hinted.with_name(hinted.name + ".moved")
+        hinted.rename(moved)
+        try:
+            assert (socket_path, str(hinted)) in runtime_leftovers.leftovers()
+        finally:
+            moved.rename(hinted)
+        runtime_leftovers.remove([(socket_path, str(hinted))])
+        assert not socket_path.exists()
 
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
@@ -1226,16 +1239,16 @@ def restart_all_cases(root, binary, releases):
                 assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
                 assert "[host_restart_failed]" in output, output
                 assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            output = first.run("host", "restart", "--all", expect=6)
-            assert str(unreadable) in output and "Host state is unconfirmed" in output, output
-            assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
-            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            assert "[host_restart_failed]" in output, output
+            # #1855: once nothing listens, the leftover socket has no live owner.
+            output = first.run("host", "restart", "--all")
+            assert str(unreadable) not in output and "failed at discovery" not in output, output
+            assert "Skipped 1 leftover Host socket: it refused connections and no running Host process serves it" in output, output
+            assert "2 Hosts: 0 restarted, 2 already current, 0 left unchanged, 0 failed." in output, output
         finally:
             unreadable.unlink(missing_ok=True)
         output = first.run("host", "restart", "--all")
         assert "2 Hosts: 0 restarted, 2 already current" in output, output
-        assert str(unreadable) not in output, output
+        assert str(unreadable) not in output and "leftover" not in output, output
 
     with case(root, binary, releases, "restart-all-managed-source") as c:
         old_host, previous = c.start_host("retained-older-source", source=True)

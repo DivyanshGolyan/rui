@@ -23,6 +23,32 @@ sys.path.insert(0, str(SCRIPT.parents[4] / "tests/integration"))
 from terminal_screen import Cell, Cursor, Frame
 
 
+def host_cli(state):
+    """A Store's Host CLI stub: `host status` is ready only while a child serves, and `host pause` stops it."""
+    def rui_cmd(*args, **_kwargs):
+        if args[:2] == ("host", "status"):
+            if not state["serving"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="rui: host unavailable")
+            providers = {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"instance": "i", "capabilities": {"providers": providers}}), stderr="")
+        if args[:2] == ("host", "pause"):
+            state["serving"] = False
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(args)
+    return rui_cmd
+
+
+def real_spawn(argv, **kwargs):
+    """The production spawn, so the existing subprocess.Popen double still sees each launch."""
+    return subprocess.Popen(argv, **kwargs)
+
+
+def host_processes(spawn):
+    """Process probes for launch_host: the given spawn, a Store always held by the child, no real waits."""
+    return types.SimpleNamespace(spawn=spawn, holds_store=lambda _run, _pid: True,
+                                 clock=lambda: 0.0, sleep=lambda _seconds: None)
+
+
 def committed(text, columns=100, lines=20):
     rows = tuple(tuple(Cell(char, None, False) for char in row) for row in text.rstrip("\n").split("\n"))
     return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
@@ -80,23 +106,26 @@ class VerifyRuiTest(unittest.TestCase):
         launch = runpy.run_path(str(SCRIPT))["launch_host"]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            state = {"serving": False}
             run = types.SimpleNamespace(
                 rui=Path("/candidate/rui"), store=root / "store", project=root, evidence=root,
                 meta={"host_options": {"active_capacity": 8, "host_setenv": ["HOST_ONLY=secret"]},
                       "fixture_url": "http://127.0.0.1:1234/responses"},
-                env=lambda: {"HOME": str(root)}, own=lambda *_args, **_kwargs: None,
-                rui_cmd=lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+                env=lambda: {"HOME": str(root)}, own=lambda *_args, **_kwargs: None, owned=lambda: [],
+                rui_cmd=host_cli(state))
             captured = {}
 
             def start(argv, **kwargs):
                 captured.update(argv=argv, env=kwargs["env"])
                 kwargs["stdout"].close()
                 kwargs["stderr"].close()
-                return types.SimpleNamespace(pid=123)
+                state["serving"] = True
+                return types.SimpleNamespace(pid=123, poll=lambda: None)
 
             for restartable in (False, True):
                 with self.subTest(restartable=restartable), patch("subprocess.Popen", start):
-                    launch(run, restartable=restartable)
+                    state["serving"] = False
+                    launch(run, restartable=restartable, processes=host_processes(real_spawn))
                 expected = ["/candidate/rui", "host", "serve", "--store", str(run.store),
                             "--set", "execution.activeCapacity=8", "--set", "providers={}",
                             "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
@@ -3610,19 +3639,21 @@ class UpgradeFramesTest(unittest.TestCase):
             with self.subTest(clean=clean), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 env = {"LD_PRELOAD": "/fixture.so", "FAKETIME_TIMESTAMP_FILE": "/clock"}
+                state = {"serving": False}
                 run = types.SimpleNamespace(meta={"host_options": {"active_capacity": 2, "host_setenv": []},
                                                   "fixture_url": "http://fixture"},
                     rui=root / "rui", store=root / "store", project=root, evidence=root,
-                    env=lambda: env.copy(), own=lambda *_a, **_k: None,
-                    rui_cmd=lambda *_a, **_k: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+                    env=lambda: env.copy(), own=lambda *_a, **_k: None, owned=lambda: [],
+                    rui_cmd=host_cli(state))
                 seen = []
                 def spawn(_argv, **kwargs):
                     seen.append(kwargs["env"])
                     kwargs["stdout"].close()
                     kwargs["stderr"].close()
-                    return types.SimpleNamespace(pid=123)
+                    state["serving"] = True
+                    return types.SimpleNamespace(pid=123, poll=lambda: None)
                 with patch("subprocess.Popen", side_effect=spawn):
-                    launch(run, restartable=True, without_preload=clean)
+                    launch(run, restartable=True, without_preload=clean, processes=host_processes(real_spawn))
                 self.assertEqual("LD_PRELOAD" in seen[0], not clean)
                 self.assertEqual(seen[0]["FAKETIME_TIMESTAMP_FILE"], "/clock")
                 self.assertEqual(env["LD_PRELOAD"], "/fixture.so")

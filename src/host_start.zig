@@ -393,6 +393,10 @@ pub const ConnectionInfo = struct {
     pub fn reusable(self: *const @This()) bool {
         return self.readiness.usable() and !self.unauthenticated and self.key_source != null;
     }
+    /// The key source the Host reads for this connection; null when it sends no key.
+    pub fn servedKey(self: *const @This()) @FieldType(@This(), "key_source") {
+        return if (self.unauthenticated) null else self.key_source;
+    }
     pub fn custom(self: *const @This()) bool {
         return !std.mem.eql(u8, self.endpoint.slice(), openai_endpoint);
     }
@@ -431,15 +435,16 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
     try fillAt(init, &parsed, dir, settings, &failure);
     var result: ConnectionInfo = .{};
     try result.endpoint.set(if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*value| value.slice() else openai_endpoint else openai_endpoint);
-    if (settings.providers.entries.openai) |*entry| {
-        result.unauthenticated = entry.unauthenticated.value;
-        if (!entry.unauthenticated.value) {
-            try defaultKeySource(init, &entry.key);
-            result.key_source = entry.key.source;
-        }
-    } else return result;
-    resolveProviders(init, settings, &failure) catch {
-        result.readiness = .credential_error;
+    const entry = if (settings.providers.entries.openai) |*value| value else return result;
+    result.unauthenticated = entry.unauthenticated.value;
+    if (entry.unauthenticated.value) {
+        result.readiness = .configured;
+        return result;
+    }
+    try defaultKeySource(init, &entry.key);
+    result.key_source = entry.key.source;
+    resolve(init, &entry.key) catch |err| {
+        result.readiness = if (err == error.ApiKeyMissing) .missing else if (err == error.OutOfMemory) return err else .credential_error;
         return result;
     };
     result.readiness = .configured;
@@ -2352,6 +2357,121 @@ test "Host start unsaved placement is refused but saved placement and other over
     try std.testing.expectError(error.SettingsInvalid, checkStart(init, .{ .dir = dir, .settings_file = file }, &failure));
     try savedEdit(init, dir, "interface.dir", interface, &failure);
     try checkStart(init, .{ .dir = dir, .assignments = &.{"execution.activeCapacity=3"} }, &failure);
+}
+
+test "inspectConnection reports the key source the Host will use" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    try environment.put("RUI_TEST_OPENAI_KEY", "sk-inspect-env-key-0001");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    const a = arena.allocator();
+    var failure: start_report.Failure = undefined;
+
+    // No key anywhere: nothing usable, and no source is reported.
+    const none = try inspectConnection(init, try std.fs.path.join(a, &.{ home, "none" }));
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, none.readiness);
+    try std.testing.expect(none.key_source == null);
+
+    // Default key file present and no configured source: the default file is the source.
+    const default_dir = try std.fs.path.join(a, &.{ home, "default" });
+    try provider_login.key(init, "sk-inspect-default-key-0001");
+    try savedEdit(init, default_dir, "providers", "{\"openai\":{}}", &failure);
+    var default_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const default_path = try credential_location.default(&environment, .openai, &default_path_buffer);
+    const from_default = try inspectConnection(init, default_dir);
+    try std.testing.expect(from_default.readiness.usable());
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_default.key_source.?)).file, std.meta.activeTag(from_default.key_source.?));
+    try std.testing.expectEqualStrings(default_path, from_default.key_source.?.file.slice());
+
+    // Configured file present: the configured file wins over the default file.
+    const configured_path = try std.fs.path.join(a, &.{ home, ".config", "rui", "configured.key" });
+    try api_key.install(configured_path, "sk-inspect-configured-key-0001");
+    const configured_dir = try std.fs.path.join(a, &.{ home, "configured" });
+    const configured_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{configured_path});
+    try savedEdit(init, configured_dir, "providers", configured_edit, &failure);
+    const from_configured = try inspectConnection(init, configured_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.configured, from_configured.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_configured.key_source.?)).file, std.meta.activeTag(from_configured.key_source.?));
+    try std.testing.expectEqualStrings(configured_path, from_configured.key_source.?.file.slice());
+
+    // Configured file missing: missing, and the named path is the reported source.
+    const absent_path = try std.fs.path.join(a, &.{ home, ".config", "rui", "absent.key" });
+    const absent_dir = try std.fs.path.join(a, &.{ home, "absent" });
+    const absent_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{absent_path});
+    try savedEdit(init, absent_dir, "providers", absent_edit, &failure);
+    const from_absent = try inspectConnection(init, absent_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, from_absent.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_absent.key_source.?)).file, std.meta.activeTag(from_absent.key_source.?));
+    try std.testing.expectEqualStrings(absent_path, from_absent.key_source.?.file.slice());
+
+    // Configured environment variable set: configured, reported as the env source.
+    const env_dir = try std.fs.path.join(a, &.{ home, "env" });
+    try savedEdit(init, env_dir, "providers", "{\"openai\":{\"key\":{\"env\":\"RUI_TEST_OPENAI_KEY\"}}}", &failure);
+    const from_env = try inspectConnection(init, env_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.configured, from_env.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_env.key_source.?)).env, std.meta.activeTag(from_env.key_source.?));
+    try std.testing.expectEqualStrings("RUI_TEST_OPENAI_KEY", from_env.key_source.?.env.slice());
+
+    // Configured environment variable unset: missing, and the variable name is reported.
+    const unset_dir = try std.fs.path.join(a, &.{ home, "unset" });
+    try savedEdit(init, unset_dir, "providers", "{\"openai\":{\"key\":{\"env\":\"RUI_TEST_OPENAI_KEY_ABSENT\"}}}", &failure);
+    const from_unset = try inspectConnection(init, unset_dir);
+    try std.testing.expectEqual(@import("provider_selection.zig").Readiness.missing, from_unset.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_unset.key_source.?)).env, std.meta.activeTag(from_unset.key_source.?));
+    try std.testing.expectEqualStrings("RUI_TEST_OPENAI_KEY_ABSENT", from_unset.key_source.?.env.slice());
+
+    const Readiness = @import("provider_selection.zig").Readiness;
+    const rui_dir = try std.fs.path.join(a, &.{ home, ".config", "rui" });
+    var rui = try std.Io.Dir.openDirAbsolute(io, rui_dir, .{});
+    defer rui.close(io);
+
+    // Configured file readable by others: refused as insecure, and the named file is the reported source.
+    const insecure_path = try std.fs.path.join(a, &.{ rui_dir, "insecure.key" });
+    try api_key.install(insecure_path, "sk-inspect-insecure-key-0001");
+    try rui.setFilePermissions(io, "insecure.key", .fromMode(0o644), .{});
+    const insecure_dir = try std.fs.path.join(a, &.{ home, "insecure" });
+    const insecure_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{insecure_path});
+    try savedEdit(init, insecure_dir, "providers", insecure_edit, &failure);
+    const from_insecure = try inspectConnection(init, insecure_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_insecure.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_insecure.key_source.?)).file, std.meta.activeTag(from_insecure.key_source.?));
+    try std.testing.expectEqualStrings(insecure_path, from_insecure.key_source.?.file.slice());
+
+    // Configured file whose content is not one key (a space inside): unreadable, and the file is the reported source.
+    const invalid_path = try std.fs.path.join(a, &.{ rui_dir, "invalid.key" });
+    try rui.writeFile(io, .{ .sub_path = "invalid.key", .data = "sk-two words\n" });
+    try rui.setFilePermissions(io, "invalid.key", .fromMode(0o600), .{});
+    const invalid_dir = try std.fs.path.join(a, &.{ home, "invalid" });
+    const invalid_edit = try std.fmt.allocPrint(a, "{{\"openai\":{{\"key\":{{\"file\":\"{s}\"}}}}}}", .{invalid_path});
+    try savedEdit(init, invalid_dir, "providers", invalid_edit, &failure);
+    const from_invalid = try inspectConnection(init, invalid_dir);
+    try std.testing.expectEqual(Readiness.credential_error, from_invalid.readiness);
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(from_invalid.key_source.?)).file, std.meta.activeTag(from_invalid.key_source.?));
+    try std.testing.expectEqualStrings(invalid_path, from_invalid.key_source.?.file.slice());
+
+    // Explicit providers that omit openai, with the default key file present: no OpenAI key and no source.
+    const omitted_dir = try std.fs.path.join(a, &.{ home, "omitted" });
+    try savedEdit(init, omitted_dir, "providers", "{\"chatgpt\":{}}", &failure);
+    const from_omitted = try inspectConnection(init, omitted_dir);
+    try std.testing.expectEqual(Readiness.missing, from_omitted.readiness);
+    try std.testing.expectEqual(false, from_omitted.key_source != null);
+
+    // Unauthenticated: no credential is sent, so it names no key source.
+    const open_dir = try std.fs.path.join(a, &.{ home, "open" });
+    try savedEdit(init, open_dir, "providers", "{\"openai\":{\"unauthenticated\":true}}", &failure);
+    const from_open = try inspectConnection(init, open_dir);
+    try std.testing.expectEqual(true, from_open.unauthenticated);
+    try std.testing.expect(from_open.servedKey() == null);
+    try std.testing.expectEqual(Readiness.configured, from_open.readiness);
+    try std.testing.expectEqual(false, from_open.key_source != null);
 }
 
 test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {

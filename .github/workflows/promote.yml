@@ -1,5 +1,5 @@
 name: Promote
-# Runs every three hours and by hand. Publish a qualified main commit and
+# Runs every three hours at :45 UTC (15 past the hour IST) and by hand. Publish a qualified main commit and
 # advance stable to it. On schedule the commit is main HEAD (inputs are empty,
 # so `inputs.sha` is ''); when stable already holds it, the run does nothing.
 # A HEAD with a red main-qualified record is skipped quietly, since the failing
@@ -21,7 +21,7 @@ on:
         required: false
         default: ''
   schedule:
-    - cron: '17 */3 * * *'
+    - cron: '45 */3 * * *'
 
 permissions:
   contents: read
