@@ -1423,6 +1423,16 @@ const Parser = struct {
         }
         if (std.mem.eql(u8, marker_name, "index")) return p.refuseWith("rsql: @index(name) stands only after its table");
         if (std.mem.eql(u8, marker_name, "after")) return p.after();
+        if (std.mem.eql(u8, marker_name, "in_index")) {
+            try p.expectSymbol("(");
+            const alias = p.next();
+            try p.expectSymbol(",");
+            const index = p.next();
+            try p.expectSymbol(")");
+            if (alias.kind != .word or index.kind != .word) return p.refuseWith("rsql: @in_index takes an alias and an index name");
+            if (inIndexRefusal(index.text)) |message| return p.refuseWith(message);
+            return .other;
+        }
         if (std.mem.eql(u8, marker_name, "session")) {
             try p.expectSymbol("(");
             const token = p.next();
@@ -1965,6 +1975,11 @@ fn expressionMarker(comptime name: []const u8) ?ExpressionMarker {
 
 fn marker(comptime name: []const u8, comptime arguments: []const []const u8, comptime text: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "after")) return renderAfterSqlite(arguments, text);
+    if (std.mem.eql(u8, name, "in_index")) {
+        if (comptime inIndexRefusal(arguments[1])) |message| @compileError(message ++ ": " ++ text);
+        const index = comptime schema.partialIndex(arguments[1]).?;
+        return "(" ++ qualify(arguments[0], index.table, index.where.?) ++ ")";
+    }
     const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
     if (arguments.len != kind.arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{kind.arity}) ++ " arguments: " ++ text);
     var pieces: [2 * kind.sqlite.len + 1][]const u8 = undefined;
@@ -2147,6 +2162,36 @@ fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const 
     }
 }
 
+/// Why `@in_index(alias, name)` is refused, or null when it is legal. A partial index must exist. The `.leading`
+/// and `.unique_when` MySQL forms test the first column, which equals the predicate only when that column is
+/// NOT NULL; the `.plain_unique` form states the predicate itself.
+fn inIndexRefusal(comptime name: []const u8) ?[]const u8 {
+    comptime {
+        const index = schema.partialIndex(name) orelse return "rsql: @in_index names no partial index " ++ name;
+        const first = columnName(index.columns[0]);
+        const tests_first_column = schema.mysqlIndexForm(index).? != .plain_unique;
+        if (tests_first_column and schema.columnNullable(index.table, first)) return "rsql: @in_index needs the first column " ++ first ++ " of " ++ name ++ " NOT NULL; a nullable first column makes its MySQL test differ from the index predicate";
+        return null;
+    }
+}
+
+/// The rows of the partial index `index` as MySQL states them for the row aliased `alias`: a seek on its
+/// `_lead` column when it has one, otherwise its key part (`.unique_when`), otherwise its predicate.
+fn inIndexMysql(comptime alias: []const u8, comptime index: schema.Index) []const u8 {
+    comptime {
+        const predicate = render(.mysql, qualify(alias, index.table, index.where.?));
+        return switch (schema.mysqlIndexForm(index).?) {
+            .leading => alias ++ "." ++ schema.leadingColumnName(index) ++ " IS NOT NULL",
+            .unique_when => schema.mysqlKeyPart(predicate, alias ++ "." ++ columnName(index.columns[0])) ++ " IS NOT NULL",
+            .plain_unique => "(" ++ predicate ++ ")",
+        };
+    }
+}
+
+fn columnName(comptime column: []const u8) []const u8 {
+    return column[0 .. std.mem.indexOfScalar(u8, column, ' ') orelse column.len];
+}
+
 const MysqlRenderer = struct {
     text: []const u8,
     tokens: []const Token,
@@ -2239,6 +2284,14 @@ const MysqlRenderer = struct {
         const close = if (at + 1 < to and r.tokens[at + 1].isSymbol("(")) closingToken(r.tokens, at + 1, to) else null;
         const end = close orelse return r.refuse("rsql: @" ++ name ++ " needs its arguments in parentheses");
         const arguments = argumentRanges(r.tokens, at + 1, end);
+        if (std.mem.eql(u8, name, "in_index")) {
+            if (arguments.len != 2 or arguments[0][1] != arguments[0][0] + 1 or arguments[1][1] != arguments[1][0] + 1) return r.refuse("rsql: @in_index takes an alias and an index name");
+            const index_name = r.tokens[arguments[1][0]].text;
+            if (inIndexRefusal(index_name)) |message| return r.refuse(message);
+            const index = schema.partialIndex(index_name).?;
+            r.emit(comptime inIndexMysql(r.tokens[arguments[0][0]].text, index));
+            return end + 1;
+        }
         if (std.mem.eql(u8, name, "index") or std.mem.eql(u8, name, "session")) {
             if (arguments.len != 1) return r.refuse("rsql: @" ++ name ++ " takes 1 arguments");
             if (std.mem.eql(u8, name, "session")) try r.range(arguments[0][0], arguments[0][1]);
@@ -3836,6 +3889,37 @@ test "a MySQL index hint is one name, not an expression" {
     try std.testing.expectEqualStrings(
         "rsql: @index takes one index name",
         comptime mysqlRendering("SELECT revision FROM session_revision @index(session_revision_instructions + bogus)").refused,
+    );
+}
+
+test "@in_index states a partial index's rows: its predicate on SQLite, its seek column or key part on MySQL" {
+    try std.testing.expectEqualStrings(
+        "SELECT t.turn_id FROM turn t WHERE (t.outcome_code IS NULL)",
+        comptime render(.sqlite, "SELECT t.turn_id FROM turn t WHERE @in_index(t, turn_one_active_per_session)"),
+    );
+    // A `.leading` index: the generated `_lead` column is NULL exactly when the predicate is false.
+    try std.testing.expectEqualStrings(
+        "SELECT u.session_ref FROM turn u  WHERE u.turn_unpositioned_lead IS NOT NULL",
+        comptime mysqlRendering("SELECT u.session_ref FROM turn u @index(turn_unpositioned) WHERE @in_index(u, turn_unpositioned)").rendered.prepared(),
+    );
+    // A `.unique_when` index: its first key part, which is NULL exactly when the predicate is false.
+    try std.testing.expectEqualStrings(
+        "SELECT t.turn_id FROM turn t WHERE (CASE WHEN t.outcome_code IS NULL THEN t.session_ref END) IS NOT NULL",
+        comptime mysqlRendering("SELECT t.turn_id FROM turn t WHERE @in_index(t, turn_one_active_per_session)").rendered.prepared(),
+    );
+    // A `.plain_unique` index: its predicate, qualified.
+    try std.testing.expectEqualStrings(
+        "SELECT a.action_id FROM action_operation a WHERE (a.sender_handle IS NOT NULL)",
+        comptime mysqlRendering("SELECT a.action_id FROM action_operation a WHERE @in_index(a, action_operation_sender_handle)").rendered.prepared(),
+    );
+    // session_obligation_parent is partial, but its first column parent_ref is nullable: refused.
+    try std.testing.expectEqualStrings(
+        "rsql: @in_index needs the first column parent_ref of session_obligation_parent NOT NULL; a nullable first column makes its MySQL test differ from the index predicate",
+        comptime statementError(.read, "SELECT s.session_ref FROM session s WHERE @in_index(s, session_obligation_parent)", struct { id: u64 }, struct { session_ref: u64 }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "rsql: @in_index names no partial index turn_session_latest",
+        comptime statementError(.read, "SELECT t.turn_id FROM turn t WHERE @in_index(t, turn_session_latest)", struct { id: u64 }, struct { turn_id: u64 }).?,
     );
 }
 

@@ -71,21 +71,31 @@ pub const Rule = struct {
 
     spins: bool = false,
 
+    /// The word an active row shows in its age column when it holds still.
+    held: ?[]const u8 = null,
+
     cause: bool = false,
 };
 
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle" },
     .pending = .{ .mark = .queued, .colour = .quiet },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true },
+    .working = .{ .mark = .active, .colour = .ink, .spins = true, .held = "working" },
+    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .held = "retrying" },
+    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .held = "working" },
     .approval = .{ .mark = .needs_you, .colour = .attention },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true },
+    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .held = "stopping" },
     .finished = .{ .mark = .none, .colour = .mark, .word = "finished" },
     .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true },
     .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped" },
 });
+
+comptime {
+    for (std.enums.values(Kind)) |kind| {
+        const rule = rules.get(kind);
+        if ((rule.mark == .active) != (rule.held != null)) @compileError("an active row's rule must name its held word, and only active rules may");
+    }
+}
 
 pub const marks = state_marks.marks;
 
@@ -105,6 +115,7 @@ pub const Action = enum {
     stop,
     archive,
     open_session,
+    next_question,
 };
 
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -118,6 +129,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = null,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    .alt_question = .next_question,
     .alt_up = .previous_session,
     .alt_down = .next_session,
     .up = .previous,
@@ -147,6 +159,8 @@ pub const InputDelivery = struct {
     under: bool = false,
     pasted: bool = false,
     wide: bool = false,
+    list_origin: bool = true,
+    at_ms: ?u64 = null,
 };
 
 pub const Delta = enum {
@@ -159,6 +173,8 @@ pub const Delta = enum {
             .not_modified => .not_modified,
             .changed => .changed,
             .full => .full,
+            // The roster never requests a window, and protocol_reply refuses a window reply before it gets here.
+            .window => unreachable,
         };
     }
 };
@@ -174,11 +190,16 @@ pub const First = struct {
 
 pub const Listed = struct {
     reference: Reference,
+    creator: ?Reference = null,
     read_version: Token = .{ .instance = @splat(0), .generation = 0 },
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     created_at: u64 = 0,
+    state_change_at: u64,
+    subtree_state_change_at: u64,
+    descendant_count: u64,
+    descendant_needs_you_count: u64,
     workspace: []const u8,
     provider: Provider,
     model: []const u8 = "",
@@ -199,11 +220,16 @@ pub const Listed = struct {
     pub fn of(row: anytype) Listed {
         return .{
             .reference = referenceOf(row.reference.slice()),
+            .creator = if (row.creator) |*creator| referenceOf(creator.slice()) else null,
             .read_version = row.read_version,
             .operation = row.work.operation,
             .archive_state = row.archive_state,
             .pin_order = row.pin_order,
             .created_at = row.created_at,
+            .state_change_at = row.state_change_at,
+            .subtree_state_change_at = row.subtree_state_change_at,
+            .descendant_count = row.descendant_count,
+            .descendant_needs_you_count = row.descendant_needs_you_count,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
             .model = row.model.slice(),
@@ -315,6 +341,7 @@ pub const CreateResult = union(enum) {
 pub const Event = union(enum) {
     input: InputDelivery,
     list_settled: struct { wide: bool, focused: bool },
+    list_presence: struct { at_ms: u64, pointer_over: bool },
 
     resized: Size,
     launch_start: LaunchIntent,
@@ -617,12 +644,22 @@ const FirstLineRead = union(enum) { unread, requested, unavailable, read: u32 };
 
 pub const Row = struct {
     reference: Reference,
+    creator: ?Reference = null,
     listed: bool = true,
     read_version: ?Token = null,
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     created_at: u64 = 0,
+    state_change_at: u64 = 0,
+    subtree_state_change_at: u64 = 0,
+    descendant_count: u64 = 0,
+    descendant_needs_you_count: u64 = 0,
+    list_group: session_work.Group = .done,
+    clock_version: ?Token = null,
+    sibling_rank: u64 = std.math.maxInt(u64),
+    born_held: bool = false,
+    flash_until_ms: u64 = 0,
 
     workspace: u32,
     provider: ?Provider = null,
@@ -718,6 +755,7 @@ pub const State = struct {
     status_changes: u64 = 0,
 
     presentation_revision: u64 = 0,
+    tree_presentation: ?u64 = null,
 
     arrivals: Vec(Seen) = .{},
 
@@ -730,6 +768,17 @@ pub const State = struct {
     list_stale: bool = false,
 
     sort_keys: Vec(SortKey) = .{},
+    nodes: Vec(Node) = .{},
+    scratch: Vec(u32) = .{},
+    folded: Vec(Reference) = .{},
+    pin_end: usize = 0,
+    ordered_refs: Vec(Reference) = .{},
+    full_order: Vec(u32) = .{},
+    last_question: ?Reference = null,
+    next_rank: u64 = 0,
+    pointer_over: bool = false,
+    key_until_ms: u64 = 0,
+    releasing: bool = false,
 
     pub const Options = struct {
         cwd: []const u8,
@@ -772,7 +821,7 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.menu.deinit(self.gpa);
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
-        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
+        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.nodes, &self.scratch, &self.folded, &self.ordered_refs, &self.full_order, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
     }
 
     pub fn find(self: *const State, ref: Reference) ?*const Row {
@@ -790,8 +839,10 @@ pub const State = struct {
 
     pub fn wakeAt(self: *const State) ?u64 {
         var at: ?u64 = if (self.listing) null else self.next_list_ms;
+        if (self.key_until_ms > self.now_ms) at = @min(at orelse self.key_until_ms, self.key_until_ms);
         for (self.rows.items) |*row| {
             if (!row.listed) continue;
+            if (row.flash_until_ms > self.now_ms) at = @min(at orelse row.flash_until_ms, row.flash_until_ms);
             const work = (&row.state);
             if (work.* == .retrying) at = @min(at orelse work.retrying.due_at_ms, work.retrying.due_at_ms);
         }
@@ -811,8 +862,8 @@ pub const State = struct {
 
     fn selectedRow(self: *const State) ?*const Row {
         if (self.selected != .session) return null;
-        const row = self.find(self.selected.session) orelse return null;
-        return if (visible(self, row)) row else null;
+        const index = lookup(self.by_reference.items, self.selected.session) orelse return null;
+        return if (index < self.nodes.items.len and self.nodes.items[index].included) &self.rows.items[index] else null;
     }
 
     pub fn initialPresentation(self: *const State, list_visible: bool) enum { holding, released, done } {
@@ -897,7 +948,7 @@ pub const State = struct {
             const before = RowPresentation.of(self, row);
             settleRow(self, row, .{ .read_version = read.read_version, .work = read.work, .last_line = read.last_line });
             const after = RowPresentation.of(self, row);
-            if (visible(self, row) and !before.eql(&after)) self.presentation_revision +%= 1;
+            if (position(self, row.reference) != null and !before.eql(&after)) self.presentation_revision +%= 1;
             try arrange(self);
         };
         if (!read.opening or read.work.served_attention == null) return;
@@ -1112,6 +1163,23 @@ pub const StatusRecord = struct {
         return .{ .reference = self.reference, .delivered = if (self.status != null) .{ .version = self.version } else .none };
     }
 };
+const Node = struct {
+    included: bool = false,
+    logical_parent: ?u32 = null,
+    parent: ?u32 = null,
+    first_child: ?u32 = null,
+    next_sibling: ?u32 = null,
+    remaining: u32 = 0,
+    descendants: u64 = 0,
+    attention: u64 = 0,
+    depth: u32 = 0,
+    last_sibling: bool = true,
+    hidden: bool = false,
+    old_position: ?usize = null,
+    line: ?usize = null,
+    representative: ?u32 = null,
+};
+
 const SortKey = struct { pin_order: ?u64, key: u128, index: u32 };
 
 fn Vec(comptime T: type) type {
@@ -1206,7 +1274,7 @@ const RowPresentation = struct {
 
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     switch (event) {
-        .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .presentation_start, .presentation_presented, .presentation_tick, .list_settled => {},
+        .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .presentation_start, .presentation_presented, .presentation_tick, .list_settled, .list_presence => {},
         else => state.presentation_revision +%= 1,
     }
     switch (event) {
@@ -1219,8 +1287,21 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
+            if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
+                const was_held = holding(state);
+                state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
+                if (was_held and !holding(state)) try releaseOrder(state);
+                state.key_until_ms = state.now_ms +| 3000;
+            }
             if (input.key != .ignored) state.launch = .done;
             try listInput(state, input, &effects);
+        },
+        .list_presence => |presence| {
+            const was_held = holding(state);
+            state.now_ms = @max(state.now_ms, presence.at_ms);
+            state.pointer_over = presence.pointer_over;
+            if (was_held != holding(state)) state.presentation_revision +%= 1;
+            if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
             const pending = state.browse_pending;
@@ -1530,18 +1611,25 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
+    const was_held = holding(state);
     const trouble = band(state);
     state.now_ms = now_ms;
+    const released = was_held and !holding(state);
+    if (released) try releaseOrder(state);
     var changed = false;
-    var redraw = false;
-    for (state.rows.items) |*row| {
+    var redraw = released;
+    for (state.rows.items, 0..) |*row, index| {
+        if (row.flash_until_ms != 0 and row.flash_until_ms <= now_ms) {
+            if (index < state.nodes.items.len and state.nodes.items[index].line != null) redraw = true;
+            row.flash_until_ms = 0;
+        }
         const was = std.meta.activeTag(row.state);
         if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
         const settled = was != std.meta.activeTag(row.state);
         changed = changed or settled;
         redraw = redraw or (settled and visible(state, row));
     }
-    if (changed) try arrange(state);
+    if (changed and !released) try arrange(state);
     if (redraw or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
     if (!state.listing and now_ms >= state.next_list_ms) {
         state.listing = true;
@@ -1588,11 +1676,17 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         const shown = listed.state.asOf(state.now_ms);
         state.pending.appendAssumeCapacity(.{
             .reference = listed.reference,
+            .creator = listed.creator,
             .read_version = listed.read_version,
             .operation = listed.operation,
             .archive_state = listed.archive_state,
             .pin_order = listed.pin_order,
             .created_at = listed.created_at,
+            .state_change_at = listed.state_change_at,
+            .subtree_state_change_at = listed.subtree_state_change_at,
+            .descendant_count = listed.descendant_count,
+            .descendant_needs_you_count = listed.descendant_needs_you_count,
+            .list_group = listed.group,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
             .model = bounded(model_capability.max_model_bytes, listed.model),
@@ -1656,6 +1750,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         for (state.pending.items) |incoming| if (lookup(state.by_reference.items, incoming.reference) == null) {
             var row = incoming;
             row.read_version = null;
+            row.born_held = holding(state);
             try state.rows.append(state.gpa, row);
             if (visible(state, &row)) state.presentation_revision +%= 1;
         };
@@ -1666,10 +1761,21 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const row = &state.rows.items[at];
         const was = row.*;
         const before = RowPresentation.of(state, row);
+        // The last arrange gave every drawn row a line; rows added by this commit have no node yet.
+        const was_visible = at < state.nodes.items.len and state.nodes.items[at].line != null;
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
+        row.creator = incoming.creator;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
         row.created_at = incoming.created_at;
+        if (row.clock_version == null or !std.mem.eql(u8, &row.clock_version.?.instance, &incoming.read_version.?.instance) or incoming.read_version.?.generation > row.clock_version.?.generation) {
+            row.state_change_at = incoming.state_change_at;
+            row.subtree_state_change_at = incoming.subtree_state_change_at;
+            row.descendant_count = incoming.descendant_count;
+            row.descendant_needs_you_count = incoming.descendant_needs_you_count;
+            row.list_group = incoming.list_group;
+            row.clock_version = incoming.read_version;
+        }
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.model = incoming.model;
@@ -1681,7 +1787,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
         retitle(state, row, title(state, &was).text);
         const after = RowPresentation.of(state, row);
-        if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
+        if (was_visible and visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
     };
     for (state.rows.items) |row| if (!row.listed) {
         if (state.entryOf(row.reference)) |entry| {
@@ -1781,22 +1887,67 @@ fn reindex(state: *State) error{OutOfMemory}!void {
 }
 
 fn visible(state: *const State, row: *const Row) bool {
-    return row.listed and (row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
+    return row.listed and (row.creator != null or row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
 }
 
 fn arrange(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
+    try state.nodes.ensure(state.gpa, rows.len);
+    try state.scratch.ensure(state.gpa, rows.len);
     try state.sort_keys.ensure(state.gpa, rows.len);
     try state.order.ensure(state.gpa, rows.len);
+    state.nodes.items.len = rows.len;
+    try state.ordered_refs.ensure(state.gpa, rows.len);
+    try state.full_order.ensure(state.gpa, rows.len);
+    const nodes = state.nodes.items;
+    for (rows, 0..) |*row, i| {
+        nodes[i] = .{ .included = visible(state, row), .descendants = row.descendant_count, .attention = row.descendant_needs_you_count };
+        if (!row.listed) continue;
+        if (row.creator) |creator| if (lookup(state.by_reference.items, creator)) |parent| {
+            if (parent != i and rows[parent].listed) nodes[i].logical_parent = parent;
+        };
+    }
+    for (state.ordered_refs.items, 0..) |reference, old_position| {
+        if (lookup(state.by_reference.items, reference)) |index| nodes[index].old_position = old_position;
+    }
+    // An available creator of a visible agent must itself be visible.
+    for (nodes, 0..) |*node, i| if (node.included) {
+        var parent = nodes[i].logical_parent;
+        while (parent) |index| {
+            if (nodes[index].included) break;
+            nodes[index].included = true;
+            parent = nodes[index].logical_parent;
+        }
+    };
+    for (nodes) |node| if (node.included) if (node.logical_parent) |parent| {
+        if (nodes[parent].included) nodes[parent].remaining += 1;
+    };
+    state.scratch.items.len = 0;
+    for (nodes, 0..) |node, i| if (node.included and node.remaining == 0) state.scratch.appendAssumeCapacity(@intCast(i));
+    var cursor: usize = 0;
+    while (cursor < state.scratch.items.len) : (cursor += 1) {
+        const index = state.scratch.items[cursor];
+        if (nodes[index].logical_parent) |parent| if (nodes[parent].included) {
+            nodes[parent].remaining -= 1;
+            if (nodes[parent].remaining == 0) state.scratch.appendAssumeCapacity(parent);
+        };
+    }
+    // A malformed cycle has no creator root. Promote its members to roots.
+    for (nodes) |*node| if (node.remaining != 0) {
+        node.logical_parent = null;
+        node.remaining = 0;
+    };
     state.sort_keys.items.len = 0;
-    state.summary = .{};
-    const latest = std.math.maxInt(u34);
-    for (rows, 0..) |*row, at| {
-        if (!visible(state, row)) continue;
-        const queued = ordering(state, row) == .queued;
-        const since = @min(shownSince(state, row), latest);
-        const age: u128 = if (queued) since else latest - since;
-        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(ordering(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
+    const latest = std.math.maxInt(u64);
+    for (rows, 0..) |*row, i| {
+        if (!nodes[i].included) continue;
+        nodes[i].parent = if (row.pin_order == null) nodes[i].logical_parent else null;
+        if (row.sibling_rank == std.math.maxInt(u64)) {
+            row.sibling_rank = state.next_rank;
+            state.next_rank += 1;
+        }
+        const rank: u128 = if (holding(state)) row.sibling_rank else latest - @min(row.subtree_state_change_at, latest);
+        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = rank << 48 | referenceKey(row.reference), .index = @intCast(i) });
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
@@ -1805,9 +1956,135 @@ fn arrange(state: *State) error{OutOfMemory}!void {
             return a.key < b.key;
         }
     }.less);
+    if (!holding(state)) {
+        state.next_rank = 0;
+        for (state.sort_keys.items) |key| {
+            rows[key.index].sibling_rank = state.next_rank;
+            state.next_rank += 1;
+        }
+    }
+    for (state.sort_keys.items) |key| if (nodes[key.index].parent) |parent| {
+        nodes[key.index].next_sibling = nodes[parent].first_child;
+        nodes[parent].first_child = key.index;
+    };
+    state.order.items.len = 0;
+    for (0..2) |phase| {
+        state.scratch.items.len = 0;
+        var at = state.sort_keys.items.len;
+        while (at != 0) {
+            at -= 1;
+            const index = state.sort_keys.items[at].index;
+            if (nodes[index].parent == null and (rows[index].pin_order != null) == (phase == 0)) state.scratch.appendAssumeCapacity(index);
+        }
+        while (state.scratch.items.len != 0) {
+            state.scratch.items.len -= 1;
+            const index = state.scratch.items.ptr[state.scratch.items.len];
+            state.order.appendAssumeCapacity(index);
+            var child = nodes[index].first_child;
+            var last = true;
+            while (child) |next| {
+                nodes[next].depth = nodes[index].depth + 1;
+                nodes[next].last_sibling = last;
+                last = false;
+                state.scratch.appendAssumeCapacity(next);
+                child = nodes[next].next_sibling;
+            }
+        }
+        if (phase == 0) state.pin_end = state.order.items.len;
+    }
+    state.full_order.items.len = state.order.items.len;
+    @memcpy(state.full_order.items, state.order.items);
+    // A pinned subtree is displayed once. Subtract each nearest pinned frontier
+    // from its logical ancestors using only facts from the same LIST snapshot.
+    for (state.sort_keys.items) |key| {
+        const index = key.index;
+        if (rows[index].pin_order == null) continue;
+        const hidden_count = rows[index].descendant_count +| 1;
+        const question_count = rows[index].descendant_needs_you_count +| @as(u64, @intFromBool(rows[index].list_group == .needs_you));
+        var ancestor = nodes[index].logical_parent;
+        while (ancestor) |parent| {
+            nodes[parent].descendants -|= hidden_count;
+            nodes[parent].attention -|= question_count;
+            if (rows[parent].pin_order != null) break;
+            ancestor = nodes[parent].logical_parent;
+        }
+    }
+    var kept: usize = 0;
+    var pin_kept: usize = 0;
+    for (state.order.items, 0..) |index, index_in_full| {
+        if (nodes[index].parent) |parent| {
+            nodes[index].hidden = nodes[parent].hidden or isFolded(state, rows[parent].reference);
+            if (nodes[index].hidden) nodes[index].representative = nodes[parent].representative orelse parent;
+        }
+        if (nodes[index].hidden) continue;
+        state.order.items[kept] = index;
+        kept += 1;
+        if (index_in_full < state.pin_end) pin_kept += 1;
+    }
+    state.order.items.len = kept;
+    state.pin_end = pin_kept;
+    state.ordered_refs.items.len = 0;
+    for (state.order.items, 0..) |index, position_| {
+        nodes[index].line = position_ + @intFromBool(state.pin_end != 0 and state.pin_end < state.order.items.len and position_ >= state.pin_end);
+        if (state.releasing and !rows[index].born_held) if (nodes[index].old_position) |old| {
+            if (old != position_) rows[index].flash_until_ms = state.now_ms +| 700;
+        };
+        if (state.releasing) rows[index].born_held = false;
+        state.ordered_refs.appendAssumeCapacity(rows[index].reference);
+    }
+    if (state.releasing) for (rows) |*row| {
+        row.born_held = false;
+    };
     state.summary.counts = counts(state);
-    state.order.items.len = state.sort_keys.items.len;
-    for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
+    var hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&state.pin_end));
+    for (state.order.items) |index| {
+        const node = nodes[index];
+        hash = std.hash.Wyhash.hash(hash, &rows[index].reference);
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.depth));
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.last_sibling));
+        const folded = isFolded(state, rows[index].reference) and node.descendants != 0;
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&folded));
+        if (folded) {
+            hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.descendants));
+            hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.attention));
+        }
+    }
+    const tree = hash;
+    if (state.tree_presentation == null or state.tree_presentation.? != tree) state.presentation_revision +%= 1;
+    state.tree_presentation = tree;
+}
+
+fn holding(state: *const State) bool {
+    return state.pointer_over or state.now_ms < state.key_until_ms;
+}
+
+fn releaseOrder(state: *State) error{OutOfMemory}!void {
+    state.releasing = true;
+    defer state.releasing = false;
+    try arrange(state);
+}
+
+fn isFolded(state: *const State, reference: Reference) bool {
+    for (state.folded.items) |folded| if (std.mem.eql(u8, &folded, &reference)) return true;
+    return false;
+}
+
+fn foldSelected(state: *State, folded: bool) error{OutOfMemory}!void {
+    if (state.selected != .session) return;
+    const reference = state.selected.session;
+    const index = lookup(state.by_reference.items, reference) orelse return;
+    if (index >= state.nodes.items.len or state.nodes.items[index].descendants == 0) return;
+    for (state.folded.items, 0..) |known, at| {
+        if (!std.mem.eql(u8, &known, &reference)) continue;
+        if (folded) return;
+        std.mem.copyForwards(Reference, state.folded.items[at .. state.folded.items.len - 1], state.folded.items[at + 1 ..]);
+        state.folded.items.len -= 1;
+        try arrange(state);
+        return;
+    }
+    if (!folded) return;
+    try state.folded.append(state.gpa, reference);
+    try arrange(state);
 }
 
 fn counts(state: *const State) Counts {
@@ -1834,8 +2111,15 @@ fn ordering(state: *const State, row: *const Row) OrderClass {
     };
 }
 
+/// A Session's place in the drawn order. A Session hidden in a collapsed
+/// branch takes its collapsed ancestor's place, so selection, highlight,
+/// list moves and Alt-Up/Down work from a hidden open chat without unfolding.
 fn position(state: *const State, ref: Reference) ?usize {
     for (state.order.items, 0..) |row, at| if (std.mem.eql(u8, &state.rows.items[row].reference, &ref)) return at;
+    const index = lookup(state.by_reference.items, ref) orelse return null;
+    if (index >= state.nodes.items.len) return null;
+    const representative = state.nodes.items[index].representative orelse return null;
+    for (state.order.items, 0..) |row, at| if (row == representative) return at;
     return null;
 }
 
@@ -1958,13 +2242,13 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
-        },
+        } else if (state.selected == .session) try foldSelected(state, true),
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => {
                 state.browse_pending = false;
                 switch (state.selected) {
-                    .session => try activateList(state, .open_session, effects),
+                    .session => try foldSelected(state, false),
                     .sessions => state.selected = .archived,
                     .new_session, .archived, .settings => {},
                 }
@@ -1975,6 +2259,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
             },
             .stop => stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
+            .next_question => try nextQuestion(state, effects),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
             .previous_session => try adjacentSession(state, .previous, effects),
@@ -1987,6 +2272,27 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     }
     if (input == .action and (input.action == .previous or input.action == .next)) {
         state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
+    }
+}
+
+fn nextQuestion(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    const order = state.full_order.items;
+    if (order.len == 0) return;
+    const anchor = state.last_question orelse state.conversing;
+    var start: usize = 0;
+    if (anchor) |reference| for (order, 0..) |index, at| {
+        if (std.mem.eql(u8, &state.rows.items[index].reference, &reference)) {
+            start = (at + 1) % order.len;
+            break;
+        }
+    };
+    for (0..order.len) |offset| {
+        const row = &state.rows.items[order[(start + offset) % order.len]];
+        if (!row.listed or row.group != .needs_you) continue;
+        state.selected = .{ .session = row.reference };
+        state.last_question = row.reference;
+        try enter(state, effects);
+        return;
     }
 }
 
@@ -2625,18 +2931,30 @@ pub const Drawn = struct {
 
 pub fn nextRedrawAt(state: *const State, drawn: Drawn, caps: Caps, awake_ms: u64) ?u64 {
     var next: ?u64 = null;
+    if (!state.pointer_over and state.key_until_ms > state.now_ms) {
+        next = awake_ms +| (state.key_until_ms - state.now_ms);
+    }
     for (drawn.first..drawn.end) |at| {
         const kind = Lines.kind(state, at) orelse break;
-        if (Lines.spins(state, at, caps)) {
-            const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
+        if (kind != .row) continue;
+        const row = &state.rows.items[state.order.items[kind.row]];
+        if (row.flash_until_ms > state.now_ms) {
+            const deadline = awake_ms +| (row.flash_until_ms - state.now_ms);
             next = @min(next orelse deadline, deadline);
         }
-        if (kind == .row and hasAge(state, kind.row)) {
-            const row = &state.rows.items[state.order.items[kind.row]];
-            if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
-                const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+        switch (rowActivity(state, kind.row, caps)) {
+            .spin => {
+                const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
                 next = @min(next orelse deadline, deadline);
-            }
+            },
+            // A held word never changes on its own.
+            .held => {},
+            .none => {
+                if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
+                    const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+                    next = @min(next orelse deadline, deadline);
+                }
+            },
         }
     }
     if (drawn.header) if (band(state)) |trouble| if (trouble.trouble == .quota) {
@@ -2669,15 +2987,7 @@ pub const Lines = struct {
     const Entry = union(enum) { gap, row: usize, empty };
 
     fn gapAt(state: *const State) ?usize {
-        const order = state.order.items;
-        if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
-        var low: usize = 1;
-        var high = order.len - 1;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
-        }
-        return low;
+        return if (state.pin_end != 0 and state.pin_end < state.order.items.len) state.pin_end else null;
     }
 
     pub fn count(state: *const State) usize {
@@ -2728,7 +3038,7 @@ pub const Lines = struct {
     /// The same animation decision used by rendering and redraw scheduling.
     pub fn spins(state: *const State, line: usize, caps: Caps) bool {
         const entry = kind(state, line) orelse return false;
-        return entry == .row and rowSpins(state, entry.row, caps);
+        return entry == .row and rowActivity(state, entry.row, caps) == .spin;
     }
 
     pub fn at(arena: Allocator, state: *const State, line: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!?Line {
@@ -2739,7 +3049,7 @@ pub const Lines = struct {
                 .segments = try rowSegments(arena, state, entry.row, width, caps, frame),
                 .target = .{ .open = row.reference },
                 .alternate = .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } },
-                .spins = rowSpins(state, entry.row, caps),
+                .spins = rowActivity(state, entry.row, caps) == .spin,
             };
         }
         var built: Spans = .of(arena, caps, width);
@@ -2749,23 +3059,114 @@ pub const Lines = struct {
     }
 };
 
+pub const Edge = enum { above, below };
+pub fn edgeAttention(state: *const State, edge: Edge, first: usize, end: usize) usize {
+    var result: usize = 0;
+    for (state.order.items) |index| {
+        const row = &state.rows.items[index];
+        const node = state.nodes.items[index];
+        if (row.group != .needs_you and !(isFolded(state, row.reference) and node.attention != 0)) continue;
+        const line = node.line orelse continue;
+        if (switch (edge) {
+            .above => line < first,
+            .below => line >= end,
+        }) result += 1;
+    }
+    return result;
+}
+pub fn sessionsFrom(state: *const State, line: usize) usize {
+    return Lines.sessionsFrom(state, line);
+}
+pub fn lineOfReference(state: *const State, reference: Reference) ?usize {
+    return if (position(state, reference)) |at| Lines.lineOf(state, at) else null;
+}
+pub fn selectedLine(state: *const State) ?usize {
+    return Lines.highlighted(state, true);
+}
+pub fn listLength(state: *const State) usize {
+    return Lines.count(state);
+}
+
 fn rowSelected(state: *const State, row: *const Row) bool {
     const ref = Lines.namedSession(state) orelse return false;
     return std.mem.eql(u8, &ref, &row.reference);
 }
 
-fn hasAge(state: *const State, row: usize) bool {
-    return rules.get(shownKind(state, &state.rows.items[state.order.items[row]])).mark != .active;
+/// How a listed row shows that it is active. Every reader (glyph, colour, age
+/// column and redraw deadlines) asks this one owner.
+pub const Activity = union(enum) { none, spin, held: []const u8 };
+
+fn rowActivity(state: *const State, at: usize, caps: Caps) Activity {
+    const row = &state.rows.items[state.order.items[at]];
+    const rule = rules.get(shownKind(state, row));
+    if (rule.mark != .active) return .none;
+    if (rule.spins and !state.list_stale and caps.unicode and caps.depth != .none) return .spin;
+    return .{ .held = rule.held.? };
 }
 
 fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
-    const row = &state.rows.items[state.order.items[at]];
+    const index = state.order.items[at];
+    const row = &state.rows.items[index];
+    const node = state.nodes.items[index];
     const quiet = rowQuiet(state, row);
     const rule = rules.get(shownKind(state, row));
+    const flash = row.flash_until_ms > state.now_ms;
+    const background: Background = if (flash) .hover else .ground;
     built.begin();
+    const activity = rowActivity(state, at, caps);
+    var age_buffer: [8]u8 = undefined;
+    const age: []const u8 = switch (activity) {
+        .none => (Age{ .elapsed = shownSince(state, row) }).text(&age_buffer, state.now_ms),
+        .spin => "",
+        .held => |word| word,
+    };
+    const age_cells = @min(built.measure(age), width -| 3);
+    const folded = isFolded(state, row.reference) and node.descendants != 0;
+    const normal_hidden = if (folded) try std.fmt.allocPrint(arena, " {s} {d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else "";
+    const normal_attention = if (folded and node.attention != 0) try std.fmt.allocPrint(arena, " {s} {d} ?", .{ if (caps.unicode) "·" else ".", node.attention }) else "";
+    const compact = folded and @as(usize, width) < 2 + 24 + built.measure(normal_hidden) + built.measure(normal_attention) + @intFromBool(age_cells != 0) + age_cells;
+    const hidden = if (compact) try std.fmt.allocPrint(arena, "{s}{d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else normal_hidden;
+    const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
+    const archived = if (row.archive_state == .archived and state.archive != .archived)
+        if (caps.unicode) " · archived" else " . archived"
+    else
+        "";
+    const suffix_cells = built.measure(hidden) + built.measure(attention_badge) + built.measure(archived);
+    const age_gap: usize = @intFromBool(age_cells != 0);
+    const tight = folded and @as(usize, width) < 1 + 2 + 24 + suffix_cells + age_gap + age_cells + 1;
+    const end: usize = @as(usize, width) -| @as(usize, @intFromBool(!tight));
+    const name_end = end -| age_cells -| age_gap;
+    const origin: usize = if (tight and name_end -| 2 -| suffix_cells < 25) 0 else 1;
+    const depth_budget = (name_end -| origin -| 2 -| suffix_cells -| 24) / 2;
+    const depth: usize = @min(node.depth, depth_budget);
+    if (depth != 0) {
+        const path = try arena.alloc(u32, depth);
+        var current: u32 = index;
+        var remaining = depth;
+        while (remaining != 0) {
+            remaining -= 1;
+            path[remaining] = current;
+            current = state.nodes.items[current].parent orelse break;
+        }
+        const guides = try arena.alloc(u8, depth * 4);
+        var used: usize = 0;
+        for (path, 0..) |member, level| {
+            const last = state.nodes.items[member].last_sibling;
+            const segment = if (!caps.unicode) "  " else if (level + 1 == depth)
+                if (last) "╰ " else "│ "
+            else if (last) "  " else "│ ";
+            @memcpy(guides[used..][0..segment.len], segment);
+            used += segment.len;
+        }
+        _ = try built.put(origin, guides[0..used], depth * 2, .{ .colour = .quiet, .background = background, .dim = quiet });
+    }
+    const mark_at = origin + depth * 2;
     const mark = marks.get(rule.mark);
-    const glyph = if (rowSpins(state, at, caps)) spinner[frame % spinner.len] else if (caps.unicode) mark.unicode else mark.ascii;
+    const glyph = switch (activity) {
+        .spin => spinner[frame % spinner.len],
+        .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
+    };
     var words: [work_line.max_words_bytes]u8 = undefined;
     const progress = workLine(&words, state, row);
     const colour = if (progress) |line| switch (line.tone) {
@@ -2773,33 +3174,19 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
         .quiet => Colour.quiet,
         .attention => Colour.attention,
     } else rule.colour;
-    _ = try built.put(mark_column, glyph, 1, .{ .colour = colour, .dim = quiet });
-    const named = title(state, row);
-    const name = switch (row.archive_state) {
-        .active, .archived => named.text,
-        .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
-    };
-    var buffer: [8]u8 = undefined;
-    const age = if (!hasAge(state, at)) "" else (Age{ .elapsed = shownSince(state, row) }).text(&buffer, state.now_ms);
-    const end = width -| 1;
-    const age_cells = @min(built.measure(age), end -| text_column);
-    const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
+    _ = try built.put(mark_at, glyph, 1, .{ .colour = colour, .background = background, .dim = quiet });
+    const start_name = mark_at + 2;
+    const room = name_end -| start_name;
+    const name_room = room -| @min(room, suffix_cells);
     const selected = rowSelected(state, row);
-    const archived = if (row.archive_state == .archived and state.archive != .archived)
-        if (caps.unicode) " · archived" else " . archived"
-    else
-        "";
-    const name_room: usize = name_end -| text_column;
-    const name_cells = try built.put(text_column, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
-    _ = try built.put(text_column + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
-    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
-}
-
-fn rowSpins(state: *const State, at: usize, caps: Caps) bool {
-    if (state.list_stale or !caps.unicode or caps.depth == .none) return false;
-    const row = &state.rows.items[state.order.items[at]];
-    return yours(row) and rules.get(shownKind(state, row)).spins;
+    const named = title(state, row).text;
+    const name = if (row.archive_state == .archiving) try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named}) else named;
+    const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
+    const archived_cells = try built.put(start_name + used, archived, room -| used, .{ .colour = .quiet, .background = background, .dim = quiet });
+    const hidden_cells = try built.put(start_name + used + archived_cells, hidden, room -| used -| archived_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    _ = try built.put(start_name + used + archived_cells + hidden_cells, attention_badge, room -| used -| archived_cells -| hidden_cells, .{ .colour = .attention, .background = background });
+    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
 fn yours(row: *const Row) bool {
@@ -2844,6 +3231,8 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
             region_count += 1;
         }
     }
+    const held_at = text_column + "Chats".len + 2 + "Archived".len + 2;
+    if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
     return .{
         .{ .segments = new_session, .target = .new_session },
         .{ .segments = try segmentsOf(arena, try built.finish(), width, .{}), .regions = try arena.dupe(Region, regions[0..region_count]) },
@@ -2988,6 +3377,7 @@ const test_first: content_value.Value = .{ .text = .{ .length = 5, .digest = @sp
 
 const TestSession = struct {
     read_version: Token = testToken(0),
+    creator: ?Reference = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     label: ?[]const u8 = null,
@@ -2998,12 +3388,17 @@ const TestSession = struct {
     yours: bool = false,
     turn: ?u64 = null,
     first_action: ?u64 = null,
+    state_change_at: ?u64 = null,
+    subtree_state_change_at: ?u64 = null,
+    descendant_count: u64 = 0,
+    descendant_needs_you_count: u64 = 0,
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
     const work: session_work.Work = .{ .state = state.asOf(test_now_s * 1000), .turn = options.turn, .first_action = options.first_action };
     return .{
         .reference = ref.*,
+        .creator = options.creator,
         .read_version = options.read_version,
         .archive_state = options.archive_state,
         .pin_order = options.pin_order,
@@ -3012,6 +3407,10 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .model = options.model,
         .label = options.label,
         .state = state,
+        .state_change_at = options.state_change_at orelse state.since(),
+        .subtree_state_change_at = options.subtree_state_change_at orelse options.state_change_at orelse state.since(),
+        .descendant_count = options.descendant_count,
+        .descendant_needs_you_count = options.descendant_needs_you_count,
         .turn = options.turn,
         .first_action = options.first_action,
         .attention = session_work.attention(work),
@@ -3261,11 +3660,11 @@ const mixed = [_]Listed{
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
     .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                          now", .ascii = " : Write the notes                                                          now", .colour = .quiet, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .working = ago(40) }, .unicode = " ◜ Write the notes", .ascii = " * Write the notes                                                      working", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ◝ Write the notes                                                     retrying", .ascii = " * Write the notes                                                     retrying", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ◜ Write the notes", .ascii = " * Write the notes                                                      working", .colour = .ink, .stoppable = true },
     .{ .state = .{ .approval = ago(3 * 60) }, .unicode = " ● Write the notes                                                           3m", .ascii = " ? Write the notes                                                           3m", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .stopping = ago(8) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .quiet, .stoppable = false },
+    .{ .state = .{ .stopping = ago(8) }, .unicode = " ◝ Write the notes                                                     stopping", .ascii = " * Write the notes                                                     stopping", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .unicode = "   Write the notes                                                          12m", .ascii = "   Write the notes                                                          12m", .colour = .mark, .stoppable = false },
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .unicode = " × Write the notes                                                           3h", .ascii = " x Write the notes                                                           3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ▪ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
@@ -3303,7 +3702,309 @@ fn expectOrder(state: *const State, expected: []const []const u8) !void {
     for (expected, state.order.items) |label, index| try std.testing.expectEqualStrings(label, state.rows.items[index].label.?.slice());
 }
 
-test "overview an Action wait leads regardless of sender" {
+test "SUI-100 creator tree uses served subtree facts and disjoint nested pins" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(80) }, .{ .label = "Root", .subtree_state_change_at = test_now_s - 1, .descendant_count = 4294967300, .descendant_needs_you_count = 4 }),
+        session("b4n8wd", .{ .approval = ago(20) }, .{ .label = "Pinned", .creator = "a1b2c3".*, .pin_order = 9, .descendant_count = 3, .descendant_needs_you_count = 2 }),
+        session("c3d4e5", .{ .approval = ago(10) }, .{ .label = "Nested pin", .creator = "b4n8wd".*, .pin_order = 8, .descendant_count = 1, .descendant_needs_you_count = 1 }),
+        session("d4e5f6", .{ .finished = ago(2) }, .{ .label = "Other root" }),
+    });
+    defer state.deinit();
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "b4n8wd".* } } });
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    const text = try screenText(&state, 140, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Pinned ▸ 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 4294967296 · 1 ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root").? < std.mem.indexOf(u8, text, "Other root").?);
+    try creatorSnapshotCase();
+    try creatorPagesCase();
+    try creatorFilteredCase();
+    try creatorEmptyCase();
+    try creatorEdgesCase();
+    try creatorClockCase();
+    try creatorPinsCase();
+    try creatorRootOrderCase();
+    try creatorSenderOrderCase();
+    try creatorQueuedOrderCase();
+}
+
+fn creatorSnapshotCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(20) }, .{ .label = "Root", .subtree_state_change_at = test_now_s - 1, .descendant_count = 3, .descendant_needs_you_count = 2 }),
+        session("b4n8wd", .{ .approval = ago(10) }, .{ .label = "Pinned", .creator = "a1b2c3".*, .pin_order = 7, .descendant_count = 1, .descendant_needs_you_count = 1 }),
+    });
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = "b4n8wd".* });
+    _ = try step(&state, .{ .observed = .{ .reference = "b4n8wd".*, .read_version = testToken(3), .work = fixtureWork(.{ .state = .{ .working = ago(1) } }), .opening = false } });
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = "a1b2c3".* } } });
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    const text = try screenText(&state, 140, 24, .{ .depth = .none });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1 ·") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "◝ Pinned") != null);
+}
+
+fn creatorPagesCase() !void {
+    var root = session("a1b2c3", .{ .working = ago(10) }, .{ .label = "Root", .descendant_count = 1 });
+    var state = try opened(&.{root});
+    defer state.deinit();
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = root.reference } } });
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    root.read_version = testToken(2);
+    root.descendant_count = 2;
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{root}, .answer = null } } });
+    var text = try screenText(&state, 140, 24, .{});
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1") != null);
+    std.testing.allocator.free(text);
+    root.descendant_count = 3;
+    root.descendant_needs_you_count = 1;
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{root}, .restarts = true, .answer = null } } });
+    text = try screenText(&state, 140, 24, .{});
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 1") != null);
+    std.testing.allocator.free(text);
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .changed, .since = testToken(2) } } } });
+    text = try screenText(&state, 140, 24, .{});
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 3 · 1 ?") != null);
+    std.testing.allocator.free(text);
+    root.read_version = testToken(1);
+    root.descendant_count = 7;
+    _ = try refresh(&state, .changed, testToken(3), &.{root});
+    text = try screenText(&state, 140, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root ▸ 3 · 1 ?") != null);
+}
+
+test "SUI-101 creator tree folding and expansion" {
+    try creatorFoldCase();
+    try creatorHiddenOpenCase();
+}
+
+test "SUI-102 creator tree order hold and release" {
+    try creatorPointerHoldCase();
+    try creatorKeyHoldCase();
+    try creatorKeyOriginCase();
+    try creatorPresentationCase();
+    try creatorFlashDeadlineCase();
+}
+
+test "SUI-103 creator tree attention representatives" {
+    try creatorAttentionCase();
+    try creatorEdgeCase();
+}
+
+test "SUI-104 creator tree width and badges" {
+    try creatorWidthCase();
+    try creatorSidebarCase();
+}
+
+fn creatorFilteredCase() !void {
+    const root = session("a1b2c3", .{ .finished = ago(10) }, .{ .label = "Root" });
+    const middle = session("b4n8wd", .{ .finished = ago(5) }, .{ .label = "Archived middle", .creator = "a1b2c3".*, .archive_state = .archived });
+    const leaf = session("c3d4e5", .{ .finished = ago(1) }, .{ .label = "Leaf", .creator = "b4n8wd".* });
+    var state = try opened(&.{ root, middle, leaf });
+    defer state.deinit();
+    var text = try screenText(&state, 140, 24, .{});
+    try std.testing.expect(std.mem.indexOf(u8, text, "Leaf").? < std.mem.indexOf(u8, text, "Root").?);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Archived middle") == null);
+    std.testing.allocator.free(text);
+    _ = try step(&state, .{ .clicked = .{ .target = .archived } });
+    _ = try respond(&state, .full, testToken(2), &.{ root, middle, leaf });
+    text = try screenText(&state, 140, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Archived middle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Leaf") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Root") == null);
+}
+
+fn creatorEmptyCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .idle = ago(10) }, .{ .first = null, .label = "Human root", .subtree_state_change_at = test_now_s - 1, .descendant_count = 1 }),
+        session("b4n8wd", .{ .idle = ago(1) }, .{ .first = null, .label = "Agent", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .idle = ago(5) }, .{ .first = null, .label = "Other empty" }),
+    });
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), Lines.count(&state));
+    const first = (try Lines.at(arena.allocator(), &state, 0, 140, .{}, 0)).?;
+    const second = (try Lines.at(arena.allocator(), &state, 1, 140, .{}, 0)).?;
+    try std.testing.expect(first.target.? == .open);
+    try std.testing.expectEqualStrings("a1b2c3", &first.target.?.open);
+    try std.testing.expect(second.target.? == .open);
+    try std.testing.expectEqualStrings("b4n8wd", &second.target.?.open);
+}
+
+fn creatorEdgesCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .finished = ago(80) }, .{ .label = "A", .subtree_state_change_at = test_now_s - 1, .descendant_count = 1 }),
+        session("b4n8wd", .{ .finished = ago(20) }, .{ .label = "B", .subtree_state_change_at = test_now_s - 10, .descendant_count = 1 }),
+        session("c3d4e5", .{ .working = ago(1) }, .{ .label = "A child", .creator = "a1b2c3".* }),
+        session("d4e5f6", .{ .finished = ago(10) }, .{ .label = "B child", .creator = "b4n8wd".* }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "A", "A child", "B", "B child" });
+}
+
+fn creatorFoldCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "A", .descendant_count = 1, .descendant_needs_you_count = 1 }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Child", .creator = "a1b2c3".* }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try expectOrder(&state, &.{"A"});
+    _ = try press(&state, .open_session);
+    try expectOrder(&state, &.{ "A", "Child" });
+}
+
+fn creatorHiddenOpenCase() !void {
+    // An open or selected Session folded away takes its collapsed ancestor's place.
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "A", .subtree_state_change_at = test_now_s - 1, .descendant_count = 1 }),
+        session("b4n8wd", .{ .finished = ago(1) }, .{ .label = "Child", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .finished = ago(30) }, .{ .label = "B" }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "A", "Child", "B" });
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try expectOrder(&state, &.{ "A", "B" });
+    _ = try step(&state, .{ .conversation = "b4n8wd".* });
+    state.selected = .{ .session = "b4n8wd".* };
+    try expectOrder(&state, &.{ "A", "B" });
+    const a_line = Lines.lineOf(&state, 0);
+    try std.testing.expectEqual(@as(?usize, a_line), Lines.named(&state));
+    try std.testing.expectEqual(@as(?usize, a_line), Lines.highlighted(&state, true));
+    try std.testing.expectEqual(@as(?usize, a_line), lineOfReference(&state, "b4n8wd".*));
+    const effects = try press(&state, .next_session);
+    try std.testing.expectEqualStrings("c3d4e5", &state.selected.session);
+    var opens: usize = 0;
+    for (effects.slice()) |effect| if (effect == .open) {
+        opens += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), opens);
+}
+
+fn creatorPointerHoldCase() !void {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A" });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = true } });
+    b.state = .{ .approval = ago(1) };
+    b.state_change_at = test_now_s - 1;
+    b.subtree_state_change_at = test_now_s - 1;
+    const c = session("c3d4e5", .{ .finished = ago(2) }, .{ .label = "C" });
+    _ = try refresh(&state, .changed, testToken(2), &.{ b, c });
+    try expectOrder(&state, &.{ "A", "B", "C" });
+    try std.testing.expect(holding(&state));
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = false } });
+    try expectOrder(&state, &.{ "B", "C", "A" });
+    try std.testing.expect(state.find("a1b2c3".*).?.flash_until_ms > state.now_ms);
+    try std.testing.expectEqual(@as(u64, 0), state.find("c3d4e5".*).?.flash_until_ms);
+    const flash = state.find("a1b2c3".*).?.flash_until_ms;
+    _ = try step(&state, .{ .tick = flash });
+    try std.testing.expectEqual(@as(u64, 0), state.find("a1b2c3".*).?.flash_until_ms);
+}
+
+fn creatorKeyHoldCase() !void {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A" });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    const start = state.now_ms;
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .next }, .at_ms = start } });
+    b.state_change_at = test_now_s - 1;
+    b.subtree_state_change_at = test_now_s - 1;
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    _ = try step(&state, .{ .tick = start + 2999 });
+    try expectOrder(&state, &.{ "A", "B" });
+    _ = try step(&state, .{ .tick = start + 3000 });
+    try expectOrder(&state, &.{ "B", "A" });
+}
+
+fn creatorKeyOriginCase() !void {
+    for ([_]Action{ .previous_session, .next_session, .next_question }) |action| {
+        for ([_]bool{ false, true }) |origin| {
+            var state = try opened(&.{});
+            defer state.deinit();
+            _ = try step(&state, .{ .input = .{ .key = .{ .action = action }, .list_origin = origin, .at_ms = state.now_ms } });
+            try std.testing.expectEqual(origin, holding(&state));
+        }
+    }
+}
+
+fn creatorClockCase() !void {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A", .state_change_at = test_now_s - 20 });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B", .state_change_at = test_now_s - 30 });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    b.state = .{ .bash = .{ .since = test_now_s - 1, .call = 1, .description = null, .running = 1, .approvals = 0 } };
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    try expectOrder(&state, &.{ "A", "B" });
+}
+
+fn creatorAttentionCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(5) }, .{ .label = "Parent", .subtree_state_change_at = test_now_s - 1, .descendant_count = 2, .descendant_needs_you_count = 1 }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .failed = .{ .since = test_now_s - 2, .code = .{}, .resets_at = null } }, .{ .label = "Failure", .creator = "a1b2c3".* }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    const index = lookup(state.by_reference.items, "a1b2c3".*).?;
+    try std.testing.expectEqual(@as(u64, 2), state.nodes.items[index].descendants);
+    try std.testing.expectEqual(@as(u64, 1), state.nodes.items[index].attention);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
+    try std.testing.expect(std.mem.indexOf(u8, text, "▸ 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "· 1 ?") != null);
+}
+
+fn creatorPinsCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "Parent" }),
+        session("b4n8wd", .{ .working = ago(5) }, .{ .label = "Pinned child", .creator = "a1b2c3".*, .pin_order = 7 }),
+        session("c3d4e5", .{ .working = ago(1) }, .{ .label = "Pin descendant", .creator = "b4n8wd".* }),
+        session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Orphan", .creator = "h8q2mz".* }),
+    });
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 2), state.pin_end);
+    try expectOrder(&state, &.{ "Pinned child", "Pin descendant", "Orphan", "Parent" });
+}
+
+fn creatorEdgeCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(5) }, .{ .label = "Parent", .descendant_count = 2, .descendant_needs_you_count = 2 }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .approval = ago(2) }, .{ .label = "Another question", .creator = "a1b2c3".* }),
+        session("d4e5f6", .{ .working = ago(20) }, .{ .label = "Other" }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try std.testing.expectEqual(@as(usize, 0), edgeAttention(&state, .below, 0, 1));
+    try std.testing.expectEqual(@as(usize, 1), edgeAttention(&state, .above, 1, 2));
+}
+
+fn creatorRootOrderCase() !void {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .approval = ago(60) }, .{ .label = "Older question" }),
+        session("b4n8wd", .{ .finished = ago(5) }, .{ .label = "Newer finished" }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "Newer finished", "Older question" });
+}
+
+fn creatorSenderOrderCase() !void {
     const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
     const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
     var state = try opened(&.{
@@ -3315,11 +4016,11 @@ test "overview an Action wait leads regardless of sender" {
         session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Theirs, finished" }),
     });
     defer state.deinit();
-    try expectOrder(&state, &.{ "Theirs, asking", "Mine, asking", "Theirs, asking beside Bash", "Theirs, running Bash", "Mine, thinking", "Theirs, finished" });
+    try expectOrder(&state, &.{ "Theirs, asking", "Mine, asking", "Theirs, running Bash", "Mine, thinking", "Theirs, asking beside Bash", "Theirs, finished" });
     try std.testing.expectEqualStrings("a5k1ng", &state.selected.session);
 }
 
-test "overview queued rows follow done and work, longest wait first" {
+fn creatorQueuedOrderCase() !void {
     const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     var state = try opened(&.{
@@ -3335,7 +4036,7 @@ test "overview queued rows follow done and work, longest wait first" {
         session("y0f005", .{ .finished = ago(5) }, .{ .label = "Mine, finished 5s", .yours = true }),
     });
     defer state.deinit();
-    try expectOrder(&state, &.{ "Retrying in 18s", "Working 40s", "Stopping 50s", "Mine, working 50s", "Mine, finished 5s", "Mine, queued 70s", "Queued 40s", "Queued 25s", "Queued 10s", "Retry due" });
+    try expectOrder(&state, &.{ "Mine, finished 5s", "Queued 10s", "Queued 25s", "Retry due", "Retrying in 18s", "Queued 40s", "Working 40s", "Stopping 50s", "Mine, working 50s", "Mine, queued 70s" });
 }
 
 test "the summary counts row marks: needs you, working, queued and failed" {
@@ -3476,6 +4177,66 @@ fn anySpins(state: *const State, caps: Caps) bool {
     var line: usize = 0;
     while (line < Lines.count(state)) : (line += 1) if (Lines.spins(state, line, caps)) return true;
     return false;
+}
+
+test "OVM-5 a working row spins while live, and every other active row holds its word" {
+    const caps_domain = [_]Caps{ .{}, .{ .depth = .none }, .{ .unicode = false } };
+    for (kind_cases) |case| for ([_]bool{ false, true }) |is_yours| for ([_]bool{ false, true }) |stale| for (caps_domain) |caps| {
+        var state = try opened(&.{session("aaaaaa", case.state, .{ .label = "Write the notes", .yours = is_yours })});
+        defer state.deinit();
+        state.list_stale = stale;
+        const kind = shownKind(&state, &state.rows.items[0]);
+        const held_word: ?[]const u8 = switch (kind) {
+            .working, .bash => "working",
+            .retrying => "retrying",
+            .stopping => "stopping",
+            else => null,
+        };
+        const live = !stale and caps.unicode and caps.depth != .none;
+        const want: Activity = if (held_word) |word| blk: {
+            if (live and (kind == .working or kind == .bash)) break :blk .spin;
+            break :blk .{ .held = word };
+        } else .none;
+        const got = rowActivity(&state, 0, caps);
+        try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
+        if (want == .held) try std.testing.expectEqualStrings(want.held, got.held);
+
+        const frame: u64 = 3;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const row = (try Lines.at(arena.allocator(), &state, 0, 80, caps, frame)).?;
+        const text = try segmentText(arena.allocator(), row.segments);
+        const mark = marks.get(rules.get(kind).mark);
+        const glyph: []const u8 = switch (want) {
+            .spin => spinner[frame % spinner.len],
+            .held, .none => if (caps.unicode) mark.unicode else mark.ascii,
+        };
+        const name_at = std.mem.indexOf(u8, text, "Write the notes").?;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, glyph, " "), std.mem.trim(u8, text[0..name_at], " "));
+        const ending = std.mem.trimEnd(u8, text, " ");
+        switch (want) {
+            .spin => try std.testing.expect(std.mem.endsWith(u8, ending, "Write the notes")),
+            .held => |word| {
+                try std.testing.expect(std.mem.endsWith(u8, ending, word));
+                try std.testing.expectEqual(Colour.quiet, (try styleOf(row.segments, word)).colour);
+            },
+            .none => {
+                var buffer: [8]u8 = undefined;
+                const age = (Age{ .elapsed = shownSince(&state, &state.rows.items[0]) }).text(&buffer, state.now_ms);
+                try std.testing.expect(std.mem.endsWith(u8, ending, age));
+            },
+        }
+        try std.testing.expectEqual(want == .spin, row.spins);
+        try std.testing.expectEqual(want == .spin, Lines.spins(&state, 0, caps));
+
+        const awake_ms: u64 = 1000;
+        const deadline = nextRedrawAt(&state, .{ .end = 1 }, caps, awake_ms);
+        switch (want) {
+            .spin => try std.testing.expectEqual(@as(?u64, awake_ms + (spin_interval_ms - awake_ms % spin_interval_ms)), deadline),
+            .held => try std.testing.expectEqual(@as(?u64, null), deadline),
+            .none => {},
+        }
+    };
 }
 
 test "OVM-4 stop gestures follow the work state" {
@@ -3992,7 +4753,7 @@ test "Host facts change only the counts line, and a row from before a restart st
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New chat").?..], after[std.mem.indexOf(u8, after, " + New chat").?..]);
-    try std.testing.expect(std.mem.indexOf(u8, after, " ◝ Admitted before the restart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, " ◜ Admitted before the restart") != null);
 }
 
 test "a row from another Workspace keeps its title at every width" {
@@ -4023,11 +4784,10 @@ test "the selection stays on its Session when it moves from active to finished" 
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "   List unused build steps") != null);
     _ = try press(&state, .next);
-    try expectSelected(&state, "h8q2mz");
+    try expectSelected(&state, "c3d4e5");
     _ = try press(&state, .next);
-    try expectSelected(&state, "t7v8w9");
-    _ = try press(&state, .next);
-    try expectSelected(&state, "m1n2p3");
+    try expectSelected(&state, "k7m2qx");
+    state.selected = .{ .session = "m1n2p3".* };
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
     try std.testing.expectEqual(state.order.items.len, Lines.count(&state));
@@ -4268,8 +5028,8 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 0, " + New chat");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 2, " ● Review PR 412                                                             3m");
-    try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
+    try expectScreenLine(&state, 2, " ◌ Trace Host shutdown order                                                now");
+    try std.testing.expectEqual(Colour.quiet, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 0, " + New chat");
 }
@@ -4360,7 +5120,7 @@ fn projectionCase3() !void {
             try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
         } else {
             try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
-            try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
+            try std.testing.expectEqualStrings("aaaaaa", &state.rows.items[state.order.items[0]].reference);
         }
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqual(if (started) Kind.working else Kind.pending, shownKind(&state, state.find(ref).?));
@@ -4519,7 +5279,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 2, " ◝ Bell? and ?[31mred");
+    try expectScreenLine(&state, 2, " ◜ Bell? and ?[31mred");
 }
 
 test "overview idle rows never fold" {
@@ -4905,18 +5665,18 @@ fn projectionCase0() !void {
     var state = try opened(&rows);
     defer state.deinit();
     const expected = [_][]const u8{
-        "k50000", "k50001",
-        "newwrk", "k20000",
-        "k20001", "k30000",
-        "k30001", "k40000",
-        "k40001", "k60000",
-        "k60001", "newend",
+        "newend", "newwrk",
         "k00000", "k00001",
+        "k10000", "k10001",
+        "k20000", "k20001",
+        "k30000", "k30001",
+        "k40000", "k40001",
+        "k50000", "k50001",
+        "k60000", "k60001",
         "k70000", "k70001",
         "k80000", "k80001",
         "k90000", "k90001",
-        "oldque", "k10000",
-        "k10001", "dueque",
+        "dueque", "oldque",
     };
     try std.testing.expectEqual(expected.len, state.order.items.len);
     for (expected, state.order.items) |ref, at| try std.testing.expectEqualStrings(ref, &state.rows.items[at].reference);
@@ -4926,7 +5686,7 @@ fn projectionCase0() !void {
     waiting.actions.decide = 1;
     waiting.attention = session_work.attention(.{ .state = waiting.state, .turn = waiting.turn, .first_action = 1 });
     _ = try refresh(&state, .changed, testToken(2), &.{waiting});
-    try std.testing.expectEqualStrings("k40000", &state.rows.items[state.order.items[0]].reference);
+    try std.testing.expectEqualStrings("newend", &state.rows.items[state.order.items[0]].reference);
 }
 
 test "overview refresh removes selection to next row else New Session and preserves ends" {
@@ -4967,7 +5727,7 @@ fn projectionCase1() !void {
     defer state.deinit();
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Genuine").? < std.mem.indexOf(u8, text, "Superseded").?);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Superseded").? < std.mem.indexOf(u8, text, "Genuine").?);
     const row = state.find("asking".*).?;
     try std.testing.expectEqual(session_work.Group.working, state.workOf(row).served_group.?);
     state.selected = .{ .session = row.reference };
@@ -5911,7 +6671,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
-                    .previous_session, .next_session => {
+                    .previous_session, .next_session, .next_question => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
@@ -5931,7 +6691,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 }
 
 test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{.enter}) |key| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -6011,7 +6771,7 @@ test "Overview browse settles only the last wide list move and never activates c
 }
 
 test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
-    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{.enter}) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .conversation = "b2c3d4".* });
@@ -6328,9 +7088,9 @@ test "session list state ages are compact stable against redraw and reset on sta
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 0)).?.segments);
-        try std.testing.expect(std.mem.endsWith(u8, first, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
+        try std.testing.expect(std.mem.endsWith(u8, first, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{if (rules.get(work).spins) "" else rules.get(work).held orelse case[1]})));
         const again = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 9)).?.segments);
-        try std.testing.expect(std.mem.endsWith(u8, again, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
+        try std.testing.expect(std.mem.endsWith(u8, again, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{if (rules.get(work).spins) "" else rules.get(work).held orelse case[1]})));
         const now = state.now_ms;
         _ = try step(&state, .{ .conversation = "aaaaaa".* });
         _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }), .opening = false } });
@@ -6380,7 +7140,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             };
             try std.testing.expect(!Lines.spins(&state, line, .{ .depth = .none }));
         }
-        try std.testing.expectEqual(@as(usize, 2), changed);
+        try std.testing.expectEqual(@as(usize, 3), changed);
     }
 
     {
@@ -6424,7 +7184,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
         try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
         try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "now", .quiet } });
-        try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "◝", .attention }, .{ "Investigate retry storm", .normal } });
+        try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "◝", .attention }, .{ "Investigate retry storm", .normal }, .{ "retrying", .quiet } });
         try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
         try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
         try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "▪", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
@@ -6448,10 +7208,12 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments;
-            const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◝ ", "◝ ", "◝ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
+            const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◜ ", "◝ ", "◜ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
             var buffer: [8]u8 = undefined;
-            const expected = [_][]const u8{ prefix, (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms) };
-            try expectLine(first, width, expected[0..if (rules.get(shownKind(&state, &state.rows.items[0])).mark == .active) @as(usize, 1) else 2]);
+            const shown = rules.get(shownKind(&state, &state.rows.items[0]));
+            const age_text = if (shown.spins) "" else shown.held orelse (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms);
+            const expected = [_][]const u8{ prefix, age_text };
+            try expectLine(first, width, if (age_text.len == 0) expected[0..1] else expected[0..]);
             try std.testing.expectEqual(Colour.strong, (try styleOf(first, "A useful Session name")).colour);
             try std.testing.expect((try styleOf(first, "A useful Session name")).bold);
             const first_text = try segmentText(arena.allocator(), first);
@@ -6477,7 +7239,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
             try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
             try std.testing.expectEqualStrings("◝", markOf(text, "Mine, retrying"));
             try std.testing.expectEqualStrings("◝", markOf(text, "Mine, stopping"));
-            try std.testing.expectEqualStrings("◝", markOf(text, "Theirs, thinking"));
+            try std.testing.expectEqualStrings(turn, markOf(text, "Theirs, thinking"));
             try std.testing.expectEqualStrings("", markOf(text, "Theirs, finished"));
             var screen = try Frame.of(&state, 80, 24, .{}, frame);
             defer screen.deinit();
@@ -6491,7 +7253,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         try std.testing.expect(state.openStop("y0urs1".*) != null);
         const asked = try frameText(&state, 80, 24, .{}, 1);
         defer std.testing.allocator.free(asked);
-        try std.testing.expectEqualStrings("◝", markOf(asked, "Mine, thinking"));
+        try std.testing.expectEqualStrings(spinner[1], markOf(asked, "Mine, thinking"));
         for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
             if (at == 3) state.list_stale = true;
             const first = try screenText(&state, 80, 24, caps);
@@ -6535,12 +7297,18 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         const mark = if (unicode_marks) expected_marks[kind] else expected_ascii[kind];
         const prefix = try std.fmt.allocPrint(arena.allocator(), " {s} Domain row", .{mark});
         try std.testing.expectEqualStrings(prefix, text[0..prefix.len]);
-        const active = switch (work) {
-            .working, .retrying, .bash, .stopping => true,
-            else => false,
+        const is_spinning = unicode_marks and (work == .working or work == .bash);
+        const held: ?[]const u8 = switch (work) {
+            .working, .bash => "working",
+            .retrying => "retrying",
+            .stopping => "stopping",
+            else => null,
         };
-        if (active) {
+        if (is_spinning) {
             try std.testing.expectEqualStrings(prefix, std.mem.trimEnd(u8, text, " "));
+        } else if (held) |word| {
+            const suffix = try std.fmt.allocPrint(arena.allocator(), "{s} ", .{word});
+            try std.testing.expectEqualStrings(suffix, text[text.len - suffix.len ..]);
         } else {
             const suffix = try std.fmt.allocPrint(arena.allocator(), "{s} ", .{age.text});
             try std.testing.expectEqualStrings(suffix, text[text.len - suffix.len ..]);
@@ -6573,7 +7341,7 @@ test "OVM-2 overview redraw deadlines follow visible changing content" {
         rows[0] = session("w0rk00", .{ .working = ago(0) }, .{ .label = "Write the notes" });
         var state = try opened(&rows);
         defer state.deinit();
-        try std.testing.expect(!anySpins(&state, .{}));
+        try std.testing.expect(anySpins(&state, .{}));
     }
     const Case = struct { remaining: ?u64, text: []const u8, delay: ?u64 };
     const cases = [_]Case{
@@ -6613,7 +7381,7 @@ test "OVM-2 overview redraw deadlines follow visible changing content" {
         try std.testing.expect(position(&state, "quota0".*).? >= drawn.end);
         var expected: ?u64 = if (header) case.delay else null;
         if (ages) expected = @min(expected orelse 9_750, 9_750);
-        if (working and (screen == .unicode or screen == .indexed)) {
+        if (working and (screen == .unicode or screen == .indexed or screen == .peer)) {
             const delay: u64 = if (awake_ms == 1000) 200 else 1;
             expected = @min(expected orelse delay, delay);
         }
@@ -7051,33 +7819,124 @@ test "launch admission belongs to bare app startup" {
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.waiting, state.launch);
 }
+
+fn creatorWidthCase() !void {
+    const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 40, 46, 140 }) |width| {
+        var state = try opened(&.{
+            session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
+            session("b4n8wd", .{ .finished = ago(age) }, .{ .label = name, .creator = "a1b2c3".*, .descendant_count = 2, .descendant_needs_you_count = 1 }),
+            session("c3d4e5", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "b4n8wd".* }),
+            session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Other", .creator = "b4n8wd".* }),
+        });
+        defer state.deinit();
+        state.selected = .{ .session = "b4n8wd".* };
+        _ = try step(&state, .{ .input = .{ .key = .left } });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸ 2" else "> 2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "· 1 ?" else ". 1 ?") != null);
+    };
+}
+
+fn creatorSidebarCase() !void {
+    const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const width: u16 = 36;
+    for ([_]bool{ false, true }) |use_unicode| {
+        var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
+        defer state.deinit();
+        state.selected = .{ .session = "a1b2c3".* };
+        _ = try step(&state, .{ .input = .{ .key = .left } });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const line = (try Lines.at(arena.allocator(), &state, 0, width, .{ .unicode = use_unicode }, 0)).?;
+        const text = try segmentText(arena.allocator(), line.segments);
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "W…" else "W.") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸2·1?" else ">2.1?") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "999d") != null);
+    }
+}
+
+fn creatorPresentationCase() !void {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A", .descendant_count = 1 });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    const unchanged = state.presentation_revision;
+    _ = try refresh(&state, .full, testToken(2), &.{ a, b });
+    try std.testing.expectEqual(unchanged, state.presentation_revision);
+    b.creator = a.reference;
+    _ = try refresh(&state, .changed, testToken(3), &.{b});
+    try std.testing.expect(state.presentation_revision != unchanged);
+    const nesting = state.presentation_revision;
+    state.selected = .{ .session = a.reference };
+    _ = try step(&state, .{ .input = .{ .key = .left, .at_ms = state.now_ms } });
+    try std.testing.expect(state.presentation_revision != nesting);
+    const collapsed = state.presentation_revision;
+    _ = try refresh(&state, .full, testToken(4), &.{ a, b });
+    try std.testing.expectEqual(collapsed, state.presentation_revision);
+    const start = state.now_ms;
+    const deadline = nextRedrawAt(&state, .{ .first = 0, .end = 1, .header = true }, .{ .depth = .none }, 1000).?;
+    try std.testing.expectEqual(@as(u64, 1000) + state.key_until_ms - start, deadline);
+    _ = try step(&state, .{ .tick = start + 3000 });
+    try std.testing.expect(state.presentation_revision != collapsed);
+}
+
+fn creatorFlashDeadlineCase() !void {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A" });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    const initial = state.presentation_revision;
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = true } });
+    try std.testing.expect(state.presentation_revision != initial);
+    b.state_change_at = test_now_s - 1;
+    b.subtree_state_change_at = test_now_s - 1;
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    try expectOrder(&state, &.{ "A", "B" });
+    const held = state.presentation_revision;
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = false } });
+    try expectOrder(&state, &.{ "B", "A" });
+    try std.testing.expect(state.presentation_revision != held);
+    const released = state.presentation_revision;
+    const deadline = nextRedrawAt(&state, .{ .first = 0, .end = 2 }, .{ .depth = .none }, 1000).?;
+    try std.testing.expectEqual(@as(u64, 1700), deadline);
+    _ = try step(&state, .{ .tick = state.now_ms + 700 });
+    try std.testing.expect(state.presentation_revision != released);
+    try std.testing.expectEqual(@as(u64, 0), state.find(a.reference).?.flash_until_ms);
+}
+
 // Frozen against 03aa26d0. The fixture is in the base's visible order:
 // approval, work (newest first), done (newest first), pending. Input is sent
 // backwards; pinned ranks preserve the fixture order. No oracle reads order,
-// Lines, rules, or yours. This preserves the oracle from the base test.
+// Lines, rules, or yours. This preserves the oracle from the base test, except
+// that held active rows (#1938) keep their still mark and show their word.
 // Base semantics intentionally differ: focused highlight follows selected;
 // unfocused highlight AND bold names follow conversing orelse selected, even
 // when that reference is absent. Archive membership precedes empty projection.
 const LinesDomainBase = struct {
     const Shape = enum { empty, unpinned, pinned, both };
-    const Fixture = struct { listed: Listed, spins: bool };
+    const Fixture = struct { listed: Listed };
     const Expected = struct { fixture: ?usize = null, gap: bool = false };
     const absent: Reference = "zzzzzz".*;
 
     fn fixtures() [12]Fixture {
         return .{
-            .{ .listed = session("f00000", .{ .approval = ago(1) }, .{ .label = "Approval", .yours = true }), .spins = false },
-            .{ .listed = session("f00001", .{ .working = ago(2) }, .{ .label = "My work", .yours = true }), .spins = true },
-            .{ .listed = session("f00002", .{ .bash = .{ .since = test_now_s - 3, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "My Bash", .yours = true }), .spins = true },
-            .{ .listed = session("f00003", .{ .working = ago(4) }, .{ .label = "Other work" }), .spins = false },
-            .{ .listed = session("f00004", .{ .bash = .{ .since = test_now_s - 5, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "Other Bash" }), .spins = false },
-            .{ .listed = session("f00005", .{ .retrying = .{ .since = test_now_s - 6, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Retry", .yours = true }), .spins = false },
-            .{ .listed = session("f00006", .{ .stopping = ago(7) }, .{ .label = "Stopping", .yours = true }), .spins = false },
-            .{ .listed = session("f00007", .{ .idle = ago(8) }, .{ .label = "Idle", .yours = true }), .spins = false },
-            .{ .listed = session("f00008", .{ .finished = ago(9) }, .{ .label = "Finished", .yours = true }), .spins = false },
-            .{ .listed = session("f00009", .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Failed", .yours = true }), .spins = false },
-            .{ .listed = session("f00010", .{ .stopped = .{ .since = test_now_s - 11, .cause = .stop } }, .{ .label = "Stopped", .yours = true }), .spins = false },
-            .{ .listed = session("f00011", .{ .pending = ago(12) }, .{ .label = "Pending", .yours = true }), .spins = false },
+            .{ .listed = session("f00000", .{ .approval = ago(1) }, .{ .label = "Approval", .yours = true }) },
+            .{ .listed = session("f00001", .{ .working = ago(2) }, .{ .label = "My work", .yours = true }) },
+            .{ .listed = session("f00002", .{ .bash = .{ .since = test_now_s - 3, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "My Bash", .yours = true }) },
+            .{ .listed = session("f00003", .{ .working = ago(4) }, .{ .label = "Other work" }) },
+            .{ .listed = session("f00004", .{ .bash = .{ .since = test_now_s - 5, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "Other Bash" }) },
+            .{ .listed = session("f00005", .{ .retrying = .{ .since = test_now_s - 6, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Retry", .yours = true }) },
+            .{ .listed = session("f00006", .{ .stopping = ago(7) }, .{ .label = "Stopping", .yours = true }) },
+            .{ .listed = session("f00007", .{ .idle = ago(8) }, .{ .label = "Idle", .yours = true }) },
+            .{ .listed = session("f00008", .{ .finished = ago(9) }, .{ .label = "Finished", .yours = true }) },
+            .{ .listed = session("f00009", .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Failed", .yours = true }) },
+            .{ .listed = session("f00010", .{ .stopped = .{ .since = test_now_s - 11, .cause = .stop } }, .{ .label = "Stopped", .yours = true }) },
+            .{ .listed = session("f00011", .{ .pending = ago(12) }, .{ .label = "Pending", .yours = true }) },
         };
     }
 
@@ -7277,8 +8136,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
                         try std.testing.expect(alternate == .pin);
                         try std.testing.expectEqual(entry.listed.reference, alternate.pin.reference);
                         try std.testing.expectEqual(entry.listed.pin_order == null, alternate.pin.pinned);
-                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, row.spins);
-                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, Lines.spins(&state, index, caps));
+                        try std.testing.expectEqual(Lines.spins(&state, index, caps), row.spins);
                         const name = if (entry.listed.first == null) "New chat" else entry.listed.label.?;
                         try std.testing.expectEqual(D.same(bold_ref, entry.listed.reference), (try styleOf(row.segments, name)).bold);
                         const text = try segmentText(arena.allocator(), row.segments);
@@ -7346,8 +8204,8 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    // Recorded by running this same fixture domain against base 03aa26d0.
-    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
+    // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
+    try std.testing.expectEqual(@as(u64, 0x697d3b6457f515c), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {

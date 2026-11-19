@@ -511,13 +511,14 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         for ([_]bool{ true, false }) |unicode_script| {
-            const caps: overview.Caps = .{ .unicode = unicode_script };
+            // No colour, so a working row holds its still mark (#1938) and the shared glyph shows.
+            const caps: overview.Caps = .{ .unicode = unicode_script, .depth = .none };
             try std.testing.expect(!overview.Lines.spins(&state, 0, caps));
             const row = (try overview.Lines.at(arena.allocator(), &state, 0, 80, caps, 4)).?.segments;
             try std.testing.expectEqualStrings(" ", row[0].text);

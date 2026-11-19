@@ -1580,7 +1580,7 @@ fn sh109_store_mysql_touch_oracle_observes_and_clears() !void {
 
 // Test-only: the SQLite leg's logical-row digests, which each MySQL leg of the journey must reproduce: the plain leg
 // compares the first, the rerun leg the second (forward_id masked, as its comment in logicalDigest says).
-const SqliteDigests = struct { plain: [32]u8, masked: [32]u8 };
+const SqliteDigests = struct { plain: [32]u8, masked: [32]u8, replies: [32]u8, replies_masked: [32]u8 };
 var sh110_sqlite_digest: ?SqliteDigests = null;
 
 // Moved from src/store/tests/round_budget.zig: "each Store entry point takes its round budget on its common path"
@@ -1591,25 +1591,27 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     var meter: RoundMeter = .{ .storage = &storage, .checked = !case.rerun };
+    var replies: store_testing.ReplyDigest = .init(std.testing.allocator);
+    defer replies.deinit();
     meter.start();
-    _ = try storage.publishRetryCrossings(0, 1);
+    _ = try replies.keep(storage.publishRetryCrossings(0, 1));
     try meter.stop(.publishRetryCrossings);
     meter.start();
     try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
     try meter.stop(.saveModelFacts);
     meter.start();
-    _ = try storage.readModelCatalogSource();
+    _ = try replies.keep(storage.readModelCatalogSource());
     try meter.stop(.readModelCatalogSource);
     var catalog_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer catalog_arena.deinit();
     meter.start();
-    _ = try storage.readModelCatalog(catalog_arena.allocator());
+    _ = try replies.keep(storage.readModelCatalog(catalog_arena.allocator()));
     try meter.stop(.readModelCatalog);
     meter.start();
-    _ = try storage.modelFact("catalog-budget");
+    _ = try replies.keep(storage.modelFact("catalog-budget"));
     try meter.stop(.modelFact);
     meter.start();
-    const model_ids = try storage.readOpenAiModelIds(std.testing.allocator);
+    const model_ids = try replies.keep(storage.readOpenAiModelIds(std.testing.allocator));
     defer {
         for (model_ids) |id| std.testing.allocator.free(id);
         std.testing.allocator.free(model_ids);
@@ -1619,36 +1621,38 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
     try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
     try meter.stop(.saveHostToolSet);
     meter.start();
-    const saved = (try storage.readHostToolSetSet()).?;
+    const saved = (try replies.keep(storage.readHostToolSetSet())).?;
     try meter.stop(.readHostToolSetSet);
     var rows: [tool_defs.built_in_tool_set.records.len]tool_set_domain.host_tool_records.Row = undefined;
     meter.start();
-    try std.testing.expectEqual(rows.len, try storage.readHostToolSetRecords(saved.tool_set_id.get(), 0, &rows));
+    try std.testing.expectEqual(rows.len, try replies.keep(storage.readHostToolSetRecords(saved.tool_set_id.get(), 0, &rows)));
     try meter.stop(.readHostToolSetRecords);
     var text: [tool_defs.bash_record.description.len]u8 = undefined;
     meter.start();
     try storage.readHostToolSetText(rows[0].description_id.get(), &text);
     try meter.stop(.readHostToolSetText);
     try std.testing.expectEqualStrings(tool_defs.bash_record.description, &text);
-    try plainTurn(&storage, &tmp, &meter);
-    try toolTurn(&storage, &tmp, &meter);
-    try compoundTurn(&storage, &tmp, &meter);
-    try compactedTurn(&storage, &tmp, &meter);
-    try coreTurn(&storage, &tmp, &meter);
-    try mcpTurn(case, &meter);
-    try imageTurn(case, &meter);
-    try findTurn(&storage, &tmp, &meter);
-    try skillTurn(case, &meter);
-    stopTurn(case, &meter) catch |err| {
+    try plainTurn(&storage, &tmp, &meter, &replies);
+    try toolTurn(&storage, &tmp, &meter, &replies);
+    try compoundTurn(&storage, &tmp, &meter, &replies);
+    try compactedTurn(&storage, &tmp, &meter, &replies);
+    try coreTurn(&storage, &tmp, &meter, &replies);
+    try mcpTurn(case, &meter, &replies);
+    try imageTurn(case, &meter, &replies);
+    try findTurn(&storage, &tmp, &meter, &replies);
+    try skillTurn(case, &meter, &replies);
+    stopTurn(case, &meter, &replies) catch |err| {
         std.debug.print("stop budget setup failed: {s}\n", .{@errorName(err)});
         return err;
     };
     // The SQLite leg runs first in forEachEngine, so each MySQL leg compares with the leg of the same test run.
-    // The rerun leg masks forward_id (see logicalDigest), so the SQLite leg records its digest both ways.
+    // The rerun leg masks forward_id (see logicalDigest and ReplyDigest.finish), so the SQLite leg records both ways.
     if (case.engine == .sqlite) {
         sh110_sqlite_digest = .{
             .plain = try store_testing.logicalDigest(&storage, false),
             .masked = try store_testing.logicalDigest(&storage, true),
+            .replies = try replies.finish(&storage, false),
+            .replies_masked = try replies.finish(&storage, true),
         };
     } else {
         // A MySQL leg with no SQLite digest before it has nothing to compare with: that is a failed run, not a pass.
@@ -1658,6 +1662,12 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
         if (!std.mem.eql(u8, &want, &logical)) {
             std.debug.print("logical rows differ from the SQLite leg (rerun: {any})\n", .{case.rerun});
             return error.LogicalRowsChanged;
+        }
+        const reply = try replies.finish(&storage, case.rerun);
+        const want_reply = if (case.rerun) expected.replies_masked else expected.replies;
+        if (!std.mem.eql(u8, &want_reply, &reply)) {
+            std.debug.print("replies differ from the SQLite leg (rerun: {any})\n", .{case.rerun});
+            return error.RepliesChanged;
         }
     }
     var failed = false;
@@ -1709,10 +1719,10 @@ const Launch = struct {
     fn run(_: void) !void {}
 };
 
-fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
-    const session = try configureTestSession(storage, "budget-compound");
+fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
+    const session = try replies.keep(configureTestSession(storage, "budget-compound"));
     try store_testing.submitTestMessageParts(storage, tmp, "budget-compound-message", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
-    const observed = try store_testing.observeCommandForTesting(storage, "budget-compound-message");
+    const observed = try replies.keep(store_testing.observeCommandForTesting(storage, "budget-compound-message"));
     const owner = observed.kind.message.?.content.parts.owner;
     const PressureRead = @import("domain/model_admission.zig").PartsPressure.Read;
     const pressure_map = try @import("../os/pages.zig").Mapped(PressureRead).map();
@@ -1720,41 +1730,57 @@ fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !
     pressure_map.value.init(session.slice(), 0, 0, 0, std.math.maxInt(i64));
     defer pressure_map.value.deinit();
     meter.start();
-    try std.testing.expect(!try storage.advancePartsPressure(pressure_map.value));
+    try std.testing.expect(!try replies.keep(storage.advancePartsPressure(pressure_map.value)));
     try meter.stop(.advancePartsPressure);
     var public_reader = try @import("domain/public_parts.zig").Reader.init(session, owner);
     defer public_reader.deinit();
     meter.start();
-    try std.testing.expect((try storage.readPublicParts(&public_reader)) == .pending);
+    try std.testing.expect((try replies.keep(storage.readPublicParts(&public_reader))) == .pending);
     try meter.stop(.readPublicParts);
     meter.start();
-    _ = try storage.openPublicPart(session.slice(), owner, 1, 0);
+    _ = try replies.keep(storage.openPublicPart(session.slice(), owner, 1, 0));
     try meter.stop(.openPublicPart);
-    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const binding = (try replies.keep(storage.admitModelAttempt(.message, .{}))).?.permit.binding;
     var view: TestingPage = undefined;
     view.open(storage, binding);
     defer view.close();
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
+    _ = replies.keep(&settings);
     try std.testing.expect(view.page.compound_inputs);
     const message = (try view.nextEntry(0)).?;
+    _ = replies.keep(message);
     try view.page.openMessage(message.input.?);
     try std.testing.expectError(error.PageRead, view.page.nextMessagePart());
     try storage.readRequestPage(&view.page); // One bounded raw manifest window.
+    keepRequestPage(replies, &view.page);
     try std.testing.expectError(error.PageRead, view.page.nextMessagePart());
     meter.start();
     try storage.readRequestPage(&view.page); // One bounded index page.
     try meter.stop(.readHistoricalMessagePart);
+    keepRequestPage(replies, &view.page);
     var count: usize = 0;
     while (try view.nextMessagePart()) |_| count += 1;
     try std.testing.expectEqual(@as(usize, 2), count);
+    _ = replies.keep(count);
     try std.testing.expect(view.page.message_cursor == null);
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
 }
 
-fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+/// A request page's reads: the entries its window holds and the tool and message counters it reads. Its cursors hold
+/// allocators and pointers to other reads, so the struct is not kept whole.
+fn keepRequestPage(replies: *store_testing.ReplyDigest, page: *const historical_domain.RequestPage) void {
+    _ = replies.keep(page.entries[0..page.entries_end]);
+    _ = replies.keep(page.message_cursor == null);
+    _ = replies.keep(page.tool_set_id);
+    _ = replies.keep(page.tool_count);
+    _ = replies.keep(page.provider_tool_count);
+    _ = replies.keep(page.provider_tools_read);
+}
+
+fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     meter.start();
-    const session = try configureTestSession(storage, "budget-plain");
+    const session = try replies.keep(configureTestSession(storage, "budget-plain"));
     try meter.stop(.configure);
     meter.start();
     try submitTestMessage(storage, tmp, "budget-plain-input", "budget-plain-key", session.slice(), "hello");
@@ -1766,41 +1792,44 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !voi
     meter.start();
     try storage.searchActivity(&search_request, search);
     try meter.stop(.searchActivity);
+    _ = replies.keep(search);
     try std.testing.expectEqual(@as(usize, 1), search.count);
     meter.start();
-    _ = try store_testing.observeCommandForTesting(storage, "budget-plain-key");
+    _ = try replies.keep(store_testing.observeCommandForTesting(storage, "budget-plain-key"));
     try meter.stop(.observeCommand);
     meter.start();
-    const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const binding = (try replies.keep(storage.admitModelAttempt(.message, .{}))).?.permit.binding;
     try meter.stop(.admitModelAttempt);
     meter.start();
-    _ = try storage.modelOperationKind(binding);
+    _ = try replies.keep(storage.modelOperationKind(binding));
     try meter.stop(.checkAttempt);
     meter.start();
-    try std.testing.expect(try storage.operationSupersededByControl(binding) == null);
+    try std.testing.expect(try replies.keep(storage.operationSupersededByControl(binding)) == null);
     try meter.stop(.operationSupersededByControl);
     meter.start();
     try storage.withDispatchHandoff(binding, {}, Launch.run);
     try meter.stop(.withDispatchHandoff);
     meter.start();
-    _ = try storage.claimModelAuthRefresh(binding);
+    _ = try replies.keep(storage.claimModelAuthRefresh(binding));
     try meter.stop(.claimModelAuthRefresh);
     const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
     meter.start();
     try settleItemsForTesting(storage, tmp, binding, &.{item}, "hi");
     try meter.stop(.settleModelSuccess);
     meter.start();
-    const result = try storage.commandResult("budget-plain-key");
+    const result = try replies.keep(storage.commandResult("budget-plain-key"));
     try meter.stop(.commandResult);
     meter.start();
-    const location = try storage.openContent(result);
+    const location = try replies.keep(storage.openContent(result));
     try meter.stop(.openContentIdentity);
     var reader: ContentReader = undefined;
     reader.open(location);
     defer reader.close();
     var bytes: [64]u8 = undefined;
     meter.start();
-    try std.testing.expectEqual(2, try reader.read(0, &bytes));
+    const read_bytes = try reader.read(0, &bytes);
+    try std.testing.expectEqual(2, read_bytes);
+    _ = replies.keep(bytes[0..read_bytes]);
     try meter.stop(.readOwnedContent);
     var request: protocol.ConversationPage = .{};
     try request.session.set(session.slice());
@@ -1808,41 +1837,42 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !voi
     meter.start();
     try storage.publicConversationPage(&request, &page, std.testing.allocator);
     try meter.stop(.publicConversationPage);
+    _ = replies.keep(&page);
     const answer = for (page.items[0..page.count]) |entry| {
         if (entry.kind == .assistant) break entry.position;
     } else return error.NoAnswer;
     meter.start();
-    _ = try storage.openPublicConversationContent(&.{ .session = session, .position = answer });
+    _ = try replies.keep(storage.openPublicConversationContent(&.{ .session = session, .position = answer }));
     try meter.stop(.openPublicConversationContent);
 
     try submitTestMessage(storage, tmp, "budget-again-input", "budget-again-key", session.slice(), "again");
-    const running = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const running = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     var interrupt: protocol.ModelInterruptionCommand = .{ .turn_id = running.turn_id, .operation_id = running.operation_id };
     try interrupt.key.set("budget-interrupt");
     try interrupt.session.set(session.slice());
     meter.start();
-    try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.interruptModel(&interrupt, .{})) == .accepted);
     try meter.stop(.interruptModel);
     var stop = try completeSessionStop("budget-stop", session.slice());
     meter.start();
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.stopSession(&stop, .{})) == .accepted);
     try meter.stop(.stopSession);
     var archive: protocol.SessionArchiveCommand = .{ .session = session };
     try archive.key.set("budget-archive");
     meter.start();
-    try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.archiveSession(&archive, .{})) == .accepted);
     try meter.stop(.archiveSession);
     archive.archived = false;
     try archive.key.set("budget-unarchive");
-    try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.archiveSession(&archive, .{})) == .accepted);
     var pin: protocol.SessionPinCommand = .{ .session = session, .pinned = true };
     try pin.key.set("budget-pin");
     meter.start();
-    try std.testing.expect(storage.pinSession(&pin, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.pinSession(&pin, .{})) == .accepted);
     try meter.stop(.pinSession);
 }
 
-fn imageTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+fn imageTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1854,23 +1884,24 @@ fn imageTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var configure = try completeConfiguration("budget-image", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     configure.configuration.tools = try .of(&.{"read_image"});
-    const configured = try storage.configure(&configure, .{});
+    const configured = try replies.keep(storage.configure(&configure, .{}));
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try submitTestMessage(&storage, &tmp, "budget-image-input", "budget-image-message", session.slice(), "inspect");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     try settleCallsForTesting(&storage, &tmp, model, "budget-image-calls", &.{
         .{ .item_id = "image-item", .name = "read_image", .encoded_call_id = "image-call", .decoded_call_id = "image-call", .encoded_arguments = "{\\\"path\\\":\\\"image.png\\\"}", .decoded_arguments = "{\"path\":\"image.png\"}" },
     });
-    const selected = (try storage.nextAction(.read_image, .fromFree(1, false))).?;
-    const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+    const selected = (try replies.keep(storage.nextAction(.read_image, .fromFree(1, false)))).?;
+    const binding = (try replies.keep(storage.admitActionAttempt(selected, 1234, .{}))).?.permit.binding;
     var input: ActionExecutionInput = undefined;
     meter.start();
     try storage.readActionExecutionInput(.read_image, binding, &input);
     try meter.stop(.readImageExecutionInput);
+    _ = replies.keep(&input);
 }
 
-fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     const records = comptime testingHostToolRecords(&.{
         .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
     });
@@ -1895,35 +1926,36 @@ fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
     command.configuration.tools = try .of(&.{"fetch_page"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("bypass");
-    const configured = try storage.configure(&command, .{});
+    const configured = try replies.keep(storage.configure(&command, .{}));
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
     try submitTestMessage(&storage, &tmp, "budget-mcp-input", "budget-mcp-key", session.slice(), "fetch a page");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     try settleCallsForTesting(&storage, &tmp, model, "budget-mcp-calls", &.{
         .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "mcp-item-two", .name = "fetch_page", .encoded_call_id = "mcp-call-two", .decoded_call_id = "mcp-call-two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     });
     meter.start();
-    const action = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
+    const action = (try replies.keep(storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true }))).?;
     try meter.stop(.nextAction);
     meter.start();
     try storage.resolveAction(action, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
     try meter.stop(.resolveAction);
-    const second = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
+    const second = (try replies.keep(storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true }))).?;
     meter.start();
-    const binding = (try storage.admitActionAttempt(second, 600_000, .{})).?.permit.binding;
+    const binding = (try replies.keep(storage.admitActionAttempt(second, 600_000, .{}))).?.permit.binding;
     try meter.stop(.admitActionAttempt);
     var input: action_domain.ActionExecutionInput = undefined;
     meter.start();
     try storage.readActionExecutionInput(.mcp, binding, &input);
     try meter.stop(.readMcpExecutionInput);
-    _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
-    try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
-    try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+    _ = replies.keep(&input);
+    _ = try replies.keep(storage.settleActionAttempt(binding, .succeeded, "done", .{}));
+    try std.testing.expect((try replies.keep(storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true }))) == null);
+    try std.testing.expect((try replies.keep(storage.admitNextModelAttempt(.{}))) != null);
 }
 
-fn skillTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+fn skillTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -1943,58 +1975,58 @@ fn skillTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
     var path: [protocol.max_workspace_bytes]u8 = undefined;
     var create = try completeConfiguration("budget-skill", "", try canonicalCwd(std.testing.io, &path), "model-a");
     create.configuration.tools = try .of(&.{"skill"});
-    const session = (try storage.configureWithInitialSkills(&create, null, &initial, .{})).accepted.session;
+    const session = (try replies.keep(storage.configureWithInitialSkills(&create, null, &initial, .{}))).accepted.session;
     meter.start();
-    try std.testing.expect(try storage.commandExists("budget-skill"));
+    try std.testing.expect(try replies.keep(storage.commandExists("budget-skill")));
     try meter.stop(.commandExists);
-    try std.testing.expect(!try storage.commandExists("budget-skill-absent"));
+    try std.testing.expect(!try replies.keep(storage.commandExists("budget-skill-absent")));
     meter.start();
-    const saved = try storage.readSkills(arena.allocator(), session.slice());
+    const saved = try replies.keep(storage.readSkills(arena.allocator(), session.slice()));
     try meter.stop(.readSkills);
     try std.testing.expectEqual(@as(usize, 1), saved.catalog.entries.len);
     try std.testing.expectEqualStrings("demo", saved.catalog.entries[0].name);
     try std.testing.expectEqualStrings("/budget/demo/SKILL.md", saved.catalog.entries[0].path);
     try submitTestMessage(&storage, &tmp, "budget-skill-input", "budget-skill-key", session.slice(), "use demo");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     const calls = [_]TestingCall{.{ .item_id = "skill-item", .name = "skill", .encoded_call_id = "skill-call", .decoded_call_id = "skill-call", .encoded_arguments = "{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}", .decoded_arguments = "{\"operation\":\"invoke\",\"name\":\"demo\"}" }};
     try settleCallsForTesting(&storage, &tmp, model, "budget-skill-calls", &calls);
-    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    const input = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.action;
     try std.testing.expectEqual(action_domain.CoreTool.skill, input.tool);
     const captured: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/budget/demo/SKILL.md\"\n\nbudget bytes" };
     meter.start();
-    try std.testing.expect(try storage.settleSkillTool(input.binding, arena.allocator(), &captured, .{}));
+    try std.testing.expect(try replies.keep(storage.settleSkillTool(input.binding, arena.allocator(), &captured, .{})));
     try meter.stop(.settleSkillTool);
     try std.testing.expect(!storage.isFenced());
 }
 
-fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     var path: [protocol.max_workspace_bytes]u8 = undefined;
     var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
     configuration.configuration.tools = try .of(&.{ "bash", "find_tools" });
     configuration.configuration.loaded_tools = try .of(&.{"find_tools"});
-    const session = (try storage.configure(&configuration, .{})).accepted.session;
+    const session = (try replies.keep(storage.configure(&configuration, .{}))).accepted.session;
     try submitTestMessage(storage, tmp, "budget-find-input", "budget-find-key", session.slice(), "find tools");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
     try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
-    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    const input = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.action;
     const words: @import("../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     meter.start();
-    try std.testing.expect(try storage.findTools(input.binding, arena.allocator(), &words, null, .{}));
+    try std.testing.expect(try replies.keep(storage.findTools(input.binding, arena.allocator(), &words, null, .{})));
     try meter.stop(.findTools);
 }
 
-fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration("budget-core", "", workspace, "model-a");
     command.configuration.tools.state = .value;
     command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
-    const session = (try storage.configure(&command, .{})).accepted.session;
+    const session = (try replies.keep(storage.configure(&command, .{}))).accepted.session;
     try submitTestMessage(storage, tmp, "budget-core-input", "budget-core-key", session.slice(), "message yourself");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     var arguments_buffer: [64]u8 = undefined;
     const decoded = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
     var encoded_buffer: [96]u8 = undefined;
@@ -2006,49 +2038,49 @@ fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void
     };
     try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
     meter.start();
-    const core = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    const core = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.action;
     try meter.stop(.nextCoreWork);
     meter.start();
-    try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
+    try std.testing.expect(try replies.keep(storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{})) == .delivered);
     try meter.stop(.deliverAgentMessage);
-    const start = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    const start = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.action;
     try std.testing.expect(start.tool == .start_agent);
     var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
     meter.start();
-    try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
+    try std.testing.expect(try replies.keep(storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{})) == .started);
     try meter.stop(.startAgent);
-    const refused = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    const refused = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.action;
     meter.start();
-    try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
+    try std.testing.expect(try replies.keep(storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{})));
     try meter.stop(.resolveCoreCall);
-    const result_page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.tool_result), .limit = 1 });
+    const result_page = try replies.keep(store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.tool_result), .limit = 1 }));
     const result = result_page.items[0];
     try std.testing.expectEqual(@as(u64, 3), result.ordinal);
     meter.start();
-    const tool = try storage.activityTool(&.{ .session = session, .position = result.position, .ordinal = result.ordinal });
+    const tool = try replies.keep(storage.activityTool(&.{ .session = session, .position = result.position, .ordinal = result.ordinal }));
     try meter.stop(.activityTool);
     try std.testing.expect(tool.presentation.code == .failed);
     try expectContent(storage, .{ .length = tool.name.length, .digest = tool.name.digest }, "start_agent");
-    while (try storage.admitNextModelAttempt(.{})) |_| {}
+    while (try replies.keep(storage.admitNextModelAttempt(.{}))) |_| {}
     var stop = try completeSessionStop("budget-core-stop", session.slice());
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    const owed = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.stop;
+    try std.testing.expect(replies.keep(storage.stopSession(&stop, .{})) == .accepted);
+    const owed = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.stop;
     var owed_stop: protocol.SessionStopCommand = .{ .key = owed.key };
     try owed_stop.session.set(owed.session.slice());
     meter.start();
-    try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.stopOwedSession(&owed_stop, .{})) == .accepted);
     try meter.stop(.stopOwedSession);
-    const ending = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.ending;
+    const ending = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.ending;
     meter.start();
-    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expect(try replies.keep(storage.deliverChildEnding(ending.turn_id, .{})));
     try meter.stop(.deliverChildEnding);
-    const forward = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.forward;
+    const forward = (try replies.keep(storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }))).?.forward;
     meter.start();
-    try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
+    try std.testing.expect(try replies.keep(storage.deliverSessionForward(forward, .{})));
     try meter.stop(.deliverSessionForward);
 }
 
-fn stopTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+fn stopTurn(case: *store_testing.Case, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -2062,27 +2094,27 @@ fn stopTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
     configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
     configure.configuration.permission_mode.state = .value;
     try configure.configuration.permission_mode.value.set("bypass");
-    const session = (try storage.configure(&configure, .{})).accepted.session;
+    const session = (try replies.keep(storage.configure(&configure, .{}))).accepted.session;
     try submitTestMessage(&storage, &tmp, "budget-stop-input", "budget-stop-input", session.slice(), "run");
-    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const model = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     const calls = [_]TestingCall{
         .{ .item_id = "target-item", .name = "bash", .encoded_call_id = "target-call", .decoded_call_id = "target-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Budget target\\\"}", .decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Budget target\"}" },
         .{ .item_id = "stop-item", .name = "stop_action", .encoded_call_id = "stop-call", .decoded_call_id = "stop-call", .encoded_arguments = "{\\\"action\\\":\\\"1\\\"}", .decoded_arguments = "{\"action\":\"1\"}" },
     };
     try settleCallsForTesting(&storage, &tmp, model, "budget-stop-calls", &calls);
     const target = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
-    const source = (try storage.nextCoreWork(.fromFree(2, true))).?.action;
+    const source = (try replies.keep(storage.nextCoreWork(.fromFree(2, true)))).?.action;
     try std.testing.expectEqual(action_domain.CoreTool.stop_action, source.tool);
     meter.start();
-    const stopped = try storage.stopAction(source.binding, target, .{});
+    const stopped = try replies.keep(storage.stopAction(source.binding, target, .{}));
     try std.testing.expectEqual(std.meta.Tag(@TypeOf(stopped)).selected, std.meta.activeTag(stopped));
     try meter.stop(.stopAction);
 }
 
-fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
-    const session = try configureTestSessionAsk(storage, "budget-tools");
+fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
+    const session = try replies.keep(configureTestSessionAsk(storage, "budget-tools"));
     try submitTestMessage(storage, tmp, "budget-tools-input", "budget-tools-key", session.slice(), "run");
-    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const first = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     const arguments = "{\\\"description\\\":\\\"Disk usage\\\",\\\"cmd\\\":\\\"df -h\\\",\\\"timeout_ms\\\":null}";
     const decoded = "{\"description\":\"Disk usage\",\"cmd\":\"df -h\",\"timeout_ms\":null}";
     const calls = [_]TestingCall{
@@ -2093,58 +2125,60 @@ fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void
     const allowed = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation", .{});
     const denied = try store_testing.queryU64(storage, "SELECT max(action_id) FROM action_operation", .{});
     meter.start();
-    _ = try storage.actionArguments(session.slice(), allowed);
+    _ = try replies.keep(storage.actionArguments(session.slice(), allowed));
     try meter.stop(.actionContent);
     var action_read: @import("../action_read.zig").Read = undefined;
     meter.start();
     try storage.readAction(&.{ .session = session, .action_id = allowed }, &action_read);
     try meter.stop(.readAction);
+    _ = replies.keep(&action_read);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
     try allow.key.set("budget-allow");
     try allow.session.set(session.slice());
     meter.start();
-    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.decidePermission(&allow, .{})) == .accepted);
     try meter.stop(.decidePermission);
     meter.start();
-    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+    const action = (try replies.keep(storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{}))).?.permit.binding;
     try meter.stop(.admitNextActionAttempt);
     var input: ActionExecutionInput = undefined;
     meter.start();
     try storage.readActionExecutionInput(.bash, action, &input);
     try meter.stop(.readBashExecutionInput);
+    _ = replies.keep(&input);
     meter.start();
-    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "budget-value", "value")) == .accepted);
+    try std.testing.expect((try replies.keep(storage.publishActionValue(input.sender_handle.slice(), "budget-value", "value"))) == .accepted);
     try meter.stop(.publishActionValue);
     meter.start();
     try storage.withActionDispatchHandoff(action, {}, Launch.run);
     try meter.stop(.withActionDispatchHandoff);
     meter.start();
-    _ = try storage.messageAfterActionLaunch(action, 0);
+    _ = try replies.keep(storage.messageAfterActionLaunch(action, 0));
     try meter.stop(.messageAfterActionLaunch);
     meter.start();
-    try std.testing.expect(try storage.actionSupersededByStop(action) == null);
+    try std.testing.expect(try replies.keep(storage.actionSupersededByStop(action)) == null);
     try meter.stop(.actionSupersededByStop);
     meter.start();
     try storage.revokeActionSender(action);
     try meter.stop(.revokeActionSender);
     meter.start();
-    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    _ = try replies.keep(storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
     try meter.stop(.settleActionAttempt);
     var background: @import("../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = allowed };
     try background.key.set("budget-background");
 
     meter.start();
-    const selected_final = storage.backgroundAction(.{ .command = &background }, .{});
+    const selected_final = replies.keep(storage.backgroundAction(.{ .command = &background }, .{}));
     try std.testing.expect(selected_final == .accepted and selected_final.accepted.selection.kind == .final);
     try meter.stop(.backgroundAction);
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
     try deny.key.set("budget-deny");
     try deny.session.set(session.slice());
     meter.start();
-    try std.testing.expect(storage.declineForMessage(&deny, .{}) == .accepted);
+    try std.testing.expect(replies.keep(storage.declineForMessage(&deny, .{})) == .accepted);
     try meter.stop(.declineForMessage);
     meter.start();
-    try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+    try std.testing.expect(!try replies.keep(storage.recoverOneUncertainAction(ActiveOperationFilter.empty())));
     try meter.stop(.recoverOneUncertainAction);
 
     var add_search: wire_request.ConfigureCommand = .{};
@@ -2152,47 +2186,59 @@ fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void
     try add_search.session.set(session.slice());
     add_search.configuration.tools = try .of(&.{ "bash", "web_search" });
     add_search.configuration.tools.state = .value;
-    try std.testing.expect(try storage.configure(&add_search, .{}) == .accepted);
-    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expect(try replies.keep(storage.configure(&add_search, .{})) == .accepted);
+    const continuation = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     {
         var view: TestingPage = undefined;
         view.open(storage, continuation);
         defer view.close();
         meter.start();
-        _ = try view.validateOutputsStep();
+        _ = replies.keep(try view.validateOutputsStep());
         try meter.stop(.validateHistoricalOutputsStep);
-        while (!try view.validateOutputsStep()) {}
+        while (!try replies.keep(view.validateOutputsStep())) {}
         var settings: HistoricalSettings = undefined;
         meter.start();
         try view.settings(&settings);
         try meter.stop(.readHistoricalSettings);
+        _ = replies.keep(&settings);
         var tool: historical_domain.HistoricalTool = .{};
         meter.start();
         try std.testing.expect(try view.nextTool(&tool));
         try meter.stop(.readTools);
+        _ = replies.keep(&tool);
         meter.start();
         try std.testing.expect(try view.nextProviderTool(&tool));
         try meter.stop(.readProviderTool);
-        _ = try view.coverage();
+        _ = replies.keep(&tool);
+        _ = replies.keep(try view.coverage());
         var declaration = view.currentDeclaration();
         const declared = ViewRounds.start(storage);
         try std.testing.expect(!try view.nextDeclaredTool(&declaration, &tool));
+        _ = replies.keep(&declaration);
+        _ = replies.keep(&tool);
         try std.testing.expectEqual(@as(u16, 1), declared.taken().rounds);
         meter.start();
         var entry = (try view.nextEntry(0)).?;
         try meter.stop(.readHistoricalEntry);
+        _ = replies.keep(entry);
         entry = (try nextTestingItem(&view, entry.position)).?;
         try std.testing.expectEqual(HistoricalEntryKind.provider_output, entry.kind);
+        _ = replies.keep(entry);
         meter.start();
-        _ = try view.openOutput(entry.position);
-        _ = try view.nextOutputPart();
+        _ = replies.keep(try view.openOutput(entry.position));
+        _ = replies.keep(try view.nextOutputPart());
         try meter.stop(.readHistoricalParts);
-        while (entry.kind != .tool_results) entry = (try nextTestingItem(&view, entry.position)).?;
+        while (entry.kind != .tool_results) {
+            entry = (try nextTestingItem(&view, entry.position)).?;
+            _ = replies.keep(entry);
+        }
         meter.start();
-        _ = (try view.nextToolResult()).?;
+        _ = replies.keep((try view.nextToolResult()).?);
         try meter.stop(.readHistoricalToolResult);
         meter.start();
-        try std.testing.expect(try view.prefixSeal() == null);
+        const seal_read = try view.prefixSeal();
+        try std.testing.expect(seal_read == null);
+        _ = replies.keep(seal_read);
         try meter.stop(.readPrefixSeal);
         const seal: historical_domain.PrefixSeal = .{ .anchor = null, .admission_position = 1, .span_length = 0, .digest = @splat(0) };
         meter.start();
@@ -2200,44 +2246,47 @@ fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void
         try meter.stop(.recordPrefixSeal);
     }
     meter.start();
-    try std.testing.expect(try storage.settleModelAttemptFailurePrepared(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{}, null));
+    try std.testing.expect(try replies.keep(storage.settleModelAttemptFailurePrepared(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{}, null)));
     try meter.stop(.settleModelAttemptFailurePrepared);
     meter.start();
-    try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
+    try std.testing.expect(try replies.keep(storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null)) == null);
     try meter.stop(.tryAdmitNextModelRetry);
     meter.start();
-    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
+    _ = try replies.keep(storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true }));
     try meter.stop(.dispatchWork);
     meter.start();
-    try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
+    try std.testing.expect(!try replies.keep(storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty())));
     try meter.stop(.recoverOneExhaustedModelAttempt);
 
     meter.start();
-    _ = try storage.inspectSessionForTesting(session.slice());
+    _ = try replies.keep(storage.inspectSessionForTesting(session.slice()));
     try meter.stop(.inspectSession);
     var activity: protocol.ActivityPage = .{};
     try activity.session.set(session.slice());
     meter.start();
-    const rows = try store_core.activityPageForTesting(storage, activity);
+    const rows = try replies.keep(store_core.activityPageForTesting(storage, activity));
     try meter.stop(.activityPage);
     meter.start();
-    _ = try storage.openActivityContent(&.{ .session = session, .position = rows.items[0].position });
+    _ = try replies.keep(storage.openActivityContent(&.{ .session = session, .position = rows.items[0].position }));
     try meter.stop(.openActivityContent);
     meter.start();
-    std.testing.allocator.free(try testingSessionReport(storage, tmp, session.slice(), 1024 * 1024));
+    std.testing.allocator.free(try replies.keep(testingSessionReport(storage, tmp, session.slice(), 1024 * 1024)));
     try meter.stop(.readSessionReport);
     var used = std.atomic.Value(u64).init(0);
     meter.start();
-    std.testing.allocator.free(try testingSessionList(storage, tmp, .{}, &used, 2));
+    std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{}, &used, 2)));
     try meter.stop(.readSessionList);
     meter.start();
-    const binding = try storage.failedResponseBinding(session.slice(), continuation.operation_id, continuation.attempt_ordinal);
+    std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{ .archive = .archived, .window = .head }, &used, 3)));
+    try meter.stop(.readArchivedWindow);
+    meter.start();
+    const binding = try replies.keep(storage.failedResponseBinding(session.slice(), continuation.operation_id, continuation.attempt_ordinal));
     try meter.stop(.failedResponseBinding);
     try std.testing.expectEqualDeep(continuation, binding);
 }
 
-fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
-    const session = try configureTestSession(storage, "budget-compacted");
+fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, replies: *store_testing.ReplyDigest) !void {
+    const session = try replies.keep(configureTestSession(storage, "budget-compacted"));
     var patch: wire_request.ConfigureCommand = .{};
     try patch.key.set("budget-heuristics");
     try patch.session.set(session.slice());
@@ -2245,34 +2294,34 @@ fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) 
     try patch.configuration.compaction_trigger.value.set("1000");
     patch.configuration.output_reservation.state = .value;
     try patch.configuration.output_reservation.value.set("1");
-    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+    try std.testing.expect(try replies.keep(storage.configure(&patch, .{})) == .accepted);
     try submitTestMessage(storage, tmp, "budget-one", "budget-one", session.slice(), "original");
-    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const first = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     const calls = [_]TestingCall{
         .{ .item_id = "item-a", .name = "unknown", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{}", .decoded_arguments = "{}" },
     };
     try settleCallsForTestingWithFaults(storage, tmp, first, "budget-usage", &calls, .{}, "{\"input_tokens\":99999,\"output_tokens\":1,\"details\":{\"input_tokens\":0}}");
     try submitTestMessage(storage, tmp, "budget-two", "budget-two", session.slice(), "later");
-    const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compaction));
+    const compaction = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
+    try std.testing.expectEqual(ModelOperationKind.compaction, try replies.keep(storage.modelOperationKind(compaction)));
     const FloorPreparation = @import("domain/history_floor.zig").Preparation;
     const floor_map = try @import("../os/pages.zig").Mapped(FloorPreparation).map();
     defer floor_map.unmap();
     floor_map.value.init(compaction.operation_id);
     defer floor_map.value.deinit();
     meter.start();
-    try std.testing.expect(!try storage.advanceHistoryFloor(floor_map.value));
+    try std.testing.expect(!try replies.keep(storage.advanceHistoryFloor(floor_map.value)));
     try meter.stop(.advanceHistoryFloor);
-    while (!try storage.advanceHistoryFloor(floor_map.value)) {}
+    while (!try replies.keep(storage.advanceHistoryFloor(floor_map.value))) {}
     try std.testing.expect(floor_map.value.prepared != null);
     try settleCompactionForTesting(storage, tmp, compaction, &.{.compaction});
-    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const successor = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;
     var view: TestingPage = undefined;
     view.open(storage, successor);
     defer view.close();
-    while (!try view.validateOutputsStep()) {}
+    while (!try replies.keep(view.validateOutputsStep())) {}
     const rounds = ViewRounds.start(storage);
-    try std.testing.expect((try view.coverage()).anchor != null);
+    try std.testing.expect((try replies.keep(view.coverage())).anchor != null);
     try std.testing.expectEqual(@as(u16, 0), rounds.taken().rounds);
 }
 
@@ -2829,6 +2878,42 @@ test "SH-27 a second owner fences the first before its next write" {
             if (case.engine == .mysql and !case.rerun) try sh27_store_mysql_live_get_lock_excludes_a();
             if (case.engine == .mysql and !case.rerun) try sh27_store_mysql_live_epoch_backup_fence_works();
             if (case.engine == .mysql and !case.rerun) try sh27_store_mysql_live_commit_sequence_backup_fence();
+        }
+    }.run);
+}
+
+// Moved from src/store/tests/historical.zig: "an admission closes the request's view it opened when its commit fails or its settings do not settle".
+// The lost-answer fault and the refusing trigger are MySQL's, so SQLite (no connection to lose) and the rerun leg return
+// here, as the test did in historical.zig.
+fn sh117_an_admission_closes_the_request_s_view(case: *store_testing.Case) !void {
+    if (case.engine != .mysql or case.rerun) return;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "closed-view-config");
+    try submitTestMessage(&storage, &tmp, "closed-view-one", "closed-view-one", session.slice(), "one");
+    var view: TestingPage = undefined;
+    var settings: HistoricalSettings = undefined;
+
+    storage.engine.mysql.state.testing_drop = .after_commit;
+    const unread = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })).?;
+    try std.testing.expect(!unread.request_started);
+    try std.testing.expect(!view.isActive());
+    try settleItemsForTesting(&storage, &tmp, unread.permit.binding, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+
+    try submitTestMessage(&storage, &tmp, "closed-view-two", "closed-view-two", session.slice(), "two");
+    try mt.rawExec(&storage, "CREATE TRIGGER refuse_operation BEFORE INSERT ON model_operation FOR EACH ROW SIGNAL SQLSTATE '45000'");
+    defer mt.rawExec(&storage, "DROP TRIGGER refuse_operation") catch @panic("cannot restore Operation inserts");
+    if (storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expect(!view.isActive());
+}
+
+test "SH-117 an admission closes the request's view it opened when its COMMIT answer is lost or its Operation insert is refused" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try sh117_an_admission_closes_the_request_s_view(case);
         }
     }.run);
 }

@@ -3,6 +3,7 @@ const wire = @import("chatgpt_plan_wire.zig");
 const policy = @import("codex_credential_policy.zig");
 const credentials = @import("codex_credentials.zig");
 const codex_auth = @import("codex_auth.zig");
+const os = @import("os");
 const pages = @import("os/pages.zig");
 
 pub const preferred_port: u16 = 1455;
@@ -26,7 +27,7 @@ pub const Options = struct {
     credential_path: []const u8,
     host_id_path: []const u8,
     issuer: Issuer = .openai,
-    opener: ?[]const u8 = null,
+    opener: ?os.LinkOpener = null,
 };
 
 pub const Shown = union(enum) {
@@ -121,7 +122,7 @@ pub fn login(io: std.Io, options: Options, display: anytype, paste: Paste, cance
         .fixture => |base| try std.fmt.bufPrint(&room.shown, "{s}/oauth/authorize{s}", .{ base, issued[wire.authorize_url.len..] }),
     };
     try display(Shown{ .link = link });
-    if (options.opener) |command| openBrowser(io, command, link) catch {};
+    if (options.opener) |opener| opener.open(io, link) catch {};
 
     const arrived = try waitForCallback(io, room, if (listener) |*server| server else null, paste, cancelled, display, wait_ns);
     const browser: ?*Connection = if (arrived) |index| &room.connections[index] else null;
@@ -182,11 +183,6 @@ fn listen(io: std.Io) ?std.Io.net.Server {
         if (address.listen(io, .{})) |server| return server else |_| {}
     }
     return null;
-}
-
-pub fn openBrowser(io: std.Io, command: []const u8, link: []const u8) !void {
-    const argv = [_][]const u8{ command, link };
-    _ = try std.process.spawn(io, .{ .argv = &argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
 }
 
 fn waitForCallback(io: std.Io, room: *Room, listener: ?*std.Io.net.Server, paste: Paste, cancelled: *const fn () bool, display: anytype, wait: i96) !?usize {

@@ -28,6 +28,26 @@ pub fn stateSql(comptime alias: []const u8) []const u8 {
         "ELSE 'archived' END";
 }
 
+/// The Archived predicate on the Session row aliased `alias`: a key whose three-state rule says 'archived'.
+pub fn archivedSql(comptime alias: []const u8) []const u8 {
+    return comptime alias ++ ".archive_seq IS NOT NULL AND (" ++ stateSql(alias) ++ ")='archived'";
+}
+
+/// Filters a Session list by archive state. `parameter` is the bound Filter name:
+/// 'all' keeps every row, 'archived' keeps Archived rows, 'active' keeps active and archiving rows.
+pub fn filterSql(comptime alias: []const u8, comptime parameter: []const u8) []const u8 {
+    return comptime " AND (" ++ parameter ++ "='all' OR (" ++ archivedSql(alias) ++ ")=(" ++ parameter ++ "='archived'))";
+}
+
+/// Sessions that may be archiving, from the indexes that hold in-flight work. A stop with a selected turn is
+/// not complete while that turn's `outcome_position` is NULL (stopCompletedSql), so the turn candidate reads
+/// every turn with no position, whether or not it has a code. Unaccepted Actions are the other source. Each
+/// candidate is a superset of its archiving Sessions, so the caller still decides each one with `stateSql`.
+/// Each candidate is one statement, so each can be planned on its own. `@in_index` states the rows of the
+/// named partial index on both engines (rsql.zig).
+pub const turn_candidates_sql = "SELECT t.session_ref FROM turn t @index(turn_outcome_unpositioned) WHERE @in_index(t, turn_outcome_unpositioned)";
+pub const unaccepted_action_candidates_sql = "SELECT a.session_ref FROM action_operation a @index(action_operation_unaccepted) WHERE @in_index(a, action_operation_unaccepted)";
+
 const mark_archived = rsql.Write(.{
     .sql = "UPDATE session SET archive_seq=?2 WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, seq: u64 },

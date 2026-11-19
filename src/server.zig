@@ -5285,21 +5285,18 @@ test "the Host's stop signals reach its handler until serve restores the previou
 }
 
 test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
+    // Rounds never wait for a hammer to be scheduled: those waits made the
+    // test's length the scheduler's, past its timeout on two starved cores
+    // (#1943). Scheduling now sets only how often a hammer lands in a round's
+    // window; a detach that does not wait still fails here run after run.
     const Hammer = struct {
-        calls: std.atomic.Value(u64) = .init(0),
         stop: std.atomic.Value(bool) = .init(false),
 
         fn run(self: *@This()) void {
             while (!self.stop.load(.acquire)) {
                 StopSignals.handle(std.posix.SIG.INT);
-                _ = self.calls.fetchAdd(1, .release);
                 std.Thread.yield() catch {};
             }
-        }
-
-        fn advance(self: *@This(), count: u64) void {
-            const target = self.calls.load(.acquire) + count;
-            while (self.calls.load(.acquire) < target) std.Thread.yield() catch {};
         }
     };
     var hammers: [3]Hammer = @splat(.{});
@@ -5317,7 +5314,6 @@ test "a stop signal handler racing detach never writes to the closed or a reused
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
         for (wake) |fd| try setNonblocking(fd);
         StopSignals.attach(wake[1]);
-        for (&hammers) |*hammer| hammer.advance(1);
         StopSignals.detach();
         _ = std.c.close(wake[0]);
         _ = std.c.close(wake[1]);
@@ -5327,7 +5323,6 @@ test "a stop signal handler racing detach never writes to the closed or a reused
             _ = std.c.close(fd);
         };
         for (reused) |fd| try setNonblocking(fd);
-        for (&hammers) |*hammer| hammer.advance(1);
         for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
     }
 }

@@ -1225,7 +1225,7 @@
           "wait": "Agent working"
         },
         {
-          "wait": "◝ Agent working"
+          "wait": "Agent working"
         },
         {
           "wait": "● Agent approval"
@@ -1247,7 +1247,7 @@
           "dim": true
         },
         {
-          "text": "◝ Agent working",
+          "text": "Agent working",
           "dim": true
         },
         {
@@ -1276,7 +1276,7 @@
           "min_columns": 140
         },
         {
-          "wait": "◝ Agent working",
+          "wait": "Agent working",
           "min_columns": 140
         },
         {
@@ -1297,7 +1297,7 @@
           "min_columns": 140
         },
         {
-          "text": "◝ Agent working",
+          "text": "Agent working",
           "dim": true,
           "min_columns": 140
         },
@@ -1967,6 +1967,7 @@
         "127.0.0.1:1",
         "Paste callback",
         "[ Open browser ]",
+        "[ Copy URL ]",
         "[ Change method ]",
         "[ Back ]"
       ],
@@ -4145,7 +4146,7 @@
         "ctrl+c   leave",
         "next focus",
         "previous focus",
-        "list/chat · info actions"
+        "fold tree · info actions"
       ],
       "absent": [
         "/help",
@@ -5632,7 +5633,7 @@
     },
     {
       "name": "list-to-chat",
-      "note": "Right on the open row returns to its retained input, without reopening the feed.",
+      "note": "Enter on the open row returns to its retained input, without reopening the feed.",
       "open": "Focus navigation audit",
       "steps": [
         {
@@ -5641,7 +5642,7 @@
         {
           "keys": [
             "Left",
-            "Right"
+            "Enter"
           ]
         },
         {

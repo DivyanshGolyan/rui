@@ -56,10 +56,17 @@ pub fn List(comptime Target: type) type {
         };
         pub const Span = struct { row: i17, height: u16, target: ?Target, alternate_target: ?Target = null, regions: []const Region = &.{} };
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
+        pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
+        pub const Edge = enum { above, below };
+        pub const Counts = struct { above: u32, below: u32 };
+        pub const Edges = struct { userdata: *const anyopaque, lineFn: *const fn (*const anyopaque, Edge, Range, Counts, std.mem.Allocator) std.mem.Allocator.Error!?Line };
 
         rows: Rows = .none,
         inset_rows: bool = false,
         selected: ?u32 = null,
+        anchor: ?struct { index: u32, row: u16 } = null,
+        on_presence: ?Presence = null,
+        edges: ?Edges = null,
         on_press: ?Press = null,
         base_style: vaxis.Style = .{},
         selection_style: vaxis.Style = .{ .reverse = true },
@@ -81,6 +88,11 @@ pub fn List(comptime Target: type) type {
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const self: *Self = @ptrCast(@alignCast(raw));
             try self.hover.handleEvent(ctx, input);
+            if (self.on_presence) |presence| switch (input) {
+                .mouse_enter => try presence.changed(presence.userdata, ctx, true),
+                .mouse_leave => try presence.changed(presence.userdata, ctx, false),
+                else => {},
+            };
             if (input != .mouse) return;
             const mouse = input.mouse;
             if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
@@ -225,20 +237,50 @@ pub fn List(comptime Target: type) type {
             below: u16 = 0,
         };
 
+        fn edgeLine(self: *const Self, side: Edge, range: Range, arena: std.mem.Allocator) std.mem.Allocator.Error!?Line {
+            const edges = self.edges orelse {
+                const count_from = self.rows.countFromFn orelse return null;
+                const count = switch (side) {
+                    .above => count_from(self.rows.userdata, 0) -| count_from(self.rows.userdata, range.first),
+                    .below => count_from(self.rows.userdata, range.end),
+                };
+                if (count == 0) return null;
+                const words = switch (side) {
+                    .above => self.aboveFn,
+                    .below => self.belowFn,
+                } orelse return null;
+                return try words(count, arena);
+            };
+            const count_from = self.rows.countFromFn orelse return edges.lineFn(edges.userdata, side, range, .{ .above = range.first, .below = self.rows.count -| range.end }, arena);
+            const counts: Counts = .{
+                .above = count_from(self.rows.userdata, 0) -| count_from(self.rows.userdata, range.first),
+                .below = count_from(self.rows.userdata, range.end),
+            };
+            return edges.lineFn(edges.userdata, side, range, counts, arena);
+        }
+
         fn measure(self: *const Self, building: *Building, first: u32, height: u16, keep_selected: bool) std.mem.Allocator.Error!Window {
             const minimum = try building.height(if (keep_selected) self.selected.? else first);
             const marker_room = height -| minimum;
-            const count_from = if (self.aboveFn != null or self.belowFn != null) self.rows.countFromFn orelse @panic("indicators need Rows.countFromFn") else null;
-            const above: u16 = @intFromBool(self.aboveFn != null and marker_room > 0 and count_from.?(self.rows.userdata, 0) > count_from.?(self.rows.userdata, first));
-            var window = try building.fit(first, height - above);
-            window.above = above;
-            if (self.belowFn != null and marker_room > above and count_from.?(self.rows.userdata, window.end) > 0) {
-                window.below = 1;
-                while (window.height > height - above - 1) {
-                    window.end -= 1;
-                    window.height -= try building.height(window.end);
+            var above: u16 = 0;
+            var below: u16 = 0;
+            var window = try building.fit(first, height);
+            while (true) {
+                var changed = false;
+                const range: Range = .{ .first = window.first, .end = window.end };
+                if (above == 0 and marker_room > above + below and try self.edgeLine(.above, range, building.arena) != null) {
+                    above = 1;
+                    changed = true;
                 }
+                if (below == 0 and marker_room > above + below and try self.edgeLine(.below, range, building.arena) != null) {
+                    below = 1;
+                    changed = true;
+                }
+                if (!changed) break;
+                window = try building.fit(first, height - above - below);
             }
+            window.above = above;
+            window.below = below;
             return window;
         }
 
@@ -265,7 +307,7 @@ pub fn List(comptime Target: type) type {
             var building: Building = .{ .owner = self, .arena = ctx.arena };
             var first = @min(self.list.scroll.top, self.rows.count - 1);
             var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
-            const keep_selected = if (self.selected) |selected| self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
+            const keep_selected = if (self.selected) |selected| self.anchor == null and self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
             if (keep_selected and (cursor < first or cursor - first > size.height)) first = cursor;
             if (offset < 0) {
                 while (offset < 0 and first > 0) {
@@ -286,7 +328,40 @@ pub fn List(comptime Target: type) type {
                     window = try self.measure(&building, window.first + 1, size.height, true);
                 }
             }
-            while (window.end == self.rows.count and window.first > 0) {
+            if (self.anchor) |anchor| {
+                // Keep the captured physical row, including marker rows and mixed heights.
+                // A boundary can make the exact offset impossible; choose the closest one.
+                var best = window;
+                var best_distance: u32 = std.math.maxInt(u32);
+                var candidate = window.first;
+                var direction: i8 = 0;
+                while (true) {
+                    const measured = try self.measure(&building, candidate, size.height, false);
+                    var position: u32 = measured.above;
+                    if (candidate <= anchor.index) {
+                        for (candidate..anchor.index) |index| position += try building.height(@intCast(index));
+                    } else {
+                        position = 0;
+                    }
+                    const distance: u32 = if (candidate > anchor.index) std.math.maxInt(u32) else if (position > anchor.row) position - anchor.row else anchor.row - position;
+                    if (distance < best_distance) {
+                        best = measured;
+                        best_distance = distance;
+                    }
+                    if (distance == 0) break;
+                    const next_direction: i8 = if (candidate > anchor.index or position < anchor.row) -1 else 1;
+                    if (direction != 0 and direction != next_direction) break;
+                    direction = next_direction;
+                    if (direction < 0) {
+                        if (candidate == 0) break;
+                        candidate -= 1;
+                    } else {
+                        if (candidate >= anchor.index) break;
+                        candidate += 1;
+                    }
+                }
+                window = best;
+            } else while (window.end == self.rows.count and window.first > 0) {
                 const previous = try self.measure(&building, window.first - 1, size.height, keep_selected);
                 if (previous.end != self.rows.count) break;
                 window = previous;
@@ -324,11 +399,10 @@ pub fn List(comptime Target: type) type {
             self.shown_at = spans;
             self.hover.targets = hover_targets.items;
             if (above_rows + below_rows > 0) {
-                const count_from = self.rows.countFromFn.?;
                 const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + above_rows + below_rows);
                 children[0] = .{ .origin = .{ .row = above_rows, .col = 0 }, .surface = surface };
-                if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, self.aboveFn.?, count_from(self.rows.userdata, 0) - count_from(self.rows.userdata, self.list.scroll.top)) };
-                if (below_rows > 0) children[children.len - 1] = .{ .origin = .{ .row = above_rows + window.height, .col = 0 }, .surface = try self.indicator(ctx, self.belowFn.?, count_from(self.rows.userdata, window.end)) };
+                if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.above, self.shown, ctx.arena)) orelse &.{}) };
+                if (below_rows > 0) children[children.len - 1] = .{ .origin = .{ .row = above_rows + window.height, .col = 0 }, .surface = try self.indicator(ctx, (try self.edgeLine(.below, self.shown, ctx.arena)) orelse &.{}) };
                 surface = .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
             }
             surface.size = size;
@@ -336,11 +410,11 @@ pub fn List(comptime Target: type) type {
             return surface;
         }
 
-        fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: *const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!Line, count: u32) std.mem.Allocator.Error!vxfw.Surface {
-            var line = try words(count, ctx.arena);
+        fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: Line) std.mem.Allocator.Error!vxfw.Surface {
+            var line = words;
             if (self.indicator_style) |style| {
                 const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
-                for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = style };
+                for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = if (std.meta.eql(segment.style, vaxis.Style{})) style else segment.style };
                 line = styled;
             }
             const label = try ctx.arena.create(vxfw.RichText);
@@ -1148,4 +1222,16 @@ test "List selected regions retain focus while other regions hover and whitespac
         try std.testing.expect(!list.hover.pointing and list.hover.point == null);
         if (hovered != null) try std.testing.expectEqual(vaxis.Mouse.Shape.default, events.cmds.items[events.cmds.items.len - 1].set_mouse_shape);
     };
+}
+test "SUI-107 List anchors mixed-height rows at the nearest attainable physical offset" {
+    const three: []const TestLine = &.{ &.{.{ .text = "one" }}, &.{.{ .text = "two" }}, &.{.{ .text = "three" }} };
+    const rows: [10]TestRow = @splat(.{ .lines = three });
+    const all: []const TestRow = &rows;
+    var list: TestList = .{ .rows = .of(&all), .anchor = .{ .index = 5, .row = 4 } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 12 }, .cell_size = .{} };
+    _ = try list.widget().draw(ctx);
+    try std.testing.expectEqual(@as(u32, 4), list.shown.first);
+    try std.testing.expectEqual(@as(i17, 3), list.shown_at[1].row);
 }

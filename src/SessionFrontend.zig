@@ -4829,10 +4829,10 @@ test "SUI-4 late activity inspection cannot cover Settings Keys" {
             try std.testing.expect(held.root.settings_page.keys_open);
             try std.testing.expect(!held.self.info_open);
             try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
-            // The shared Keys row legitimately says "list/chat · info actions".
+            // The shared Keys row legitimately says "fold tree · info actions".
             // Only that occurrence of the info marker may appear here.
             const info_count = std.mem.count(u8, shown, " · info");
-            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "list/chat · info actions") != null), info_count);
+            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "fold tree · info actions") != null), info_count);
             for ([_][]const u8{ "Copy last answer", "/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "ctrl+c/d", "pgup/pgdn", "first session", "latest / last", "scroll / select" }) |stale|
                 try std.testing.expect(std.mem.indexOf(u8, shown, stale) == null);
             return shown;
@@ -5157,7 +5157,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7, .served_group = .done };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .group = .working, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .state_change_at = 1, .subtree_state_change_at = 1, .descendant_count = 0, .descendant_needs_you_count = 0, .group = .working, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });

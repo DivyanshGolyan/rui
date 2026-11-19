@@ -42,6 +42,9 @@ const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
 const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
+// Budgets measured inside another entry point's round: an Archived window is a readSessionList request, so it enters
+// the Store through readSessionList and has no Store function of its own.
+const dispatched_points = [_]EntryPoint{.readArchivedWindow};
 
 test "every function that enters the Store has a round budget" {
     const sources = .{
@@ -145,6 +148,10 @@ test "every function that enters the Store has a round budget" {
             found.insert(point);
         }
     };
+    for (dispatched_points) |point| {
+        try std.testing.expect(!found.contains(point));
+        found.insert(point);
+    }
     try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
     for (fixtures) |seen| try std.testing.expect(seen);
 }

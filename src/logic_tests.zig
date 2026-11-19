@@ -65,6 +65,7 @@ const cores = .{
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
+    .{ "first_line.zig", @import("first_line.zig") },
     .{ "hex_value.zig", @import("hex_value.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_activation.zig", @import("host_activation.zig") },
@@ -426,6 +427,10 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .provider = .codex,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
+            .state_change_at = since,
+            .subtree_state_change_at = since,
+            .descendant_count = 0,
+            .descendant_needs_you_count = 0,
             .first = .{ .position = 1, .admission = at + 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (at % 10 == 0) since else null,
         };

@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 86;
+pub const schema_version: u32 = 87;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -66,6 +66,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
+    .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -869,6 +870,17 @@ pub const migrations = [_]Migration{
             "EXECUTE rui_read_only",
             "DEALLOCATE PREPARE rui_read_only",
             "SET @rui_read_only_ddl=NULL",
+        },
+    },
+    .{
+        .from = 86,
+        .sqlite = &.{
+            "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
+            "CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED AFTER action_operation_approval_lead, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
+            "ALTER TABLE turn ADD COLUMN turn_outcome_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN outcome_position IS NULL THEN session_ref END) STORED AFTER turn_unpositioned_lead, ADD INDEX turn_outcome_unpositioned(turn_outcome_unpositioned_lead)",
         },
     },
 };
@@ -1938,6 +1950,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
+    .{ .name = "action_operation_unaccepted", .table = "action_operation", .columns = &.{"session_ref"}, .where = "acceptance_position IS NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
@@ -1965,6 +1978,7 @@ pub const indexes = [_]Index{
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
+    .{ .name = "turn_outcome_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_position IS NULL" },
     .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
 
@@ -2066,6 +2080,37 @@ pub fn hasIndex(comptime name: []const u8) bool {
         for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return true;
         return false;
     }
+}
+
+/// The partial index named `name`, or null when no index has that name or it has no WHERE. rsql's
+/// `@in_index` states the rows of exactly these indexes.
+pub fn partialIndex(comptime name: []const u8) ?Index {
+    comptime {
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return if (index.where == null) null else index;
+        return null;
+    }
+}
+
+/// Whether the column `column` of table `table` admits NULL.
+pub fn columnNullable(comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        for (tables) |candidate| {
+            if (!std.mem.eql(u8, candidate.name, table)) continue;
+            for (candidate.columns) |found| if (std.mem.eql(u8, found.name, column)) return found.nullable;
+        }
+        @compileError("schema: no column " ++ table ++ "." ++ column);
+    }
+}
+
+/// The MySQL generated column that a `.leading` partial index is built on, as the DDL names it.
+pub fn leadingColumnName(comptime index: Index) []const u8 {
+    return leadingColumn(index);
+}
+
+/// One key part of a `.unique_when` partial index on MySQL: `predicate` (already rendered) decides whether
+/// `column` is kept. The index DDL and rsql's `@in_index` both build their key parts with this function.
+pub fn mysqlKeyPart(comptime predicate: []const u8, comptime column: []const u8) []const u8 {
+    return "(CASE WHEN " ++ predicate ++ " THEN " ++ column ++ " END)";
 }
 
 const mysql_index_names: []const []const u8 = blk: {
@@ -2471,7 +2516,7 @@ fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const 
         parts = "";
         for (index.columns, 0..) |column, position| {
             const part = indexColumn(column);
-            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+            parts = parts ++ (if (position == 0) "" else ",") ++ mysqlKeyPart(expression(.mysql, all[tablePosition(all, index.table)], index.where.?), part.name) ++ part.order;
         }
     }
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
@@ -3748,6 +3793,34 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
     try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
+}
+
+test "schema 87 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {
+    const step = migrations[86 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 86), step.from);
+    try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
+    try std.testing.expectEqualStrings("CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL", step.sqlite[0]);
+    try std.testing.expectEqualStrings("CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL", step.sqlite[1]);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 86) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted' AND tbl_name='action_operation'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='turn_outcome_unpositioned' AND tbl_name='turn'"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM action_operation INDEXED BY action_operation_unaccepted WHERE acceptance_position IS NULL");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null);
 }
 
 // Export each schema value once per collect binary, under a stable symbol name.
