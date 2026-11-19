@@ -738,7 +738,7 @@ test "MySQL plans each archiving candidate and page through its index" {
                 .{ .source = session_list_read.live_turn_source, .index = "turn_outcome_unpositioned" },
                 .{ .source = session_list_read.live_action_source, .index = "action_operation_unaccepted" },
             };
-            for (pages) |page| {
+            inline for (pages) |page| {
                 const literal = comptime bindLiterals(rsql.sentTemplate(page.source).prepared(), &.{ "0", "1000" });
                 var buffer: [8192]u8 = undefined;
                 const plan = try mysql_testing.planText(&storage, literal, &buffer);
