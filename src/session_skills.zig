@@ -108,9 +108,11 @@ fn prepareMessageInput(allocator: std.mem.Allocator, scratch_allocator: std.mem.
         if (!any.found) return prepared;
     }
     if (command.configuration) |*configuration| {
-        var inherited: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        if (try creationReplay(store, command.key.slice(), configuration, &inherited)) return prepared;
-        prepared.* = try prepareCreation(allocator, scratch_allocator, io, creationWorkspace(configuration, &inherited), home, text);
+        // The workspace buffer is 4 KiB: it lives in the request arena, not this frame.
+        const inherited = try allocator.create(protocol.Bounded(protocol.max_workspace_bytes));
+        inherited.* = .{ .len = 0 };
+        if (try creationReplay(store, command.key.slice(), configuration, inherited)) return prepared;
+        prepared.* = try prepareCreation(allocator, scratch_allocator, io, creationWorkspace(configuration, inherited), home, text);
     } else {
         if (try store.commandExists(command.key.slice())) return prepared;
         prepared.captured = try bindTo(allocator, io, store, command.session.slice(), text);

@@ -1901,7 +1901,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .conversation_page => |*command| {
             const page = try createUnfilled(host.allocator, store_module.PublicConversationPage);
             defer host.allocator.destroy(page);
-            host.store.publicConversationPage(command, page) catch |err| switch (err) {
+            host.store.publicConversationPage(command, page, host.allocator) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
                 else => return refuseRead(host, fd, "conversation page", err),
             };

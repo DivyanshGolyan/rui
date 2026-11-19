@@ -112,7 +112,7 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
         var a: reads_domain.ReadAccess = .open(&entry);
         defer a.deinit();
         const before = storage.testing_content_work.rounds;
-        try reads_domain.publicConversationPage(&a, conversation, &public_page);
+        try reads_domain.publicConversationPage(&a, conversation, &public_page, std.testing.allocator);
         result.rounds[0] = storage.testing_content_work.rounds - before;
     }
     {
