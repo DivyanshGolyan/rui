@@ -135,9 +135,10 @@ test "SH-101 a lost batch runs again only while unsaved and still ours, and once
             }
         }
     }
-    // defers holds for armed in both values, with rerunnable, login and connection_lost: 2 of the 80 cases (replaced
-    // does not change it). Runs again: 2 reconnect cases (armed, not replaced) each with the one owner row equal to
-    // ours, and 2 rerun cases (replaced) each with all 16 owner rows answering yes: 2 * 1 + 2 * 16 = 34.
+    // defers holds only when armed, rerunnable, with a login and connection_lost: once per value of replaced, 2 of
+    // the 80 cases. Runs again: 2 reconnect cases (not replaced; armed either way, since recover does not read armed)
+    // each with the one owner row equal to ours, and 2 rerun cases (replaced) each with all 16 owner rows answering
+    // yes: 2 * 1 + 2 * 16 = 34.
     try std.testing.expectEqual(@as(usize, 2), deferred);
     try std.testing.expectEqual(@as(usize, 34), runs_again);
 
