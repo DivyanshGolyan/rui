@@ -850,13 +850,22 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
-def launch_host(run, *, restartable=False, without_preload=False):
-    """Start this run's Host from the options saved at `new`; return its ready status."""
+DEFAULT_SERVE = ("codex",)
+SERVABLE_PROVIDERS = ("codex", "openai", "chatgpt")
+
+
+def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_SERVE):
+    """Start this run's Host from the options saved at `new`; return its ready status.
+
+    `serve` is the provider set the Host serves; each one answers from the fixture."""
     options = run.meta["host_options"]
+    provider_sets = []
+    for provider in serve:
+        provider_sets += ["--set", f"providers.{provider}.endpoint={run.meta['fixture_url']}",
+                          "--set", f"providers.{provider}.unauthenticated=true"]
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
                  "--set", f"execution.activeCapacity={options['active_capacity']}",
-                 "--set", "providers={}", "--set", f"providers.codex.endpoint={run.meta['fixture_url']}",
-                 "--set", "providers.codex.unauthenticated=true"]
+                 "--set", "providers={}", *provider_sets]
     if not restartable:
         host_argv += ["--test-retry-waits-ms", "50,100,150"]
     host_env = run.env()
@@ -879,9 +888,8 @@ def launch_host(run, *, restartable=False, without_preload=False):
         time.sleep(0.1)
 
 
-def cmd_restart_host(args):
-    """Stop the run's Host and start a fresh one on the same Store, fixture and options."""
-    run = Run(args.run)
+def stop_host(run):
+    """Pause the run's owned Host and wait for it to exit; return the stopped owned records."""
     old = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
            and process_start(r["pid"])[0] == r["lstart"]]
     # A Host that is already stopped is simply started again.
@@ -893,6 +901,13 @@ def cmd_restart_host(args):
         if time.monotonic() > deadline:
             die("old Host did not exit after host pause")
         time.sleep(0.1)
+    return old
+
+
+def cmd_restart_host(args):
+    """Stop the run's Host and start a fresh one on the same Store, fixture and options."""
+    run = Run(args.run)
+    old = stop_host(run)
     status = launch_host(run)
     print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
 
@@ -2344,7 +2359,7 @@ def validate_scenario(data, sizes=None):
         suspended = False
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer", "shot_clock_advance", "shot_settle_message"}
+            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer", "shot_clock_advance", "shot_settle_message", "serve"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
@@ -2355,6 +2370,7 @@ def validate_scenario(data, sizes=None):
                     f"{name}: invalid empty_composer (wait boolean only)")
             require("shot_clock_advance" not in step or action == "sleep" and type(step["shot_clock_advance"]) is int and step["shot_clock_advance"] >= 0, f"{name}: shot_clock_advance requires nonnegative whole seconds on a sleep")
             require("shot_settle_message" not in step or action == "host" and step[action] == "suspend" and step["shot_settle_message"] is True, f"{name}: shot_settle_message requires Host suspension")
+            require("serve" not in step or action == "host" and step[action] == "restart", f"{name}: serve requires a Host restart step")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2375,10 +2391,15 @@ def validate_scenario(data, sizes=None):
             elif action == "sleep":
                 require(duration(value), f"{name}: invalid sleep")
             elif action == "host":
-                require(value in ("pause", "start", "suspend", "resume"), f"{name}: invalid host action")
+                require(value in ("pause", "start", "suspend", "resume", "restart"), f"{name}: invalid host action")
                 require(value != "suspend" or not suspended, f"{name}: Host already suspended")
                 require(value != "resume" or suspended, f"{name}: Host is not suspended")
-                require(value not in ("pause", "start") or not suspended, f"{name}: resume Host before pause/start")
+                require(value not in ("pause", "start", "restart") or not suspended, f"{name}: resume Host before pause/start/restart")
+                if value == "restart" and "serve" in step:
+                    served = step["serve"]
+                    require(isinstance(served, list) and bool(served) and len(set(served)) == len(served)
+                            and all(provider in SERVABLE_PROVIDERS for provider in served),
+                            f"{name}: serve must be a nonempty list of distinct providers from {', '.join(SERVABLE_PROVIDERS)}")
                 suspended = value == "suspend" if value in ("suspend", "resume") else suspended
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
@@ -2938,11 +2959,28 @@ def frame_steps(run, terminal, steps, exiting=False):
                 frame_host_suspension(run, True)
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
+        elif step["host"] == "restart":
+            # Stop the fixture-owned Host, then start it serving only the named providers.
+            stop_host(run)
+            launch_host(run, serve=tuple(step.get("serve", DEFAULT_SERVE)))
+            run.frame_served = tuple(step.get("serve", DEFAULT_SERVE))
+            append_jsonl(run.evidence / "frames-host-restart.jsonl", {"t_ns": now_ns(), "wall": wall(),
+                                                                     "serve": list(step.get("serve", DEFAULT_SERVE))})
         else:
             launch_host(run)
         if not exiting and terminal.status is not None:
             raise FrameFailure(f"Rui exited with status {terminal.status} before the state was reached")
     return exiting
+
+
+def frame_restore_served(run):
+    """Return a Host that a state restarted with another provider set to the default set."""
+    served = getattr(run, "frame_served", None)
+    if served is None or served == DEFAULT_SERVE:
+        return
+    run.frame_served = None
+    stop_host(run)
+    launch_host(run)
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
@@ -3699,6 +3737,17 @@ def run_frames(args):
                     try:
                         frame_resume_settled_shot(run)
                     finally:
+                        try:
+                            frame_restore_served(run)
+                        except (Exception, SystemExit) as error:
+                            if is_selected:
+                                failed = True
+                                for record in records[first_record:]:
+                                    record.update(ok=False, status="failed", reason=record["reason"] or str(error))
+                                print(f"verify-rui: {state['name']}: default Host restore failed: {error}", file=sys.stderr)
+                            else:
+                                print(f"verify-rui: warning: {state['name']}: default Host restore failed: {error} "
+                                      "(not selected; its failure does not fail this run)", file=sys.stderr)
                         if opened:
                             try:
                                 try:
