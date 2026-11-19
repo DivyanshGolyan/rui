@@ -4146,7 +4146,7 @@
         "ctrl+c   leave",
         "next focus",
         "previous focus",
-        "list/chat · info actions"
+        "fold tree · info actions"
       ],
       "absent": [
         "/help",
@@ -5633,7 +5633,7 @@
     },
     {
       "name": "list-to-chat",
-      "note": "Right on the open row returns to its retained input, without reopening the feed.",
+      "note": "Enter on the open row returns to its retained input, without reopening the feed.",
       "open": "Focus navigation audit",
       "steps": [
         {
@@ -5642,7 +5642,7 @@
         {
           "keys": [
             "Left",
-            "Right"
+            "Enter"
           ]
         },
         {

@@ -412,6 +412,100 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_creator_cast_and_viewport_assertions_validate_before_launch(self):
+        data = {"active_capacity": 4, "sizes": ["140x40", "46x30"], "states": [{
+            "name": "creator", "open": "overview", "full_overview": True,
+            "cast": [
+                {"label": "Root", "workspace": "code/rui", "mode": "bypass", "tools": "start_agent,bash", "messages": ["root"]},
+                {"label": "Child", "workspace": "code/rui", "mode": "ask", "creator": "Root", "attached": False, "messages": ["child"]},
+            ],
+            "steps": [{"select_row": "Root"}, {"keys": ["Left"]},
+                      {"birth": {"label": "New", "creator": "Root", "attached": True, "mode": "bypass", "messages": ["new"]}}],
+            "expect_viewport": {"140x40": {"expect": ["Root", "Child"]}, "46x30": {"expect": ["Root"]}},
+            "comparison": {"before": {"expect": ["Root"], "expect_viewport": {}}},
+        }]}
+        validate = self.helper["validate_scenario"]
+        normalized = validate(data)
+        self.assertEqual(normalized["active_capacity"], 4)
+        self.assertEqual(self.helper["frame_viewport_state"](normalized["states"][0], 46, 30)["expect"], ["Root"])
+        for change, message in (
+                (lambda d: d.update(active_capacity=0), "active_capacity"),
+                (lambda d: d["states"][0]["cast"][1].update(creator="Missing"), "earlier cast"),
+                (lambda d: d["states"][0]["cast"][1].update(sender="Root"), "exclusive"),
+                (lambda d: d["states"][0].update(expect_viewport={"wrong": {"expect": ["x"]}}), "viewport")):
+            invalid = copy.deepcopy(data)
+            change(invalid)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                validate(invalid)
+        self.assertEqual(validate(self.scenario()).get("active_capacity", 2), 2)
+
+    def test_full_overview_rejects_blank_wide_chat_and_selects_drawn_row(self):
+        is_overview = self.helper["is_full_overview"]
+        split = committed("+ New chat".ljust(40) + "│ chat\nChats  Archived\nSettings", columns=140)
+        self.assertFalse(is_overview(split))
+        full = committed("+ New chat".ljust(41) + " \nChats  Archived\n Root\nSettings", columns=140)
+        self.assertTrue(is_overview(full))
+        captured = []
+        capture = types.SimpleNamespace(style=lambda text: types.SimpleNamespace(bold=text == "Root"))
+        terminal = types.SimpleNamespace(frame=full, status=None, write=captured.append,
+                                         wait=lambda predicate, *_a, **_k: self.assertTrue(predicate(capture)))
+        self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+        keys = self.helper["KEYS"]
+        self.assertEqual(captured, [keys["Home"] + keys["S-Down"] * 2])
+        gap = committed("+ New chat\nChats  Archived\n\n Root\nSettings", columns=140)
+        terminal.frame = gap
+        self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+        self.assertEqual(captured[-1], keys["Home"] + keys["S-Down"] * 2)
+        terminal.frame = committed("+ New chat\nChats  Archived\n↑ 1 needs you\n Root\nSettings", columns=140)
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "scrolled"):
+            self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+
+    def test_full_overview_is_required_at_readiness_and_capture(self):
+        state = {"name": "fold", "full_overview": True, "expect": ["Root"]}
+        full = committed("+ New chat".ljust(41) + " \nChats  Archived\n Root\nSettings", columns=140)
+        for separator in ("│", "|"):
+            split = committed("+ New chat".ljust(40) + separator + " chat\nChats  Archived\n Root\nSettings", columns=140)
+            observed = []
+            def wait(predicate, *_args, **_kwargs):
+                for frame in (split, full):
+                    observed.append(predicate(types.SimpleNamespace(frame=frame, completed=frame.text)))
+            terminal = types.SimpleNamespace(frame=split, wait=wait)
+            self.helper["frame_ready"](terminal, state)
+            self.assertEqual(observed, [False, True])
+            run = types.SimpleNamespace(meta={"sha": "a" * 40, "sessions": {}})
+            with tempfile.TemporaryDirectory() as temp:
+                record = self.helper["frame_capture"](run, terminal, Path(temp), state, (140, 40), None)
+            self.assertFalse(record["ok"])
+            self.assertEqual(record["reason"], "state left full overview before capture")
+
+    def test_edge_open_finishes_in_chat_only_on_the_new_version(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("creator-tree.json"))
+        for name in ("edge-open-unicode", "edge-open-ascii"):
+            state = next(item for item in scenario["states"] if item["name"] == name)
+            self.assertTrue(state["full_overview"])
+            self.assertFalse(state["final_full_overview"])
+            before = {**state, **state["comparison"]["before"]}
+            self.assertTrue(before["final_full_overview"])
+            self.assertIn("Allow once", state["expect"])
+            narrow = self.helper["frame_viewport_state"](state, 46, 30)
+            self.assertEqual(narrow["expect_regex"], [])
+            self.assertEqual(narrow["expect"], ["Allow once", "Deny", "alt+i info"])
+            self.assertIn("Opening", narrow["absent"])
+            self.assertEqual(before["expect_viewport"], {})
+            split = committed("+ New chat".ljust(40) + "│ chat\nQuestion leaf\nAllow once\nSettings", columns=140)
+            outcomes = []
+            terminal = types.SimpleNamespace(frame=split, wait=lambda predicate, *_a, **_k:
+                outcomes.append(predicate(types.SimpleNamespace(frame=split, completed=split.text))))
+            self.helper["frame_ready"](terminal, state)
+            self.helper["frame_ready"](terminal, before)
+            self.assertEqual(outcomes, [True, False])
+            run = types.SimpleNamespace(meta={"sha": "a" * 40, "sessions": {}})
+            with tempfile.TemporaryDirectory() as temp:
+                after_capture = self.helper["frame_capture"](run, terminal, Path(temp), state, (140, 40), None)
+                before_capture = self.helper["frame_capture"](run, terminal, Path(temp), before, (140, 40), None)
+            self.assertTrue(after_capture["ok"])
+            self.assertEqual(before_capture["reason"], "state left full overview before capture")
+
     def test_host_suspension_validates_actions_and_lifetime(self):
         for steps in ([{"host": "suspend"}], [{"host": "suspend"}, {"host": "resume"}],
                       [{"host": "suspend"}, {"host": "resume"}, {"host": "pause"}]):
@@ -1444,7 +1538,7 @@ while True:
         self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
         self.assertIn("ctrl+c   leave", states["keys"]["expect"])
         self.assertEqual(len(states["keys"]["expect"]), 14)
-        for meaning in ("next focus", "previous focus", "list/chat · info actions"):
+        for meaning in ("next focus", "previous focus", "fold tree · info actions"):
             self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127", states["chat"]["expect"])

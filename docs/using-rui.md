@@ -136,7 +136,8 @@ The overview list uses the full width at every terminal size, with no empty chat
 | --- | --- |
 | Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. Right on a Session row opens it, as Enter does. |
+| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. On a Session row, Left collapses the agents it created and Right expands them; Enter or a click opens it. |
+| Alt-? | Opens the next Session that needs you, including one hidden in a collapsed tree or scrolled out of view. |
 | Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. On **Archived** it opens the archived Sessions, or from there returns to the usual list; a click on **Archived** does the same, and a click elsewhere on the row is still **New Session**. In Settings, open **Model** to pick the default for future Sessions. |
 | Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
 | Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
