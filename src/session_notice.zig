@@ -1,6 +1,7 @@
 const std = @import("std");
 const submission = @import("submission_state.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const Text = @import("TerminalText.zig");
 
 pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
 
@@ -230,5 +231,142 @@ test "SUI-14 message and decision notices retain their placement during opening 
                 try std.testing.expectEqual(if (opening) true else if (waiting) false else case.in_flight, shown.in_flight);
             }
         }
+    }
+}
+
+pub const Departure = struct { store: []const u8, opened: ?[]const u8, action: ?u64 };
+
+/// The notice a departing terminal prints: how to come back, and for an open Session the
+/// commands that name its Store, its Session and any pending Action.
+pub fn writeDeparture(writer: *std.Io.Writer, facts: Departure) !void {
+    try writer.writeAll("\nYour chats keep working while you are away.\nCome back with: rui\n");
+    if (facts.opened) |session| {
+        try writer.writeAll("Resume: rui session resume --store ");
+        try Text.writeShellWord(writer, facts.store);
+        try Text.writeShellSession(writer, session, true);
+        try writer.writeByte('\n');
+        if (facts.action) |id| {
+            try writer.writeAll("Pending Action: inspect the complete proposal before deciding.\n");
+            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
+                try writer.print("rui action {s} --store ", .{command});
+                try Text.writeShellWord(writer, facts.store);
+                try Text.writeShellSession(writer, session, false);
+                try writer.print(" --action {d}\n", .{id});
+            }
+        }
+    } else {
+        try writer.writeAll("Overview: rui --store ");
+        try Text.writeShellWord(writer, facts.store);
+        try writer.writeByte('\n');
+    }
+}
+
+test "SUI-62 departure names the Store, the Session and the pending Action" {
+    // Decodes one `$'...'` word the way a POSIX shell reads it, into `out`; returns the value and the index after the word.
+    const decodeWord = struct {
+        fn decode(text: []const u8, out: []u8) !struct { value: []const u8, end: usize } {
+            if (!std.mem.startsWith(u8, text, "$'")) return error.NotQuotedWord;
+            var index: usize = 2;
+            var length: usize = 0;
+            while (true) {
+                if (index >= text.len) return error.UnterminatedWord;
+                const byte = text[index];
+                if (byte == '\'') return .{ .value = out[0..length], .end = index + 1 };
+                if (byte == '\\') {
+                    if (index + 1 >= text.len) return error.UnterminatedWord;
+                    const escaped = text[index + 1];
+                    if (escaped == '\\' or escaped == '\'') {
+                        out[length] = escaped;
+                        index += 2;
+                    } else {
+                        if (index + 4 > text.len) return error.UnterminatedWord;
+                        out[length] = try std.fmt.parseInt(u8, text[index + 1 .. index + 4], 8);
+                        index += 4;
+                    }
+                } else {
+                    out[length] = byte;
+                    index += 1;
+                }
+                length += 1;
+            }
+        }
+    }.decode;
+    // A 4095-byte Store escapes to about 8 KiB per shell word, and one departure writes four of them.
+    var storage: [64 * 1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    const ordinary = "\nYour chats keep working while you are away.\nCome back with: rui\n";
+    // Literal lines for the plain Store and one Session with a pending Action.
+    try writeDeparture(&out, .{ .store = "/s", .opened = "k7m2qx", .action = 7 });
+    try std.testing.expectEqualStrings(ordinary ++
+        "Resume: rui session resume --store $'/s' k7m2qx\n" ++
+        "Pending Action: inspect the complete proposal before deciding.\n" ++
+        "rui action inspect --store $'/s' --session k7m2qx --action 7\n" ++
+        "rui action allow --store $'/s' --session k7m2qx --action 7\n" ++
+        "rui action deny --store $'/s' --session k7m2qx --action 7\n", out.buffered());
+    out.end = 0;
+    try writeDeparture(&out, .{ .store = "/s", .opened = "k7m2qx", .action = null });
+    try std.testing.expectEqualStrings(ordinary ++ "Resume: rui session resume --store $'/s' k7m2qx\n", out.buffered());
+    out.end = 0;
+    try writeDeparture(&out, .{ .store = "/s", .opened = null, .action = 7 });
+    try std.testing.expectEqualStrings(ordinary ++ "Overview: rui --store $'/s'\n", out.buffered());
+
+    // Every Store text and Session, with and without a Session and an Action, round-trips through shell words.
+    const hostile_store = "it's a \\ \n\xe2\x80\xae ";
+    var long_buffer: [4095]u8 = undefined;
+    for (&long_buffer, 0..) |*byte, index| byte.* = "a'\\\n "[index % 5];
+    const long_store: []const u8 = &long_buffer;
+    const stores = [_][]const u8{ "/plain/store", "/with space", "/quote'd", hostile_store, long_store };
+    const sessions = [_][]const u8{ "k7m2qx", "09azvw" };
+    const actions = [_]?u64{ null, 7, std.math.maxInt(u64) };
+    for (stores) |store| for (sessions) |session| for (actions) |action| {
+        out.end = 0;
+        try writeDeparture(&out, .{ .store = store, .opened = session, .action = action });
+        var rest = out.buffered()[ordinary.len..];
+        var decoded: [4096]u8 = undefined;
+        // Resume line: the Store word, then the bare Session ID.
+        const resume_prefix = "Resume: rui session resume --store ";
+        try std.testing.expect(std.mem.startsWith(u8, rest, resume_prefix));
+        const resumed = try decodeWord(rest[resume_prefix.len..], &decoded);
+        try std.testing.expectEqualSlices(u8, store, resumed.value);
+        rest = rest[resume_prefix.len + resumed.end ..];
+        try std.testing.expectEqual(@as(u8, ' '), rest[0]);
+        try std.testing.expectEqualStrings(session, rest[1 .. 1 + session.len]);
+        rest = rest[1 + session.len ..];
+        try std.testing.expectEqual(@as(u8, '\n'), rest[0]);
+        rest = rest[1..];
+        if (action) |id| {
+            try std.testing.expect(std.mem.startsWith(u8, rest, "Pending Action: inspect the complete proposal before deciding.\n"));
+            rest = rest["Pending Action: inspect the complete proposal before deciding.\n".len..];
+            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
+                const command_prefix = try std.fmt.allocPrint(std.testing.allocator, "rui action {s} --store ", .{command});
+                defer std.testing.allocator.free(command_prefix);
+                try std.testing.expect(std.mem.startsWith(u8, rest, command_prefix));
+                const word = try decodeWord(rest[command_prefix.len..], &decoded);
+                try std.testing.expectEqualSlices(u8, store, word.value);
+                rest = rest[command_prefix.len + word.end ..];
+                try std.testing.expect(std.mem.startsWith(u8, rest, " --session "));
+                rest = rest[" --session ".len..];
+                try std.testing.expectEqualStrings(session, rest[0..session.len]);
+                rest = rest[session.len..];
+                const action_text = try std.fmt.allocPrint(std.testing.allocator, " --action {d}\n", .{id});
+                defer std.testing.allocator.free(action_text);
+                try std.testing.expect(std.mem.startsWith(u8, rest, action_text));
+                rest = rest[action_text.len..];
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), rest.len);
+    };
+
+    // Overview with no Session: the Store word alone.
+    for (stores) |store| {
+        out.end = 0;
+        try writeDeparture(&out, .{ .store = store, .opened = null, .action = null });
+        var decoded: [4096]u8 = undefined;
+        const prefix = "Overview: rui --store ";
+        const rest = out.buffered()[ordinary.len..];
+        try std.testing.expect(std.mem.startsWith(u8, rest, prefix));
+        const word = try decodeWord(rest[prefix.len..], &decoded);
+        try std.testing.expectEqualSlices(u8, store, word.value);
+        try std.testing.expectEqualStrings("\n", rest[prefix.len + word.end ..]);
     }
 }
