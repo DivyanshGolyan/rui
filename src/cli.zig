@@ -961,6 +961,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, caller_exit.knownError(err));
         return err;
     };
+    if (command != .host_settings and client.hostStatus(init.io, selected) == .ready) diagnoseRetainedHost(selected, .saved);
 }
 
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
@@ -1143,19 +1144,33 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ov
 }
 
 fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bool, retained: bool) !void {
-    if (retained) notice: {
-        var bytes: [4 * protocol.max_store_bytes + 512]u8 = undefined;
-        var notice = std.Io.Writer.fixed(&bytes);
-        notice.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. Changing settings means pausing this Host and all its work: rui host pause --store ") catch break :notice;
-        TerminalText.writeShellWord(&notice, ready.selector.slice()) catch break :notice;
-        notice.writeByte('\n') catch break :notice;
-        stderr.diagnostic("{s}", .{notice.buffered()});
-    }
+    if (retained) diagnoseRetainedHost(ready.selector.slice(), .assignments);
     if (!quiet) try writeHostStatus(io, .{ .ready = ready.facts }, ready.diagnostics_directory.slice());
 }
 
-fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8) !void {
-    try writer.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. Changing settings means pausing this Host and all its work: rui host pause --store ");
+/// What a running Host did not take: `--set` on a start that adopted it, or settings saved while it serves.
+const Retained = enum { assignments, saved };
+
+fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
+    // Each selector byte escapes to at most 4 bytes, and the notice names it twice.
+    var bytes: [8 * protocol.max_store_bytes + 512]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&bytes);
+    notice.writeByte('\n') catch return;
+    writeRetainedHostNotice(&notice, selector, retained) catch return;
+    // Not `diagnostic`: its fixed buffer would drop a notice with a long Store path.
+    stderr.diagnosticBytes(notice.buffered());
+}
+
+/// The one notice that a running Host keeps its settings, and the commands that apply new ones.
+/// `rui host restart` keeps a Host already on the target build, so the remedy is pause then start.
+fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8, retained: Retained) !void {
+    try writer.writeAll(switch (retained) {
+        .assignments => "rui: the running Host keeps its settings; --set assignments apply only to a new Host. ",
+        .saved => "rui: saved; the running Host keeps its old settings until a new Host starts. ",
+    });
+    try writer.writeAll("Applying settings means pausing this Host and all its work: rui host pause --store ");
+    try TerminalText.writeShellWord(writer, selector);
+    try writer.writeAll(", then rui host start --store ");
     try TerminalText.writeShellWord(writer, selector);
     try writer.writeByte('\n');
 }
@@ -5594,7 +5609,7 @@ test "Host selection round trips every Store placement and interface through def
             try std.testing.expectEqualStrings(if (kind == .mysql) mysql_identity else paths.store_identity.slice(), result.outcome.ready.facts.store.slice());
             var command: std.Io.Writer.Allocating = .init(gpa);
             defer command.deinit();
-            try writeRetainedHostNotice(&command.writer, result.outcome.ready.selector.slice());
+            try writeRetainedHostNotice(&command.writer, result.outcome.ready.selector.slice(), .assignments);
             var word: std.Io.Writer.Allocating = .init(gpa);
             defer word.deinit();
             try TerminalText.writeShellWord(&word.writer, dir);

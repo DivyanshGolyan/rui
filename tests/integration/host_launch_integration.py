@@ -1128,7 +1128,7 @@ def saved_settings(root, env):
                 assert defaults.returncode == 0 and json.loads(defaults.stdout)["host"]["status"] == "ready", defaults
                 retained = run_start(moved, selected_env, "--set", "execution.activeCapacity=3")
                 assert retained.returncode == 0 and instance(json.loads(retained.stdout), DEFAULT_ACTIVE_CAPACITY) == info["instance"], retained
-                assert f"rui host pause --store $'{moved.resolve()}'\n" in retained.stderr, retained
+                assert f"rui host pause --store $'{moved.resolve()}', then rui host start --store $'{moved.resolve()}'\n" in retained.stderr, retained
                 record = root / f"{name}-request.json"
                 command = subprocess.run([RUI, "session", "start",
                                           "--record", str(record), "--key", "placement-start",
@@ -1560,13 +1560,25 @@ def main():
             differing = run_start(held_store, env, "--set", 'execution.activeCapacity=7')
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
-            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. "
-                    f"Changing settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
+            remedy = (f"Applying settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}', "
+                      f"then rui host start --store $'{held_store.resolve()}'\n")
+            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. " + remedy
                     ) in differing.stderr, differing.stderr
+            saved = subprocess.run([RUI, "host", "set", "--store", str(held_store), "execution.activeCapacity", "7"],
+                env=env, capture_output=True, text=True, timeout=30)
+            assert saved.returncode == 0 and saved.stdout == "", saved
+            assert saved.stderr == "\nrui: saved; the running Host keeps its old settings until a new Host starts. " + remedy, saved.stderr
+            unset = subprocess.run([RUI, "host", "unset", "--store", str(held_store), "execution.activeCapacity"],
+                env=env, capture_output=True, text=True, timeout=30)
+            assert unset.returncode == 0 and unset.stdout == "" and unset.stderr == saved.stderr, unset
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
             stop_process(held)
+        assert wait_for_processes(held_store, 0) == []
+        for edit in (["set", "execution.activeCapacity", "7"], ["unset", "execution.activeCapacity"]):
+            quiet = subprocess.run([RUI, "host", edit[0], "--store", str(held_store), *edit[1:]], env=env, capture_output=True, text=True, timeout=30)
+            assert quiet.returncode == 0 and quiet.stdout == "" and quiet.stderr == "", quiet
 
         new_host_provider_policy(root, env)
         detached_settings_checks(root, env)
