@@ -1928,17 +1928,6 @@ def main(selected="all"):
             assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
-        saved.unlink()
-        fallback.parent.mkdir(parents=True)
-        fallback.symlink_to(store, target_is_directory=True)
-        with terminal_process([str(fixture.RUI), "session", "resume", "--", session],
-            env={**os.environ, "HOME": str(preferences_home)},
-        ) as (entered, master):
-            assert "Session:" not in read_terminal(master, "› ")
-            assert "Copy last answer" in chat_info_frame(master)
-            terminal_step(master, "\x03", "Your chats keep working")
-            assert entered.wait(timeout=5) == 0
-        fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o600)
         assert run(preferences_home, "session", "inspect", "--session", session, success=False) == ""
@@ -1952,16 +1941,10 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: close_pty(slave), lambda: close_pty(master))
         assert entered.returncode == 6 and b"[store_unavailable]" in entered.stderr, entered.stderr
-        assert not (state / "missing").exists() and not fallback.exists()
+        assert not (state / "missing").exists()
         assert run(preferences_home, "request", "list") == before_missing
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "session", "inspect", "--store", store, "--session", session))["work"]["state"]["kind"] == "idle"
-        before = run(preferences_home, "request", "list")
-        invalid_store = subprocess.run([str(fixture.RUI), "session", "send", "--store", "", "--to",
-            session], env={**os.environ, "HOME": str(preferences_home)},
-            input="not sent", capture_output=True, text=True, timeout=5)
-        assert invalid_store.returncode == 2 and "[store_path_malformed]" in invalid_store.stderr, invalid_store
-        assert invalid_store.stdout == "" and run(preferences_home, "request", "list") == before
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
         no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,

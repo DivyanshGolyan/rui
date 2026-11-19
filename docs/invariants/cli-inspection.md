@@ -8,6 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | CLI-22 | Module | A saved-defaults file decodes to values only when it is one of the four known versions with exactly that version's lines in order; encoding writes the lowest version that holds the values, and every valid value survives encode then decode. | `preference_document.decode`, `encode`, `version` | `CLI-22 a defaults file is the lowest version that holds its values` | docs/contracts/cli.md |
 | CLI-23 | Module | An edit changes only the fields it names; a new provider clears the saved model unless it is another way in to the same one; a model is saved only with a provider that supports it; a refused edit yields no values. | `preference_document.apply` | `CLI-23 an edit changes only what it names` | docs/contracts/cli.md |
+| CLI-25 | Module | An invocation selects its Store from the option, else its inherited `RUI_STORE` with a valid `RUI_ADDRESS` and nonempty `RUI_SENDER_HANDLE`, else the saved default, else the HOME default; inherited and saved Stores must already exist, a partial inherited set is refused, and saved defaults are read only when the first two are absent. | `store_target.next` | `CLI-25 an invocation selects one Store by a fixed order` | docs/contracts/cli.md |
 | CLI-27 | Module | A saved-defaults update publishes to disk exactly the document encoded from the new values. | `preferences.update` and the saved preferences file | `CLI-27 updates publish the encoded preference document` (`src/preferences.zig`) | docs/contracts/cli.md |
 | CLI-19 | Product | Request inspect and wait report the admitted multipart input identity and Message owner unchanged. | CLI admission and request observation | `cli_image_integration.py:cli_observation` | docs/contracts/inspection.md |
 | CLI-21 | Product | Native Message input refuses ambiguous or empty compositions and preserves scalar stdin bytes and implicit stdin order. | CLI and fake provider | `cli_image_integration.py:cli_rules` | docs/contracts/cli.md |
@@ -69,6 +70,7 @@ Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation v
 
 - Scoped help, syntax refusals and retired-name variants in `human_cli_integration.py:help_case`: CLI-1–CLI-2; the process witnesses remain.
 - Saved-defaults encoding and edit cases in `tests/integration/human_cli_integration.py:preference_edits`: CLI-22 and CLI-23; conflicting CLI option refusals and the on-disk configure witness remain.
+- Store entry cases in `tests/integration/human_cli_integration.py:main`: the HOME-default resume moves to CLI-25; `session send --store ""` is still witnessed by the `session list --store ""` refusal case; the missing saved Store and no-TTY witnesses remain.
 
 - CLI grammar/help/refusal blocks in `src/cli_args.zig:306` and `src/caller_exit.zig`: CLI-1–CLI-4, CLI-7, CLI-13. Preserve unrelated feature ownership until migrated.
 - Session list cases in `src/protocol_reply.zig:2750`, `tests/integration/session_list_integration.py` and `tests/integration/session_list_facts_integration.py`: CLI-11–CLI-12.
