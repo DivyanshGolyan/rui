@@ -127,7 +127,7 @@ pub const HostRead = struct {
 pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
-    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
+    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, protocol.SessionArchiveFilter, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
     window: *const fn (*Self, client.Requests, session_list.ArchivedCursor, *protocol_reply.ArchivedWindowPage) anyerror!?protocol_reply.ReadFailure,
     first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
@@ -1322,8 +1322,9 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .open_settings => next = .open_settings,
         .focus_chat => next = .focus_chat,
         .new_session => next = .new_session,
-        .list => |since| {
-            self.traversal = .init(since);
+        .list => |request| {
+            self.traversal = .init(request.since);
+            self.traversal.archive = request.archive;
             if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
             if (self.state.listed_at_ms == null) self.queueHost();
@@ -1410,7 +1411,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .list => {
             self.answer = .{ .page = undefined };
-            if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
+            if (try self.ops.list(self, requests, self.traversal.cursor, self.traversal.archive, &self.answer.page)) |failure| return failure.err();
         },
         .archived => |read| {
             self.answer = .{ .archived = undefined };
@@ -1921,7 +1922,7 @@ fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
     return process_memory.read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
 }
 
-fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
     const Sink = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1935,9 +1936,8 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     const file = self.scratch.?;
     var sink: Sink = .{ .io = self.init.io, .file = file };
     var buffer: client.ReplyBuffer = .{};
-    // The roster walks the live tab. A delta also asks for the archived Sessions that changed, so the
-    // window can take them; they are routed, never held as roster rows.
-    const archive: protocol.SessionArchiveFilter = if (cursor.since != null) .all else .active;
+    // The filter was chosen by the core once per walk: a delta also asks for the archived Sessions that
+    // changed, so the window can take them; they are routed, never held as roster rows.
     const reply = try requests.listSessionsFiltered(self.options.store, null, archive, cursor, &sink, &buffer);
     switch (try protocol_reply.SessionListReply.decode(self.init.io, file, null, cursor, reply)) {
         .page => |value| page.* = value,
@@ -2103,9 +2103,9 @@ const fake_operations: Operations = .{
         }
     }.window,
     .list = struct {
-        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
-            Seen.now.archive_filter = if (cursor.since != null) .all else .active;
+            Seen.now.archive_filter = archive;
             Seen.now.since = cursor.since;
             page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
@@ -2951,7 +2951,7 @@ fn readFailure(code: []const u8) protocol_reply.ReadFailure {
 test "a canonical Store failure in a listing ends the overview" {
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -3083,7 +3083,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
 
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -3106,8 +3106,8 @@ test "a terminal that answers the program status probe gets each Session's recor
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished = false;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (finished) page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 });
             return null;
         }
@@ -3181,8 +3181,8 @@ test "a Session's record takes its new name when only its Label changes" {
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var label: ?[]const u8 = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (label) |text| {
                 page.rows[0].label = .{};
                 page.rows[0].label.?.set(text) catch unreachable;
@@ -3223,8 +3223,8 @@ test "each later finish, and each later wait, is a record again though no listin
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var read: ?protocol.SessionWork = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (read) |listed| page.rows[0].work = listed;
             return null;
         }
@@ -3278,8 +3278,8 @@ test "a later Turn's finish the conversation read first is still a record when t
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished_turn: u64 = 1;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn });
             return null;
         }
@@ -3314,8 +3314,8 @@ test "a finish the conversation opened on is no done record when a listing reads
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished_turn: ?u64 = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (finished_turn) |finished| page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished });
             return null;
         }
@@ -3488,7 +3488,7 @@ const HostRecovery = struct {
 
 test "Host line appears once in overview and chat at wide and narrow widths, never from list failure" {
     const UnavailableList = struct {
-        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return error.ConnectionRefused;
         }
     };
@@ -4218,7 +4218,7 @@ test "a conversation that fails to open still names unconfirmed creation on depa
 test "a listing failure under a conversation ends the overview once the terminal is restored" {
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -4535,8 +4535,8 @@ test "overview Archived window effect runs one job and its reply becomes the win
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             for (page.rows[0..page.count]) |*row| {
                 row.archive_state = archive_state;
                 row.work.state = switch (archive_state) {
@@ -7256,7 +7256,7 @@ const EmptySessionOwner = struct {
         count += 1;
     }
 
-    fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+    fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
         generation += 1;
         page.* = .{ .count = count, .delta = .full, .since = .{ .instance = @splat(1), .generation = generation } };
         for (rows[0..count], page.rows[0..count]) |row, *listed| {
@@ -8355,8 +8355,8 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
 
 test "overview redraw deadline includes quota header with failed row off screen" {
     const Listing = struct {
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            const failure = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, archive, page);
             const row = &page.rows[page.count - 1];
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
@@ -8600,7 +8600,7 @@ test "wide launch draws late listing after presentation deadline without flashin
 
 test "wide launch waits for listing and opens the newest empty Session without creation" {
     const Listing = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             page.* = .{ .count = 5, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
             for (page.rows[0..5], 0..) |*row, i| {
                 row.* = .{ .created_at = @intCast(10 + i), .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
@@ -8642,7 +8642,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
 
 test "named launch waits for sign-in before choosing its binding" {
     const Listing = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
             const row = &page.rows[0];
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
@@ -8829,7 +8829,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
 
 test "wide launch shows stopped Host recovery and failed listing" {
     const Listing = struct {
-        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return error.ConnectionRefused;
         }
     };
@@ -8867,8 +8867,8 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
             files += 1;
             return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
         }
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            const failure = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, archive, page);
             for (page.rows[0..4], labels, 0..) |*row, label, at| {
                 row.label = try protocol.Bounded(100).from(label);
                 const since = test_now_s - 10;

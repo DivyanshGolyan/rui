@@ -1521,6 +1521,8 @@ pub const SessionTraversal = struct {
     cursor: SessionListCursor,
     delta: protocol.ListDelta = .full,
     since: ?protocol.SinceToken = null,
+    /// The archive filter of the whole walk, set once when the walk starts and kept across its pages.
+    archive: protocol.SessionArchiveFilter = .active,
 
     pub fn init(since: ?protocol.SinceToken) SessionTraversal {
         return .{ .cursor = .{ .since = since } };

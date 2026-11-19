@@ -217,8 +217,6 @@ pub const Listed = struct {
     attention: ?session_work.Attention = null,
     group: session_work.Group = .done,
     actions: session_work.Actions = .{},
-    /// False for an Archived window row: the slim wire row carries no work state, so the row has no mark.
-    known_work: bool = true,
     first: ?First = null,
 
     from_person_at: ?u64 = null,
@@ -264,29 +262,53 @@ pub const Listed = struct {
         return bytes[0..change_ring.id_bytes].*;
     }
 
-    /// An Archived window row, as the slim wire row gives it. Only the name and the age are known.
+    /// An Archived window row, as the slim wire row gives it.
     pub fn archived(row: anytype) Listed {
         return .{
             .reference = referenceOf(row.reference.slice()),
             .archive_state = .archived,
             .archive_seq = row.archive_seq,
+            .label = if (row.label) |*text| text.slice() else null,
             .workspace = "",
             .provider = .codex,
-            .label = if (row.label) |*text| text.slice() else null,
-            // The age is the stop time. The work state is not known, so the row shows no mark, and it feeds
-            // no count or group (its group stays the default `done`; Archived rows are never counted).
             .state = .{ .stopped = .{ .since = row.stopped_at, .cause = .stop } },
             .state_change_at = 0,
             .subtree_state_change_at = 0,
             .descendant_count = 0,
             .descendant_needs_you_count = 0,
-            .known_work = false,
             .first = if (row.first) |*first| .{
                 .position = first.position,
                 .admission = first.admission,
                 .sender = null,
                 .content = first.content,
                 .line = if (first.line) |*line| line.slice() else null,
+            } else null,
+        };
+    }
+
+    /// The one slim projection of an Archived Session: the name, the stop-time age, the Host's order and the
+    /// first Message. Nothing else reaches an archived row (no pin, creator, descendant counts, last line, work
+    /// state or group), so a routed row and a window read of the same Session are the same row. pendingRow
+    /// applies it to every archived row.
+    pub fn archivedSlim(self: Listed) Listed {
+        return .{
+            .reference = self.reference,
+            .archive_state = .archived,
+            .archive_seq = self.archive_seq,
+            .label = self.label,
+            .workspace = "",
+            .provider = .codex,
+            .state = .{ .stopped = .{ .since = self.state.since(), .cause = .stop } },
+            .state_change_at = 0,
+            .subtree_state_change_at = 0,
+            .descendant_count = 0,
+            .descendant_needs_you_count = 0,
+            .first = if (self.first) |first| .{
+                .position = first.position,
+                .admission = first.admission,
+                .sender = null,
+                .content = first.content,
+                .line = first.line,
             } else null,
         };
     }
@@ -594,18 +616,25 @@ pub const ArchivedWindow = struct {
     at_head: bool = false,
     /// The Host holds Archived Sessions older than the window's last row.
     more_below: bool = false,
+    /// One read is in flight. It is never cleared by leaving the tab: its answer clears it when it lands.
     inflight: bool = false,
+    /// The window must be re-read from the head before it is trusted (a full roster walk or an empty page).
+    reanchor: bool = false,
+    /// The last read failed. The window keeps the rows it holds, and the list interval retries.
     failed: bool = false,
 
     fn leave(self: *ArchivedWindow) void {
         self.epoch +%= 1;
-        self.inflight = false;
         self.failed = false;
     }
 };
 
+/// One roster walk's request. The core picks the archive filter once per walk: a walk with a since token
+/// also asks for the archived Sessions that changed, so the Archived window can take them.
+pub const ListRequest = struct { since: ?Token, archive: ArchiveFilter };
+
 pub const Effect = union(enum) {
-    list: ?Token,
+    list: ListRequest,
     read_first_lines: Reads,
     read_archived: ArchivedRead,
 
@@ -757,8 +786,6 @@ pub const Row = struct {
     attention: ?session_work.Attention = null,
     group: session_work.Group = .done,
     actions: session_work.Actions = .{},
-    /// False for an Archived window row (see Listed.known_work): its `state` only dates the age.
-    known_work: bool = true,
     first: ?First,
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
@@ -1725,7 +1752,9 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.listing = true;
         state.listing_wanted = true;
         state.next_list_ms = now_ms + list_interval_ms;
-        effects.add(.{ .list = state.token });
+        effects.add(.{ .list = .{ .since = state.token, .archive = if (state.token == null) .active else .all } });
+        // A failed Archived window read retries on the list interval; the rows it holds stay in view.
+        state.archived.failed = false;
         if (state.menu.loading()) askModels(state, effects);
     }
 }
@@ -1772,7 +1801,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     state.upgrade.reobserved();
     if (held != state.holdsHost()) state.presentation_revision +%= 1;
     try readFirstLines(state, effects);
-    if (answer.delta == .full) try reanchorArchived(state, effects);
+    if (answer.delta == .full) restartArchivedAtHead(state);
 }
 
 /// The Row a listed Session becomes while its page is pending (or, for an Archived window row, placed).
@@ -1935,15 +1964,12 @@ fn routeArchived(state: *State, incoming: *const Row) error{OutOfMemory}!void {
     if (at) |index| state.rows.items[index].listed = false;
     const key = incoming.archive_seq orelse return;
     if (!coversArchived(state, key)) return;
-    // A window row shows no work state whichever list delivered it, so the routed copy carries none either.
-    var windowed = incoming.*;
-    windowed.known_work = false;
     const index = at orelse blk: {
-        try state.rows.append(state.gpa, windowed);
+        try state.rows.append(state.gpa, incoming.*);
         try reindex(state);
         break :blk lookup(state.by_reference.items, incoming.reference).?;
     };
-    try applyArchived(state, &state.rows.items[index], &windowed);
+    try applyArchived(state, &state.rows.items[index], incoming);
 }
 
 fn namesArchived(rows: []const Listed, reference: Reference) bool {
@@ -1991,26 +2017,34 @@ fn placeArchived(state: *State, read: ArchivedRead, page: ArchivedPage) error{Ou
 }
 
 fn archivedAnswer(state: *State, answer: ArchivedAnswer, effects: *Effects) error{OutOfMemory}!void {
-    if (answer.read.epoch != state.archived.epoch) return;
+    // Any answer clears the one read in flight. A stale-epoch answer is dropped, and archivedReads decides again.
     state.archived.inflight = false;
+    if (answer.read.epoch != state.archived.epoch) return;
     const page = answer.page orelse {
         state.archived.failed = true;
         return;
     };
     // A page with no rows (no first or last key) off the head is a restored or stale anchor: re-read the
     // head in a new epoch rather than trust the flags beside it (inspection.md, Archived window).
-    if (page.rows.len == 0 and answer.read.from != .head) return restartArchivedAtHead(state, effects);
+    if (page.rows.len == 0 and answer.read.from != .head) {
+        restartArchivedAtHead(state);
+        return;
+    }
     try placeArchived(state, answer.read, page);
     // Only rows the window now holds are visible in the Archived view, so only they read a line.
     try readFirstLines(state, effects);
 }
 
 /// Asks for the Archived window page the screen needs next, one at a time: the head when the window is
-/// empty, the next older page when the selection nears the bottom, the newer page when a trimmed window's
-/// top comes into reach. Rows far above the selection are trimmed first, so the window keeps the shown
-/// rows and a margin.
+/// empty or re-anchored, the next older page when the selection nears the bottom, the newer page when a
+/// trimmed window's top comes into reach. Rows far from the selection are trimmed on both sides first, so
+/// the window holds the shown rows and about two screens of margin each way.
 fn archivedReads(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (state.archive != .archived or state.archived.inflight or state.archived.failed) return;
+    if (state.archived.reanchor) {
+        state.archived.reanchor = false;
+        return readArchived(state, effects, .head);
+    }
     const margin = @max(@as(usize, state.size.height), 1);
     var at = selectedAt(state);
     if (at > 3 * margin) {
@@ -2024,36 +2058,41 @@ fn archivedReads(state: *State, effects: *Effects) error{OutOfMemory}!void {
         try arrange(state);
         at = selectedAt(state);
     }
+    if (state.order.items.len -| at > 3 * margin) {
+        // Rows older than the one two screens below the selection are dropped; the Host still holds them.
+        const cutoff = state.rows.items[state.order.items[at + 2 * margin]].archive_seq orelse return;
+        for (state.rows.items) |*row| {
+            if (!row.listed or row.archive_state != .archived) continue;
+            if ((row.archive_seq orelse 0) < cutoff) row.listed = false;
+        }
+        state.archived.more_below = true;
+        try retainRows(state);
+        try arrange(state);
+        at = selectedAt(state);
+    }
     const bounds = archivedBounds(state);
     const shown = state.order.items.len;
-    const from: session_list.ArchivedCursor = if (bounds.first == null)
-        (if (state.archived.at_head) return else .head)
-    else if (state.archived.more_below and shown -| at <= margin)
-        .{ .below = bounds.last.? }
-    else if (!state.archived.at_head and at < margin)
-        .{ .above = bounds.first.? }
-    else
-        return;
+    if (bounds.first == null) {
+        if (state.archived.at_head) return;
+        return readArchived(state, effects, .head);
+    }
+    if (state.archived.more_below and shown -| at <= margin) return readArchived(state, effects, .{ .below = bounds.last.? });
+    if (!state.archived.at_head and at < margin) return readArchived(state, effects, .{ .above = bounds.first.? });
+}
+
+fn readArchived(state: *State, effects: *Effects, from: session_list.ArchivedCursor) void {
     state.archived.inflight = true;
     effects.add(.{ .read_archived = .{ .from = from, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
 }
 
-/// A full roster walk re-anchors a held window: it re-reads from the newest row held, in a new epoch.
-fn reanchorArchived(state: *State, effects: *Effects) error{OutOfMemory}!void {
-    const first = archivedBounds(state).first orelse return;
+/// Re-anchors the Archived window at the head in a new epoch. A full roster walk and an empty page off the
+/// head both come here, and so does tab re-entry through archivedReads. The head answer replaces every
+/// held archived row the Host does not name, so a stale window cannot survive a re-anchor. A read in
+/// flight is not replaced: its answer is stale now, and archivedReads reads the head once it lands.
+fn restartArchivedAtHead(state: *State) void {
     state.archived.epoch +%= 1;
     state.archived.failed = false;
-    state.archived.inflight = true;
-    effects.add(.{ .read_archived = .{ .from = .{ .below = first +| 1 }, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
-}
-
-/// Re-reads the Archived window from the head in a new epoch. The head answer replaces every held archived
-/// row the Host does not name, so a stale window cannot survive a re-anchor.
-fn restartArchivedAtHead(state: *State, effects: *Effects) error{OutOfMemory}!void {
-    state.archived.epoch +%= 1;
-    state.archived.failed = false;
-    state.archived.inflight = true;
-    effects.add(.{ .read_archived = .{ .from = .head, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
+    state.archived.reanchor = true;
 }
 
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
@@ -2155,7 +2194,8 @@ fn reindex(state: *State) error{OutOfMemory}!void {
 }
 
 /// The Row a listed Session becomes while its page is pending, or placed as an Archived window row.
-fn pendingRow(state: *State, listed: Listed) error{OutOfMemory}!Row {
+fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
+    const listed = if (input.archive_state == .archived) input.archivedSlim() else input;
     const shown = listed.state.asOf(state.now_ms);
     return .{
         .reference = listed.reference,
@@ -2176,7 +2216,6 @@ fn pendingRow(state: *State, listed: Listed) error{OutOfMemory}!Row {
         .model = bounded(model_capability.max_model_bytes, listed.model),
         .label = if (listed.label) |text| labelOf(text) else null,
         .state = shown,
-        .known_work = listed.known_work,
         .turn = listed.turn,
         .first_action = listed.first_action,
         .attention = listed.attention,
@@ -2507,7 +2546,7 @@ fn shownSince(state: *const State, row: *const Row) u64 {
 }
 
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
-    if (!row.known_work) return null;
+    if (row.archive_state == .archived) return null;
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
 }
 
@@ -3392,7 +3431,7 @@ pub const Activity = union(enum) { none, spin, held: []const u8 };
 const no_work_rule: Rule = .{ .mark = .none, .colour = .normal };
 
 fn markRule(state: *const State, row: *const Row) Rule {
-    if (!row.known_work) return no_work_rule;
+    if (row.archive_state == .archived) return no_work_rule;
     return rules.get(shownKind(state, row));
 }
 
@@ -3745,7 +3784,7 @@ fn ago(seconds: u64) WorkState.Since {
 fn opened(rows: []const Listed) !State {
     var state = try testState();
     errdefer state.deinit();
-    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = test_now_s * 1000 }));
+    try expectEffects(&.{.{ .list = .{ .since = null, .archive = .active } }}, try step(&state, .{ .tick = test_now_s * 1000 }));
     _ = try respond(&state, .full, testToken(1), rows);
     return state;
 }
@@ -3789,7 +3828,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     for (expected, effects) |want, got| {
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .list => |since| try std.testing.expectEqual(since, got.list),
+            .list => |request| try std.testing.expectEqualDeep(request, got.list),
             .read_first_lines => |reads| {
                 try std.testing.expectEqual(reads.len, got.read_first_lines.len);
                 for (reads.slice(), got.read_first_lines.slice()) |a, b| {
@@ -4962,7 +5001,7 @@ test "session resume opens its Session through the overview, which then keeps it
     var state = try testState();
     defer state.deinit();
     try expectEffects(&.{ .{ .open = "c3d4e5".* }, .list_models }, try step(&state, .{ .open = "c3d4e5".* }));
-    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = test_now_s * 1000 }));
+    try expectEffects(&.{.{ .list = .{ .since = null, .archive = .active } }}, try step(&state, .{ .tick = test_now_s * 1000 }));
     _ = try respond(&state, .full, testToken(1), &mixed);
     try expectSelected(&state, "c3d4e5");
 }
@@ -5251,7 +5290,7 @@ test "merging list pages keeps each Session once" {
     var nine: [9]Listed = undefined;
     for (&nine, 0..) |*row, n| row.* = session(&[6]u8{ 'e', 'e', 'e', 'e', 'e', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "E" });
     var asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = testToken(2) }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(2), .archive = .all } }}, asked);
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = nine[0..8], .answer = null } } });
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "dddddd" });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{ a, b, c, nine[0] }, .restarts = true, .answer = null } } });
@@ -5261,7 +5300,7 @@ test "merging list pages keeps each Session once" {
     try std.testing.expectEqual(testToken(6), state.token.?);
 
     asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{.{ .list = testToken(6) }}, asked);
+    try expectEffects(&.{.{ .list = .{ .since = testToken(6), .archive = .all } }}, asked);
     _ = try respond(&state, .not_modified, testToken(6), &.{});
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc", "eeeee0", "eeeee8" });
 
@@ -5288,7 +5327,7 @@ test "a Session listed twice keeps its later row, whatever the order" {
 
     var rows: [10]Listed = undefined;
     for (&rows, 0..) |*row, n| row.* = session(&[6]u8{ 'r', 'r', 'r', 'r', 'r', '0' + @as(u8, @intCast(n)) }, .{ .idle = ago(n) }, .{ .label = "R" });
-    try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = state.now_ms + list_interval_ms }));
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..8], .answer = null } } });
     _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[8..], .answer = .{ .delta = .full, .since = testToken(2) } } } });
@@ -5321,13 +5360,13 @@ test "the overview lists once a second, one listing at a time" {
     var state = try testState();
     defer state.deinit();
     const start = test_now_s * 1000;
-    try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = start }));
+    try expectEffects(&.{.{ .list = .{ .since = null, .archive = .active } }}, try step(&state, .{ .tick = start }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     _ = try respond(&state, .full, testToken(1), &mixed);
-    try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 2 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .tick = start + 2 * list_interval_ms + 500 }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
+    try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectScreenLine(&state, 0, " + New chat");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
@@ -6048,8 +6087,6 @@ test "an Archived window row has no mark: its name and age show, and no count re
     var host: [2]Listed = undefined;
     host[0] = session("w00010", .{ .stopped = .{ .since = test_now_s - 10, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 10, .first = .{ .position = 0, .admission = 10, .sender = null, .content = null, .line = "inline line" } });
     host[1] = session("w00009", .{ .failed = .{ .since = test_now_s - 9, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = "failed line" } });
-    // The window rows reach the overview from the Host's slim rows, which carry no work state.
-    for (&host) |*row| row.known_work = false;
 
     var state = try opened(&.{});
     defer state.deinit();
@@ -6129,10 +6166,13 @@ test "archive filter switch keeps the roster and reads the window once per entry
     try std.testing.expect(state.archived.inflight);
     var stale = read;
     stale.epoch +%= 1;
-    _ = try step(&state, .{ .archived = .{ .read = stale, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
+    const retry = try step(&state, .{ .archived = .{ .read = stale, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
     try std.testing.expect(state.find(archived.reference) == null);
+    try std.testing.expectEqual(@as(usize, 1), retry.slice().len);
+    const again = retry.slice()[0].read_archived;
+    try std.testing.expect(again.from == .head and again.epoch == read.epoch);
     try std.testing.expect(state.archived.inflight);
-    _ = try step(&state, .{ .archived = .{ .read = read, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
+    _ = try step(&state, .{ .archived = .{ .read = again, .page = .{ .rows = &.{archived}, .first = 7, .last = 7, .more_above = false, .more_below = false } } });
     try std.testing.expect(state.find(archived.reference) != null);
     try std.testing.expect(!state.archived.inflight);
     effects = .{};
@@ -6143,6 +6183,271 @@ test "archive filter switch keeps the roster and reads the window once per entry
     try changeArchiveView(&state, .archived, &effects);
     try std.testing.expectEqual(@as(usize, 0), effects.len);
     try std.testing.expectEqual(@as(usize, 1), state.order.items.len);
+}
+
+test "archived window stays bounded when scrolled far down and back up" {
+    var refs: [200][6]u8 = undefined;
+    var host: [200]Listed = undefined;
+    for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "b{d:0>5}", .{at}) catch unreachable;
+    for (0..host.len) |index| {
+        const key: u64 = host.len - index;
+        host[index] = session(&refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    defer state.deinit();
+    const margin: usize = 2;
+    state.size = .{ .width = 80, .height = margin };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &host, effects);
+    // The held rows never exceed this bound, however far the selection travels in either direction.
+    const bound = 6 * margin + 2 * window_test_page;
+    var most: usize = 0;
+    for (0..host.len + 8) |_| {
+        const at = selectedAt(&state);
+        state.selected = .{ .session = state.rows.items[state.order.items[@min(at + 1, state.order.items.len - 1)]].reference };
+        try serveWindow(&state, &host, try step(&state, .{ .tick = state.now_ms }));
+        most = @max(most, heldArchived(&state));
+    }
+    try std.testing.expect(!state.archived.more_below);
+    try std.testing.expect(most <= bound);
+    for (0..host.len + 8) |_| {
+        const at = selectedAt(&state);
+        state.selected = .{ .session = state.rows.items[state.order.items[at -| 1]].reference };
+        try serveWindow(&state, &host, try step(&state, .{ .tick = state.now_ms }));
+        most = @max(most, heldArchived(&state));
+    }
+    try std.testing.expect(state.archived.at_head);
+    try std.testing.expect(most <= bound);
+    try expectWindowMatchesHost(&state, &host);
+}
+
+fn heldArchived(state: *const State) usize {
+    var count: usize = 0;
+    for (state.rows.items) |row| {
+        if (row.listed and row.archive_state == .archived) count += 1;
+    }
+    return count;
+}
+
+test "a full roster walk re-anchors the Archived window at the head and shows a newer archive" {
+    var old: [4]Listed = undefined;
+    var old_refs: [4][6]u8 = undefined;
+    for (&old_refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "o{d:0>5}", .{at}) catch unreachable;
+    for (0..old.len) |index| {
+        const key: u64 = 40 - 10 * index;
+        old[index] = session(&old_refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &old, effects);
+    try std.testing.expect(state.archived.at_head);
+    const epoch = state.archived.epoch;
+
+    // While the Host was away, Session X was archived above the window and the roster walk lost its deltas.
+    const newer = session("xxxxxx", .{ .stopped = .{ .since = test_now_s - 50, .cause = .stop } }, .{ .label = "newer", .archive_state = .archived, .archive_seq = 50 });
+    var host: [5]Listed = undefined;
+    host[0] = newer;
+    @memcpy(host[1..], &old);
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    const walked = try respond(&state, .full, testToken(2), &.{});
+    var reads: usize = 0;
+    for (walked.slice()) |effect| switch (effect) {
+        .read_archived => |read| {
+            reads += 1;
+            try std.testing.expect(read.from == .head);
+            try std.testing.expectEqual(epoch +% 1, read.epoch);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), reads);
+    try serveWindow(&state, &host, walked);
+    try std.testing.expect(state.find(newer.reference) != null);
+    try expectWindowMatchesHost(&state, &host);
+}
+
+test "archive tab flips keep one Archived read in flight and drop its stale answer" {
+    var host: [3]Listed = undefined;
+    var refs: [3][6]u8 = undefined;
+    for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "f{d:0>5}", .{at}) catch unreachable;
+    for (0..host.len) |index| {
+        const key: u64 = 30 - 10 * index;
+        host[index] = session(&refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try std.testing.expectEqual(@as(usize, 1), effects.len);
+    const read = effects.slice()[0].read_archived;
+
+    // Flipping tabs while the head read is in flight queues no further read: the one read is still outstanding.
+    var flipped: usize = 0;
+    for (0..6) |_| {
+        var flip: Effects = .{};
+        try changeArchiveView(&state, .active, &flip);
+        try changeArchiveView(&state, .archived, &flip);
+        for (flip.slice()) |effect| switch (effect) {
+            .read_archived => flipped += 1,
+            else => {},
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 0), flipped);
+    try std.testing.expect(state.archived.inflight);
+
+    // The answer lands in the epoch it was asked in, but the tab was left since: it is dropped, and the
+    // one read that follows is the only one outstanding.
+    var buffer: [window_test_page]Listed = undefined;
+    const landed = try step(&state, .{ .archived = .{ .read = read, .page = hostPage(&host, .head, &buffer) } });
+    var outstanding: usize = 0;
+    for (landed.slice()) |effect| switch (effect) {
+        .read_archived => |next| {
+            outstanding += 1;
+            try std.testing.expect(next.from == .head and next.epoch == state.archived.epoch);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), outstanding);
+    try std.testing.expect(state.archived.inflight);
+    try serveWindow(&state, &host, landed);
+    try std.testing.expect(!state.archived.inflight);
+    try expectWindowMatchesHost(&state, &host);
+}
+
+test "a failed Archived read keeps its rows and the list interval retries it" {
+    var host: [20]Listed = undefined;
+    var refs: [20][6]u8 = undefined;
+    for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "g{d:0>5}", .{at}) catch unreachable;
+    for (0..host.len) |index| {
+        const key: u64 = 20 - index;
+        host[index] = session(&refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 2 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &host, effects);
+    const held = heldArchived(&state);
+    try std.testing.expectEqual(window_test_page, held);
+
+    // Selecting the last shown row asks for the next older page; the Host fails to answer it.
+    state.selected = .{ .session = state.rows.items[state.order.items[state.order.items.len - 1]].reference };
+    const asked = try step(&state, .{ .tick = state.now_ms });
+    var read: ?ArchivedRead = null;
+    for (asked.slice()) |effect| switch (effect) {
+        .read_archived => |next| read = next,
+        else => {},
+    };
+    try std.testing.expect(read != null and read.?.from == .below);
+    _ = try step(&state, .{ .archived = .{ .read = read.?, .page = null } });
+    try std.testing.expect(state.archived.failed);
+    try std.testing.expectEqual(held, heldArchived(&state));
+
+    // Nothing is re-read until the list interval comes round; then the read is asked again and succeeds.
+    const quiet = try step(&state, .{ .tick = state.now_ms });
+    for (quiet.slice()) |effect| try std.testing.expect(effect != .read_archived);
+    const retried = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    var asked_again = false;
+    for (retried.slice()) |effect| switch (effect) {
+        .read_archived => |next| {
+            asked_again = true;
+            try std.testing.expect(next.from == .below and next.epoch == read.?.epoch);
+        },
+        else => {},
+    };
+    try std.testing.expect(asked_again);
+    try serveWindow(&state, &host, retried);
+    try std.testing.expect(!state.archived.failed);
+    try std.testing.expect(heldArchived(&state) > held);
+    try expectWindowMatchesHost(&state, &host);
+}
+
+test "a restored Archived row draws its live mark again" {
+    const archived = session("rrrrrr", .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } }, .{ .label = "restored", .archive_state = .archived, .archive_seq = 5, .first = .{ .position = 0, .admission = 5, .sender = null, .content = null, .line = "restored line" } });
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 24 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &.{archived}, effects);
+    try std.testing.expectEqual(ArchiveState.archived, state.find(archived.reference).?.archive_state);
+
+    // The Session is restored: the roster walk reports it live, failed, and the window row becomes a roster row.
+    const live = session("rrrrrr", .{ .failed = .{ .since = test_now_s - 3, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .label = "restored", .first = .{ .position = 0, .admission = 5, .sender = null, .content = null, .line = "restored line" } });
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    _ = try respond(&state, .changed, testToken(2), &.{live});
+    try changeArchiveView(&state, .active, &effects);
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, marks.get(.failed).unicode) != null);
+}
+
+test "a routed Archived row equals the window read of the same Session, pin and creator included" {
+    const creator = session("cccccc", .{ .idle = ago(1) }, .{ .label = "maker", .first = .{ .position = 0, .admission = 1, .sender = null, .content = null, .line = "maker line" } });
+    const pinned = session("pppppp", .{ .stopped = .{ .since = test_now_s - 9, .cause = .stop } }, .{ .label = "saved", .archive_state = .archived, .archive_seq = 9, .pin_order = 1, .creator = "cccccc".*, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = "saved line" } });
+
+    // Routed: the Host's delta carries the archived Session with its pin and creator.
+    var routed_state = try opened(&.{creator});
+    defer routed_state.deinit();
+    routed_state.size = .{ .width = 80, .height = 24 };
+    var effects: Effects = .{};
+    try changeArchiveView(&routed_state, .archived, &effects);
+    try serveWindow(&routed_state, &.{}, effects);
+    _ = try step(&routed_state, .{ .tick = routed_state.now_ms + list_interval_ms });
+    _ = try respond(&routed_state, .changed, testToken(2), &.{ creator, pinned });
+    const routed = routed_state.find(pinned.reference).?.*;
+
+    // Read: the window reads the same Session from the Host.
+    var read_state = try opened(&.{creator});
+    defer read_state.deinit();
+    read_state.size = .{ .width = 80, .height = 24 };
+    var read_effects: Effects = .{};
+    try changeArchiveView(&read_state, .archived, &read_effects);
+    try serveWindow(&read_state, &.{pinned}, read_effects);
+    const read = read_state.find(pinned.reference).?.*;
+
+    // The slim projection drops the pin and the creator from both, so the routed row is the read row.
+    try std.testing.expectEqual(@as(?u64, null), routed.pin_order);
+    try std.testing.expectEqual(@as(?[6]u8, null), routed.creator);
+    try std.testing.expectEqual(read.pin_order, routed.pin_order);
+    try std.testing.expectEqual(read.creator, routed.creator);
+    try std.testing.expectEqual(read.archive_seq, routed.archive_seq);
+    try std.testing.expectEqual(read.archive_state, routed.archive_state);
+    try std.testing.expectEqualStrings(read.label.?.slice(), routed.label.?.slice());
+    try std.testing.expectEqualStrings(read.first.?.line.?, routed.first.?.line.?);
+    try std.testing.expectEqual(read.first.?.admission, routed.first.?.admission);
+    try std.testing.expectEqual(std.meta.activeTag(read.state), std.meta.activeTag(routed.state));
+    try std.testing.expectEqual(read.descendant_count, routed.descendant_count);
+    // And the two Archived views draw the same row.
+    const routed_text = try screenText(&routed_state, 80, 24, .{});
+    defer std.testing.allocator.free(routed_text);
+    const read_text = try screenText(&read_state, 80, 24, .{});
+    defer std.testing.allocator.free(read_text);
+    try std.testing.expectEqualStrings(read_text, routed_text);
+}
+
+test "the Archived view lists Sessions flat in the Host's order, with no nesting and no pins first" {
+    const parent = session("p00001", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "parent", .archive_state = .archived, .archive_seq = 30 });
+    const pinned = session("q00002", .{ .stopped = .{ .since = test_now_s - 20, .cause = .stop } }, .{ .label = "pinned", .archive_state = .archived, .archive_seq = 20, .pin_order = 1 });
+    const child = session("c00003", .{ .stopped = .{ .since = test_now_s - 10, .cause = .stop } }, .{ .label = "child", .archive_state = .archived, .archive_seq = 10, .creator = "p00001".* });
+    const host = [_]Listed{ parent, pinned, child };
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 24 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &host, effects);
+    try std.testing.expectEqual(host.len, state.order.items.len);
+    for (host, 0..) |want, at| {
+        const index = state.order.items[at];
+        try std.testing.expectEqualSlices(u8, &want.reference, &state.rows.items[index].reference);
+        try std.testing.expectEqual(@as(?u32, null), state.nodes.items[index].logical_parent);
+    }
 }
 
 test "archive failure and unconfirmed requests stay visible and surface recoverable errors" {
@@ -6570,7 +6875,7 @@ test "shared model reads are admitted by core openings and deduplicated across f
         try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
-        try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
+        try expectEffects(&.{ .{ .list = .{ .since = testToken(1), .archive = .all } }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
         try expectEffects(&.{show}, try openModelConsumer(&state, opening));
         try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
         try std.testing.expect(!state.asking_models and !state.menu.loading());
@@ -6604,7 +6909,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
         try std.testing.expectEqual(wanted, state.asking_models);
         try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         const ticked = try step(&state, .{ .tick = state.next_list_ms });
-        try expectEffects(&.{.{ .list = testToken(1) }}, ticked);
+        try expectEffects(&.{.{ .list = .{ .since = testToken(1), .archive = .all } }}, ticked);
         if (hold == .reobserving) {
             _ = try respond(&state, .full, testToken(2), &.{});
             try std.testing.expect(!state.holdsHost());
@@ -6855,7 +7160,7 @@ test "archive admission reports only a new ledger request across every surface c
             _ = try step(&state, .{ .tick = test_now_s * 1000 });
             if (archive == .archived) {
                 _ = try respond(&state, .full, testToken(1), &.{});
-                _ = try step(&state, .{ .archived = .{ .read = .{ .from = .head, .rows = 40, .epoch = 0 }, .page = .{ .rows = &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = .archived, .archive_seq = 5 })}, .first = 5, .last = 5, .more_above = false, .more_below = false } } });
+                _ = try step(&state, .{ .archived = .{ .read = .{ .from = .head, .rows = 40, .epoch = state.archived.epoch }, .page = .{ .rows = &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = .archived, .archive_seq = 5 })}, .first = 5, .last = 5, .more_above = false, .more_below = false } } });
                 state.selected = .{ .session = ref };
             } else _ = try respond(&state, .full, testToken(1), &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = archive })});
             if (held != .none) {
@@ -7686,7 +7991,9 @@ test "Session pin empty visibility keeps archive membership and never counts a r
         var state = try opened(&.{});
         defer state.deinit();
         state.archive = filter;
+        // The window holds nothing here and is not read: the roster's own rows are what this case checks.
         state.archived.at_head = true;
+        state.archived.reanchor = false;
         _ = try refresh(&state, .full, testToken(1), &.{row});
         const shown = @intFromBool(filter.includes(archive) and archive != .archived);
         try std.testing.expectEqual(shown, state.order.items.len);
@@ -8616,6 +8923,35 @@ const LinesDomainBase = struct {
         };
     }
 
+    /// The slim wire row an Archived window read carries for a Session: the decoder's shape, mapped by
+    /// `Listed.archived` exactly as a window answer is.
+    const WireText = struct {
+        text: []const u8,
+
+        fn slice(self: *const WireText) []const u8 {
+            return self.text;
+        }
+    };
+    const WireRow = struct {
+        reference: WireText,
+        archive_seq: u64,
+        stopped_at: u64,
+        label: ?WireText,
+        first: ?struct { position: u64, admission: u64, content: @FieldType(First, "content"), line: ?WireText },
+    };
+
+    fn throughWindow(listed: Listed, seq: u64) Listed {
+        const wire: WireRow = .{
+            .reference = .{ .text = &listed.reference },
+            .archive_seq = seq,
+            .stopped_at = test_now_s - seq,
+            .label = if (listed.label) |label| WireText{ .text = label } else null,
+            // A window row a Session is listed by carries its first Message, which makes it visible.
+            .first = .{ .position = 0, .admission = seq, .content = null, .line = .{ .text = "archived line" } },
+        };
+        return Listed.archived(wire);
+    }
+
     fn selectionRef(selected: Selection) ?Reference {
         return switch (selected) {
             .session => |ref| ref,
@@ -8720,7 +9056,8 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     for (std.enums.values(D.Shape)) |shape| for (std.enums.values(ArchiveFilter)) |filter| for (std.enums.values(ArchiveState)) |archive| {
         var fixture = D.fixtures();
         const total: usize = if (shape == .empty) 0 else fixture.len;
-        const pins: usize = switch (shape) {
+        // An Archived row is never pinned: its window row has no pin, so the Archived view is flat.
+        const pins: usize = if (archive == .archived) 0 else switch (shape) {
             .empty, .unpinned => 0,
             .pinned => total,
             .both => total / 2,
@@ -8729,11 +9066,9 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
             entry.listed.archive_state = archive;
             entry.listed.pin_order = if (index < pins) @intCast(100 - index) else null;
             if (archive == .archived) {
-                // The Host keys archived rows newest first; fixture order is the Host order.
-                const seq: u64 = @intCast(total - index);
-                entry.listed.archive_seq = seq;
-                // Archived rows reach the frame through the window, which carries no work state.
-                entry.listed.known_work = false;
+                // The Host keys archived rows newest first; fixture order is the Host order. Each archived
+                // row is the Listed that the Host's window read maps to, not a hand-set archived flag.
+                entry.listed = D.throughWindow(entry.listed, total - index);
             }
         }
         if (pins > 1) {
@@ -8768,6 +9103,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         for (0..total) |index| input[index] = fixture[total - 1 - index].listed;
         var state = try testState();
         defer state.deinit();
+        state.size = .{ .width = 80, .height = 24 };
         _ = try step(&state, .{ .tick = test_now_s * 1000 });
         _ = try respond(&state, .full, testToken(1), input[0..total]);
         // Archived rows reach the overview through the Archived window only: the Host answers them in one page,
@@ -8898,8 +9234,10 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     };
     try D.checkBoundaries();
     // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
-    // Re-recorded again: an Archived window row has no work state, so it draws no mark (main drew the stopped mark).
-    // The only change from main's matrix is that mark cell on the archived rows; the rest of the frame is main's.
+    // Re-recorded again: an Archived window row has no work state, so it draws no mark. Main drew each row's own
+    // work mark (the archived row's state mark), so the mark cell is the change from main's matrix. The Archived
+    // view is also flat (no pin-first order, no nesting), which main did not do, so this golden is not yet
+    // proven to differ from main's only in the mark cell: see the report.
     try std.testing.expectEqual(@as(u64, 0xa434ddb7ed5fc5b), bytes_and_styles);
 }
 
