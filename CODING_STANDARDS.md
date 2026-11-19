@@ -95,6 +95,9 @@ A new surface that does the same job as an existing component calls that compone
 
 Before correcting a failure, identify its owner, invariant and earliest violating transition.
 Correct that transition or replace the owning model, not a downstream observer.
+For a bug, that owner answers why the bug was possible: a rule with two owners, a rule applied beyond its case, a check only one path runs, a caller that must know a policy or a call order, or a test that pinned the broken promise ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
+The bug fix's `## Summary` states it in a `Why possible:` line and how the fix removes that class.
+Only a root fix that needs a user decision under [Authority](AGENTS.md#authority) (a contract or behavior change, or wider scope) may land after the instance fix, as a linked issue under the same workstream.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.
