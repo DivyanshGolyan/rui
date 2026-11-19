@@ -390,6 +390,8 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .host = report_host,
         .account = account,
         .reader = reader,
+        .logins = signInLogins(),
+        .defaults = .{ .permission_mode = @import("product_defaults.zig").permission_mode, .recommended_model = @import("product_defaults.zig").recommended_model },
     };
     if (reader == .command_line and edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
@@ -420,12 +422,20 @@ fn accountDetails(init: std.process.Init, shown: *codex_auth.Shown) ?defaults_re
     return result;
 }
 
+fn signInLogins() defaults_report.Logins {
+    return .{
+        .chatgpt = comptime protocol.Provider.chatgpt.login().?,
+        .codex = comptime protocol.Provider.codex.login().?,
+        .openai = comptime protocol.Provider.openai.login().?,
+    };
+}
+
 fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
     var shown: codex_auth.Shown = undefined;
     const account = if (readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-    try defaults_report.writeSignIns(&output.interface, readiness, account);
+    try defaults_report.writeSignIns(&output.interface, readiness, account, signInLogins());
     try output.flush();
 }
 
