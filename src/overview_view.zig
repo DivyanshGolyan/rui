@@ -208,6 +208,8 @@ pub const Listed = struct {
     attention: ?session_work.Attention = null,
     group: session_work.Group = .done,
     actions: session_work.Actions = .{},
+    /// False for an Archived window row: the slim wire row carries no work state, so the row has no mark.
+    known_work: bool = true,
     first: ?First = null,
 
     from_person_at: ?u64 = null,
@@ -257,7 +259,10 @@ pub const Listed = struct {
             .workspace = "",
             .provider = .codex,
             .label = if (row.label) |*text| text.slice() else null,
+            // The age is the stop time. The work state is not known, so the row shows no mark, and it feeds
+            // no count or group (its group stays the default `done`; Archived rows are never counted).
             .state = .{ .stopped = .{ .since = row.stopped_at, .cause = .stop } },
+            .known_work = false,
             .first = if (row.first) |*first| .{
                 .position = first.position,
                 .admission = first.admission,
@@ -720,6 +725,8 @@ pub const Row = struct {
     attention: ?session_work.Attention = null,
     group: session_work.Group = .done,
     actions: session_work.Actions = .{},
+    /// False for an Archived window row (see Listed.known_work): its `state` only dates the age.
+    known_work: bool = true,
     first: ?First,
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
@@ -1706,6 +1713,7 @@ fn pendingRow(state: *State, listed: Listed) error{OutOfMemory}!Row {
         .attention = listed.attention,
         .group = listed.group,
         .actions = listed.actions,
+        .known_work = listed.known_work,
         .first = listed.first,
         .from_person_at = listed.from_person_at,
         .last_line = if (listed.last_line) |last| .{ .position = last.position, .text = if (last.text) |text| bounded(session_list.max_last_line_bytes, text) else null } else null,
@@ -1859,12 +1867,15 @@ fn routeArchived(state: *State, incoming: *const Row) error{OutOfMemory}!void {
     if (at) |index| state.rows.items[index].listed = false;
     const key = incoming.archive_seq orelse return;
     if (!coversArchived(state, key)) return;
+    // A window row shows no work state whichever list delivered it, so the routed copy carries none either.
+    var windowed = incoming.*;
+    windowed.known_work = false;
     const index = at orelse blk: {
-        try state.rows.append(state.gpa, incoming.*);
+        try state.rows.append(state.gpa, windowed);
         try reindex(state);
         break :blk lookup(state.by_reference.items, incoming.reference).?;
     };
-    try applyArchived(state, &state.rows.items[index], incoming);
+    try applyArchived(state, &state.rows.items[index], &windowed);
 }
 
 fn namesArchived(rows: []const Listed, reference: Reference) bool {
@@ -2217,6 +2228,7 @@ fn shownSince(state: *const State, row: *const Row) u64 {
 }
 
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
+    if (!row.known_work) return null;
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
 }
 
@@ -3048,9 +3060,17 @@ fn rowSelected(state: *const State, row: *const Row) bool {
 /// column and redraw deadlines) asks this one owner.
 pub const Activity = union(enum) { none, spin, held: []const u8 };
 
+/// The rule that draws a row's mark. An Archived window row has no work state, so it has no mark.
+const no_work_rule: Rule = .{ .mark = .none, .colour = .normal };
+
+fn markRule(state: *const State, row: *const Row) Rule {
+    if (!row.known_work) return no_work_rule;
+    return rules.get(shownKind(state, row));
+}
+
 fn rowActivity(state: *const State, at: usize, caps: Caps) Activity {
     const row = &state.rows.items[state.order.items[at]];
-    const rule = rules.get(shownKind(state, row));
+    const rule = markRule(state, row);
     if (rule.mark != .active) return .none;
     if (rule.spins and !state.list_stale and caps.unicode and caps.depth != .none) return .spin;
     return .{ .held = rule.held.? };
@@ -3060,7 +3080,7 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
     const quiet = rowQuiet(state, row);
-    const rule = rules.get(shownKind(state, row));
+    const rule = markRule(state, row);
     built.begin();
     const mark = marks.get(rule.mark);
     const activity = rowActivity(state, at, caps);
@@ -5341,6 +5361,37 @@ test "an empty Archived page off the head re-reads the head in a new epoch" {
     try std.testing.expectEqual(@as(usize, 0), empty_head.slice().len);
     try std.testing.expect(!state.archived.inflight);
     try std.testing.expect(state.archived.at_head);
+}
+
+test "an Archived window row has no mark: its name and age show, and no count reads it" {
+    var host: [2]Listed = undefined;
+    host[0] = session("w00010", .{ .stopped = .{ .since = test_now_s - 10, .cause = .stop } }, .{ .archive_state = .archived, .archive_seq = 10, .first = .{ .position = 0, .admission = 10, .sender = null, .content = null, .line = "inline line" } });
+    host[1] = session("w00009", .{ .failed = .{ .since = test_now_s - 9, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .archive_state = .archived, .archive_seq = 9, .first = .{ .position = 0, .admission = 9, .sender = null, .content = null, .line = "failed line" } });
+    // The window rows reach the overview from the Host's slim rows, which carry no work state.
+    for (&host) |*row| row.known_work = false;
+
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.size = .{ .width = 80, .height = 24 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindow(&state, &host, effects);
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    // No row draws a work mark: neither the stopped mark nor the failed one.
+    try std.testing.expect(std.mem.indexOf(u8, text, marks.get(.stopped).unicode) == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, marks.get(.failed).unicode) == null);
+    // Each name stays at the text column (3) and the mark cell (1) is blank.
+    for ([_][]const u8{ "inline line", "failed line" }) |name| {
+        const at = std.mem.indexOf(u8, text, name).?;
+        const begin = if (std.mem.lastIndexOfScalar(u8, text[0..at], '\n')) |newline| newline + 1 else 0;
+        try std.testing.expectEqual(@as(usize, text_column), at - begin);
+        try std.testing.expectEqualStrings("  ", text[begin .. begin + mark_column + 1]);
+    }
+    // The age is the stop time, and the failed row is not counted: Archived rows are never counted.
+    try std.testing.expectEqual(Counts{}, state.summary.counts);
+    try std.testing.expectEqual(WorkState.stopped, std.meta.activeTag(state.find("w00010".*).?.state));
+    try std.testing.expect(state.find("w00009".*).?.group == .done);
 }
 
 test "archived window scrolls back up after trimming and reads the rows above with an above cursor" {
@@ -7910,6 +7961,8 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
                 // The Host keys archived rows newest first; fixture order is the Host order.
                 const seq: u64 = @intCast(total - index);
                 entry.listed.archive_seq = seq;
+                // Archived rows reach the frame through the window, which carries no work state.
+                entry.listed.known_work = false;
             }
         }
         if (pins > 1) {
@@ -8074,7 +8127,9 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     };
     try D.checkBoundaries();
     // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
-    try std.testing.expectEqual(@as(u64, 0x697d3b6457f515c), bytes_and_styles);
+    // Re-recorded again: an Archived window row has no work state, so it draws no mark (main drew the stopped mark).
+    // The only change from main's matrix is that mark cell on the archived rows; the rest of the frame is main's.
+    try std.testing.expectEqual(@as(u64, 0xa434ddb7ed5fc5b), bytes_and_styles);
 }
 
 test "SUI-3 overview_projection" {
