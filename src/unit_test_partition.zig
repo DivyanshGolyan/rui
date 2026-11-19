@@ -21,6 +21,22 @@ pub const Shard = struct {
     }
 };
 
+/// Caller owns the returned slice. Timings for the other root do not inform this
+/// root's median, so one table can serve both roots.
+pub fn ownedTimings(allocator: std.mem.Allocator, times: []const Timing, root: usize) ![]Timing {
+    var count: usize = 0;
+    for (times) |entry| if (@backingInt(owner(entry.name)) == root) {
+        count += 1;
+    };
+    const result = try allocator.alloc(Timing, count);
+    var index: usize = 0;
+    for (times) |entry| if (@backingInt(owner(entry.name)) == root) {
+        result[index] = entry;
+        index += 1;
+    };
+    return result;
+}
+
 const Weighted = struct { index: usize, name: []const u8, seconds: f64 };
 
 pub fn exclusive(name: []const u8) bool {
@@ -242,5 +258,43 @@ test "session handler comparison has exclusive ownership for every shard count" 
         try std.testing.expectEqual(@as(usize, 0), placement[1]);
         // Their shared-window cost must not displace ordinary work from zero.
         try std.testing.expectEqual(@as(usize, 0), placement[2]);
+    }
+}
+
+test "owned timings keep one root's entries and a missing test adds only its median" {
+    const allocator = std.testing.allocator;
+    const times = [_]Timing{
+        .{ .name = "store.test.a", .seconds = 3 },
+        .{ .name = "native.b", .seconds = 5 },
+        .{ .name = "native.c", .seconds = 7 },
+    };
+    const native = try ownedTimings(allocator, &times, @backingInt(Root.native));
+    defer allocator.free(native);
+    try std.testing.expectEqual(@as(usize, 2), native.len);
+    try std.testing.expectEqualStrings("native.b", native[0].name);
+    const store = try ownedTimings(allocator, &times, @backingInt(Root.store));
+    defer allocator.free(store);
+    try std.testing.expectEqual(@as(usize, 1), store.len);
+
+    // Eight recorded tests weigh 10 each, so the median is 10. The ninth is
+    // missing: it is hash-placed and charged that median, so LPT over the eight
+    // known tests must keep every shard within one median of the others.
+    const names = [_][]const u8{ "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "missing" };
+    var known: [8]Timing = undefined;
+    for (&known, names[0..8]) |*entry, name| entry.* = .{ .name = name, .seconds = 10 };
+    for (2..9) |count| {
+        const placement = try assign(allocator, &names, &known, count);
+        defer allocator.free(placement);
+        const loads = try allocator.alloc(f64, count);
+        defer allocator.free(loads);
+        @memset(loads, 0);
+        for (placement) |shard| loads[shard] += 10;
+        var low: f64 = loads[0];
+        var high: f64 = loads[0];
+        for (loads) |load| {
+            low = @min(low, load);
+            high = @max(high, load);
+        }
+        try std.testing.expect(high - low <= 10);
     }
 }

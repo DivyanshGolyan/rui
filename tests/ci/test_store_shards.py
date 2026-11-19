@@ -268,7 +268,7 @@ class LauncherTest(unittest.TestCase):
 
     def test_every_recorded_store_name_survives_each_failure_envelope(self):
         import report_issue
-        names = json.loads((ROOT / "tests/ci/store_test_times.json").read_text())
+        names = [name for name in json.loads((ROOT / "tests/ci/unit_test_times.json").read_text()) if name.startswith("store.")]
         for name in names:
             for how in ("failed (TestUnexpectedResult)", "terminated with signal SIGABRT",
                         "failed (ProcessTimeout)", "failed (TestTimeout)"):
@@ -504,6 +504,17 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(shards.run(self.binary, [], 30, "measure", os.environ, output), 0)
         self.assertEqual(set(json.loads(output.read_text())), {"store.test.skip"})
 
+    def test_write_times_replaces_only_the_measured_root(self):
+        output = self.directory / "times.json"
+        output.write_text(json.dumps({"store.test.old": 1, "codex.kept": 2, "codex.removed": 9}))
+        shards.write_times(output, {"codex.kept": 3, "codex.added": 4})
+        self.assertEqual(json.loads(output.read_text()), {"codex.added": 4, "codex.kept": 3, "store.test.old": 1})
+        with self.assertRaises(ValueError):
+            shards.write_times(output, {"store.test.x": 1, "codex.kept": 1})
+        with self.assertRaises(ValueError):
+            shards.write_times(output, {})
+        self.assertEqual(json.loads(output.read_text()), {"codex.added": 4, "codex.kept": 3, "store.test.old": 1})
+
     def test_record_join_rejects_missing_or_negative_inputs(self):
         output = self.directory / "out"
         first = self.directory / "first"
@@ -525,14 +536,22 @@ class LauncherTest(unittest.TestCase):
                      "set RUI_TEST_ZIG_METADATA_PROBE=1 for compiled assignment domain and mutation")
 class CompilerShardTest(unittest.TestCase):
     def test_complete_recorded_inventory_with_additions_removals_and_drop_mutation(self):
-        # The measured names are an independent full-root inventory. Build a tiny
-        # no-op root carrying every one, then change its inventory relative to the
-        # committed measurements without recompiling the product's Store tests.
-        measured = json.loads((ROOT / "tests/ci/store_test_times.json").read_text())
-        self.assertGreater(len(measured), 100)
+        # One committed table holds both roots. Each root's recorded names are an
+        # independent full-root inventory; check each against a no-op root.
+        recorded = json.loads((ROOT / "tests/ci/unit_test_times.json").read_text())
+        self.assertGreater(len([name for name in recorded if name.startswith("store.")]), 100)
+        for index, prefix in ((1, "store.test."), (0, "native.test.")):
+            with self.subTest(index=index):
+                measured = {name: seconds for name, seconds in recorded.items()
+                            if name.startswith("store.") == (index == 1)}
+                if not measured:
+                    self.skipTest("no recorded timings for this root yet")
+                self.check_recorded_inventory(index, prefix, measured)
+
+    def check_recorded_inventory(self, root_index, prefix, measured):
         old_names = sorted(measured)
-        current = old_names[1:] + ["store.test.new test missing from measurements"]
-        transformed = {"store.test." + name: seconds for name, seconds in measured.items()}
+        current = old_names[1:] + [prefix + "new test missing from measurements"]
+        transformed = {prefix + name: seconds for name, seconds in measured.items()}
         zig = shutil.which("zig")
         environment = subprocess.check_output([zig, "env"], text=True)
         lib = json.loads(re.search(r'\.lib_dir = ("(?:[^"\\]|\\.)*")', environment)[1])
@@ -542,7 +561,7 @@ class CompilerShardTest(unittest.TestCase):
             source = root / "store.zig"
             source.write_text("\n".join("test " + json.dumps(name, ensure_ascii=False) + " {}" for name in current))
             (root / "partition.zig").write_text((ROOT / "src/unit_test_partition.zig").read_text())
-            (root / "options.zig").write_text("pub const root: usize = 1;")
+            (root / "options.zig").write_text(f"pub const root: usize = {root_index};")
             generated = unit_test_runner.generate(stock, transformed)
             runner = root / "runner.zig"
             binary = root / "tests"

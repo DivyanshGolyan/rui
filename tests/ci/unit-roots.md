@@ -41,15 +41,18 @@ a peer does not blame the test it happened to be running. A failure before any
 test starts is reported as a unit-root gate failure.
 
 The generated runner embeds the committed per-test seconds from
-[store_test_times.json](store_test_times.json). The partition owner in
+[unit_test_times.json](unit_test_times.json). The partition owner in
 `src/unit_test_partition.zig` assigns the complete owned name list at runtime,
 using longest-processing-time-first greedy assignment with deterministic ties.
 The exclusive prelude delays every shard equally, so its durations do not count
 against shard zero's ordinary-work load; all four processes share the work after
 that prefix. Tests absent from the timing file use a stable hash shard and the median
 recorded duration as their weight; removed tests contribute no work. Metadata
-and test execution use the same selection. The native root uses the same launcher with K=4 and the same hash placement
-(it has no timing file yet), so its four processes split the non-Store tests the same way.
+and test execution use the same selection. The native root uses the same launcher
+and the same owner, with its own entries in the same file (`store.` names are the
+Store root; every other name is native). Tests that the owner has no timing for
+are hash-placed and charged the median of the table, so one new test adds at most
+its own weight to any shard's imbalance before LPT rebalances the known tests.
 Without `RUI_UNIT_SHARD=i/K`, the
 binary exposes its complete root, preserving unsharded measurements and
 inventory comparisons. Explicit `-Dtest-filter` runs retain one process.
@@ -121,11 +124,15 @@ Artifact receipts validate both independently named executables.
 ## Verification and measurements
 
 Refresh the timing file against CI's MySQL 8.4 service, with its required-engine,
-socket, password and record environment, as a non-root fixture user:
+socket, password and record environment, as a non-root fixture user. Each root is
+measured separately; `measure` replaces only that root's entries and keeps the
+other root's, so a removed test drops out of its own root only:
 
 ```sh
 python3 tests/ci/store_shards.py measure PATH/TO/unit-store-tests \
-  --timeout 1800 --output tests/ci/store_test_times.json
+  --timeout 1800 --output tests/ci/unit_test_times.json
+python3 tests/ci/store_shards.py measure PATH/TO/unit-native \
+  --timeout 1800 --output tests/ci/unit_test_times.json
 ```
 
 The measurement command runs the complete Store root in terminal mode. Its larger

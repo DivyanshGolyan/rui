@@ -146,7 +146,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
         const output = generate.addOutputFileArg("unit_test_runner.zig");
-        generate.addFileArg(b.path("tests/ci/store_test_times.json"));
+        generate.addFileArg(b.path("tests/ci/unit_test_times.json"));
         break :runner output;
     } else null;
     const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
