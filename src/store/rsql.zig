@@ -2284,9 +2284,9 @@ const MysqlRenderer = struct {
         const arguments = argumentRanges(r.tokens, at + 1, end);
         if (std.mem.eql(u8, name, "in_index")) {
             if (arguments.len != 2 or arguments[0][1] != arguments[0][0] + 1 or arguments[1][1] != arguments[1][0] + 1) return r.refuse("rsql: @in_index takes an alias and an index name");
-            const name = r.tokens[arguments[1][0]].text;
-            if (inIndexRefusal(name)) |message| return r.refuse(message);
-            const index = schema.partialIndex(name).?;
+            const index_name = r.tokens[arguments[1][0]].text;
+            if (inIndexRefusal(index_name)) |message| return r.refuse(message);
+            const index = schema.partialIndex(index_name).?;
             r.emit(comptime inIndexMysql(r.tokens[arguments[0][0]].text, index));
             return end + 1;
         }
