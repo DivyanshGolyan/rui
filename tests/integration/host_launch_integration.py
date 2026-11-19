@@ -1560,9 +1560,15 @@ def main():
             differing = run_start(held_store, env, "--set", 'execution.activeCapacity=7')
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
-            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. "
-                    f"Changing settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
+            remedy = (f"Applying settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}', "
+                      f"then rui host start --store $'{held_store.resolve()}'\n")
+            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. " + remedy
                     ) in differing.stderr, differing.stderr
+            saved = subprocess.run([RUI, "host", "set", "--store", str(held_store), "execution.activeCapacity", "7"],
+                env=env, capture_output=True, text=True, timeout=30)
+            assert saved.returncode == 0 and saved.stdout == "", saved
+            assert saved.stderr == "rui: saved; the running Host keeps its old settings until a new Host starts. " + remedy, saved.stderr
+            assert instance(status(held_store, env), 3) == before
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
