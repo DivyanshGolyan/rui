@@ -135,9 +135,7 @@ class RuntimeLeftovers(unittest.TestCase):
                 listening.bind(str(accepting))
                 listening.listen(1)
                 accepting.with_suffix(".store").write_text(str(state / "store"))
-                subprocess.run([sys.executable, str(ROOT / "tests/integration/runtime_leftovers.py"),
-                                "retire-under", str(state)], check=True,
-                               env={**os.environ, runtime_leftovers.OVERRIDE: str(root)})
+                runtime_leftovers.retire_under(state, root)
                 self.assertFalse(below.exists() or below.with_suffix(".store").exists())
                 self.assertTrue(sibling.exists() and accepting.exists())
             finally:

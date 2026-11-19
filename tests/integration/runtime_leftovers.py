@@ -132,11 +132,3 @@ def sweep(directory=None):
 
 def describe(found):
     return "; ".join(f"{path.name} (Store {store})" for path, store in found)
-
-
-if __name__ == "__main__":
-    # Shell fixtures: python3 runtime_leftovers.py retire-under STATE_DIR
-    import sys
-    if sys.argv[1:2] != ["retire-under"] or len(sys.argv) != 3:
-        sys.exit("usage: runtime_leftovers.py retire-under STATE_DIR")
-    retire_under(sys.argv[2])

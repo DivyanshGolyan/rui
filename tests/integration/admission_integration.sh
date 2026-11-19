@@ -82,7 +82,8 @@ cleanup() {
     # Every Host above is dead now; a SIGKILLed one leaves its socket and .store
     # hint, so retire those naming this run's Stores before the Stores go
     # (docs/verification/testing.md, Leftover state).
-    python3 "$root/tests/integration/runtime_leftovers.py" retire-under "$state" || true
+    PYTHONPATH="$root/tests/integration" python3 -c \
+        'import sys, runtime_leftovers; runtime_leftovers.retire_under(sys.argv[1])' "$state" || true
     if [ "$result" -eq 0 ]; then
         rm -rf "$state"
     else
