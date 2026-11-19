@@ -99,6 +99,100 @@ test "a Message to an existing Session with require_model is refused only while 
     }.run);
 }
 
+const AdmissionRow = struct {
+    name: []const u8,
+    setup: enum { active, archived, archiving },
+    served_first: bool,
+    state: protocol.SessionArchiveState,
+    served_replay: bool,
+    refused: ?protocol.MessageRejection,
+};
+
+fn runningBashSession(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try shared_fixtures.configureTestSessionWithMode(storage, key, "bypass");
+    var message_key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const message_key = try std.fmt.bufPrint(&message_key_buffer, "{s}-message", .{key});
+    try submitTestMessage(storage, tmp, message_key, message_key, session.slice(), "run Bash");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]shared_fixtures.TestingCall{.{
+        .item_id = "bash-item",
+        .name = "bash",
+        .encoded_call_id = "bash-call",
+        .decoded_call_id = "bash-call",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+    try shared_fixtures.settleCallsForTesting(storage, tmp, model, key, &calls);
+    _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+    return session;
+}
+
+test "a Message with require_model follows the Session's archive state and provider service" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Rows run in this order: the Message-producing archiving setup comes before the accepted row,
+            // so that row's pending model work cannot be admitted by another row's setup.
+            const rows = [_]AdmissionRow{
+                .{ .name = "archived", .setup = .archived, .served_first = false, .state = .archived, .served_replay = true, .refused = .model_capability_unavailable },
+                .{ .name = "archiving", .setup = .archiving, .served_first = false, .state = .archiving, .served_replay = true, .refused = .session_archiving },
+                .{ .name = "unserved", .setup = .active, .served_first = false, .state = .active, .served_replay = true, .refused = .model_capability_unavailable },
+                .{ .name = "served", .setup = .active, .served_first = true, .state = .active, .served_replay = false, .refused = null },
+            };
+            inline for (rows) |row| {
+                var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
+                switch (row.setup) {
+                    .active => session = try store_testing.configureTestSession(&storage, row.name),
+                    .archived => {
+                        session = try store_testing.configureTestSession(&storage, row.name);
+                        var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+                        try archive.key.set(row.name ++ "-archive");
+                        try archive.session.set(session.slice());
+                        try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                    },
+                    .archiving => {
+                        session = try runningBashSession(&storage, &tmp, row.name);
+                        var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+                        try archive.key.set(row.name ++ "-archive");
+                        try archive.session.set(session.slice());
+                        try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                    },
+                }
+                var message: wire_request.MessageCommand = .{ .require_model = true };
+                try message.key.set(row.name ++ "-msg");
+                try message.session.set(session.slice());
+                message.text = try testingBytesContent(&tmp, row.name ++ "-msg", "hello again");
+                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+                storage.served = protocol.routesAll(if (row.served_first) .endpoint else .unserved);
+                const first = storage.submitMessageWithModel(&message, null, .{});
+                if (row.refused) |code| {
+                    try std.testing.expect(first == .rejected and !first.rejected.replayed);
+                    try std.testing.expectEqual(code, first.rejected.code);
+                } else {
+                    try std.testing.expect(first == .accepted and !first.accepted.replayed);
+                }
+                const observation = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expect(observation.found);
+                try std.testing.expectEqual(row.state, observation.archive_state);
+
+                storage.served = protocol.routesAll(if (row.served_replay) .endpoint else .unserved);
+                const replay = storage.submitMessageWithModel(&message, null, .{});
+                if (row.refused) |code| {
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                    try std.testing.expectEqual(code, replay.rejected.code);
+                } else {
+                    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                }
+            }
+        }
+    }.run);
+}
+
 fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configuration, actual: @import("../../creation_receipt.zig").Configuration) !void {
     try std.testing.expectEqual(expected.provider, actual.provider);
     try std.testing.expectEqualStrings(expected.model.slice(), actual.model.slice());
