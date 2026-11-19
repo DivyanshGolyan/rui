@@ -362,7 +362,7 @@ pub const Store = struct {
             try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .owner = row.owner, .server = server, .read_only = row.read_only, .description = description, .input_schema = schema };
+            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
             digest.* = tool_record.recordDigest(out);
         }
         if (!saved.toolSet().valid()) return error.CorruptStore;
