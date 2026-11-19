@@ -2090,7 +2090,7 @@ fn captureSessionList(host: *Host, request: *const protocol.ListSessions, reques
     defer host.allocator.destroy(reply);
     reply.capture = &capture;
     reply.rows = 0;
-    try host.store.readSessionList(request, reply);
+    try host.store.readSessionList(request, reply, host.allocator);
     return capture.seal();
 }
 

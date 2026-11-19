@@ -579,7 +579,7 @@ pub fn testingSessionListReport(storage: *Store, request: *const protocol.ListSe
     try capture.create(scratch_path, request_number, false);
     errdefer capture.deinit();
     var reply: TestingListReply = .{ .capture = &capture };
-    try storage.readSessionList(request, &reply);
+    try storage.readSessionList(request, &reply, std.testing.allocator);
     return capture.seal();
 }
 

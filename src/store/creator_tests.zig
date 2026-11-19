@@ -29,7 +29,7 @@ fn expectOrigin(storage: *Store, session: []const u8, creator: ?[]const u8, pare
     };
     var visitor: Visitor = .{ .session = session, .creator = creator, .parent = parent };
     const request: session_list.ListSessions = .{ .archive = archive };
-    try storage.readSessionList(&request, &visitor);
+    try storage.readSessionList(&request, &visitor, std.testing.allocator);
     try std.testing.expectEqual(listed, visitor.found);
     var activity: @import("../activity_read.zig").ActivityPage = .{};
     try activity.session.set(session);

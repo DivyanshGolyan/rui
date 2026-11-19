@@ -178,13 +178,13 @@ const LivePages = struct {
 /// first list_limit rows, so the first page of the union is complete. A Session can be in both archiving
 /// candidate sets; created_seq is unique per Session, so its two rows are adjacent and the second is dropped.
 /// `more` is exact: it is set only when a further distinct Session follows the page.
-fn mergeLive(live: *const LivePages) !ListPage {
+fn mergeLive(live: *const LivePages, page: *ListPage) !void {
     if (live.active.failure) |err| return err;
     if (live.turn.failure) |err| return err;
     if (live.action.failure) |err| return err;
     const lists = [_]*const LiveCandidates{ &live.active, &live.turn, &live.action };
     var cursor = [_]usize{ 0, 0, 0 };
-    var page: ListPage = .{};
+    page.* = .{};
     while (true) {
         var chosen: ?usize = null;
         for (lists, 0..) |list, index| {
@@ -204,7 +204,6 @@ fn mergeLive(live: *const LivePages) !ListPage {
         }
         cursor[index] += 1;
     }
-    return page;
 }
 
 const ListPage = struct {
@@ -362,8 +361,8 @@ fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_li
 
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
 /// read oldest first from their key and are returned newest first.
-fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, generation: u64, visitor: anytype) !void {
-    var page: ArchivedPage = .{};
+fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
+    page.* = .{};
     const size = session_list.archived_window_size;
     var more_above = false;
     var more_below = false;
@@ -378,14 +377,14 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
         .head, .below => null,
     };
     if (newest_below) |below| {
-        a.readEach(archived_newest_page, .{ .below = below }, archived_window_limit, &page);
+        a.readEach(archived_newest_page, .{ .below = below }, archived_window_limit, page);
         try store_access.runAs(a, error.SessionReadFailed);
         if (page.failure) |err| return err;
         more_below = page.count > size;
         more_above = std.meta.activeTag(cursor) == .below;
         page.count = @min(page.count, size);
     } else if (oldest_above) |above| {
-        a.readEach(archived_oldest_page, .{ .above = above }, archived_window_limit, &page);
+        a.readEach(archived_oldest_page, .{ .above = above }, archived_window_limit, page);
         try store_access.runAs(a, error.SessionReadFailed);
         if (page.failure) |err| return err;
         // The oldest-first read keeps the rows nearest the cursor; the extra row is further away.
@@ -429,34 +428,45 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
     } });
 }
 
-pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, visitor: anytype) !void {
+/// The page buffers of one Session list read: an Archived window page is about 37 KB. The caller allocates
+/// them before the Store queue runs the read, so the read's frame stays inside the Host stack budget, and a
+/// failed allocation is an ordinary refusal that never reaches the held Store.
+pub const Scratch = struct {
+    archived: ArchivedPage = .{},
+    page: ListPage = .{},
+    live: LivePages = .{},
+};
+
+pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, visitor: anytype) !void {
     const self = a.store;
     const generation = self.commit_generation.load(.acquire);
-    if (request.window) |cursor| return readArchivedWindow(a, cursor, generation, visitor);
+    if (request.window) |cursor| return readArchivedWindow(a, cursor, generation, &scratch.archived, visitor);
     if (request.since) |since| {
         const through = if (request.changed) |changed| changed.through else generation;
         if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
             return readChangedSessions(a, request, since.generation, through, visitor);
     }
-    try readAllSessions(a, request, generation, visitor);
+    try readAllSessions(a, request, generation, scratch, visitor);
 }
 
-fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, generation: u64, visitor: anytype) !void {
+fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, generation: u64, scratch: *Scratch, visitor: anytype) !void {
     var maximum: reads_domain.First(list_ceiling.Row) = .{};
     if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
     const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
-    var page: ListPage = .{};
-    var live: LivePages = .{};
+    const page = &scratch.page;
+    const live = &scratch.live;
+    page.* = .{};
+    live.* = .{};
     const live_tab = request.workspace == null and request.archive == .active;
     if (request.workspace) |*workspace|
-        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
+        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, page)
     else if (live_tab) {
         a.readEach(live_active_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.active);
         a.readEach(live_turn_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.turn);
         a.readEach(live_action_page, .{ .after = request.after, .ceiling = bound }, list_limit, &live.action);
-    } else a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
+    } else a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, page);
     try store_access.runAs(a, error.SessionReadFailed);
-    if (live_tab) page = try mergeLive(&live);
+    if (live_tab) try mergeLive(live, page);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
     try readRows(a, request, page.refs[0..page.count], visitor);

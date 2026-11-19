@@ -574,7 +574,7 @@ fn walkAll(storage: *Store, archive: session_archive.Filter, workspace: ?[]const
     var count: usize = 0;
     while (true) {
         var walk: ListWalk = .{};
-        try storage.readSessionList(&request, &walk);
+        try storage.readSessionList(&request, &walk, std.testing.allocator);
         for (walk.refs[0..walk.count]) |ref| {
             try std.testing.expect(count < out.len);
             out[count] = ref;
@@ -761,7 +761,7 @@ const WindowVisitor = struct {
 
 fn readWindow(storage: *Store, cursor: session_list.ArchivedCursor, visitor: *WindowVisitor) !void {
     const request: protocol.ListSessions = .{ .archive = .archived, .window = cursor };
-    try storage.readSessionList(&request, visitor);
+    try storage.readSessionList(&request, visitor, std.testing.allocator);
 }
 
 test "Archived window carries the first Message's position, admission and content, and a line only when it is inline Text" {
