@@ -2741,7 +2741,7 @@ test "overview state ages request one minute frame only while visible" {
     try std.testing.expect(!overview.wantsFrameAt(std.math.maxInt(u64)));
 }
 
-test "quiet overview schedules tree hold release without a worker" {
+test "SUI-110 quiet overview schedules tree hold release without a worker" {
     const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
@@ -8845,6 +8845,7 @@ test "SUI-4 Settings focus navigation and retained draft" {
 }
 
 test "SUI-108 App overview keyboard and pointer precedence" {
+    try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
     try keyboardSelectionCase();
     try keyboardOriginCase();
 }

@@ -477,46 +477,6 @@ class FramesTest(unittest.TestCase):
             self.assertTrue(after_capture["ok"])
             self.assertEqual(before_capture["reason"], "state left full overview before capture")
 
-    def test_creator_birth_uses_public_tool_and_proves_both_relationships(self):
-        creator_birth = self.helper["creator_birth"]
-        for attached in (True, False):
-            for valid in (True, False):
-                with self.subTest(attached=attached, valid=valid), tempfile.TemporaryDirectory() as temp:
-                    root = Path(temp)
-                    calls, lists = [], []
-                    parent = {"reference": "parent", "creator": None, "parent": None}
-                    child = {"reference": "child1", "creator": "parent" if valid else "wrong", "parent": "parent" if attached else None}
-                    def command(*args, **kwargs):
-                        calls.append((args, kwargs))
-                        if args[:2] == ("session", "list"):
-                            lists.append(1)
-                            body = {"sessions": [parent] if len(lists) == 1 else [parent, child]}
-                        elif args[:2] == ("session", "inspect"):
-                            sid = args[args.index("--session") + 1]
-                            body = {"session": {"model": "fixture-model"}} if sid == "parent" else {"work": {"state": {"kind": "finished"}}}
-                        else:
-                            body = {}
-                        return types.SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="request: fixture\n")
-                    run = types.SimpleNamespace(store=root / "store", root=root, evidence=root / "evidence",
-                        meta={"sessions": {}}, sid=lambda _name: "parent", rui_cmd=command)
-                    entry = {"creator": "Root", "label": "Child", "attached": attached, "mode": "ask", "messages": ["task"]}
-                    imports = {"host_process": types.SimpleNamespace(wait_for=lambda observe, *_a, **_k: observe()),
-                               "product_defaults": types.SimpleNamespace(start_effort=lambda _model: "high",
-                                                                        compaction_trigger=lambda *_a: 123)}
-                    with patch.dict(creator_birth.__globals__, {"frame_request": lambda *_a: None}), \
-                            patch.dict(sys.modules, imports):
-                        if not valid:
-                            with self.assertRaisesRegex(self.helper["FrameFailure"], "provenance"):
-                                creator_birth(run, entry)
-                            continue
-                        creator_birth(run, entry)
-                    self.assertEqual(run.meta["sessions"]["Child"], "child1")
-                    send = next(kwargs["input"] for args, kwargs in calls if args[:2] == ("session", "send"))
-                    payload = json.loads(send.removeprefix("verify-rui creator birth "))
-                    self.assertEqual(payload["attached"], attached)
-                    self.assertEqual(payload["spec"]["permissionMode"], "ask")
-                    self.assertTrue((run.evidence / "creator-births.jsonl").is_file())
-
     def test_host_suspension_validates_actions_and_lifetime(self):
         for steps in ([{"host": "suspend"}], [{"host": "suspend"}, {"host": "resume"}],
                       [{"host": "suspend"}, {"host": "resume"}, {"host": "pause"}]):

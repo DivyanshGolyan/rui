@@ -3644,6 +3644,8 @@ test "SUI-100 creator tree uses served subtree facts and disjoint nested pins" {
     try creatorClockCase();
     try creatorPinsCase();
     try creatorRootOrderCase();
+    try creatorSenderOrderCase();
+    try creatorQueuedOrderCase();
 }
 
 fn creatorSnapshotCase() !void {
@@ -3747,8 +3749,10 @@ fn creatorEmptyCase() !void {
     try std.testing.expectEqual(@as(usize, 2), Lines.count(&state));
     const first = (try Lines.at(arena.allocator(), &state, 0, 140, .{}, 0)).?;
     const second = (try Lines.at(arena.allocator(), &state, 1, 140, .{}, 0)).?;
-    try std.testing.expectEqualDeep(Target{ .open = "a1b2c3".* }, first.target.?);
-    try std.testing.expectEqualDeep(Target{ .open = "b4n8wd".* }, second.target.?);
+    try std.testing.expect(first.target.? == .open);
+    try std.testing.expectEqualStrings("a1b2c3", &first.target.?.open);
+    try std.testing.expect(second.target.? == .open);
+    try std.testing.expectEqualStrings("b4n8wd", &second.target.?.open);
 }
 
 fn creatorEdgesCase() !void {
@@ -3888,7 +3892,7 @@ fn creatorRootOrderCase() !void {
     try expectOrder(&state, &.{ "Newer finished", "Older question" });
 }
 
-test "overview orders Sessions by state change regardless of sender and state" {
+fn creatorSenderOrderCase() !void {
     const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
     const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
     var state = try opened(&.{
@@ -3904,7 +3908,7 @@ test "overview orders Sessions by state change regardless of sender and state" {
     try std.testing.expectEqualStrings("a5k1ng", &state.selected.session);
 }
 
-test "overview orders queued and completed Sessions by newest state change" {
+fn creatorQueuedOrderCase() !void {
     const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     var state = try opened(&.{
@@ -7550,7 +7554,7 @@ fn creatorWidthCase() !void {
 
 fn creatorSidebarCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const width = @import("widgets/RowInset.zig").contentWidth(40);
+    const width: u16 = 36;
     for ([_]bool{ false, true }) |use_unicode| {
         var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
         defer state.deinit();
