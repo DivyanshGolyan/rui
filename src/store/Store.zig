@@ -1095,29 +1095,8 @@ pub const Store = struct {
 
     pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
         try request.validate();
-        if (request.window != null) return self.readArchivedWindow(request, visitor);
         var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
         try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, &watched });
-    }
-
-    /// One Archived window page, in one round. Reached through readSessionList for window requests.
-    pub fn readArchivedWindow(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
-        try request.validate();
-        var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
-        try self.queue().run(ArchivedWindowHeld(@TypeOf(visitor)).readArchivedWindowHeld, .{ self, request, &watched });
-    }
-
-    fn ArchivedWindowHeld(comptime Visitor: type) type {
-        return struct {
-            fn readArchivedWindowHeld(self: *Store, request: *const session_list.ListSessions, watched: *session_list_read.Watched(Visitor)) !void {
-                const entry = try enter(self, .none);
-                defer entry.release();
-                var access: ReadAccess = .open(&entry);
-                defer access.deinit();
-                const result = session_list_read.readSessionList(&access, request, watched);
-                return entry.finishCapture(watched.failed, result);
-            }
-        };
     }
 
     fn SessionListHeld(comptime Visitor: type) type {

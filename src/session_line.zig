@@ -24,6 +24,10 @@ pub fn name(label: ?[]const u8, line: ?[]const u8, reference: []const u8) Name {
     return .{ .text = reference, .hint = true };
 }
 
+/// The display line of a first Message: its first physical line, trimmed of spaces and tabs. Blank means no
+/// line: the Session is then named by its reference. Every reader of a first Message's line calls this one
+/// function (the client's first-line read, the overview and the Archived window), so a Session is named the
+/// same way wherever it is listed.
 pub fn firstLine(bytes: []const u8) []const u8 {
     const end = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
     return std.mem.trim(u8, bytes[0..end], " \t");
@@ -299,4 +303,10 @@ test "a line is written again when its width or facts change" {
     try std.testing.expectEqualStrings("x · y · ctrl+x stop", shown.text(.{ .name = "x", .model = "y", .stop = true }, 51, .unicode));
     try std.testing.expectEqualStrings("x · y", shown.text(.{ .name = "x", .model = "y" }, 51, .unicode));
     try std.testing.expectEqualStrings("gpt-6.1-sol · 69% left", shown.text(.{ .name = "Fix flaky store tests", .model = "gpt-6.1-sol", .left = 69, .stop = true }, 30, .unicode));
+}
+
+test "a first Message names its Session by its first physical line, and a leading blank line names nothing" {
+    try std.testing.expectEqualStrings("", firstLine("\nFix CI"));
+    try std.testing.expectEqualStrings("", firstLine("\r\nFix CI"));
+    try std.testing.expectEqualStrings("Fix CI", firstLine("  Fix CI \r\nmore"));
 }

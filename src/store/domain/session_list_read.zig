@@ -280,35 +280,19 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
     return if (next) |row| row.retry_due_at_ms else null;
 }
 
-// The Archived window: one statement per page, newest archive first. The inner page is the keyed range
-// of session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. The outer statement
-// decorates only those rows: the first Message's admission (the same rule as FirstCandidates: the
-// first turn's first admission, or an earlier pending one) and its first line when that Message is
-// inline Text. Parts-form first Messages leave the line NULL; their line needs a parts read. The line
-// is read from the first 512 bytes, which keeps the row under the 1 KiB decode limit; a first line that
-// begins after 512 bytes of blank lines reads as absent.
+// The Archived window: one statement per page, newest archive first. The page is the keyed range of
+// session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. Each row joins its first
+// Message once (report.zig's first_admission_join: the same rule as FirstCandidates). The line is that
+// Message's first display line (session_line.firstLine, the rule the overview's first-line read uses),
+// read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
+// the line NULL; their line comes from the overview's parts read.
 const archived_window_limit = session_list.archived_window_size + 1;
 
-fn firstAdmissionSql(comptime alias: []const u8) []const u8 {
-    return comptime "SELECT MIN(pm.admission_id) FROM message_admission pm WHERE pm.session_ref=" ++ alias ++ ".session_ref AND " ++
-        "(pm.turn_id IS NULL OR pm.admission_id=(SELECT t.first_admission_id FROM turn t WHERE t.session_ref=" ++ alias ++ ".session_ref ORDER BY t.turn_id LIMIT 1))";
-}
-
-/// One column of the first Message, read by its admission (the same rule as firstAdmissionSql).
-fn firstMessageSql(comptime column: []const u8) []const u8 {
-    return comptime "(SELECT " ++ column ++ " FROM message_admission fm JOIN content fc ON fc.content_id=fm.content_id " ++
-        "WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ "))";
-}
-
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
-    "(" ++ firstAdmissionSql("session") ++ ") AS first_admission," ++
-    "(SELECT fm.admission_position FROM message_admission fm WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ ")) AS first_position," ++
-    firstMessageSql("fc.byte_length") ++ " AS first_length," ++
-    firstMessageSql("fc.digest") ++ " AS first_digest," ++
-    firstMessageSql("fc.private") ++ " AS first_private," ++
-    firstMessageSql("fc.form") ++ " AS first_form," ++
-    "(SELECT substr(@payload(fc),1,512) FROM message_admission fm JOIN content fc ON fc.content_id=fm.content_id " ++
-    "WHERE fm.admission_id=(" ++ firstAdmissionSql("session") ++ ") AND fc.private=0 AND fc.form=0) AS first_line";
+    "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position," ++
+    "first_content.byte_length AS first_length,first_content.digest AS first_digest," ++
+    "first_content.private AS first_private,first_content.form AS first_form," ++
+    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
 
 const ArchivedWindowRow = struct {
     archive_seq: rsql.Positive,
@@ -325,7 +309,8 @@ const ArchivedWindowRow = struct {
 };
 
 const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
-    "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key ";
+    "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key" ++ report_domain.first_admission_join ++
+    " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id ";
 
 pub const archived_newest_page = rsql.Read(.{
     .sql = "SELECT " ++ archived_columns ++ archived_window_join ++
@@ -362,16 +347,12 @@ const ArchivedPage = struct {
 };
 
 /// The first display line of an inline first Message, the same rule as the Session row's last line.
-fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(session_list.max_last_line_bytes)) ?[]const u8 {
+fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(session_line.max_line_bytes)) ?[]const u8 {
     const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
-    var lines = std.mem.splitAny(u8, bytes, "\r\n");
-    while (lines.next()) |line| {
-        const trimmed = session_line.firstLine(line);
-        if (trimmed.len == 0) continue;
-        text.* = session_line.cut(session_list.max_last_line_bytes, trimmed);
-        return text.slice();
-    }
-    return null;
+    const line = session_line.firstLine(bytes);
+    if (line.len == 0) return null;
+    text.* = session_line.cut(session_line.max_line_bytes, line);
+    return text.slice();
 }
 
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
@@ -409,7 +390,7 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
         std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
     }
     try visitor.head();
-    var text: Bounded(session_list.max_last_line_bytes) = undefined;
+    var text: Bounded(session_line.max_line_bytes) = undefined;
     for (page.rows[0..page.count]) |*row| {
         if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
         const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{

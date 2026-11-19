@@ -701,7 +701,14 @@ test "Session list membership and order equal the state reference for every filt
 const WindowRow = struct { reference: [6]u8, key: u64, first: ?WindowFirst = null };
 
 /// What the window carries of a row's first Message: its position, admission, content, and whether a line came inline.
-const WindowFirst = struct { position: u64, admission: u64, content: content_value.Value, has_line: bool };
+const WindowFirst = struct {
+    position: u64,
+    admission: u64,
+    content: content_value.Value,
+    has_line: bool,
+    line_buf: [@import("../session_line.zig").max_line_bytes]u8 = undefined,
+    line_len: ?usize = null,
+};
 
 /// Records one Archived window page: its rows (newest first), and the page's tail.
 const WindowVisitor = struct {
@@ -718,7 +725,14 @@ const WindowVisitor = struct {
 
     pub fn archivedRow(self: *WindowVisitor, archived: *const session_list.ArchivedRow) !void {
         if (self.count == self.rows.len or archived.reference.len != 6) return error.TooManyRows;
-        const first: ?WindowFirst = if (archived.first) |first| .{ .position = first.position, .admission = first.admission, .content = first.content, .has_line = first.line != null } else null;
+        const first: ?WindowFirst = if (archived.first) |first| blk: {
+            var out: WindowFirst = .{ .position = first.position, .admission = first.admission, .content = first.content, .has_line = first.line != null };
+            if (first.line) |line| {
+                @memcpy(out.line_buf[0..line.len], line);
+                out.line_len = line.len;
+            }
+            break :blk out;
+        } else null;
         self.rows[self.count] = .{ .reference = archived.reference[0..6].*, .key = archived.archive_seq, .first = first };
         self.count += 1;
     }
@@ -908,6 +922,159 @@ test "Archived window pages walk every archived Session once, newest archive fir
     }.run);
 }
 
+/// Collects the references of every page of one direction: the head walk (`below`) or the tail walk (`above`).
+fn collectWindow(storage: *Store, from_head: bool, out: *[256][6]u8) !usize {
+    var count: usize = 0;
+    var page: WindowVisitor = .{};
+    try readWindow(storage, if (from_head) .head else .tail, &page);
+    while (true) {
+        for (page.rowsSlice()) |row| {
+            try std.testing.expect(count < out.len);
+            out[count] = row.reference;
+            count += 1;
+        }
+        if (from_head) {
+            if (!page.more_below) return count;
+            try readWindow(storage, .{ .below = page.rowsSlice()[page.count - 1].key }, &page);
+        } else {
+            if (!page.more_above) return count;
+            try readWindow(storage, .{ .above = page.rowsSlice()[0].key }, &page);
+        }
+    }
+}
+
+/// The Archived window's union, from the head and from the tail, is the Archived membership of walkAll: the same
+/// Sessions, each once.
+fn expectWindowMatchesWalk(storage: *Store) !void {
+    var expected: [256][6]u8 = undefined;
+    const expected_count = try walkAll(storage, .archived, null, &expected);
+    var head: [256][6]u8 = undefined;
+    const head_count = try collectWindow(storage, true, &head);
+    var tail: [256][6]u8 = undefined;
+    const tail_count = try collectWindow(storage, false, &tail);
+    try std.testing.expectEqual(expected_count, head_count);
+    try std.testing.expectEqual(expected_count, tail_count);
+    for (head[0..head_count], 0..) |ref, index| {
+        for (head[0..index]) |earlier| try std.testing.expect(!std.mem.eql(u8, &earlier, &ref));
+        try std.testing.expect(containsRef(expected[0..expected_count], ref));
+    }
+    for (expected[0..expected_count]) |ref| {
+        try std.testing.expect(containsRef(head[0..head_count], ref));
+        try std.testing.expect(containsRef(tail[0..tail_count], ref));
+    }
+}
+
+fn containsRef(refs: []const [6]u8, ref: [6]u8) bool {
+    for (refs) |candidate| if (std.mem.eql(u8, &candidate, &ref)) return true;
+    return false;
+}
+
+/// A fresh Session archived now, named by `key`. Its reference is returned.
+fn archiveFreshSession(storage: *Store, key: []const u8) ![6]u8 {
+    var archive_key_buffer: [64]u8 = undefined;
+    const session = try testing.configureTestSession(storage, key);
+    var archive = try archiveCommand(try std.fmt.bufPrint(&archive_key_buffer, "archive-{s}", .{key}), session.slice(), true);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&archive, .{}).accepted.completion);
+    return session.slice()[0..6].*;
+}
+
+test "Archived window equals the Archived membership over the archive's edge cases" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            // An empty Store: no rows, no keys, no page beyond it.
+            var empty: WindowVisitor = .{};
+            try readWindow(&storage, .head, &empty);
+            try std.testing.expectEqual(@as(usize, 0), empty.count);
+            try std.testing.expect(empty.first == null and empty.last == null and !empty.more_above and !empty.more_below);
+            try expectWindowMatchesWalk(&storage);
+
+            // Exactly one full page: 40 archived Sessions, no more below.
+            var key_buffer: [48]u8 = undefined;
+            for (0..session_list.archived_window_size) |index| {
+                _ = try archiveFreshSession(&storage, try std.fmt.bufPrint(&key_buffer, "edge-forty-{d}", .{index}));
+            }
+            var exact: WindowVisitor = .{};
+            try readWindow(&storage, .head, &exact);
+            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), exact.count);
+            try std.testing.expect(!exact.more_above and !exact.more_below);
+            try expectWindowMatchesWalk(&storage);
+
+            // One more: 41 archived Sessions, the head page is full and the 41st is one page below.
+            _ = try archiveFreshSession(&storage, "edge-forty-one");
+            var head: WindowVisitor = .{};
+            try readWindow(&storage, .head, &head);
+            try std.testing.expectEqual(@as(usize, session_list.archived_window_size), head.count);
+            try std.testing.expect(!head.more_above and head.more_below);
+            try expectWindowMatchesWalk(&storage);
+            const anchor = head.rowsSlice()[0];
+
+            // A Session with no Message: its first is absent, and it is still listed.
+            const bare = try archiveFreshSession(&storage, "edge-bare");
+            var bare_page: WindowVisitor = .{};
+            try readWindow(&storage, .head, &bare_page);
+            try std.testing.expectEqualSlices(u8, &bare, &bare_page.rowsSlice()[0].reference);
+            try std.testing.expect(bare_page.rowsSlice()[0].first == null);
+            try expectWindowMatchesWalk(&storage);
+
+            // A pending admission before the first turn: the first Message is that admission, with its line.
+            const pending = try testing.configureTestSession(&storage, "edge-pending-first-session");
+            try testing.submitTestMessage(&storage, &tmp, "edge-pending-file", "edge-pending-message", pending.slice(), "pending first line");
+            var pending_archive = try archiveCommand("edge-pending-archive", pending.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&pending_archive, .{}).accepted.completion);
+            var pending_page: WindowVisitor = .{};
+            try readWindow(&storage, .head, &pending_page);
+            const pending_row = pending_page.rowsSlice()[0];
+            try std.testing.expectEqualSlices(u8, pending.slice()[0..6], &pending_row.reference);
+            const pending_first = pending_row.first orelse return error.TestUnexpectedResult;
+            try std.testing.expect(pending_first.admission != 0 and pending_first.has_line);
+            try std.testing.expectEqualStrings("pending first line", pending_first.line_buf[0..pending_first.line_len.?]);
+            try expectWindowMatchesWalk(&storage);
+
+            // A private first Message: its line is absent, its content reference still rides the row.
+            const private = try testing.configureTestSession(&storage, "edge-private-session");
+            try testing.submitTestMessage(&storage, &tmp, "edge-private-file", "edge-private-message", private.slice(), "private first line");
+            try testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT m.content_id FROM message_admission m WHERE m.session_ref=?1 AND m.turn_id IS NULL)", .{private.slice()});
+            var private_archive = try archiveCommand("edge-private-archive", private.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&private_archive, .{}).accepted.completion);
+            try expectWindowMatchesWalk(&storage);
+
+            // A leading blank line: the first line is blank, so the Session is named by its reference, as the
+            // client names it.
+            const blank = try testing.configureTestSession(&storage, "edge-blank-session");
+            try testing.submitTestMessage(&storage, &tmp, "edge-blank-file", "edge-blank-message", blank.slice(), "\nFix CI");
+            var blank_archive = try archiveCommand("edge-blank-archive", blank.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&blank_archive, .{}).accepted.completion);
+            var blank_page: WindowVisitor = .{};
+            try readWindow(&storage, .head, &blank_page);
+            const blank_row = blank_page.rowsSlice()[0];
+            try std.testing.expectEqualSlices(u8, blank.slice()[0..6], &blank_row.reference);
+            try std.testing.expect(!(blank_row.first orelse return error.TestUnexpectedResult).has_line);
+            try expectWindowMatchesWalk(&storage);
+
+            // A stale anchor: the newest Session is restored. Its key now names no Archived Session, so the page
+            // above it is empty, its first and last are null, and the flag on the side it moved away from says a
+            // page was there when the cursor was made. The client re-reads from head.
+            var restore = try archiveCommand("edge-restore-anchor", &anchor.reference, false);
+            try std.testing.expect(storage.archiveSession(&restore, .{}) == .accepted);
+            var stale: WindowVisitor = .{};
+            try readWindow(&storage, .{ .above = anchor.key }, &stale);
+            try std.testing.expectEqual(@as(usize, 0), stale.count);
+            try std.testing.expect(stale.first == null and stale.last == null and stale.more_below);
+            // A Session restored and left live is in no window page.
+            try expectWindowMatchesWalk(&storage);
+            var after_restore: WindowVisitor = .{};
+            try readWindow(&storage, .head, &after_restore);
+            for (after_restore.rowsSlice()) |row| try std.testing.expect(!std.mem.eql(u8, &row.reference, &anchor.reference));
+        }
+    }.run);
+}
+
 // Each archiving candidate and each archiving page is planned on MySQL. The pages are planned with literal
 // bounds, so the plan is the one the live list reads. A page must not scan session, and its candidate's index
 // must be used. MySQL has no partial index: the marker states the `_lead` column. Runs only when MySQL is
@@ -953,6 +1120,15 @@ test "MySQL plans each archiving candidate and page through its index" {
                 .{ .source = session_list_read.live_turn_source, .index = "turn_outcome_unpositioned" },
                 .{ .source = session_list_read.live_action_source, .index = "action_operation_unaccepted" },
             };
+            const window_pages = [_][]const u8{ session_list_read.archived_newest_page.sql, session_list_read.archived_oldest_page.sql };
+            inline for (window_pages) |source| {
+                const literal = comptime bindLiterals(rsql.sentTemplate(source).prepared(), &.{"1000"});
+                var buffer: [16384]u8 = undefined;
+                const plan = try mysql_testing.planText(&storage, literal, &buffer);
+                errdefer std.debug.print("MySQL plan for window page {s}:\n{s}", .{ source, plan });
+                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan on session") == null);
+                try std.testing.expect(std.mem.indexOf(u8, plan, "session_tab") != null);
+            }
             inline for (pages) |page| {
                 const literal = comptime bindLiterals(rsql.sentTemplate(page.source).prepared(), &.{ "0", "1000" });
                 var buffer: [16384]u8 = undefined;

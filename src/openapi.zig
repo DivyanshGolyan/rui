@@ -31,6 +31,44 @@ const Variant = struct {
     example: *const fn (*std.Io.Writer, bool) anyerror!void,
 };
 
+/// The Archived window cursor: `head`, `tail`, `below:<key>` or `above:<key>`, keys canonical and nonzero.
+const archived_cursor_pattern = "^(head|tail|(below|above):[1-9][0-9]*)$";
+const live_list_deltas = .{ "not_modified", "changed", "full" };
+
+fn windowVariant(comptime shape: anytype, comptime examples: anytype) Variant {
+    const S = struct {
+        const value = shape;
+        fn schema(d: *Document) anyerror!Value {
+            var built = try d.shapeSchema(value);
+            const window = built.object.getPtr("properties").?.object.getPtr("window").?;
+            try window.object.put(d.arena, "pattern", .{ .string = archived_cursor_pattern });
+            return built;
+        }
+        fn example(out: *std.Io.Writer, optional: bool) anyerror!void {
+            return writeExampleWith(out, value, examples, optional);
+        }
+    };
+    return .{ .schema = S.schema, .example = S.example };
+}
+
+/// A list reply union whose `delta` admits, per shape, only the listed values.
+fn deltaReply(comptime shapes: anytype, comptime deltas: anytype) Reply {
+    const S = struct {
+        fn schema(d: *Document) anyerror!Value {
+            var values: [shapes.len]Value = undefined;
+            inline for (shapes, deltas, 0..) |shape, allowed, index| {
+                values[index] = try d.shapeSchema(shape);
+                const delta = values[index].object.getPtr("properties").?.object.getPtr("delta").?;
+                var names: std.json.Array = .init(d.arena);
+                inline for (allowed) |name| try names.append(.{ .string = name });
+                try delta.object.put(d.arena, "enum", .{ .array = names });
+            }
+            return d.anyOf(&values);
+        }
+    };
+    return .{ .json = S.schema };
+}
+
 fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
     const S = struct {
         const value = shape;
@@ -183,16 +221,17 @@ pub const routes = [_]Route{
                 Optional(protocol.list_sessions_request.through),
                 Optional(protocol.list_sessions_request.after_reference),
             } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
-            // The Archived window: archive is required and must be archived; no since or through.
-            variant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archive ++
-                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "archived" }, .{ 3, "0" }, .{ 4, "0" }, .{ 5, "below:12" } }),
+            // The Archived window: archive is the constant archived; no since or through; window matches its grammar.
+            windowVariant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archived_archive ++
+                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" } }),
         },
-        .reply = jsonReply(.{
+        // Live replies never carry the window delta; the window reply carries only it.
+        .reply = deltaReply(.{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.last_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.ArchivedRow.Fields)} ++ protocol.session_list_reply.window_tail,
-        }),
+        }, .{ live_list_deltas, live_list_deltas, live_list_deltas, .{"window"} }),
     },
     .{
         .path = "/v1/conversation-page",

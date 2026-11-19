@@ -211,35 +211,38 @@ pub fn archiveState(a: *ReadAccess, session: []const u8) !session_archive.State 
     return archiveStateFromIntent(row);
 }
 
-const first_bound = rsql.Read(.{
-    .sql = "SELECT first_admission_id FROM turn @index(turn_session_latest) WHERE session_ref=?1 ORDER BY turn_id LIMIT 1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { first_admission_id: rsql.Positive },
-    .cardinality = .optional,
-});
+/// The first Message admission of the Session row `session` (joined onto `FROM session`): the earlier of the
+/// first turn's first admission (`first_bound`) and the earliest pending admission with no turn
+/// (`first_unbound`), chosen as `first_pick`. Each candidate is one indexed keyed read per row, and the pick is
+/// one join on that row, so a column of the first Message reads its admission once per row.
+pub const first_admission_join = " LEFT JOIN message_admission first_bound ON first_bound.admission_id=" ++
+    "(SELECT t.first_admission_id FROM turn t @index(turn_session_latest) WHERE t.session_ref=session.session_ref ORDER BY t.turn_id LIMIT 1)" ++
+    " LEFT JOIN message_admission first_unbound ON first_unbound.admission_id=" ++
+    "(SELECT u.admission_id FROM message_admission u @index(message_admission_session_pending) " ++
+    "WHERE u.session_ref=session.session_ref AND u.turn_id IS NULL ORDER BY u.admission_id LIMIT 1)" ++
+    " LEFT JOIN message_admission first_pick ON first_pick.admission_id=(CASE WHEN first_unbound.admission_id IS NULL " ++
+    "OR (first_bound.admission_id IS NOT NULL AND first_bound.admission_id<=first_unbound.admission_id) " ++
+    "THEN first_bound.admission_id ELSE first_unbound.admission_id END)";
+/// The admission column of `first_admission_join`: the Session's first Message, or NULL when it has none.
+pub const first_admission_column = "first_pick.admission_id";
 
-const first_unbound = rsql.Read(.{
-    .sql = "SELECT admission_id FROM message_admission @index(message_admission_session_pending) " ++
-        "WHERE session_ref=?1 AND turn_id IS NULL ORDER BY admission_id LIMIT 1",
+const first_candidate = rsql.Read(.{
+    .sql = "SELECT " ++ first_admission_column ++ " AS admission_id FROM session" ++ first_admission_join ++ " WHERE session.session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { admission_id: rsql.Positive },
+    .Row = struct { admission_id: ?rsql.Positive },
     .cardinality = .optional,
 });
 
 pub const FirstCandidates = struct {
-    bound: first_bound.Result = null,
-    unbound: first_unbound.Result = null,
+    row: first_candidate.Result = null,
 
     pub fn queue(first: *FirstCandidates, a: *ReadAccess, session: []const u8) void {
-        a.read(first_bound, .{ .session = session }, &first.bound);
-        a.read(first_unbound, .{ .session = session }, &first.unbound);
+        a.read(first_candidate, .{ .session = session }, &first.row);
     }
 
     pub fn admission(first: *const FirstCandidates) u64 {
-        const bound = if (first.bound) |row| row.first_admission_id.get() else std.math.maxInt(u64);
-        const unbound = if (first.unbound) |row| row.admission_id.get() else std.math.maxInt(u64);
-        const earlier = @min(bound, unbound);
-        return if (earlier == std.math.maxInt(u64)) 0 else earlier;
+        const row = first.row orelse return 0;
+        return if (row.admission_id) |id| id.get() else 0;
     }
 };
 
@@ -664,8 +667,7 @@ const work_stop = rsql.Read(.{
 });
 
 pub const report_failures = .{
-    .{ first_bound, error.SessionReadFailed },
-    .{ first_unbound, error.SessionReadFailed },
+    .{ first_candidate, error.SessionReadFailed },
     .{ person_message, error.SessionReadFailed },
     .{ first_message, error.CorruptStore },
 } ++ work_failures;

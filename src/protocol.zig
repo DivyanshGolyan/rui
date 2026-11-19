@@ -646,7 +646,7 @@ pub const ArchivedFirstFields = struct {
     content: content_value.Value,
     line: ?[]const u8,
 
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_last_line_bytes }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_first_line_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const ArchivedFirstFields, out: *std.Io.Writer) !void {
@@ -2207,6 +2207,8 @@ pub const inspect_session_request = struct {
 pub const list_sessions_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes } };
     pub const archive = .{ ",\"archive\":\"", Hole{ .tag = SessionArchiveFilter }, "\"" };
+    /// The Archived window's archive: the constant `archived`, the only filter a window read takes.
+    pub const archived_archive = .{",\"archive\":\"archived\""};
     pub const cursor = .{ ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
     pub const since = .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"" };
     pub const through = .{ ",\"through\":\"", Hole.decimal, "\"" };
