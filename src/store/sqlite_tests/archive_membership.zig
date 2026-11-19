@@ -103,12 +103,62 @@ test "format 86 live Session page reads session_tab and the archiving probe read
     const archiving = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.live_archiving_page.sql);
     defer _ = c.sqlite3_finalize(archiving);
     var probes_index = false;
+    var probes_turn_index = false;
     var scans_session = false;
     while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
         const detail = std.mem.span(c.sqlite3_column_text(archiving, 3));
         if (std.mem.indexOf(u8, detail, "action_operation_unaccepted") != null) probes_index = true;
+        if (std.mem.indexOf(u8, detail, "turn_outcome_unpositioned") != null) probes_turn_index = true;
         if (std.mem.indexOf(u8, detail, "SCAN s") != null) scans_session = true;
     }
     try std.testing.expect(probes_index);
+    try std.testing.expect(probes_turn_index);
     try std.testing.expect(!scans_session);
+}
+
+// The archiving probe must find a Session whose archive is pending on an open turn alone, and one whose
+// turn is settled in code but unpositioned, when no Action is unaccepted. Both raw rows are built here:
+// the stop's interrupt would otherwise settle the turn in the same commit.
+test "format 86 archiving probe finds an open turn and an unpositioned turn with no unaccepted Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/probe.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(raw, store_testing.baseline_rows);
+    for (store_schema.migrations) |step| {
+        for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+    }
+    try sqlite.exec(raw, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    // Turns 1 (d8mv7p) and 2 (brhkcj) come from the baseline. rhvzwc gets a copy of turn 1 left open as turn 3;
+    // d8mv7p keeps turn 1 with a code but no position.
+    try sqlite.exec(raw, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at,continuation_operation_id) " ++
+        "SELECT 3,'rhvzwc',first_admission_id,input_cutoff,operation_id,NULL,NULL,NULL,NULL,NULL FROM turn WHERE turn_id=1");
+    try sqlite.exec(raw, "UPDATE turn SET outcome_position=NULL WHERE turn_id=1 AND outcome_code IS NOT NULL");
+    try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
+        "('open-turn-arch',6,'rhvzwc',zeroblob(32),1,'',0,0,40),('pos-turn-arch',6,'d8mv7p',zeroblob(32),1,'',0,0,41);" ++
+        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,action_cutoff) VALUES" ++
+        "('open-turn-arch','rhvzwc',3,NULL,0,1793781800,0,0),('pos-turn-arch','d8mv7p',1,NULL,0,1793781800,0,0);" ++
+        "UPDATE session SET archive_seq=40 WHERE session_ref='rhvzwc';UPDATE session SET archive_seq=41 WHERE session_ref='d8mv7p';");
+    const archiving = try sqlite.prepare(raw, session_list_read.live_archiving_page.sql);
+    defer _ = c.sqlite3_finalize(archiving);
+    try sqlite.bindI64(archiving, 1, 0);
+    try sqlite.bindI64(archiving, 2, 1000);
+    var found_open = false;
+    var found_unpositioned = false;
+    var count: usize = 0;
+    while (c.sqlite3_step(archiving) == c.SQLITE_ROW) {
+        count += 1;
+        const ref = std.mem.span(c.sqlite3_column_text(archiving, 1));
+        if (std.mem.eql(u8, ref, "rhvzwc")) found_open = true;
+        if (std.mem.eql(u8, ref, "d8mv7p")) found_unpositioned = true;
+    }
+    try std.testing.expect(found_open);
+    try std.testing.expect(found_unpositioned);
+    try std.testing.expectEqual(@as(usize, 2), count);
 }

@@ -65,7 +65,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
-    .{ .schema_version = 86, .digest = 0x6099b37b911cb4ba },
+    .{ .schema_version = 86, .digest = 0xaf3fc29f874e6c4a },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -854,9 +854,11 @@ pub const migrations = [_]Migration{
         .from = 85,
         .sqlite = &.{
             "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
+            "CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL",
         },
         .mysql = &.{
-            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED AFTER action_operation_approval_lead, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
+            "ALTER TABLE turn ADD COLUMN turn_outcome_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN outcome_position IS NULL THEN session_ref END) STORED AFTER turn_unpositioned_lead, ADD INDEX turn_outcome_unpositioned(turn_outcome_unpositioned_lead)",
         },
     },
 };
@@ -1955,6 +1957,7 @@ pub const indexes = [_]Index{
     .{ .name = "model_output_compaction_anchor", .table = "model_output_item", .columns = &.{ "operation_id", "item_ordinal" }, .where = "item_kind=4" },
     .{ .name = "turn_session_latest", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" } },
     .{ .name = "turn_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "(outcome_code IS NULL)!=(outcome_position IS NULL)" },
+    .{ .name = "turn_outcome_unpositioned", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_position IS NULL" },
     .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
 
@@ -2056,6 +2059,26 @@ pub fn hasIndex(comptime name: []const u8) bool {
         for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return true;
         return false;
     }
+}
+
+/// The partial index named `name`, or null when no index has that name or it has no WHERE. rsql's
+/// `@in_index` states the rows of exactly these indexes.
+pub fn partialIndex(comptime name: []const u8) ?Index {
+    comptime {
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return if (index.where == null) null else index;
+        return null;
+    }
+}
+
+/// The MySQL generated column that a `.leading` partial index is built on, as the DDL names it.
+pub fn leadingColumnName(comptime index: Index) []const u8 {
+    return leadingColumn(index);
+}
+
+/// One key part of a `.unique_when` partial index on MySQL: `predicate` (already rendered) decides whether
+/// `column` is kept. The index DDL and rsql's `@in_index` both build their key parts with this function.
+pub fn mysqlKeyPart(comptime predicate: []const u8, comptime column: []const u8) []const u8 {
+    return "(CASE WHEN " ++ predicate ++ " THEN " ++ column ++ " END)";
 }
 
 const mysql_index_names: []const []const u8 = blk: {
@@ -2461,7 +2484,7 @@ fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const 
         parts = "";
         for (index.columns, 0..) |column, position| {
             const part = indexColumn(column);
-            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+            parts = parts ++ (if (position == 0) "" else ",") ++ mysqlKeyPart(expression(.mysql, all[tablePosition(all, index.table)], index.where.?), part.name) ++ part.order;
         }
     }
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";

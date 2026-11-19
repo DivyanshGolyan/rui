@@ -7,6 +7,7 @@ const sqlite = @import("sqlite.zig");
 const wire = @import("wire/mysql_connection.zig");
 const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
+const Bounded = @import("../bounded.zig").Bounded;
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
 const os = @import("os");
@@ -262,6 +263,38 @@ pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     try use(storage);
     try root.query(sql);
     return readU64(&root);
+}
+
+/// The MySQL plan of `sql` as EXPLAIN FORMAT=TREE lines, each ended by a newline, written into `out`.
+pub fn planText(storage: *Store, sql: []const u8, out: []u8) ![]const u8 {
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    var statement: [8192]u8 = undefined;
+    try root.query(try std.fmt.bufPrint(&statement, "EXPLAIN FORMAT=TREE {s}", .{sql}));
+    return readPlan(&root, out);
+}
+
+fn readPlan(source: *wire.Connection, out: []u8) ![]const u8 {
+    const Row = struct { line: Bounded(1024) };
+    var columns: rows.Columns(Row) = undefined;
+    var length: usize = 0;
+    while (!source.isReady()) switch (try source.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, source, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, source, &row);
+            const line = row.line.slice();
+            if (length + line.len + 1 > out.len) return error.PlanTooLong;
+            @memcpy(out[length..][0..line.len], line);
+            length += line.len;
+            out[length] = '\n';
+            length += 1;
+        },
+        .err => return error.QueryFailed,
+        else => {},
+    };
+    return out[0..length];
 }
 
 pub fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {

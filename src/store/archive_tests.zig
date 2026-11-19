@@ -569,10 +569,7 @@ fn walkAll(storage: *Store, archive: session_archive.Filter, workspace: ?[]const
     var count: usize = 0;
     while (true) {
         var walk: ListWalk = .{};
-        storage.readSessionList(&request, &walk) catch |err| {
-            std.debug.print("WALK ERR {s} archive={s} ws={?s}\n", .{ @errorName(err), @tagName(archive), workspace });
-            return err;
-        };
+        try storage.readSessionList(&request, &walk);
         for (walk.refs[0..walk.count]) |ref| {
             try std.testing.expect(count < out.len);
             out[count] = ref;
@@ -692,6 +689,36 @@ test "Session list membership and order equal the state reference for every filt
                 const actual_count = try walkAll(&storage, filter, workspace, &actual);
                 try std.testing.expectEqualSlices([6]u8, expected[0..expected_count], actual[0..actual_count]);
             };
+        }
+    }.run);
+}
+
+// Each archiving candidate is planned on MySQL through its own index. MySQL has no partial index, so the
+// marker states the `_lead` column (or the functional key for the unique open-turn index). The plan must
+// not scan the table. Runs only when the MySQL engine is live (forEachEngine skips it otherwise).
+test "MySQL plans each archiving candidate through its index" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            if (case.engine != .mysql) return;
+            const rsql = @import("rsql.zig");
+            const membership = @import("domain/archive_membership.zig");
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const candidates = [_]struct { sql: []const u8, mysql: []const u8, index: []const u8 }{
+                .{ .sql = membership.turn_candidates_sql, .mysql = comptime rsql.sentTemplate(membership.turn_candidates_sql).prepared(), .index = "turn_outcome_unpositioned" },
+                .{ .sql = membership.unaccepted_action_candidates_sql, .mysql = comptime rsql.sentTemplate(membership.unaccepted_action_candidates_sql).prepared(), .index = "action_operation_unaccepted" },
+            };
+            for (candidates) |candidate| {
+                var buffer: [8192]u8 = undefined;
+                const plan = try mysql_testing.planText(&storage, candidate.mysql, &buffer);
+                errdefer std.debug.print("MySQL plan for {s}:\n{s}", .{ candidate.sql, plan });
+                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+                try std.testing.expect(std.mem.indexOf(u8, plan, candidate.index) != null);
+            }
         }
     }.run);
 }
