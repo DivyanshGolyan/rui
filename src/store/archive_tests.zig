@@ -1035,14 +1035,6 @@ test "Archived window equals the Archived membership over the archive's edge cas
             try std.testing.expectEqualStrings("pending first line", pending_first.line_buf[0..pending_first.line_len.?]);
             try expectWindowMatchesWalk(&storage);
 
-            // A private first Message: its line is absent, its content reference still rides the row.
-            const private = try testing.configureTestSession(&storage, "edge-private-session");
-            try testing.submitTestMessage(&storage, &tmp, "edge-private-file", "edge-private-message", private.slice(), "private first line");
-            try testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT m.content_id FROM message_admission m WHERE m.session_ref=?1 AND m.turn_id IS NULL)", .{private.slice()});
-            var private_archive = try archiveCommand("edge-private-archive", private.slice(), true);
-            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&private_archive, .{}).accepted.completion);
-            try expectWindowMatchesWalk(&storage);
-
             // A leading blank line: the first line is blank, so the Session is named by its reference, as the
             // client names it.
             const blank = try testing.configureTestSession(&storage, "edge-blank-session");
@@ -1073,6 +1065,16 @@ test "Archived window equals the Archived membership over the archive's edge cas
             var after_restore: WindowVisitor = .{};
             try readWindow(&storage, .head, &after_restore);
             for (after_restore.rowsSlice()) |row| try std.testing.expect(!std.mem.eql(u8, &row.reference, &anchor.reference));
+            // A private first Message is exposed as corrupt, as the live list exposes it (content_parts.publicValue
+            // refuses private content, and inspection.md fences private exposed content): the page is refused, not
+            // read with a line-less row. Last, because every later page reads the same row.
+            const private = try testing.configureTestSession(&storage, "edge-private-session");
+            try testing.submitTestMessage(&storage, &tmp, "edge-private-file", "edge-private-message", private.slice(), "private first line");
+            try testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT m.content_id FROM message_admission m WHERE m.session_ref=?1 AND m.turn_id IS NULL)", .{private.slice()});
+            var private_archive = try archiveCommand("edge-private-archive", private.slice(), true);
+            try std.testing.expectEqual(protocol.SessionStopCompletion.completed, storage.archiveSession(&private_archive, .{}).accepted.completion);
+            var private_page: WindowVisitor = .{};
+            try std.testing.expectError(error.CorruptStore, readWindow(&storage, .head, &private_page));
         }
     }.run);
 }
