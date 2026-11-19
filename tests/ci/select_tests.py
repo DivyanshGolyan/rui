@@ -600,6 +600,16 @@ CLIENT_LOCALITY_INPUTS = ("src/*.zig", "clients/ts/src/*", "tests/ci/client_loca
                           "tests/ci/select_tests.py", "tests/ci/import_architecture.py", STACK_FRAMES_GATE)
 
 
+# The CI-code inputs every module declared with the table reads: a change to CI code or to a workflow reruns it.
+CI_CODE_INPUTS = ("tests/ci/*", ".github/*")
+
+# Each module's inputs. Rule: a module is declared only if every repo file it reads is named by a path literal or
+# glob in its own test file. A module that reads through a helper (a tests/ci or tests/integration module that
+# scans the tree, git over the tree, a fixture the module or the script it runs imports, or the build graph) is
+# not declared, so it always runs. test_store_engine_boundary and test_promotion meet the rule: their reads are
+# src/store and their own tests/ci helpers, which CI_CODE_INPUTS covers. test_docs_only is not declared: its path
+# literals are fixture names in temporary repositories, which the literal guard in test_selection.py would require
+# to be repo inputs.
 POLICY_SELF_CHECKS = (
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
@@ -610,6 +620,10 @@ POLICY_SELF_CHECKS = (
     ("test_client_locality", CLIENT_LOCALITY_INPUTS),
     # TLC runs only when a model, its runner or its CI wrapper changes.
     ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
+    # Runs only in-process fake repositories and fake steps; reads no repo file outside tests/ci.
+    ("test_promotion", CI_CODE_INPUTS),
+    # Reads src/store/** only.
+    ("test_store_engine_boundary", (*CI_CODE_INPUTS, "src/store*")),
 )
 
 
