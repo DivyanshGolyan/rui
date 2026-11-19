@@ -85,20 +85,21 @@ class StoreConformanceTest(unittest.TestCase):
     def test_repository_conformance_files_name_no_sqlite_mechanism(self):
         sources = conformance_sources()
         names = [name for name, _ in sources]
-        self.assertEqual(names[0], TESTS)
-        self.assertTrue(all(name.startswith("src/store/tests/") for name in names[1:]))
+        self.assertEqual(names[:2], [TESTS, "src/store/engine_contract.zig"])
+        self.assertTrue(all(name.startswith("src/store/tests/") for name in names[2:]))
         self.assertGreater(len(names), 1)
         self.assertIsNone(check(sources))
 
     def test_conformance_sources_read_tests_zig_and_every_domain_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in (TESTS, "src/store/tests/b.zig", "src/store/tests/nested/a.zig",
+            for name in (TESTS, "src/store/engine_contract.zig", "src/store/tests/b.zig", "src/store/tests/nested/a.zig",
                          "src/store/sqlite_tests.zig", "src/store/sqlite_tests/c.zig", "src/store/testing.zig"):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text(name)
             self.assertEqual(conformance_sources(root), [
-                (TESTS, TESTS), ("src/store/tests/b.zig", "src/store/tests/b.zig"),
+                (TESTS, TESTS), ("src/store/engine_contract.zig", "src/store/engine_contract.zig"),
+                ("src/store/tests/b.zig", "src/store/tests/b.zig"),
                 ("src/store/tests/nested/a.zig", "src/store/tests/nested/a.zig")])
 
     def test_check_reports_a_violation_in_a_domain_file(self):
