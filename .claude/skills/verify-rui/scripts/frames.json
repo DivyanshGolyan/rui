@@ -1225,7 +1225,7 @@
           "wait": "Agent working"
         },
         {
-          "wait": "◝ Agent working"
+          "wait": "Agent working"
         },
         {
           "wait": "● Agent approval"
@@ -1247,7 +1247,7 @@
           "dim": true
         },
         {
-          "text": "◝ Agent working",
+          "text": "Agent working",
           "dim": true
         },
         {
@@ -1276,7 +1276,7 @@
           "min_columns": 140
         },
         {
-          "wait": "◝ Agent working",
+          "wait": "Agent working",
           "min_columns": 140
         },
         {
@@ -1297,7 +1297,7 @@
           "min_columns": 140
         },
         {
-          "text": "◝ Agent working",
+          "text": "Agent working",
           "dim": true,
           "min_columns": 140
         },
