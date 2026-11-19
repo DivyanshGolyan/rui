@@ -102,7 +102,7 @@ A reopened issue keeps its label; change it if the next fix finds another cause.
 
 Promotion publishes a release and advances `stable`; merging never does.
 Promote publishes a green main HEAD every three hours when main has moved past `stable`, and publishes a commit a [scheduled promotion](../verification/release.md#scheduled-promotion) already qualified in minutes; it qualifies main HEAD itself, as below, only when no green record of that commit still holds its archives.
-Dispatch a promotion by hand without asking once the merged batch holds a fix users are waiting for and the next tick is too late: `gh workflow run promote.yml --ref main`, or `-f sha=qualified` for the newest green commit while main HEAD is red or still qualifying.
+Dispatch a promotion by hand without asking once the merged batch holds a fix users are waiting for and the next tick is too late: `gh workflow run promote.yml --ref main`, or `-f sha=qualified` for the newest green commit while main HEAD is red. A dispatch waits behind a running promotion, and a scheduled tick replaces it while it waits ([Scheduled promotion](../verification/release.md#scheduled-promotion)).
 Whoever dispatches a promotion watches it to the end and reports the result unprompted.
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.

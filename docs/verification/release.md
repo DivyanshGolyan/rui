@@ -62,7 +62,8 @@ Every run records its verdict as the `main-qualified` commit status of HEAD, who
 [main_qualified.py](../../tests/ci/main_qualified.py) alone writes and reads that record and names the batch.
 Runs never overlap: the `promote` concurrency group queues a newer run behind the current one, so an idle `main` whose HEAD is already in `stable` costs one short job per tick.
 A rerun of its failed jobs records the rerun's verdict on the same SHA.
-A scheduled run and a manual promotion of the same SHA share that queue, so neither cancels the other.
+Scheduled and manual runs share that queue, so neither cancels a running promotion, but GitHub keeps only one waiting run per group: a newer tick or dispatch replaces a waiting one.
+A scheduled tick that replaces a waiting dispatch promotes main HEAD, as a default dispatch would; dispatch again after the running promotion when the replaced one named a `sha`.
 
 ### Promote
 
