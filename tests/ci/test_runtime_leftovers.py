@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
@@ -116,31 +115,18 @@ class RuntimeLeftovers(unittest.TestCase):
                 listening.close()
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
+        # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no
+        # refusal errno. Nothing proves the socket dead, so it is live and kept.
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
-            root = pathlib.Path(raw)
+            root = pathlib.Path(raw) / ("d" * 60) / ("e" * 60)
+            root.mkdir(parents=True)
             path = root / "p.sock"
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(str(path))
-            server.close()
-            gone = str(root / "gone")
+            path.write_text("")
+            gone = str(pathlib.Path(raw) / "gone")
             path.with_suffix(".store").write_text(gone)
-
-            class Denied:
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *exc):
-                    return False
-
-                def settimeout(self, seconds):
-                    pass
-
-                def connect(self, target):
-                    raise PermissionError(errno.EACCES, "denied")
-
-            with mock.patch.object(runtime_leftovers.os_semantics, "unix_stream", Denied):
-                self.assertEqual([], runtime_leftovers.leftovers(root))
-                self.assertEqual([], runtime_leftovers.retire(gone, root))
+            self.assertTrue(runtime_leftovers.answers(path))
+            self.assertEqual([], runtime_leftovers.leftovers(root))
+            self.assertEqual([], runtime_leftovers.retire(gone, root))
             self.assertTrue(path.exists() and path.with_suffix(".store").exists())
 
 
@@ -259,17 +245,16 @@ class HostDisposal(unittest.TestCase):
 
 
 class ForcedCrashCleanup(unittest.TestCase):
-    """forced_crash_cleanup kills and reaps the Hosts it finds, then retires their sockets. Discovery
-    (the process census) is stubbed to the stand-in Host, since the real census needs a Rui executable;
-    the kill, reap and retire are real."""
+    """forced_crash_cleanup finds, kills and reaps the detached Host on a Store, then retires its
+    socket. The stand-in runs as `python host serve --store S`, the argv shape the real census matches,
+    so discovery, kill, reap and retire are all real."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.runtime = pathlib.Path(self.tmp.name) / "runtime"
         self.runtime.mkdir()
-        self.script = pathlib.Path(self.tmp.name) / "fake_host.py"
-        self.script.write_text(FAKE_HOST)
+        (pathlib.Path(self.tmp.name) / "host").write_text(FAKE_HOST)
         previous = os.environ.get(runtime_leftovers.OVERRIDE)
         os.environ[runtime_leftovers.OVERRIDE] = str(self.runtime)
         self.addCleanup(lambda: os.environ.pop(runtime_leftovers.OVERRIDE) if previous is None
@@ -288,17 +273,14 @@ class ForcedCrashCleanup(unittest.TestCase):
         store = pathlib.Path(self.tmp.name) / "store"
         store.mkdir()
         store = store.resolve()
-        process, _ = HOST.start_ready_process([sys.executable, str(self.script), "--store", str(store), "--mode", "serve"],
-                                              env=self.env, isolate_providers=False)
+        process = subprocess.Popen([sys.executable, "host", "serve", "--store", str(store), "--mode", "serve"],
+                                   cwd=self.tmp.name, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
         socket_path = self.runtime / "x.sock"
-        self.assertTrue(socket_path.exists())
-
-        def stand_in(named, *, descendants=False):
-            return [(process.pid, str(store))] if process.poll() is None and named == store else []
-
-        with mock.patch.object(launch, "matching_hosts", stand_in):
-            launch.forced_crash_cleanup(store)
-        self.assertIsNotNone(process.poll())
+        HOST.wait_for(socket_path.exists, "stand-in Host to listen", timeout=10)
+        self.assertEqual([process.pid], launch.matching_processes(store))
+        launch.forced_crash_cleanup(store)
+        process.wait(timeout=10)
         self.assertFalse(socket_path.exists() or socket_path.with_suffix(".store").exists())
         shutil.rmtree(store)
         self.assertEqual([], runtime_leftovers.leftovers(self.runtime))
