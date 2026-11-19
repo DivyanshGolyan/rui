@@ -379,17 +379,22 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .incompatible => .incompatible,
         .access_failure => .access_failure,
     } else .store_unavailable;
+    // With a Store, the report reads the Host's view of the OpenAI key; without one, the local view.
+    var key_source: ?defaults_report.KeySource = null;
+    var report_readiness = readiness;
+    if (available_store != null) report_readiness = storeReadiness(init, prospective_store.?, &key_source);
     var shown: codex_auth.Shown = undefined;
-    const account = if (reader != .command_line and readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
+    const account = if (reader != .command_line and report_readiness.get(.chatgpt).usable()) accountDetails(init, &shown) else null;
     const facts: defaults_report.Facts = .{
         .changed = changed,
         .values = values,
         .store = prospective_store,
         .saved_store = values.store.len != 0,
         .store_available = available_store != null,
-        .readiness = &readiness,
+        .readiness = &report_readiness,
         .host = report_host,
         .account = account,
+        .openai_key = key_source,
         .reader = reader,
         .names = signInNames(),
         .defaults = .{ .permission_mode = product_defaults.permission_mode, .recommended_model = product_defaults.recommended_model },
@@ -439,7 +444,7 @@ fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Rea
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const names = signInNames();
-    try defaults_report.writeSignIns(&output.interface, readiness, account, &names);
+    try defaults_report.writeSignIns(&output.interface, readiness, account, &names, null);
     try output.flush();
 }
 
@@ -1846,14 +1851,26 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
     return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store, .launch = entry.launch };
 }
 
-fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
+/// The Store's readiness as the Host will see it, and the OpenAI key source it found (copied; null when none).
+fn storeReadiness(init: std.process.Init, store: []const u8, source: *?defaults_report.KeySource) provider_selection.Readinesses {
     var readiness = localReadiness(init);
+    source.* = null;
     const info = host_start.inspectConnection(init, store) catch {
         readiness.set(.openai, .credential_error);
         return readiness;
     };
     readiness.set(.openai, info.readiness);
+    if (info.key_source) |key| switch (key) {
+        .file => |*file| source.* = .{ .file = init.arena.allocator().dupe(u8, file.slice()) catch return readiness },
+        .env => |*name| source.* = .{ .env = init.arena.allocator().dupe(u8, name.slice()) catch return readiness },
+        .default, .literal => {},
+    };
     return readiness;
+}
+
+fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
+    var source: ?defaults_report.KeySource = null;
+    return storeReadiness(init, store, &source);
 }
 
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: HostLaunchOps, result: *HostLaunchResult) void {

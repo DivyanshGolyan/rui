@@ -48,6 +48,9 @@ pub const Defaults = struct {
     recommended_model: []const u8,
 };
 
+/// Where the Store's Host reads the OpenAI API key from, when a source was found.
+pub const KeySource = union(enum) { file: []const u8, env: []const u8 };
+
 pub const Facts = struct {
     changed: bool,
     values: preference_document.Values,
@@ -57,6 +60,7 @@ pub const Facts = struct {
     readiness: *const provider_selection.Readinesses,
     host: Host,
     account: ?Account = null,
+    openai_key: ?KeySource = null,
     reader: Reader = .command_line,
     names: Names,
     defaults: Defaults,
@@ -104,7 +108,20 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     try writer.writeAll(",\"local_credentials\":{");
     for (std.enums.values(protocol.Provider), 0..) |provider, index|
         try writer.print("{s}\"{s}\":\"{s}\"", .{ if (index == 0) "" else ",", @tagName(provider), @tagName(facts.readiness.get(provider)) });
-    try writer.writeAll("},\"next_session\":");
+    try writer.writeAll("},\"openai_key_source\":");
+    if (facts.openai_key) |source| switch (source) {
+        .file => |path| {
+            try writer.writeAll("{\"file\":");
+            try std.json.Stringify.value(path, .{}, writer);
+            try writer.writeByte('}');
+        },
+        .env => |name| {
+            try writer.writeAll("{\"env\":");
+            try std.json.Stringify.value(name, .{}, writer);
+            try writer.writeByte('}');
+        },
+    } else try writer.writeAll("null");
+    try writer.writeAll(",\"next_session\":");
     switch (nextSession(facts)) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
@@ -169,7 +186,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
     try writer.writeAll(if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     try safeField(writer, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     try safeField(writer, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else facts.defaults.permission_mode);
-    try writeSignIns(writer, facts.readiness, facts.account, names);
+    try writeSignIns(writer, facts.readiness, facts.account, names, facts.openai_key);
     switch (selection) {
         .unsupported_provider => try writer.print("Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
         .unsupported_model => try writer.print("Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider {s} --model {s}`.\n", .{ names.choices, facts.defaults.recommended_model }),
@@ -244,11 +261,33 @@ fn hostProvidersLine(routes: protocol.Routes, names: *const Names, buffer: []u8)
     return line.buffered();
 }
 
-pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection.Readinesses, account: ?Account, names: *const Names) !void {
+pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection.Readinesses, account: ?Account, names: *const Names, source: ?KeySource) !void {
     try chatgptLines(writer, readiness.get(.chatgpt), readiness.get(.codex), names, account);
     switch (readiness.get(.openai)) {
-        .configured, .renewal_due => try writer.writeAll("OpenAI API key: saved locally (remote acceptance not checked).\n"),
-        .missing => try writer.writeAll("OpenAI API key: missing.\n"),
+        .configured, .renewal_due => if (source) |key| switch (key) {
+            .file => |path| {
+                try writer.writeAll("OpenAI API key: found in file ");
+                try safeText(writer, path);
+                try writer.writeAll(" (remote acceptance not checked).\n");
+            },
+            .env => |name| {
+                try writer.writeAll("OpenAI API key: found in environment variable ");
+                try safeText(writer, name);
+                try writer.writeAll(" (remote acceptance not checked).\n");
+            },
+        } else try writer.writeAll("OpenAI API key: saved locally (remote acceptance not checked).\n"),
+        .missing => if (source) |key| switch (key) {
+            .file => |path| {
+                try writer.writeAll("OpenAI API key: missing from file ");
+                try safeText(writer, path);
+                try writer.writeAll(".\n");
+            },
+            .env => |name| {
+                try writer.writeAll("OpenAI API key: missing from environment variable ");
+                try safeText(writer, name);
+                try writer.writeAll(".\n");
+            },
+        } else try writer.writeAll("OpenAI API key: missing.\n"),
         .refresh_required, .credential_error => try writer.print("OpenAI API key: unreadable, not owner-only or not one key; save it again with `{s}`.\n", .{names.loginFor(.openai)}),
     }
 }
@@ -334,7 +373,7 @@ test "CLI-30 the defaults report is a function of its facts" {
                 readiness.set(.chatgpt, plan);
                 var output_buffer: [1024]u8 = undefined;
                 var output = std.Io.Writer.fixed(&output_buffer);
-                try writeSignIns(&output, &readiness, account, &names);
+                try writeSignIns(&output, &readiness, account, &names, null);
                 try std.testing.expectEqualStrings(expected, output.buffered());
             }
         }
@@ -349,7 +388,7 @@ test "CLI-30 the defaults report is a function of its facts" {
                 readiness.set(.chatgpt, row[0]);
                 var output_buffer: [1024]u8 = undefined;
                 var output = std.Io.Writer.fixed(&output_buffer);
-                try writeSignIns(&output, &readiness, account, &names);
+                try writeSignIns(&output, &readiness, account, &names, null);
                 try std.testing.expectEqualStrings(row[1], output.buffered());
             }
         }
@@ -369,10 +408,49 @@ test "CLI-30 the defaults report is a function of its facts" {
             readiness.set(.openai, row[0]);
             var output_buffer: [1024]u8 = undefined;
             var output = std.Io.Writer.fixed(&output_buffer);
-            try writeSignIns(&output, &readiness, null, &names);
+            try writeSignIns(&output, &readiness, null, &names, null);
             var expected_buffer: [1024]u8 = undefined;
             const expected = try std.fmt.bufPrint(&expected_buffer, "ChatGPT: not signed in; sign in with `rui auth login chatgpt` (add --device-code to use a code instead of the browser).\n{s}", .{row[1]});
             try std.testing.expectEqualStrings(expected, output.buffered());
+        }
+    }
+
+    // OpenAI key source: the Store's configured or default source is named, with its path or variable name.
+    {
+        const sourced = [_]struct { Readiness, KeySource, []const u8 }{
+            .{ .configured, .{ .file = "/keys/openai.key" }, "OpenAI API key: found in file /keys/openai.key (remote acceptance not checked).\n" },
+            .{ .configured, .{ .env = "RUI_OPENAI_KEY" }, "OpenAI API key: found in environment variable RUI_OPENAI_KEY (remote acceptance not checked).\n" },
+            .{ .missing, .{ .file = "/keys/absent.key" }, "OpenAI API key: missing from file /keys/absent.key.\n" },
+            .{ .missing, .{ .env = "RUI_ABSENT_KEY" }, "OpenAI API key: missing from environment variable RUI_ABSENT_KEY.\n" },
+        };
+        for (sourced) |row| {
+            var readiness = provider_selection.Readinesses.initFill(.missing);
+            readiness.set(.openai, row[0]);
+            var output_buffer: [1024]u8 = undefined;
+            var output = std.Io.Writer.fixed(&output_buffer);
+            try writeSignIns(&output, &readiness, null, &names, row[1]);
+            try std.testing.expect(std.mem.endsWith(u8, output.buffered(), row[2]));
+        }
+        // The source is reported only with a readiness that names it; unreadable keys keep their sentence.
+        var unreadable = provider_selection.Readinesses.initFill(.missing);
+        unreadable.set(.openai, .credential_error);
+        var unreadable_buffer: [1024]u8 = undefined;
+        var unreadable_out = std.Io.Writer.fixed(&unreadable_buffer);
+        try writeSignIns(&unreadable_out, &unreadable, null, &names, .{ .file = "/keys/openai.key" });
+        try std.testing.expect(std.mem.endsWith(u8, unreadable_out.buffered(), "OpenAI API key: unreadable, not owner-only or not one key; save it again with `rui auth login openai`.\n"));
+        // JSON carries the source as an object for file and env, and null when none was found.
+        const json_cases = [_]struct { ?KeySource, []const u8 }{
+            .{ .{ .file = "/keys/openai.key" }, "\"openai_key_source\":{\"file\":\"/keys/openai.key\"},\"next_session\"" },
+            .{ .{ .env = "RUI_OPENAI_KEY" }, "\"openai_key_source\":{\"env\":\"RUI_OPENAI_KEY\"},\"next_session\"" },
+            .{ null, "\"openai_key_source\":null,\"next_session\"" },
+        };
+        for (json_cases) |row| {
+            var readiness = provider_selection.Readinesses.initFill(.missing);
+            var facts: Facts = .{ .changed = false, .values = .{}, .store = "/s", .saved_store = false, .store_available = true, .readiness = &readiness, .host = .unavailable, .names = names, .defaults = defaults, .openai_key = row[0] };
+            var json_buffer: [4096]u8 = undefined;
+            var json = std.Io.Writer.fixed(&json_buffer);
+            try writeJson(&json, &facts);
+            try std.testing.expect(std.mem.indexOf(u8, json.buffered(), row[1]) != null);
         }
     }
 
@@ -529,5 +607,5 @@ test "CLI-30 the defaults report is a function of its facts" {
     var output: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try writeJson(&writer, &wire_facts);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"provider\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"defaults\",\"changed\":false,\"store\":\"/home/test/.local/share/rui/store\",\"store_source\":\"home\",\"store_available\":false,\"provider\":null,\"model\":null,\"notifications\":true,\"reasoning_effort\":null,\"permission_mode\":null,\"local_credentials\":{\"codex\":\"missing\",\"openai\":\"missing\",\"chatgpt\":\"missing\"},\"openai_key_source\":null,\"next_session\":{\"status\":\"choose_provider\"},\"host\":{\"status\":\"store_unavailable\"}}\n", writer.buffered());
 }
