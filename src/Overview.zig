@@ -651,6 +651,17 @@ fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!vo
     ctx.redraw = ctx.redraw or self.state.presentation_revision != revision;
 }
 
+/// A wheel scroll moved the list. The core learns which rows are shown, so the Archived window reads the edge the
+/// list reaches; the top row becomes the anchor, so a trim above it moves nothing on screen.
+fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.state.archive != .archived or top >= self.state.order.items.len) return;
+    const row = self.state.rows.items[self.state.order.items[top]];
+    self.app_sessions.anchor = .{ .target = .{ .open = row.reference }, .index = top, .row = 0 };
+    try self.appNext(ctx, try self.event(.{ .viewport = .{ .first = top, .end = top + height } }));
+    ctx.redraw = true;
+}
+
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const upgrade_admitted = if (self.app_session) |shown| (if (shown.frontend) |frontend| frontend.admitsUpgrade() else true) else true;
@@ -1179,6 +1190,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
+    self.app_sessions.on_scroll = .{ .userdata = self, .scrolled = appScrolled };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     return self;
