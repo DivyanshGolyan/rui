@@ -4,7 +4,7 @@
 
 ## Sub-features
 
-- **Continue in your browser** shows a link, **Paste callback**, **Open browser**, **Change method** and **Back**.
+- **Continue in your browser** shows a link preview, **Paste callback**, **Open browser**, **Copy URL**, **Change method** and **Back**. **Copy URL** copies the complete sign-in URL.
 - **Use a device code** shows the address and code, with **Copy code**, **Open browser**, **Change method** and **Back**. C copies the code.
 - **Connect with an API key** has **Connect** and **Back** controls. Typing a key shows mask characters.
 - Tab/Shift-Tab move between controls; Enter or a click activates one. **Close** leaves the account chooser.

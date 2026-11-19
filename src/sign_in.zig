@@ -4,7 +4,7 @@ pub const Readinesses = @import("provider_selection.zig").Readinesses;
 pub const Account = enum { chatgpt, api_key };
 pub const Method = enum { browser, device };
 pub const Field = enum { base, key, model };
-pub const Control = enum { chatgpt, api_key, browser, device, reuse, base, key, model, connect, link, callback, copy_code, open_page, switch_method, back, retry, recheck, pause_command, start_command, close };
+pub const Control = enum { chatgpt, api_key, browser, device, reuse, base, key, model, connect, link, callback, copy_code, open_page, copy_url, switch_method, back, retry, recheck, pause_command, start_command, close };
 pub const Attempt = enum { browser, device, key, existing, recheck };
 pub const Failure = enum {
     expired,
@@ -51,6 +51,7 @@ pub const Action = union(enum) {
     callback,
     copy: Code,
     open: Link,
+    copy_url: Link,
     command: []const u8,
     switch_method,
     back,
@@ -78,7 +79,7 @@ pub const State = struct {
             .account => &.{ .chatgpt, .api_key, .close },
             .method => &.{ .browser, .device, .reuse, .back },
             .api => &.{ .base, .key, .model, .connect, .back },
-            .browser => &.{ .link, .callback, .open_page, .switch_method, .back },
+            .browser => &.{ .link, .callback, .open_page, .copy_url, .switch_method, .back },
             .device => &.{ .link, .copy_code, .open_page, .switch_method, .back },
             .stopping, .saving => &.{.back},
             .failed => &.{ .retry, .back },
@@ -161,6 +162,7 @@ pub const State = struct {
                     .callback => if (self.page == .browser) return .callback,
                     .copy => |code| if (self.page == .device and code.len != 0) return .{ .copy = code },
                     .open => |link| if ((self.page == .device or self.page == .browser) and link.len != 0) return .{ .open = link },
+                    .copy_url => |link| if (self.page == .browser and link.len != 0) return .{ .copy_text = link },
                     .command => |text| if (self.page == .pending) return .{ .copy_text = text },
                     .switch_method => if (self.page == .browser or self.page == .device) {
                         self.show(.{ .stopping = .method }, .back);
@@ -193,7 +195,7 @@ fn act(state: *State, action: Action) Effect {
     return state.step(.{ .activate = .{ .attempt = state.attempt, .page = std.meta.activeTag(state.page), .action = action } });
 }
 
-test "Sign-in guided account method cancellation publication and stale actions" {
+test "SUI-8 Sign-in guided cancellation settles publication" {
     var state: State = .{};
     try std.testing.expectEqual(Effect.none, act(&state, .{ .choose = .chatgpt }));
     try std.testing.expectEqual(@as(Attempt, .browser), act(&state, .{ .method = .browser }).start);
@@ -211,20 +213,33 @@ test "Sign-in guided account method cancellation publication and stale actions" 
     try std.testing.expect(state.page == .connected);
 }
 
-test "Sign-in every page has reachable controls and stale input never starts work" {
+test "SUI-6 Sign-in controls reject stale pages and attempts for every action" {
     const pages_ = [_]Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .login, .retry = .browser } }, .pending, .connected };
+    var code: Code = .{};
+    try code.set("SYNTHETIC");
+    const actions = [_]Action{ .{ .choose = .api_key }, .{ .method = .device }, .{ .reuse = .chatgpt }, .{ .field = .key }, .connect, .callback, .{ .copy = code }, .{ .copy_url = "https://example.invalid/?a=1&b=2" }, .{ .open = "https://example.invalid/" }, .{ .command = "synthetic" }, .recheck, .retry, .switch_method, .back, .close };
     for (pages_) |page| {
-        var state: State = .{ .page = page };
+        var state: State = .{ .page = page, .attempt = 7 };
         state.focus = state.controls()[0];
         const first = state.focus;
         for (0..state.controls().len) |_| _ = state.step(.{ .move = true });
         try std.testing.expectEqual(first, state.focus);
         for (0..state.controls().len) |_| _ = state.step(.{ .move = false });
         try std.testing.expectEqual(first, state.focus);
-        for ([_]Action{ .{ .choose = .api_key }, .{ .method = .device }, .connect, .recheck, .retry, .back, .close }) |action| {
-            try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 99, .page = std.meta.activeTag(page), .action = action } }));
+        for (actions) |action| {
+            try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 6, .page = std.meta.activeTag(page), .action = action } }));
+            for (pages_) |drawn_page| {
+                if (std.meta.activeTag(drawn_page) == std.meta.activeTag(page)) continue;
+                try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 7, .page = std.meta.activeTag(drawn_page), .action = action } }));
+            }
             try std.testing.expectEqual(std.meta.activeTag(page), std.meta.activeTag(state.page));
+            try std.testing.expectEqual(first, state.focus);
         }
+        for ([_]Action{ .{ .copy_url = "" }, .{ .copy = .{} } }) |empty| try std.testing.expectEqual(Effect.none, act(&state, empty));
+        const effect = act(&state, .{ .copy_url = "full-url" });
+        if (page == .browser) try std.testing.expectEqualStrings("full-url", effect.copy_text) else try std.testing.expectEqual(Effect.none, effect);
+        const device_effect = act(&state, .{ .copy = code });
+        if (page == .device) try std.testing.expectEqualStrings(code.slice(), device_effect.copy.slice()) else try std.testing.expectEqual(Effect.none, device_effect);
     }
 }
 
