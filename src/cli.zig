@@ -357,8 +357,15 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
     if (parsed.get("reasoning-effort")) |text| edit.reasoning_effort = try effortEdit(text);
     if (parsed.get("permission-mode")) |text| edit.permission_mode = .{ .set = std.meta.stringToEnum(cli_value.PermissionMode, text).? };
-    const readiness = localReadiness(init);
     const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep or edit.permission_mode != .keep;
+    // The prospective Store is known before the save, so one readiness serves the save and the report.
+    const local = localReadiness(init);
+    const saved_before: ?preferences.Values = if (edit.store == .set) null else preferences.load(home) catch null;
+    var planned_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const planned_store: ?[]const u8 = if (edit.store == .set) edit.store.set else if (saved_before) |*saved| (if (saved.store.len != 0) saved.store.slice() else preferences.defaultStore(home, &planned_buffer) catch null) else null;
+    const planned_paths: ?platform.Paths = if (planned_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
+    const overlay = if (planned_paths != null) storeReadiness(init, planned_store.?, local) else defaults_report.overlayStore(local, null);
+    const readiness = overlay.readiness;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
         if (err == error.InvalidPreferenceStore and edit.store == .set) holdStore(edit.store.set);
         const said = preferences.failure(err);
@@ -390,6 +397,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .readiness = &readiness,
         .host = report_host,
         .account = account,
+        .openai_key = overlay.key_source,
         .reader = reader,
         .names = signInNames(),
         .defaults = .{ .permission_mode = product_defaults.permission_mode, .recommended_model = product_defaults.recommended_model },
@@ -439,7 +447,7 @@ fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Rea
     var buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const names = signInNames();
-    try defaults_report.writeSignIns(&output.interface, readiness, account, &names);
+    try defaults_report.writeSignIns(&output.interface, readiness, account, &names, null);
     try output.flush();
 }
 
@@ -1848,14 +1856,26 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
     return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store, .launch = entry.launch };
 }
 
-fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    var readiness = localReadiness(init);
-    const info = host_start.inspectConnection(init, store) catch {
-        readiness.set(.openai, .credential_error);
-        return readiness;
+/// The Store's readiness as its Host reads the OpenAI key, over the local readiness of every other provider.
+/// A failed inspect, or a Store whose Host names no key source, leaves the local readiness standing.
+fn storeReadiness(init: std.process.Init, store: []const u8, local: provider_selection.Readinesses) defaults_report.Overlay {
+    const info = host_start.inspectConnection(init, store) catch return defaults_report.overlayStore(local, null);
+    return defaults_report.overlayStore(local, .{ .readiness = info.readiness, .key_source = copiedKeySource(init, info.servedKey()) });
+}
+
+/// The key source copied into the arena, so it outlives the inspect result; null when none or when the copy fails.
+fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.ConnectionInfo, "key_source")) ?defaults_report.KeySource {
+    const key = source orelse return null;
+    const arena = init.arena.allocator();
+    return switch (key) {
+        .file => |*file| defaults_report.KeySource{ .file = arena.dupe(u8, file.slice()) catch return null },
+        .env => |*name| defaults_report.KeySource{ .env = arena.dupe(u8, name.slice()) catch return null },
+        .default, .literal => null,
     };
-    readiness.set(.openai, info.readiness);
-    return readiness;
+}
+
+fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
+    return storeReadiness(init, store, localReadiness(init)).readiness;
 }
 
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: HostLaunchOps, result: *HostLaunchResult) void {

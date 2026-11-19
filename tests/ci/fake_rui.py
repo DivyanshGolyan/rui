@@ -39,7 +39,7 @@ case "$*" in
         [ -z "${{TEST_REPORT_FAULT-}}" ] || exit 1
         host=$(state)
         if [ -z "${{TEST_HOST-}}" ] && [ ! -d "$store" ]; then host=store_unavailable; fi
-        printf '{{"version":"1","type":"defaults","changed":false,"store":"%s","store_source":"home","store_available":false,"provider":null,"model":null,"local_credentials":{{"codex":"missing","openai":"missing"}},"next_session":{{"status":"choose_provider"}},"host":{{"status":"%s"}}}}\\n' "$store" "$host" ;;
+        printf '{{"version":"1","type":"defaults","changed":false,"store":"%s","store_source":"home","store_available":false,"provider":null,"model":null,"local_credentials":{{"codex":"missing","openai":"missing"}},"openai_key_source":null,"next_session":{{"status":"choose_provider"}},"host":{{"status":"%s"}}}}\\n' "$store" "$host" ;;
     "host status"|"host status --store "*)
         if [ -n "${{TEST_STATUS_LOG-}}" ]; then printf '%s\\n' "$*" >>"$TEST_STATUS_LOG"; fi
         [ -z "${{TEST_REPORT_FAULT-}}" ] || exit 1
