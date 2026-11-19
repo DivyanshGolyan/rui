@@ -13,6 +13,9 @@ import quarantine
 from report_issue import fixtures
 from steps import record_failure
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "integration"))
+import runtime_leftovers  # noqa: E402  (fixture helper beside the fixtures it checks)
+
 RETRIED = "one automatic retry"
 TEST_TIMEOUT = "5m"
 
@@ -31,6 +34,8 @@ def main():
     targets = json.loads(args.targets)
     batches = execution_batches(targets, args.check_part)
     for index, batch in enumerate(batches):
+        if earlier := runtime_leftovers.sweep():
+            print(f"Removed {len(earlier)} Host sockets left by earlier runs.", flush=True)
         returncode, output = execute(batch, args.ci_artifacts)
         if returncode and args.quarantine != "off" and (flakes := listed(output)):
             note = (f"{' '.join(batch)} failed only on listed flakes ({issues(flakes)}); "
@@ -54,6 +59,14 @@ def main():
             returncode, _ = execute(batch, args.ci_artifacts)
             if not returncode:
                 summarize(f"{' '.join(batch)} passed on its automatic retry after failing.")
+        # Checked after retries and quarantine, which forgive only the zig exit, never a leak.
+        if leaked := runtime_leftovers.sweep():
+            note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
+                    f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
+                    "remove its socket and .store hint before deleting the Store (docs/verification/testing.md).")
+            print(f"::error::{note}", flush=True)
+            summarize(note)
+            returncode = returncode or 1
         if returncode:
             record_failure(' '.join(batch), command(batch))
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "

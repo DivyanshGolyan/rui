@@ -17,6 +17,22 @@ import zipfile
 import build_artifact
 import build_files
 import run_selected
+import runtime_leftovers  # noqa: E402
+
+_leftover_runtime = None
+
+
+def setUpModule():
+    # The harness sweeps for leftover Host sockets; keep it off this machine's real directory.
+    global _leftover_runtime
+    _leftover_runtime = tempfile.TemporaryDirectory()
+    os.environ[runtime_leftovers.OVERRIDE] = _leftover_runtime.name
+
+
+def tearDownModule():
+    os.environ.pop(runtime_leftovers.OVERRIDE, None)
+    _leftover_runtime.cleanup()
+
 
 
 class HandoffTest(unittest.TestCase):
