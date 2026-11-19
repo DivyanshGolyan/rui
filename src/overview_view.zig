@@ -2109,8 +2109,15 @@ fn ordering(state: *const State, row: *const Row) OrderClass {
     };
 }
 
+/// A Session's place in the drawn order. A Session hidden in a collapsed
+/// branch takes its collapsed ancestor's place, so selection, highlight,
+/// list moves and Alt-Up/Down work from a hidden open chat without unfolding.
 fn position(state: *const State, ref: Reference) ?usize {
     for (state.order.items, 0..) |row, at| if (std.mem.eql(u8, &state.rows.items[row].reference, &ref)) return at;
+    const index = lookup(state.by_reference.items, ref) orelse return null;
+    if (index >= state.nodes.items.len) return null;
+    const representative = state.nodes.items[index].representative orelse return null;
+    for (state.order.items, 0..) |row, at| if (row == representative) return at;
     return null;
 }
 
@@ -3772,6 +3779,7 @@ fn creatorPagesCase() !void {
 
 test "SUI-101 creator tree folding and expansion" {
     try creatorFoldCase();
+    try creatorHiddenOpenCase();
 }
 
 test "SUI-102 creator tree order hold and release" {
@@ -3851,6 +3859,34 @@ fn creatorFoldCase() !void {
     try expectOrder(&state, &.{"A"});
     _ = try press(&state, .open_session);
     try expectOrder(&state, &.{ "A", "Child" });
+}
+
+fn creatorHiddenOpenCase() !void {
+    // An open or selected Session folded away takes its collapsed ancestor's place.
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "A", .subtree_state_change_at = test_now_s - 1, .descendant_count = 1 }),
+        session("b4n8wd", .{ .finished = ago(1) }, .{ .label = "Child", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .finished = ago(30) }, .{ .label = "B" }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "A", "Child", "B" });
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try expectOrder(&state, &.{ "A", "B" });
+    _ = try step(&state, .{ .conversation = "b4n8wd".* });
+    state.selected = .{ .session = "b4n8wd".* };
+    try expectOrder(&state, &.{ "A", "B" });
+    const a_line = Lines.lineOf(&state, 0);
+    try std.testing.expectEqual(@as(?usize, a_line), Lines.named(&state));
+    try std.testing.expectEqual(@as(?usize, a_line), Lines.highlighted(&state, true));
+    try std.testing.expectEqual(@as(?usize, a_line), lineOfReference(&state, "b4n8wd".*));
+    const effects = try press(&state, .next_session);
+    try std.testing.expectEqualStrings("c3d4e5", &state.selected.session);
+    var opens: usize = 0;
+    for (effects.slice()) |effect| if (effect == .open) {
+        opens += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), opens);
 }
 
 fn creatorPointerHoldCase() !void {

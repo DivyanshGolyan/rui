@@ -627,11 +627,9 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .list_origin = delivery.list_origin,
         .at_ms = self.realMs(),
     } }));
+    // Any list key that moved the selection (arrows, Home/End, Alt-?, Alt-Up/Down) brings it into view.
     if (delivery.list_origin and !delivery.pasted and delivery.under == .main and !std.meta.eql(before, self.state.selected)) {
-        if (semantic == .action) switch (semantic.action) {
-            .previous, .next, .select_previous, .select_next, .first, .last => self.app_sessions.followSelection(),
-            else => {},
-        };
+        self.app_sessions.followSelection();
     }
     ctx.consumeAndRedraw();
 }
