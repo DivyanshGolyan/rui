@@ -11,7 +11,7 @@ from urllib.parse import quote
 import live_engines
 import model_fixture as fixture
 import overview_fixture
-from host_process import dispose_all, short_interface_directory, start_ready_process, wait_for
+from host_process import dispose_all, READY_TRANSPORT, short_interface_directory, start_ready_process, wait_for
 
 
 def mysql_inputs(environ):
@@ -61,7 +61,7 @@ class MysqlStore:
         env = dict(os.environ, RUI_TOOL_PROFILE_MYSQL_URL=url)
         args = fixture.host_arguments(store, endpoint, active_capacity=active_capacity)
         host, _ = start_ready_process(args, env=env,
-                                     required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+                                     required_fields=READY_TRANSPORT)
         return host
 
     def drop(self):

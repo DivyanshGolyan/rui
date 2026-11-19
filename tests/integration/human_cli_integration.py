@@ -1515,7 +1515,7 @@ def provider_line_cases():
             [fixture.RUI, "host", "serve", "--store", store,
              "--set", f"providers.codex.endpoint={url}", "--set", f"providers.openai.endpoint={url}"],
             env={**os.environ, "RUI_OPENAI_KEY_FILE": str(host_key), "RUI_CODEX_CREDENTIAL_FILE": str(host_codex)},
-            required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+            required_fields=host_process.READY_TRANSPORT)
         no_tty = state / "no-tty"
         no_tty.mkdir()
         refused = subprocess.run([str(fixture.RUI)], cwd=state,

@@ -35,7 +35,7 @@ const image_png = @embedFile("codecs/fixtures/image-input/pixel.png");
 const image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"image\",\"data\":\"" ++ image_b64 ++ "\",\"mimeType\":\"image/png\"},{\"type\":\"text\",\"text\":\"after\"}]}}");
 const bad_image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"image\",\"data\":\"not-base64-secret\",\"mimeType\":\"image/png\"}]}}");
-const Case = enum { success, image, image_bad, image_exhausted, image_stop_race, retention_saved, retention_refused, retention_tight, retention_no_bash, retention_settlement_failure, retention_settlement_unlink_failure, serial, timeout, down, stop, stop_unsent, shutdown, concurrent };
+const Case = enum { success, image, image_bad, image_exhausted, image_stop_race, retention_saved, retention_refused, retention_tight, retention_no_bash, retention_settlement_failure, retention_settlement_unlink_failure, two_calls, timeout, down, stop, stop_unsent, shutdown, concurrent };
 
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);
@@ -69,8 +69,8 @@ test "Host MCP releases a retained result when settlement fails" {
     try run(.retention_settlement_unlink_failure);
 }
 
-test "Host MCP serializes two calls from one model reply in recorded order" {
-    try run(.serial);
+test "Host MCP offers the second call of one model reply while the first runs" {
+    try run(.two_calls);
 }
 
 test "Host MCP timeout closes a sent request and records outcome unknown" {
@@ -121,7 +121,7 @@ fn run(case: Case) !void {
         .{ .item_id = "item-1", .name = "fetch_page", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"q\\\":\\\"first\\\",\\\"rui_call_description\\\":\\\"Read docs\\\",\\\"unexpected\\\":\\\"must not leave Host\\\"}", .decoded_arguments = arguments },
         .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{\\\"q\\\":\\\"second\\\",\\\"rui_call_description\\\":\\\"Read next\\\"}", .decoded_arguments = second_arguments },
     };
-    const count: usize = if (case == .serial) 2 else 1;
+    const count: usize = if (case == .two_calls) 2 else 1;
     try store.settleCallsForTesting(storage, &tmp, binding, "mcp-calls", calls[0..count]);
     try expectHere(@src(), (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
     try expectHere(@src(), (try storage.admitNextModelAttempt(.{})) == null);
@@ -135,7 +135,7 @@ fn run(case: Case) !void {
     defer allocator.free(retention_reply);
     const script = try allocator.create(Script);
     defer allocator.destroy(script);
-    script.* = .{ .reply = if (retention_case) retention_reply else if (case == .image_bad) bad_image_reply else if (case == .image or case == .image_exhausted or case == .image_stop_race) image_reply else reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .image_stop_race or case == .shutdown or case == .concurrent };
+    script.* = .{ .reply = if (retention_case) retention_reply else if (case == .image_bad) bad_image_reply else if (case == .image or case == .image_exhausted or case == .image_stop_race) image_reply else reply, .more = if (case == .two_calls) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .image_stop_race or case == .shutdown or case == .concurrent };
     if (case != .down) try script.start();
     defer if (case != .down) script.stop();
     if (case == .down) script.port = try @import("socket_fixture.zig").refusedPort();
@@ -188,7 +188,7 @@ fn run(case: Case) !void {
             try storage.readActionExecutionInput(.mcp, .{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
             try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
         }
-        if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
+        if (case == .two_calls and ordinal == 0) try std.testing.expectEqual(work.mcp.action_id + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
         const Context = struct {
             active: *mcp.Calls,
             host: *Host,
@@ -390,7 +390,7 @@ fn run(case: Case) !void {
         return;
     }
     const expected = switch (case) {
-        .success, .serial => "page payload",
+        .success, .two_calls => "page payload",
         .image, .image_bad, .image_exhausted, .image_stop_race, .retention_saved, .retention_refused, .retention_tight, .retention_no_bash, .retention_settlement_failure, .retention_settlement_unlink_failure => unreachable,
         .timeout, .stop => "Outcome unknown",
         .stop_unsent => "not sent",
