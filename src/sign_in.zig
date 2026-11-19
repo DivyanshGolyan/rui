@@ -4,7 +4,7 @@ pub const Readinesses = @import("provider_selection.zig").Readinesses;
 pub const Account = enum { chatgpt, api_key };
 pub const Method = enum { browser, device };
 pub const Field = enum { base, key, model };
-pub const Control = enum { chatgpt, api_key, browser, device, reuse, base, key, model, connect, link, callback, copy_code, open_page, switch_method, back, retry, recheck, pause_command, start_command, close };
+pub const Control = enum { chatgpt, api_key, browser, device, reuse, base, key, model, connect, link, callback, copy_code, open_page, copy_url, switch_method, back, retry, recheck, pause_command, start_command, close };
 pub const Attempt = enum { browser, device, key, existing, recheck };
 pub const Failure = enum {
     expired,
@@ -51,6 +51,7 @@ pub const Action = union(enum) {
     callback,
     copy: Code,
     open: Link,
+    copy_url: Link,
     command: []const u8,
     switch_method,
     back,
@@ -78,7 +79,7 @@ pub const State = struct {
             .account => &.{ .chatgpt, .api_key, .close },
             .method => &.{ .browser, .device, .reuse, .back },
             .api => &.{ .base, .key, .model, .connect, .back },
-            .browser => &.{ .link, .callback, .open_page, .switch_method, .back },
+            .browser => &.{ .link, .callback, .open_page, .copy_url, .switch_method, .back },
             .device => &.{ .link, .copy_code, .open_page, .switch_method, .back },
             .stopping, .saving => &.{.back},
             .failed => &.{ .retry, .back },
@@ -161,6 +162,7 @@ pub const State = struct {
                     .callback => if (self.page == .browser) return .callback,
                     .copy => |code| if (self.page == .device and code.len != 0) return .{ .copy = code },
                     .open => |link| if ((self.page == .device or self.page == .browser) and link.len != 0) return .{ .open = link },
+                    .copy_url => |link| if (self.page == .browser and link.len != 0) return .{ .copy_text = link },
                     .command => |text| if (self.page == .pending) return .{ .copy_text = text },
                     .switch_method => if (self.page == .browser or self.page == .device) {
                         self.show(.{ .stopping = .method }, .back);

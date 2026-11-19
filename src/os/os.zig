@@ -83,13 +83,39 @@ pub const sec_trust = current.sec_trust;
 /// OpenSSL system trust probes before the bundles.
 pub const hashed_trust_directories = current.hashed_trust_directories;
 
-/// The command that opens a link in a browser here, given the environment:
-/// macOS's `open` always has one; Linux's `xdg-open` only in a graphical
-/// session, which names `DISPLAY` or `WAYLAND_DISPLAY`.
-pub fn linkOpener(environ: *const std.process.Environ.Map) ?[]const u8 {
-    const opener = current.link_opener orelse return null;
-    if (opener.needs_display and environ.get("DISPLAY") == null and environ.get("WAYLAND_DISPLAY") == null) return null;
-    return opener.command;
+pub const LinkOpener = union(enum) {
+    desktop: []const u8,
+    wsl: ?[]const u8,
+
+    pub fn open(self: LinkOpener, io: std.Io, link: []const u8) !void {
+        switch (self) {
+            .desktop => |command| try launch(io, &.{ command, link }),
+            .wsl => |fallback| launch(io, &.{ "rundll32.exe", "url.dll,FileProtocolHandler", link }) catch |err| {
+                const command = fallback orelse return err;
+                try launch(io, &.{ command, link });
+            },
+        }
+    }
+
+    fn launch(io: std.Io, argv: []const []const u8) !void {
+        _ = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    }
+};
+
+pub fn linkOpener(environ: *const std.process.Environ.Map) ?LinkOpener {
+    return linkOpenerFor(tag, environ);
+}
+
+fn linkOpenerFor(comptime platform: std.Target.Os.Tag, environ: *const std.process.Environ.Map) ?LinkOpener {
+    const opener = semantics(platform).link_opener orelse return null;
+    const has_display = environ.get("DISPLAY") != null or environ.get("WAYLAND_DISPLAY") != null;
+    const desktop: ?[]const u8 = if (!opener.needs_display or has_display) opener.command else null;
+    if (platform == .linux) {
+        if (environ.get("WSL_INTEROP")) |interop| {
+            if (interop.len != 0) return .{ .wsl = desktop };
+        }
+    }
+    return if (desktop) |command| .{ .desktop = command } else null;
 }
 
 test "Linux and Darwin semantics" {
@@ -110,6 +136,20 @@ test "Linux and Darwin semantics" {
     try std.testing.expectEqualStrings("open", mac.link_opener.?.command);
     const unsupported = semantics(.windows);
     try std.testing.expect(!unsupported.supported and unsupported.read_only_directory == null);
+}
+
+test "browser opener follows the platform and WSL interop" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try std.testing.expect(linkOpenerFor(.linux, &environment) == null);
+    try std.testing.expectEqualStrings("open", linkOpenerFor(.macos, &environment).?.desktop);
+    try environment.put("DISPLAY", ":0");
+    try std.testing.expectEqualStrings("xdg-open", linkOpenerFor(.linux, &environment).?.desktop);
+    try environment.put("WSL_INTEROP", "/run/WSL/synthetic");
+    try std.testing.expectEqualStrings("xdg-open", linkOpenerFor(.linux, &environment).?.wsl.?);
+    try std.testing.expectEqualStrings("open", linkOpenerFor(.macos, &environment).?.desktop);
+    _ = environment.swapRemove("DISPLAY");
+    try std.testing.expect(linkOpenerFor(.linux, &environment).?.wsl == null);
 }
 
 test {

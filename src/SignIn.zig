@@ -812,12 +812,12 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os").linkOpener(init_.environ_map) orelse {
-                self.issue = "No browser opener is available. Open the displayed URL manually.";
+            const opener = @import("os").linkOpener(init_.environ_map) orelse {
+                self.issue = if (self.state.page == .browser) "No browser opener is available. Copy URL to open it manually." else "No browser opener is available. Open the displayed URL manually.";
                 return;
             };
-            plan_login.openBrowser(init_.io, command, link_) catch {
-                self.issue = "Couldn't open a browser. Open the displayed URL manually.";
+            opener.open(init_.io, link_) catch {
+                self.issue = if (self.state.page == .browser) "Couldn't open a browser. Copy URL to open it manually." else "Couldn't open a browser. Open the displayed URL manually.";
                 return;
             };
             self.issue = "Browser open requested.";
@@ -973,7 +973,7 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     @import("TerminalText.zig").writeShellWord(&writer.writer, store) catch return error.OutOfMemory;
     return writer.written();
 }
-fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
+fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: ?core.Control, action: ?core.Action, width: u16) !void {
     const value_width = Panel.valueWidth(width);
     const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
     try append(rows, ctx.arena, label, first, control, action);
@@ -981,7 +981,7 @@ fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []cons
     while (at < text.len and value_width > 0) {
         const part = line.fit(ctx, text[at..], value_width).text;
         if (part.len == 0) break;
-        try append(rows, ctx.arena, "", part, null, if (action == .open) action else null);
+        try append(rows, ctx.arena, "", part, null, if (action != null and action.? == .open) action else null);
         at += part.len;
     }
 }
@@ -1054,11 +1054,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             }
         },
         .browser => {
-            try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) browser_link else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
+            const value_width = Panel.valueWidth(width);
+            const visible = line.fit(ctx, browser_link, value_width).text;
+            const link_label = if (visible.len < browser_link.len and value_width > 3)
+                try std.fmt.allocPrint(a, "{s}...", .{line.fit(ctx, browser_link, value_width - 3).text})
+            else
+                visible;
+            try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) link_label else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
             const mask = try a.alloc(u8, @min(browser_typed, Panel.valueWidth(width) -| 1));
             @memset(mask, '*');
             try append(&rows, a, "Paste callback", if (browser_typed != 0) mask else if (browser_stray) "Not the sign-in address. Paste again." else if (browser_checking) "Checking address..." else "Paste final browser address, then Enter", .callback, .callback);
             try button(&buttons, a, "Open browser", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
+            try button(&buttons, a, "Copy URL", .copy_url, if (browser_link.len != 0) .{ .copy_url = browser_link } else null);
             try button(&buttons, a, "Change method", .switch_method, .switch_method);
             try button(&buttons, a, "Back", .back, .back);
         },
@@ -1100,7 +1107,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Close", .close, .close);
         },
     }
-    if (self.issue) |issue| try append(&rows, a, "Status", issue, null, null);
+    if (self.issue) |issue| {
+        if (self.state.page == .browser or self.state.page == .device) {
+            try appendWrapped(&rows, ctx, "Status", issue, null, null, width);
+        } else {
+            try append(&rows, a, "Status", issue, null, null);
+        }
+    }
     const fields = try a.alloc(Panel.Field, rows.items.len);
     const labels = try a.alloc([]const u8, buttons.items.len);
     var selected: usize = 0;
@@ -1696,6 +1709,31 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
             try std.testing.expect(clicked);
             try std.testing.expectEqual(if (from == .browser or from == .device) @as(std.meta.Tag(core.Page), .method) else .account, std.meta.activeTag(page.state.page));
         }
+    }
+}
+
+test "SUI-7 Sign-in keeps the browser fallback readable and copies the complete URL on request" {
+    const url = "https://example.invalid/authorize?client_id=synthetic&state=synthetic&scope=example";
+    const status = "Couldn't open a browser. Copy URL to open it manually.";
+    for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = .{ .page = .browser, .focus = .callback }, .issue = status };
+        page.browser = try pages.Mapped(Browser).map();
+        defer _ = page.closeBrowser();
+        page.browser.?.value.init();
+        try page.browser.?.value.link.set(url);
+        const frame = try testingDraw(&page, ctx.alloc, width, 30);
+        const text = try testingText(frame, ctx.alloc);
+        try std.testing.expect(std.mem.indexOf(u8, text, "[ Copy URL ]") != null);
+        var compact: std.ArrayList(u8) = .empty;
+        for (text) |byte| if (!std.ascii.isWhitespace(byte)) try compact.append(ctx.alloc, byte);
+        try std.testing.expect(std.mem.indexOf(u8, compact.items, "Couldn'topenabrowser.CopyURLtoopenitmanually.") != null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        try testingSend(&page, &ctx, "\t\t\r", width, 30);
+        try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+        try std.testing.expectEqualStrings(url, ctx.cmds.items[0].copy_to_clipboard);
     }
 }
 
