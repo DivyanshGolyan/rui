@@ -132,6 +132,7 @@ The order is defaults, saved settings, `--settings FILE|-`, then repeatable `--s
 Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
+`rui host set providers.NAME...`, or `unset providers.NAME` of a provider it serves automatically, on a Host with no saved `providers` first saves the providers it would serve automatically now, so it changes only that provider; the saved set is then exact, and a later sign-in or key is not added automatically. `--set` on `host start` still names the exact set for that start.
 
 Credential-location defaults for client and Host share `src/credential_location.zig`: `RUI_OPENAI_KEY_FILE`, `RUI_CODEX_CREDENTIAL_FILE` and `RUI_CHATGPT_CREDENTIAL_FILE` select absolute paths; a provider credential leaf overrides its default. Without a variable, the default is under `~/.config/rui/`.
 
