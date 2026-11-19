@@ -728,6 +728,13 @@ test "ADM-23 Message mutation replies bind capture identity and accepted parts o
     const protocol = @import("protocol.zig");
     const command_reply = @import("command_reply.zig");
     const digest: [32]u8 = @splat(7);
+    const identity: content_value.Reference = .{ .length = 108, .digest = digest };
+    for ([_]struct { content_value.Value, bool }{
+        .{ .{ .text = identity }, true },
+        .{ .{ .parts = .{ .identity = identity, .owner = .{ .message = 7 } } }, true },
+        .{ .{ .parts = .{ .identity = identity, .owner = .{ .message = 8 } } }, false },
+        .{ .{ .parts = .{ .identity = identity, .owner = .{ .action = 7 } } }, false },
+    }) |case| try std.testing.expectEqual(case[1], matchesMessageAdmission(case[0], 7));
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":";
     const accepted = "{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
     const rejected = "{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";

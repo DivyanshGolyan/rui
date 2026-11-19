@@ -5,7 +5,7 @@ First drafts, written from the README and the contracts and checked against fixe
 
 | Area | Invariants |
 | --- | --- |
-| [Admission and Session stops](admission-sessions.md) | 48 |
+| [Admission and Session stops](admission-sessions.md) | 53 |
 | [Store, Host lifetime, install and upgrade](store-host.md) | 82 |
 | [Tools, execution, recovery and resources](execution-resources.md) | 66 |
 | [Conversation, settings and model requests](conversation-model.md) | 38 |

@@ -4093,7 +4093,7 @@ test "CLI-6 start_receipt_configuration" {
     try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
 }
 
-test "Message mutation JSON preserves accepted parts owners and rejected receipts" {
+test "ADM-30 Message mutation JSON renders accepted parts with their owner and rejected receipts without one" {
     const wire_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\"";
     const accepted = ",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
     const rejected = ",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
