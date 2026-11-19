@@ -961,7 +961,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, caller_exit.knownError(err));
         return err;
     };
-    if (command != .host_settings and client.hostStatus(init.io, selected) == .ready) diagnoseRetainedHost(selected, .saved);
+    if (command != .host_settings and client.hostStatus(init.io, selected) == .ready) diagnoseRetainedHost(selected, savedRetention(parsed.positional.?));
 }
 
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
@@ -1150,7 +1150,32 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
 }
 
 /// What a running Host did not take: `--set` on a start that adopted it, or settings saved while it serves.
-const Retained = enum { assignments, saved };
+/// `saved_capacity` is a saved edit that reaches `execution.activeCapacity`, the one saved setting
+/// a restart keeps (it is pinned so the replacement can be told from a concurrent starter).
+const Retained = enum { assignments, saved, saved_capacity };
+
+/// Which notice a `host set`/`host unset` of this settings path gets.
+fn savedRetention(path: []const u8) Retained {
+    const capacity = "execution.activeCapacity";
+    const reaches = std.mem.eql(u8, path, capacity) or
+        (path.len < capacity.len and std.mem.startsWith(u8, capacity, path) and capacity[path.len] == '.');
+    return if (reaches) .saved_capacity else .saved;
+}
+
+test "a saved edit that reaches Active Capacity gets the pause-then-start notice" {
+    for ([_]struct { []const u8, Retained }{
+        .{ "execution.activeCapacity", .saved_capacity },
+        .{ "execution", .saved_capacity },
+        .{ "execution.backgroundAfterMs", .saved },
+        .{ "execution.active", .saved },
+        .{ "exec", .saved },
+        .{ "providers.openai", .saved },
+    }) |case| try std.testing.expectEqual(case[1], savedRetention(case[0]));
+    var notice: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer notice.deinit();
+    try writeRetainedHostNotice(&notice.writer, "/s", .saved_capacity);
+    try std.testing.expectEqualStrings("rui: saved; the running Host keeps its capacity until a new Host starts, and rui host restart keeps it too. Applying settings means pausing this Host and all its work: rui host pause --store /s, then rui host start --store /s\n", notice.written());
+}
 
 fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
     // Each selector byte escapes to at most 4 bytes, and the notice names it twice.
@@ -1164,11 +1189,14 @@ fn diagnoseRetainedHost(selector: []const u8, retained: Retained) void {
 
 /// The one notice that a running Host keeps its settings, and the command that applies them.
 /// A saved change is applied by `rui host restart --all`, which restarts a Host whose saved
-/// settings changed even on the same build. `--set` assignments reuse the running Host's own
-/// flags, so they still need pause then start.
+/// settings changed even on the same build. A saved capacity and `--set` assignments are kept
+/// by restart, so they still need pause then start.
 fn writeRetainedHostNotice(writer: *std.Io.Writer, selector: []const u8, retained: Retained) !void {
-    if (retained == .saved) return writer.writeAll("rui: saved; the running Host keeps its old settings until it restarts. Apply them with rui host restart --all; saved work resumes.\n");
-    try writer.writeAll("rui: the running Host keeps its settings; --set assignments apply only to a new Host. ");
+    try writer.writeAll(switch (retained) {
+        .saved => return writer.writeAll("rui: saved; the running Host keeps its old settings until it restarts. Apply them with rui host restart --all; saved work resumes.\n"),
+        .saved_capacity => "rui: saved; the running Host keeps its capacity until a new Host starts, and rui host restart keeps it too. ",
+        .assignments => "rui: the running Host keeps its settings; --set assignments apply only to a new Host. ",
+    });
     try writer.writeAll("Applying settings means pausing this Host and all its work: rui host pause --store ");
     try TerminalText.writeShellWord(writer, selector);
     try writer.writeAll(", then rui host start --store ");
