@@ -336,7 +336,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. */
+        /** One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. `window` reads one page of Archived Sessions, newest archive first, in one round: only with `archive` = `archived`, no `workspace`, no `since`, and zero `after` and `ceiling`. */
         post: operations["listSessions"];
         delete?: never;
         options?: never;
@@ -951,6 +951,19 @@ export interface components {
             /** @enum {string} */
             provider?: "codex" | "openai" | "chatgpt";
             workspace?: string;
+        };
+        ArchivedFirstFields: {
+            position: components["schemas"]["Decimal"];
+            admission: components["schemas"]["Decimal"];
+            content: components["schemas"]["ContentValue"];
+            line: string | null;
+        };
+        ArchivedRowFields: {
+            reference: string;
+            archive_seq: components["schemas"]["Decimal"];
+            stopped_at: components["schemas"]["Decimal"];
+            label: string | null;
+            first: components["schemas"]["ArchivedFirstFields"] | null;
         };
         CallActivity: {
             total: components["schemas"]["Decimal"];
@@ -1643,6 +1656,21 @@ export interface components {
             delta: "not_modified" | "changed" | "full";
             since: string;
             next: null;
+        } | {
+            /** @constant */
+            version: "22";
+            /** @constant */
+            type: "session_list";
+            sessions: components["schemas"]["ArchivedRowFields"][];
+            /** @enum {string} */
+            delta: "window";
+            since: string;
+            next: {
+                first: components["schemas"]["Decimal"] | null;
+                last: components["schemas"]["Decimal"] | null;
+                more_above: boolean;
+                more_below: boolean;
+            };
         };
         ListSessionsRequest: {
             /** @constant */
@@ -1658,6 +1686,18 @@ export interface components {
             since?: string;
             through?: components["schemas"]["Decimal"];
             after_reference?: string;
+        } | {
+            /** @constant */
+            version: "22";
+            /** @constant */
+            kind: "list_sessions";
+            store: string;
+            workspace: string | null;
+            /** @constant */
+            archive: "archived";
+            after: components["schemas"]["Decimal"];
+            ceiling: components["schemas"]["Decimal"];
+            window: string;
         };
         MessageConflictReply: {
             /** @constant */
@@ -3207,6 +3247,7 @@ export interface components {
             archive_state: "active" | "archiving" | "archived";
             pin_order: components["schemas"]["Decimal"] | null;
             reference: string;
+            archive_seq: components["schemas"]["Decimal"] | null;
             workspace: string;
             /** @enum {string} */
             provider: "codex" | "openai" | "chatgpt";

@@ -171,3 +171,39 @@ test "format 87 archiving probe finds an open turn and an unpositioned turn with
     try sqlite.bindI64(action_page, 2, 1000);
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(action_page));
 }
+
+test "the Archived window pages read session_tab in key order with no sort and no session scan" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/window_plan.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(raw, store_testing.baseline_rows);
+    for (store_schema.migrations) |step| {
+        for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+    }
+    const newest = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.archived_newest_page.sql);
+    defer _ = c.sqlite3_finalize(newest);
+    const oldest = try sqlite.prepare(raw, "EXPLAIN QUERY PLAN " ++ session_list_read.archived_oldest_page.sql);
+    defer _ = c.sqlite3_finalize(oldest);
+    for ([_]*c.sqlite3_stmt{ newest, oldest }) |statement| {
+        var uses_tab = false;
+        var uses_pending = false;
+        while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+            const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
+            try std.testing.expect(std.mem.indexOf(u8, detail, "TEMP B-TREE") == null);
+            // Every step is a search: the page, and each first-Message lookup, reaches its table by index.
+            try std.testing.expect(std.mem.indexOf(u8, detail, "SCAN") == null);
+            if (std.mem.indexOf(u8, detail, "session_tab") != null) uses_tab = true;
+            if (std.mem.indexOf(u8, detail, "message_admission_session_pending") != null) uses_pending = true;
+        }
+        try std.testing.expect(uses_tab);
+        try std.testing.expect(uses_pending);
+        _ = c.sqlite3_reset(statement);
+    }
+}

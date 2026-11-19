@@ -24,6 +24,7 @@ pub fn Reply(comptime Capture: type) type {
                 .archive_state = values.archive_state,
                 .pin_order = values.pin_order,
                 .reference = values.reference,
+                .archive_seq = values.archive_seq,
                 .parent = values.parent,
                 .creator = values.creator,
                 .workspace = values.workspace,
@@ -49,9 +50,24 @@ pub fn Reply(comptime Capture: type) type {
             reply.rows += 1;
         }
 
+        pub fn archivedRow(reply: *@This(), values: *const session_list.ArchivedRow) !void {
+            const first: ?protocol.ArchivedFirstFields = if (values.first) |first| .{ .position = first.position, .admission = first.admission, .content = first.content, .line = first.line } else null;
+            const fields: protocol.ArchivedRow.Fields = .{
+                .reference = values.reference,
+                .archive_seq = values.archive_seq,
+                .stopped_at = values.stopped_at,
+                .label = values.label,
+                .first = first,
+            };
+            if (reply.rows != 0) try reply.capture.append(",");
+            try appendShape(reply.capture, .{protocol.Hole{ .json = protocol.ArchivedRow.Fields }}, .{&fields});
+            reply.rows += 1;
+        }
+
         pub fn tail(reply: *@This(), values: session_list.Tail) !void {
             const shapes = protocol.session_list_reply;
             switch (values) {
+                .window => |window| try appendShape(reply.capture, shapes.window_tail, .{ session_list.ListDelta.window, window.since, window.first, window.last, window.more_above, window.more_below }),
                 .full => |full| try appendShape(reply.capture, shapes.full_tail, .{ session_list.ListDelta.full, full.since, full.after, full.ceiling }),
                 .changed => |changed| try appendShape(reply.capture, shapes.changed_tail, .{ session_list.ListDelta.changed, changed.since, changed.through, changed.after_reference }),
                 .last => |last| try appendShape(reply.capture, shapes.last_tail, .{ last.delta, last.since }),

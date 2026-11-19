@@ -525,6 +525,7 @@ pub const SessionRow = struct {
     archive_state: SessionArchiveState = .active,
     pin_order: ?u64 = null,
     reference: Bounded(max_session_bytes) = .{},
+    archive_seq: ?u64 = null,
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
@@ -546,11 +547,11 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"",       Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"",              Hole{ .tag = SessionArchiveState },         "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",           Hole{ .string = max_session_bytes }, ",\"workspace\":",                   Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",           Hole{ .tag = Provider },                     "\",\"model\":",                        Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",   Hole{ .tag = PermissionMode },       "\",\"parent\":",                    Hole{ .optional_string = session_id_bytes },
-        ",\"creator\":",              Hole{ .optional_string = session_id_bytes }, ",\"label\":",                          Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"state_change_at\":\"", Hole.decimal,                        "\",\"subtree_state_change_at\":\"", Hole.decimal,
-        "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,                               "\",\"revision\":\"", Hole.decimal,                              "\",\"end\":\"",             Hole.decimal,                        "\",\"first_message\":",             Hole{ .optional_json = FirstMessage },
-        ",\"last_line\":",            Hole{ .optional_json = LastLine.Fields },    ",\"work\":",                           Hole{ .json = SessionWork },                ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
+        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",         Hole.optional_id,                          ",\"reference\":",                   Hole{ .string = max_session_bytes },      ",\"archive_seq\":",          Hole.optional_id,                            ",\"workspace\":",                      Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",               Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",           Hole{ .tag = PermissionMode },            "\",\"parent\":",             Hole{ .optional_string = session_id_bytes }, ",\"creator\":",                        Hole{ .optional_string = session_id_bytes },
+        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"state_change_at\":\"", Hole.decimal,                              "\",\"subtree_state_change_at\":\"", Hole.decimal,                             "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,
+        "\",\"revision\":\"",   Hole.decimal,                                "\",\"end\":\"",           Hole.decimal,                       "\",\"first_message\":",     Hole{ .optional_json = FirstMessage },     ",\"last_line\":",                   Hole{ .optional_json = LastLine.Fields }, ",\"work\":",                 Hole{ .json = SessionWork },                 ",\"peers\":",                          Hole{ .json = PeerFacts },
+        "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     pub const budget_bytes = 36 * 1024;
@@ -563,6 +564,7 @@ pub const SessionRow = struct {
         archive_state: SessionArchiveState = .active,
         pin_order: ?u64 = null,
         reference: []const u8,
+        archive_seq: ?u64 = null,
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
@@ -588,10 +590,9 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,    f.pin_order,                  f.reference, f.workspace, f.provider,      f.model,
-                f.tools,                              f.permission_mode,  f.parent,                     f.creator,   f.label,     f.created_at,    f.state_change_at,
-                f.subtree_state_change_at,            f.descendant_count, f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.last_line,
-                f.work,                               f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,              f.pin_order, f.reference, f.archive_seq,   f.workspace,  f.provider,        f.model,
+                f.tools,                              f.permission_mode,            f.parent,    f.creator,   f.label,         f.created_at, f.state_change_at, f.subtree_state_change_at,
+                f.descendant_count,                   f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.last_line,  f.work,            f.peers,
             });
         }
     };
@@ -613,6 +614,7 @@ pub const SessionRow = struct {
             .archive_state = self.archive_state,
             .pin_order = self.pin_order,
             .reference = self.reference.slice(),
+            .archive_seq = self.archive_seq,
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
@@ -637,13 +639,51 @@ pub const SessionRow = struct {
     }
 };
 
+/// The slim Archived row (ArchivedRow in session_list.zig): the Archived tab's name and age only.
+pub const ArchivedFirstFields = struct {
+    position: u64,
+    admission: u64,
+    content: content_value.Value,
+    line: ?[]const u8,
+
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"content\":", Hole{ .json = ContentValueJson }, ",\"line\":", Hole{ .optional_string = session_list.max_first_line_bytes }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const ArchivedFirstFields, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.position, self.admission, ContentValueJson{ .value = self.content }, self.line });
+    }
+};
+
+pub const ArchivedRow = struct {
+    pub const Fields = struct {
+        reference: []const u8,
+        archive_seq: u64,
+        stopped_at: u64,
+        label: ?[]const u8,
+        first: ?ArchivedFirstFields,
+
+        pub const json_shape = .{ "{\"reference\":", Hole{ .string = session_id_bytes }, ",\"archive_seq\":\"", Hole.decimal, "\",\"stopped_at\":\"", Hole.decimal, "\",\"label\":", Hole{ .optional_string = max_label_bytes }, ",\"first\":", Hole{ .optional_json = ArchivedFirstFields }, "}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+
+        pub fn writeJson(self: *const Fields, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.reference, self.archive_seq, self.stopped_at, self.label, self.first });
+        }
+    };
+    comptime {
+        std.debug.assert(Fields.max_json_bytes <= session_list.ArchivedRow.max_json_bytes);
+    }
+};
+
 pub const session_list_reply = struct {
     pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_list\",\"sessions\":["};
     const facts = .{ "],\"delta\":\"", Hole{ .tag = ListDelta }, "\",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"next\":" };
     pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
     pub const last_tail = facts ++ .{"null}"};
-    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
+    pub const window_tail = facts ++ .{ "{\"first\":", Hole.optional_id, ",\"last\":", Hole.optional_id, ",\"more_above\":", Hole.boolean, ",\"more_below\":", Hole.boolean, "}}" };
+    /// A live page carries up to session_list_page_size full rows; a window page up to archived_window_size slim
+    /// rows. The reply bound is the larger of the two, so a window page fits the same budget.
+    pub const max_bytes = shapeBytes(head) + @max(jsonListBytes(session_list_page_size, SessionRow.max_json_bytes), jsonListBytes(session_list.archived_window_size, ArchivedRow.Fields.max_json_bytes)) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, window_tail });
 };
 
 pub const ActivityFacts = activity_facts.Page;
@@ -1515,7 +1555,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseListSessions(self: *Parser, out: *ListSessions, members: *Members) !void {
-            const Field = enum { workspace, archive, after, ceiling, since, through, after_reference };
+            const Field = enum { workspace, archive, after, ceiling, since, through, after_reference, window };
             var seen: std.enums.EnumSet(Field) = .empty;
             var through: u64 = 0;
             var reference: Bounded(session_id_bytes) = .{};
@@ -1540,6 +1580,11 @@ fn ParserOf(comptime Custody: type) type {
                 .after_reference => {
                     try self.readSmallString(&reference);
                     if (reference.len != session_id_bytes) return error.InvalidCursor;
+                },
+                .window => {
+                    var text: Bounded(session_list.archived_cursor_text_bytes) = .{};
+                    try self.readSmallString(&text);
+                    out.window = session_list.parseArchivedCursor(text.slice()) catch return error.InvalidCursor;
                 },
             };
             try require(Field, seen, &.{ .workspace, .after, .ceiling });
@@ -2162,10 +2207,14 @@ pub const inspect_session_request = struct {
 pub const list_sessions_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes } };
     pub const archive = .{ ",\"archive\":\"", Hole{ .tag = SessionArchiveFilter }, "\"" };
+    /// The Archived window's archive: the constant `archived`, the only filter a window read takes.
+    pub const archived_archive = .{",\"archive\":\"archived\""};
     pub const cursor = .{ ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
     pub const since = .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"" };
     pub const through = .{ ",\"through\":\"", Hole.decimal, "\"" };
     pub const after_reference = .{ ",\"after_reference\":", Hole{ .string = session_id_bytes } };
+    /// The Archived window cursor, one field: `head`, `tail`, `below:<key>` or `above:<key>`.
+    pub const window = .{ ",\"window\":\"", Hole{ .text = session_list.archived_cursor_text_bytes }, "\"" };
     pub const tail = .{"}"};
     pub const all = head ++ archive ++ cursor ++ since ++ through ++ after_reference ++ tail;
 };
@@ -3096,6 +3145,70 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
         try std.testing.expectEqual(case.through, if (request.changed) |changed| changed.through else null);
         if (request.changed) |changed| try std.testing.expectEqualStrings("k7m2qx", &changed.after_reference);
     }
+}
+
+test "Archived window wire: one request field decodes both ways, refuses other combinations, and rows and tails encode" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"archived\",\"after\":\"0\",\"ceiling\":\"0\"";
+    const Case = struct { json: []const u8, window: ?session_list.ArchivedCursor = null, failure: ?anyerror = null };
+    const cases = [_]Case{
+        .{ .json = head ++ ",\"window\":\"head\"}", .window = .head },
+        .{ .json = head ++ ",\"window\":\"tail\"}", .window = .tail },
+        .{ .json = head ++ ",\"window\":\"below:12\"}", .window = .{ .below = 12 } },
+        .{ .json = head ++ ",\"window\":\"above:9223372036854775807\"}", .window = .{ .above = std.math.maxInt(i64) } },
+        .{ .json = head ++ ",\"window\":\"below:0\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"below:012\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"below:\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"sideways:4\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"window\":\"above:9223372036854775808\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"active\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":\"/a\",\"archive\":\"archived\",\"after\":\"0\",\"ceiling\":\"0\",\"window\":\"head\"}", .failure = error.InvalidCursor },
+        .{ .json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"s\",\"workspace\":null,\"archive\":\"archived\",\"after\":\"8\",\"ceiling\":\"12\",\"window\":\"head\"}", .failure = error.InvalidCursor },
+        .{ .json = head ++ ",\"since\":\"abababababababababababababababab.42\",\"window\":\"head\"}", .failure = error.InvalidCursor },
+    };
+    for (cases) |case| {
+        var source: MetadataSource = .{ .input = case.json };
+        var parser = Tested.Parser{ .source = &source };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+            continue;
+        }
+        const request = (try parseForTest(&parser)).list_sessions;
+        try std.testing.expectEqualDeep(case.window, request.window);
+    }
+
+    // Encode and decode: the request field is written by the same shapes a client uses.
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    const cursors = [_]session_list.ArchivedCursor{ .head, .tail, .{ .below = 77 }, .{ .above = 1 } };
+    for (cursors) |cursor| {
+        out.end = 0;
+        var text: [session_list.archived_cursor_text_bytes]u8 = undefined;
+        try writeShape(&out, list_sessions_request.head ++ list_sessions_request.archive ++ list_sessions_request.cursor ++ list_sessions_request.window ++ list_sessions_request.tail, .{
+            "s", @as(?[]const u8, null), SessionArchiveFilter.archived, @as(u64, 0), @as(u64, 0), session_list.formatArchivedCursor(cursor, &text),
+        });
+        var source: MetadataSource = .{ .input = out.buffered() };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).list_sessions;
+        try std.testing.expectEqualDeep(cursor, request.window.?);
+    }
+
+    var row_buffer: [512]u8 = undefined;
+    var row_out = std.Io.Writer.fixed(&row_buffer);
+    const digest: [32]u8 = @splat(0);
+    const row: ArchivedRow.Fields = .{
+        .reference = "k7m2qx",
+        .archive_seq = 42,
+        .stopped_at = 1700,
+        .label = null,
+        .first = .{ .position = 3, .admission = 7, .content = .{ .text = .{ .length = 5, .digest = digest } }, .line = "hello" },
+    };
+    try row.writeJson(&row_out);
+    try std.testing.expectEqualStrings(
+        "{\"reference\":\"k7m2qx\",\"archive_seq\":\"42\",\"stopped_at\":\"1700\",\"label\":null,\"first\":{\"position\":\"3\",\"admission\":\"7\",\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++
+            @as([64]u8, @splat('0')) ++ "\"},\"line\":\"hello\"}}",
+        row_out.buffered(),
+    );
+    comptime std.debug.assert(ArchivedRow.Fields.max_json_bytes <= session_list.ArchivedRow.max_json_bytes);
 }
 
 test "a client command cannot take a key Rui keeps for its own commands" {

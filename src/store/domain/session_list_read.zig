@@ -7,7 +7,7 @@ const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
-const session_line = @import("../../session_line.zig");
+const first_line = @import("../../first_line.zig");
 const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -17,6 +17,8 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const command_domain = @import("command.zig");
 const archive_membership = @import("archive_membership.zig");
+const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
 const configuration_domain = @import("configuration.zig");
 const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
@@ -42,6 +44,13 @@ pub fn Watched(comptime Visitor: type) type {
 
         pub fn row(w: *@This(), values: *const session_list.Row) !void {
             w.visitor.row(values) catch |err| {
+                w.failed = true;
+                return err;
+            };
+        }
+
+        pub fn archivedRow(w: *@This(), values: *const session_list.ArchivedRow) !void {
+            w.visitor.archivedRow(values) catch |err| {
                 w.failed = true;
                 return err;
             };
@@ -271,9 +280,159 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
     return if (next) |row| row.retry_due_at_ms else null;
 }
 
+// The Archived window: one statement per page, newest archive first. The page is the keyed range of
+// session_tab, bounded by LIMIT N+1, so `more` is exact in the direction read. Each row joins its first
+// Message once (report.zig's first_admission_join: the same rule as FirstCandidates). The line is that
+// Message's first display line (first_line.firstLine, the rule the overview's first-line read uses),
+// read from the first 512 bytes and only when the Message is inline Text. Parts-form first Messages leave
+// the line NULL; their line comes from the overview's parts read.
+const archived_window_limit = session_list.archived_window_size + 1;
+
+const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
+    "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position," ++
+    "first_content.byte_length AS first_length,first_content.digest AS first_digest," ++
+    "first_content.private AS first_private,first_content.form AS first_form," ++
+    "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
+
+const ArchivedWindowRow = struct {
+    archive_seq: rsql.Positive,
+    session_ref: SessionText,
+    stopped_at: rsql.Positive,
+    label: ?Bounded(tool_presentation.max_label_bytes),
+    first_admission: ?rsql.Positive,
+    first_position: ?rsql.Positive,
+    first_length: ?u64,
+    first_digest: ?[32]u8,
+    first_private: ?bool,
+    first_form: ?u8,
+    first_line: ?rsql.Blob(512),
+};
+
+const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
+    "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key" ++ report_domain.first_admission_join ++
+    " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id ";
+
+/// The statement sources, with `@index` marks as written (the MySQL plan test renders them).
+pub const archived_newest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
+    "WHERE session.archive_seq<?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
+    "ORDER BY session.archive_seq DESC LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+pub const archived_oldest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
+    "WHERE session.archive_seq>?1 AND (" ++ archive_membership.stateSql("session") ++ ")='archived' " ++
+    "ORDER BY session.archive_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{archived_window_limit});
+
+pub const archived_newest_page = rsql.Read(.{
+    .sql = archived_newest_source,
+    .Args = struct { below: u64 },
+    .Row = ArchivedWindowRow,
+    .cardinality = .each,
+});
+
+pub const archived_oldest_page = rsql.Read(.{
+    .sql = archived_oldest_source,
+    .Args = struct { above: u64 },
+    .Row = ArchivedWindowRow,
+    .cardinality = .each,
+});
+
+const ArchivedPage = struct {
+    rows: [archived_window_limit]ArchivedWindowRow = undefined,
+    count: usize = 0,
+    failure: ?error{CorruptStore} = null,
+
+    pub fn visit(page: *ArchivedPage, row: *const ArchivedWindowRow) bool {
+        if (page.count == page.rows.len or row.session_ref.slice().len != change_ring.id_bytes) {
+            page.failure = error.CorruptStore;
+            return false;
+        }
+        page.rows[page.count] = row.*;
+        page.count += 1;
+        return true;
+    }
+};
+
+/// The first display line of an inline first Message: first_line.firstLine, cut to the line bound. The client
+/// escapes it for the terminal exactly as it does a line it reads itself.
+fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_line_bytes)) ?[]const u8 {
+    const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
+    const line = first_line.firstLine(bytes);
+    if (line.len == 0) return null;
+    text.* = first_line.cut(first_line.max_line_bytes, line);
+    return text.slice();
+}
+
+/// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
+/// read oldest first from their key and are returned newest first.
+fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, generation: u64, visitor: anytype) !void {
+    var page: ArchivedPage = .{};
+    const size = session_list.archived_window_size;
+    var more_above = false;
+    var more_below = false;
+    const newest_below: ?u64 = switch (cursor) {
+        .head => std.math.maxInt(i64),
+        .below => |key| key,
+        .tail, .above => null,
+    };
+    const oldest_above: ?u64 = switch (cursor) {
+        .tail => 0,
+        .above => |key| key,
+        .head, .below => null,
+    };
+    if (newest_below) |below| {
+        a.readEach(archived_newest_page, .{ .below = below }, archived_window_limit, &page);
+        try store_access.runAs(a, error.SessionReadFailed);
+        if (page.failure) |err| return err;
+        more_below = page.count > size;
+        more_above = std.meta.activeTag(cursor) == .below;
+        page.count = @min(page.count, size);
+    } else if (oldest_above) |above| {
+        a.readEach(archived_oldest_page, .{ .above = above }, archived_window_limit, &page);
+        try store_access.runAs(a, error.SessionReadFailed);
+        if (page.failure) |err| return err;
+        // The oldest-first read keeps the rows nearest the cursor; the extra row is further away.
+        more_above = page.count > size;
+        more_below = std.meta.activeTag(cursor) == .above;
+        page.count = @min(page.count, size);
+        std.mem.reverse(ArchivedWindowRow, page.rows[0..page.count]);
+    }
+    try visitor.head();
+    var text: Bounded(first_line.max_line_bytes) = undefined;
+    for (page.rows[0..page.count]) |*row| {
+        if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
+        const first: ?session_list.ArchivedFirst = if (row.first_admission) |admission| .{
+            .admission = admission.get(),
+            .position = (row.first_position orelse return error.CorruptStore).get(),
+            .content = try content_parts.publicValue(&.{
+                .byte_length = row.first_length orelse return error.CorruptStore,
+                .digest = row.first_digest orelse return error.CorruptStore,
+                .private = row.first_private orelse return error.CorruptStore,
+                .form = row.first_form orelse return error.CorruptStore,
+            }, .{ .message = admission.get() }),
+            .line = archivedLine(if (row.first_line) |*prefix| prefix else null, &text),
+        } else null;
+        var values: session_list.ArchivedRow = .{
+            .reference = row.session_ref.slice(),
+            .archive_seq = row.archive_seq.get(),
+            .stopped_at = row.stopped_at.get(),
+            .label = if (row.label) |*label| label.slice() else null,
+            .first = first,
+        };
+        try visitor.archivedRow(&values);
+    }
+    var token: [change_ring.Token.max_bytes]u8 = undefined;
+    const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
+    try visitor.tail(.{ .window = .{
+        .since = since,
+        .first = if (page.count != 0) page.rows[0].archive_seq.get() else null,
+        .last = if (page.count != 0) page.rows[page.count - 1].archive_seq.get() else null,
+        .more_above = more_above,
+        .more_below = more_below,
+    } });
+}
+
 pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, visitor: anytype) !void {
     const self = a.store;
     const generation = self.commit_generation.load(.acquire);
+    if (request.window) |cursor| return readArchivedWindow(a, cursor, generation, visitor);
     if (request.since) |since| {
         const through = if (request.changed) |changed| changed.through else generation;
         if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
@@ -531,7 +690,7 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
     }
 }
 
-const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
+const settings_columns = "session.session_ref,session.archive_seq,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
@@ -566,6 +725,7 @@ const list_row_bare = rsql.Read(.{
 
 const ListRow = struct {
     session_ref: SessionText,
+    archive_seq: ?rsql.Positive,
     parent_ref: ?Bounded(session_id.bytes),
     creator_ref: ?Bounded(session_id.bytes),
     workspace: Bounded(workspace_path.max_bytes),
@@ -722,6 +882,7 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
         .archive_state = row.archive_state,
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
         .reference = row.session_ref.slice(),
+        .archive_seq = if (row.archive_seq) |key| key.get() else null,
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .creator = if (row.creator_ref) |*creator| creator.slice() else null,
         .workspace = row.workspace.slice(),
@@ -756,9 +917,9 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
         const bytes = utf8_validation.completePrefix(prefix.slice());
         var lines = std.mem.splitAny(u8, bytes, "\r\n");
         while (lines.next()) |line| {
-            const trimmed = session_line.firstLine(line);
+            const trimmed = first_line.firstLine(line);
             if (trimmed.len == 0) continue;
-            text.* = session_line.cut(session_list.max_last_line_bytes, trimmed);
+            text.* = first_line.cut(session_list.max_last_line_bytes, trimmed);
             answer = text.slice();
             break;
         }

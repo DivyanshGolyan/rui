@@ -23,6 +23,9 @@ fn expectOrigin(storage: *Store, session: []const u8, creator: ?[]const u8, pare
             try expectReference(self.parent, value.parent);
         }
         pub fn tail(_: *@This(), _: session_list.Tail) !void {}
+        pub fn archivedRow(_: *@This(), _: *const session_list.ArchivedRow) !void {
+            return error.TestUnexpectedResult;
+        }
     };
     var visitor: Visitor = .{ .session = session, .creator = creator, .parent = parent };
     const request: session_list.ListSessions = .{ .archive = archive };

@@ -13,6 +13,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
+const session_list = @import("session_list.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -30,6 +31,44 @@ const Variant = struct {
     schema: *const fn (*Document) anyerror!Value,
     example: *const fn (*std.Io.Writer, bool) anyerror!void,
 };
+
+/// The Archived window cursor: `head`, `tail`, `below:<key>` or `above:<key>`, keys canonical and nonzero.
+const archived_cursor_pattern = "^(head|tail|(below|above):[1-9][0-9]{0,18})$";
+const live_list_deltas = .{ "not_modified", "changed", "full" };
+
+fn windowVariant(comptime shape: anytype, comptime examples: anytype) Variant {
+    const S = struct {
+        const value = shape;
+        fn schema(d: *Document) anyerror!Value {
+            var built = try d.shapeSchema(value);
+            const window = built.object.getPtr("properties").?.object.getPtr("window").?;
+            try window.object.put(d.arena, "pattern", .{ .string = archived_cursor_pattern });
+            return built;
+        }
+        fn example(out: *std.Io.Writer, optional: bool) anyerror!void {
+            return writeExampleWith(out, value, examples, optional);
+        }
+    };
+    return .{ .schema = S.schema, .example = S.example };
+}
+
+/// A list reply union whose `delta` admits, per shape, only the listed values.
+fn deltaReply(comptime shapes: anytype, comptime deltas: anytype) Reply {
+    const S = struct {
+        fn schema(d: *Document) anyerror!Value {
+            var values: [shapes.len]Value = undefined;
+            inline for (shapes, deltas, 0..) |shape, allowed, index| {
+                values[index] = try d.shapeSchema(shape);
+                const delta = values[index].object.getPtr("properties").?.object.getPtr("delta").?;
+                var names: std.json.Array = .init(d.arena);
+                inline for (allowed) |name| try names.append(.{ .string = name });
+                try delta.object.put(d.arena, "enum", .{ .array = names });
+            }
+            return d.anyOf(&values);
+        }
+    };
+    return .{ .json = S.schema };
+}
 
 fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
     const S = struct {
@@ -174,19 +213,26 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/list-sessions",
         .kind = .list_sessions,
-        .summary = "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`.",
-        .variants = &.{variant(protocol.list_sessions_request.head ++ .{
-            Optional(protocol.list_sessions_request.archive),
-        } ++ protocol.list_sessions_request.cursor ++ .{
-            Optional(protocol.list_sessions_request.since),
-            Optional(protocol.list_sessions_request.through),
-            Optional(protocol.list_sessions_request.after_reference),
-        } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } })},
-        .reply = jsonReply(.{
+        .summary = "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. `window` reads one page of Archived Sessions, newest archive first, in one round: only with `archive` = `archived`, no `workspace`, no `since`, and zero `after` and `ceiling`.",
+        .variants = &.{
+            variant(protocol.list_sessions_request.head ++ .{
+                Optional(protocol.list_sessions_request.archive),
+            } ++ protocol.list_sessions_request.cursor ++ .{
+                Optional(protocol.list_sessions_request.since),
+                Optional(protocol.list_sessions_request.through),
+                Optional(protocol.list_sessions_request.after_reference),
+            } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
+            // The Archived window: archive is the constant archived; no since or through; window matches its grammar.
+            windowVariant(protocol.list_sessions_request.head ++ protocol.list_sessions_request.archived_archive ++
+                protocol.list_sessions_request.cursor ++ protocol.list_sessions_request.window ++ protocol.list_sessions_request.tail, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, "below:12" } }),
+        },
+        // Live replies never carry the window delta; the window reply carries only it.
+        .reply = deltaReply(.{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.last_tail,
-        }),
+            protocol.session_list_reply.head ++ .{ListOf(protocol.ArchivedRow.Fields)} ++ protocol.session_list_reply.window_tail,
+        }, .{ live_list_deltas, live_list_deltas, live_list_deltas, .{"window"} }),
     },
     .{
         .path = "/v1/conversation-page",
@@ -1324,6 +1370,11 @@ fn publishedRequestSchemas() !void {
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
             .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
+            // Live and since reads, or an Archived window: a one-of over the two request forms.
+            .list_sessions => {
+                try std.testing.expectEqual(@as(usize, 2), route.variants.len);
+                try std.testing.expect(schema.contains("anyOf"));
+            },
             else => {
                 try std.testing.expectEqual(@as(usize, 1), route.variants.len);
                 try std.testing.expectEqualStrings("object", schema.get("type").?.string);
@@ -1671,6 +1722,7 @@ fn matches(pattern: []const u8, text: []const u8) bool {
         for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
         return true;
     }
+    if (std.mem.eql(u8, pattern, archived_cursor_pattern)) return if (session_list.parseArchivedCursor(text)) |_| true else |_| false;
     const lower_name = std.mem.startsWith(u8, pattern, "^[a-z0-9_-]{1,");
     if (lower_name or std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
         const begin = std.mem.indexOfScalar(u8, pattern, ',').? + 1;

@@ -2277,6 +2277,9 @@ fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repli
     std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{}, &used, 2)));
     try meter.stop(.readSessionList);
     meter.start();
+    std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{ .archive = .archived, .window = .head }, &used, 3)));
+    try meter.stop(.readArchivedWindow);
+    meter.start();
     const binding = try replies.keep(storage.failedResponseBinding(session.slice(), continuation.operation_id, continuation.attempt_ordinal));
     try meter.stop(.failedResponseBinding);
     try std.testing.expectEqualDeep(continuation, binding);
