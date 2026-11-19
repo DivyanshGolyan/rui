@@ -1171,7 +1171,7 @@ pub const ReplyDigest = struct {
                 self.put(&bytes);
             },
             // The integer, not the name: a non-exhaustive enum (rsql.Positive) has values without a name.
-            .@"enum" => self.write(@as(@typeInfo(T).@"enum".tag_type, @intFromEnum(value))),
+            .@"enum" => self.write(@as(@typeInfo(T).@"enum".tag_type, @backingInt(value))),
             .optional => if (value) |inner| {
                 self.put(&.{1});
                 self.write(inner);
