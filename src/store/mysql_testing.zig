@@ -35,7 +35,6 @@ fn connection() !*wire.Connection {
         opened = true;
         for (schema.mysql_session) |sql| try run(sql);
         try run("SET SESSION sql_log_bin=0");
-        try run("SET SESSION cte_max_recursion_depth=1000000");
     }
     return &root;
 }
@@ -687,6 +686,19 @@ fn openLive(storage: *Store, tmp: *std.testing.TmpDir) !void {
     try open(storage, tmp, std.testing.io, .{});
 }
 
+test "store.mysql owned connection permits every legal creator depth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const owned = &storage.engine.mysql.state.connection;
+    try owned.query("SELECT @@session.cte_max_recursion_depth AS value");
+    try std.testing.expectEqual(schema.mysql_recursive_limit, try readU64(owned));
+    try owned.query("WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<1001) SELECT max(value) AS value FROM sequence");
+    try std.testing.expectEqual(@as(u64, 1001), try readU64(owned));
+}
+
 fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     const mysql = &storage.engine.mysql;
     try mysql.bind(S, &args, 0);
@@ -697,7 +709,7 @@ fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     return changed;
 }
 
-fn handlerReads(storage: *Store) !u64 {
+pub fn handlerReads(storage: *Store) !u64 {
     const source = &storage.engine.mysql.state.connection;
     try source.query("SHOW SESSION STATUS LIKE 'Handler_read%'");
     const Row = struct { name: protocol.Bounded(64), value: protocol.Bounded(32) };

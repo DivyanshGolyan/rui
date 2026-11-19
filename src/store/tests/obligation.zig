@@ -231,10 +231,8 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
                     var count: usize = 0;
                     expected[count] = target.slice()[0..protocol.session_id_bytes].*;
                     count += 1;
-                    if (shape != .standalone) {
-                        expected[count] = root.slice()[0..protocol.session_id_bytes].*;
-                        count += 1;
-                    }
+                    expected[count] = root.slice()[0..protocol.session_id_bytes].*;
+                    count += 1;
                     if (shape == .grandchild) {
                         expected[count] = child.slice()[0..protocol.session_id_bytes].*;
                         count += 1;
