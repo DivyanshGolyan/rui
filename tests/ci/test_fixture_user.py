@@ -30,26 +30,24 @@ class FixtureUserTest(unittest.TestCase):
         self.root = Path(scratch.name)
 
     def test_a_lane_gets_only_the_zig_packages_it_lacks(self):
-        caller = self.root / "caller"
+        caller, target = self.root / "caller", self.root / "lane/p"
         for name, body in (("pkg-a", b"a"), ("pkg-b", b"b")):
             (caller / "p" / name).mkdir(parents=True)
             (caller / "p" / name / "build.zig").write_bytes(body)
         (caller / "p" / "pkg-c.tar.gz").write_bytes(b"c")
-        lane = fixture_user.Lane("seed")
-        lane.home = self.root / "home"
-        (lane.home / ".cache/zig/p/pkg-a").mkdir(parents=True)
-        (lane.home / ".cache/zig/p/pkg-a/build.zig").write_bytes(b"kept")
-        owned = []
-        with patch.object(fixture_user.Lane, "run", lambda self, argv, **_: Path(argv[-1]).mkdir(parents=True, exist_ok=True)), \
-                patch.object(fixture_user.subprocess, "run", lambda argv, **_: owned.append(argv)):
-            self.assertEqual(lane.seed_packages(caller), 2)
-            self.assertEqual(lane.seed_packages(caller), 0)
-            self.assertEqual(lane.seed_packages(self.root / "absent"), 0)
-        self.assertEqual((lane.home / ".cache/zig/p/pkg-a/build.zig").read_bytes(), b"kept")
-        self.assertEqual((lane.home / ".cache/zig/p/pkg-b/build.zig").read_bytes(), b"b")
-        self.assertEqual((lane.home / ".cache/zig/p/pkg-c.tar.gz").read_bytes(), b"c")
-        self.assertEqual(owned, [["chown", "-R", "rui-seed:rui-seed", str(lane.home / ".cache/zig/p" / name)]
-                                 for name in ("pkg-b", "pkg-c.tar.gz")])
+        (target / "pkg-a").mkdir(parents=True)
+        (target / "pkg-a/build.zig").write_bytes(b"kept")
+        gid = os.getgid()
+        self.assertEqual(fixture_user.seed_packages(caller, target, gid), 2)
+        self.assertEqual(fixture_user.seed_packages(caller, target, gid), 0)
+        self.assertEqual(fixture_user.seed_packages(self.root / "absent", target, gid), 0)
+        self.assertEqual((target / "pkg-a/build.zig").read_bytes(), b"kept")
+        self.assertEqual((target / "pkg-b/build.zig").read_bytes(), b"b")
+        self.assertEqual((target / "pkg-c.tar.gz").read_bytes(), b"c")
+        for copy in (target / "pkg-b", target / "pkg-b/build.zig", target / "pkg-c.tar.gz"):
+            self.assertEqual(os.stat(copy).st_gid, gid)
+            needed = stat.S_IRGRP | (stat.S_IXGRP if copy.is_dir() else 0)
+            self.assertEqual(os.stat(copy).st_mode & needed, needed, copy)
 
     def test_export_disables_automatic_maintenance_on_every_fetch(self):
         inputs = fixture_user.Inputs("0" * 40, self.root / "source", "origin", {}, {})
@@ -127,9 +125,9 @@ class FixtureUserTest(unittest.TestCase):
                 patch.object(fixture_user, "place", return_value=placed), \
                 patch.object(fixture_user, "lock"), \
                 patch.object(fixture_user.Lane, "ensure_user", return_value=1234), \
-                patch.object(fixture_user.Lane, "seed_packages", return_value=0), \
                 patch.object(fixture_user.subprocess, "run", side_effect=start), \
-                patch.dict(os.environ, {**secrets, "PATH": "/usr/bin"}, clear=True), \
+                patch.dict(os.environ, {**secrets, "PATH": "/usr/bin", "ZIG_GLOBAL_CACHE_DIR": str(self.root / "no-cache")},
+                           clear=True), \
                 redirect_stderr(io.StringIO()):
             self.assertEqual(fixture_user.run("a", "HEAD", ("RUI_TOKEN",), ["python3", "case.py"]), 0)
 

@@ -129,8 +129,7 @@ AssertionError
                 self.assertEqual(prepush.as_fixture_user(command, euid), expected)
         skipped = prepush.Skipped("macOS")
         mysql = prepush.NeedsMySQL(unit, True)
-        with patch.object(prepush.os, "geteuid", return_value=0):
-            checks = list(prepush.local_red_checks([("fixture", fixture), ("skip", skipped), ("store", mysql)], False))
+        checks = list(prepush.local_red_checks([("fixture", fixture), ("skip", skipped), ("store", mysql)], False, euid=0))
         self.assertEqual(checks[0], ("fixture", wrapped))
         self.assertIs(checks[1][1], skipped)
         self.assertEqual(checks[2][1][-len(unit):], unit)

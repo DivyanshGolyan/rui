@@ -180,10 +180,10 @@ def as_fixture_user(command, euid=None):
     return [str(ROOT / fixture_user.COMMAND), FIXTURE_LANE, "--ref", "HEAD", "--", *command]
 
 
-def local_red_checks(planned, mysql):
+def local_red_checks(planned, mysql, euid=None):
     for name, command in planned:
         if not isinstance(command, NeedsMySQL):
-            yield name, command if isinstance(command, Skipped) else as_fixture_user(command)
+            yield name, command if isinstance(command, Skipped) else as_fixture_user(command, euid)
         elif mysql:
             yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
         else:
