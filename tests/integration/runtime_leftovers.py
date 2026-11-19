@@ -18,8 +18,12 @@ import pathlib
 import os_semantics
 
 
+# Tests of the harness itself point this at their own temporary directory.
+OVERRIDE = "RUI_TEST_LEFTOVER_RUNTIME"
+
+
 def runtime():
-    return pathlib.Path(f"/tmp/rui-{os.geteuid()}")
+    return pathlib.Path(os.environ.get(OVERRIDE) or f"/tmp/rui-{os.geteuid()}")
 
 
 def leftovers(directory=None):

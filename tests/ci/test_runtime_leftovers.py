@@ -1,10 +1,12 @@
 """Only a refusing socket whose hinted Store is gone is a fixture leftover (#1855)."""
 import pathlib
 import socket
+import sys
 import tempfile
 import unittest
 
-import runtime_leftovers
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "integration"))
+import runtime_leftovers  # noqa: E402
 
 
 class RuntimeLeftovers(unittest.TestCase):

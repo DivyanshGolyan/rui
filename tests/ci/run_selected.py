@@ -34,6 +34,8 @@ def main():
     targets = json.loads(args.targets)
     batches = execution_batches(targets, args.check_part)
     for index, batch in enumerate(batches):
+        if earlier := runtime_leftovers.sweep():
+            print(f"Removed {len(earlier)} Host sockets left by earlier runs.", flush=True)
         returncode, output = execute(batch, args.ci_artifacts)
         if returncode and args.quarantine != "off" and (flakes := listed(output)):
             note = (f"{' '.join(batch)} failed only on listed flakes ({issues(flakes)}); "
@@ -57,6 +59,14 @@ def main():
             returncode, _ = execute(batch, args.ci_artifacts)
             if not returncode:
                 summarize(f"{' '.join(batch)} passed on its automatic retry after failing.")
+        # Checked after retries and quarantine, which forgive only the zig exit, never a leak.
+        if leaked := runtime_leftovers.sweep():
+            note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
+                    f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
+                    "remove its socket and .store hint before deleting the Store (docs/verification/testing.md).")
+            print(f"::error::{note}", flush=True)
+            summarize(note)
+            returncode = returncode or 1
         if returncode:
             record_failure(' '.join(batch), command(batch))
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
@@ -91,8 +101,6 @@ def command(batch, ci_artifacts=None):
 
 def execute(batch, ci_artifacts):
     print("Executing: " + " ".join(batch), flush=True)
-    if earlier := runtime_leftovers.sweep():
-        print(f"Removed {len(earlier)} Host sockets left by earlier runs.", flush=True)
     start = time.monotonic()
     output = []
     with subprocess.Popen(command(batch, ci_artifacts), env=dict(os.environ, RUI_UNIT_TEST_TIMEOUT=TEST_TIMEOUT),
@@ -103,14 +111,6 @@ def execute(batch, ci_artifacts):
             sys.stdout.flush()
             output.append(line)
     returncode = process.returncode
-    if leaked := runtime_leftovers.sweep():
-        note = (f"{' '.join(batch)} left {len(leaked)} Host sockets whose Store no longer exists "
-                f"(removed): {runtime_leftovers.describe(leaked)}. A fixture that kills a Host must "
-                "remove its socket and .store hint before deleting the Store (docs/verification/testing.md).")
-        print(f"::error::{note}", flush=True)
-        summarize(note)
-        output.append(note + "\n")
-        returncode = returncode or 1
     print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {returncode}", flush=True)
     return returncode, "".join(output)
 
