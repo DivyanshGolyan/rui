@@ -3,8 +3,10 @@ import pathlib
 import re
 import shlex
 import threading
+import time
 
 import model_fixture as fixture
+from host_process import wait_for
 from overview_fixture import world
 
 PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}", 1)[0]
@@ -53,6 +55,10 @@ def needs_you():
         done = w.session("--label", "Answered already")
         send(w, done, "just say hi")
         wait_state(w, done, "finished")
+        # Siblings sort by their latest state change, in whole seconds; start the
+        # question in a later second so it is strictly the newest.
+        finished_second = int(time.time())
+        wait_for(lambda: int(time.time()) > finished_second, "the next wall-clock second", timeout=3)
         asking = w.session("--permission-mode", "ask", "--label", "Asks before running")
         send(w, asking, "please run the command")
         wait_state(w, asking, "approval")
@@ -108,8 +114,9 @@ def queued_in_active():
                 queued = row(frame, "Second peer task")
                 assert re.fullmatch(r"   [◜◝◞◟] First peer task *", working), working
                 assert re.fullmatch(r"   ◌ Second peer task +now", queued), queued
-                done = row(frame, "Dispatcher")
-                assert lines.index(working) < lines.index(done) < lines.index(queued), frame
+                # Rows sort by their latest state change in whole seconds, which these
+                # three share, so this case checks marks, not order.
+                row(frame, "Dispatcher")
                 drawn = cells(screen, "Second peer task")
                 queued_mark = drawn[3]
                 working_mark = cells(screen, "First peer task")[3]
@@ -118,7 +125,7 @@ def queued_in_active():
                 assert queued_mark.fg != working_mark.fg, frame
         finally:
             hold.set()
-    print("overview groups: a queued peer row shows a dim `◌` after working and done rows, with no headings", flush=True)
+    print("overview groups: a queued peer row shows a dim `◌` beside working and done rows, with no headings", flush=True)
 
 
 def detail_column():
