@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Own the `main-qualified` record: which main commits passed the full tier.
 
-Promote (promote.yml) runs every hour and by hand. It runs the full
+Promote (promote.yml) runs every three hours and by hand. It runs the full
 qualification tier (qualification-tier.yml) on the commit it publishes when
 that commit has no verdict yet, and publishes a commit with a green record from
 the archives that run built and tested, without qualifying it again. Each run

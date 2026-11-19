@@ -5,7 +5,7 @@
 ## Landing cadence
 
 `main` is the integration branch; `stable` and the latest release are what users run.
-PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; [scheduled promotion](#scheduled-promotion) runs the expensive tier on `main` every hour and publishes a green HEAD to users, and a manual promotion publishes a qualified commit.
+PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; [scheduled promotion](#scheduled-promotion) runs the expensive tier on `main` every three hours and publishes a green HEAD to users, and a manual promotion publishes a qualified commit.
 GitHub must require pull requests and the GitHub Actions `admission` check on `main`, with no bypass; it does not require an up-to-date base.
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
@@ -51,7 +51,7 @@ Correctness failures are fixed on the PR before it reaches `main`.
 
 ### Scheduled promotion
 
-[Promote](../../.github/workflows/promote.yml) runs every hour, with empty inputs, so it promotes main HEAD.
+[Promote](../../.github/workflows/promote.yml) runs every three hours, with empty inputs, so it promotes main HEAD.
 When [stable](#promote) already holds HEAD it does nothing.
 When HEAD has a red `main-qualified` record it skips quietly, since the failing run already filed its issues.
 Otherwise it qualifies HEAD, or publishes the archives of HEAD's green record, exactly as a manual promotion does below, and a green HEAD that main has moved past since the last release becomes a release without anyone dispatching it.

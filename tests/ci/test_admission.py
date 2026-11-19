@@ -977,7 +977,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertFalse((ROOT / '.github/workflows/main-build.yml').exists())
         text = PROMOTE.read_text()
         on = text.split('\npermissions:', 1)[0]
-        self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \* \* \* \*'$")
+        self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
         self.assertIn('  workflow_dispatch:', on)
         self.assertNotRegex(on, r'push:|pull_request')
         self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: promote\n  cancel-in-progress: false$')
