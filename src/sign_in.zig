@@ -195,7 +195,7 @@ fn act(state: *State, action: Action) Effect {
     return state.step(.{ .activate = .{ .attempt = state.attempt, .page = std.meta.activeTag(state.page), .action = action } });
 }
 
-test "Sign-in guided account method cancellation publication and stale actions" {
+test "SUI-8 Sign-in guided cancellation settles publication" {
     var state: State = .{};
     try std.testing.expectEqual(Effect.none, act(&state, .{ .choose = .chatgpt }));
     try std.testing.expectEqual(@as(Attempt, .browser), act(&state, .{ .method = .browser }).start);
@@ -213,20 +213,33 @@ test "Sign-in guided account method cancellation publication and stale actions" 
     try std.testing.expect(state.page == .connected);
 }
 
-test "Sign-in every page has reachable controls and stale input never starts work" {
+test "SUI-6 Sign-in controls reject stale pages and attempts for every action" {
     const pages_ = [_]Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .login, .retry = .browser } }, .pending, .connected };
+    var code: Code = .{};
+    try code.set("SYNTHETIC");
+    const actions = [_]Action{ .{ .choose = .api_key }, .{ .method = .device }, .{ .reuse = .chatgpt }, .{ .field = .key }, .connect, .callback, .{ .copy = code }, .{ .copy_url = "https://example.invalid/?a=1&b=2" }, .{ .open = "https://example.invalid/" }, .{ .command = "synthetic" }, .recheck, .retry, .switch_method, .back, .close };
     for (pages_) |page| {
-        var state: State = .{ .page = page };
+        var state: State = .{ .page = page, .attempt = 7 };
         state.focus = state.controls()[0];
         const first = state.focus;
         for (0..state.controls().len) |_| _ = state.step(.{ .move = true });
         try std.testing.expectEqual(first, state.focus);
         for (0..state.controls().len) |_| _ = state.step(.{ .move = false });
         try std.testing.expectEqual(first, state.focus);
-        for ([_]Action{ .{ .choose = .api_key }, .{ .method = .device }, .connect, .recheck, .retry, .back, .close }) |action| {
-            try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 99, .page = std.meta.activeTag(page), .action = action } }));
+        for (actions) |action| {
+            try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 6, .page = std.meta.activeTag(page), .action = action } }));
+            for (pages_) |drawn_page| {
+                if (std.meta.activeTag(drawn_page) == std.meta.activeTag(page)) continue;
+                try std.testing.expectEqual(Effect.none, state.step(.{ .activate = .{ .attempt = 7, .page = std.meta.activeTag(drawn_page), .action = action } }));
+            }
             try std.testing.expectEqual(std.meta.activeTag(page), std.meta.activeTag(state.page));
+            try std.testing.expectEqual(first, state.focus);
         }
+        for ([_]Action{ .{ .copy_url = "" }, .{ .copy = .{} } }) |empty| try std.testing.expectEqual(Effect.none, act(&state, empty));
+        const effect = act(&state, .{ .copy_url = "full-url" });
+        if (page == .browser) try std.testing.expectEqualStrings("full-url", effect.copy_text) else try std.testing.expectEqual(Effect.none, effect);
+        const device_effect = act(&state, .{ .copy = code });
+        if (page == .device) try std.testing.expectEqualStrings(code.slice(), device_effect.copy.slice()) else try std.testing.expectEqual(Effect.none, device_effect);
     }
 }
 
