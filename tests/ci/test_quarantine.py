@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import quarantine
 import run_selected
+import os_semantics  # noqa: E402  (run_selected put tests/integration on the path)
+import runtime_leftovers  # noqa: E402
 from report_issue import fixtures
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -129,22 +131,23 @@ class RunSelectedTest(unittest.TestCase):
         code, calls, _ = self.selected(mode, runs, '["codex-h2-integration"]')
         return code, len(calls)
 
-    def selected(self, mode, runs, targets, leaked=()):
+    def selected(self, mode, runs, targets, leak=False):
         runs = list(runs)
         calls = []
-        sweeps = [[], list(leaked)]
-
-        def sweep():
-            return sweeps.pop(0) if sweeps else []
 
         def execute(batch, artifacts):
             calls.append(batch)
+            if leak and len(calls) == 1:
+                # What a killed fixture Host leaves: a closed socket whose hinted Store is gone.
+                with os_semantics.unix_stream() as dead:
+                    dead.bind(str(Path(runtime, "dead.sock")))
+                Path(runtime, "dead.store").write_text("/gone/store")
             return runs.pop(0)
 
-        with tempfile.TemporaryDirectory() as scratch, \
-                patch.dict(os.environ, GITHUB_STEP_SUMMARY=str(Path(scratch, "summary")), RUNNER_TEMP=scratch), \
+        with tempfile.TemporaryDirectory() as scratch, tempfile.TemporaryDirectory(dir="/tmp") as runtime, \
+                patch.dict(os.environ, {runtime_leftovers.OVERRIDE: runtime},
+                           GITHUB_STEP_SUMMARY=str(Path(scratch, "summary")), RUNNER_TEMP=scratch), \
                 patch.object(run_selected, "execute", execute), \
-                patch.object(run_selected.runtime_leftovers, "sweep", sweep), \
                 patch.object(quarantine, "entries", return_value=[FLAKE]), \
                 patch.object(quarantine, "today", return_value="2026-11-10"), \
                 patch.object(sys, "argv", ["run_selected.py", targets, "--quarantine", mode]), \
@@ -167,10 +170,9 @@ class RunSelectedTest(unittest.TestCase):
         self.assertEqual(self.verdict("admission", self.FLAKY, self.REAL), (1, 2))
 
     def test_a_leaked_host_socket_fails_the_batch_even_when_quarantine_forgives_its_exit(self):
-        leak = [(Path("/tmp/rui-1/dead.sock"), "/gone/store")]
         for runs in ((self.PASS,), (self.FLAKY, self.FLAKY)):
             with self.subTest(runs=len(runs)):
-                code, _, report = self.selected("admission", runs, '["codex-h2-integration"]', leaked=leak)
+                code, _, report = self.selected("admission", runs, '["codex-h2-integration"]', leak=True)
                 self.assertEqual(code, 1)
                 self.assertIn("left 1 Host sockets whose Store no longer exists", report)
                 self.assertIn("/gone/store", report)
