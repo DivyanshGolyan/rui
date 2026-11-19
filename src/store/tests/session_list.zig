@@ -83,7 +83,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
                 }
             }
             var request = protocol.ListSessions{};
-            try std.testing.expectError(error.InvalidCursor, storage.readSessionList(&.{ .after = 2, .ceiling = 1 }, @as(*TestingListReply, undefined), std.testing.allocator));
+            try std.testing.expectError(error.InvalidCursor, storage.readSessionList(&.{ .after = 2, .ceiling = 1 }, @as(*TestingListReply, undefined), @as(*session_list_read_domain.Scratch, undefined)));
             request.workspace = .{};
             try request.workspace.?.set(workspace);
             const first = try testingSessionList(&storage, &tmp, request, &used, 2);

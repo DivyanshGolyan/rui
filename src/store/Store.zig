@@ -1093,11 +1093,10 @@ pub const Store = struct {
         return .{ .generation = self.commitGeneration(), .next = next };
     }
 
-    /// `scratch_allocator` holds the read's page buffers, allocated here before the queue runs the read.
-    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype, scratch_allocator: std.mem.Allocator) !void {
+    /// `pages` holds the read's page buffers. The caller allocates them before the queue runs the read, so a
+    /// failed allocation never reaches the held Store and the buffers stay off Host stacks.
+    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype, pages: *session_list_read.Scratch) !void {
         try request.validate();
-        const pages = try scratch_allocator.create(session_list_read.Scratch);
-        defer scratch_allocator.destroy(pages);
         var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
         try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, pages, &watched });
     }

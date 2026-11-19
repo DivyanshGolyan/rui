@@ -362,7 +362,9 @@ fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(first_line.max_li
 /// Reads one Archived window page in one round. `head` and `below` read newest first; `above` and `tail`
 /// read oldest first from their key and are returned newest first.
 fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, generation: u64, page: *ArchivedPage, visitor: anytype) !void {
-    page.* = .{};
+    // Resets the small fields only: a whole-struct store would write all 37 KB of rows.
+    page.count = 0;
+    page.failure = null;
     const size = session_list.archived_window_size;
     var more_above = false;
     var more_below = false;
@@ -430,7 +432,8 @@ fn readArchivedWindow(a: *ReadAccess, cursor: session_list.ArchivedCursor, gener
 
 /// The page buffers of one Session list read: an Archived window page is about 37 KB. The caller allocates
 /// them before the Store queue runs the read, so the read's frame stays inside the Host stack budget, and a
-/// failed allocation is an ordinary refusal that never reaches the held Store.
+/// failed allocation is an ordinary refusal that never reaches the held Store. The read resets each buffer
+/// it uses, so the caller may hand them in unfilled.
 pub const Scratch = struct {
     archived: ArchivedPage = .{},
     page: ListPage = .{},
