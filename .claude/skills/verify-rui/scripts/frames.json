@@ -6328,7 +6328,13 @@
           ]
         },
         {
+          "wait": "Sign-in expired"
+        },
+        {
           "text": "Unserved send witness"
+        },
+        {
+          "wait": "Unserved send witness"
         },
         {
           "keys": [
@@ -6336,7 +6342,8 @@
           ]
         },
         {
-          "wait": "isn't served by"
+          "wait": "isn't served by",
+          "empty_composer": true
         }
       ],
       "expect": [
