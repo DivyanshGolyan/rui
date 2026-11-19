@@ -9,7 +9,7 @@ const cli_value = @import("cli_value.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const content_value = @import("content_value.zig");
-const session_line = @import("session_line.zig");
+const first_line = @import("first_line.zig");
 
 pub const session_list_page_size: usize = 8;
 /// Archived rows per window page: one tall overview screen (about 40 rows at 24+ lines). A slim row is
@@ -18,8 +18,8 @@ pub const session_list_page_size: usize = 8;
 /// each, 288 KiB).
 pub const archived_window_size: usize = 40;
 pub const max_last_line_bytes = 200;
-/// The longest first Message line an Archived row carries: the overview's display cut (session_line).
-pub const max_first_line_bytes = session_line.max_line_bytes;
+/// The longest first Message line an Archived row carries: the overview's display cut (first_line).
+pub const max_first_line_bytes = first_line.max_line_bytes;
 pub const ListDelta = enum { not_modified, changed, full, window };
 
 pub const ListSessions = struct {
@@ -171,7 +171,7 @@ pub const ArchivedFirst = struct {
     admission: u64,
     position: u64,
     content: content_value.Value,
-    /// The first display line (session_line.firstLine), cut to `max_first_line_bytes`: the same line the
+    /// The first display line (first_line.firstLine), cut to `max_first_line_bytes`: the same line the
     /// overview's first-line read gives. Null when the first Message is parts-form (its line comes from the
     /// overview's own first-line read) or its first line is blank.
     line: ?[]const u8,
