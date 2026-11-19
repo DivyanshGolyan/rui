@@ -285,7 +285,6 @@ pub const Listed = struct {
             } else null,
         };
     }
-
 };
 
 /// One Archived window page as the overview reads it: rows newest archive first, and the page's edge keys.
