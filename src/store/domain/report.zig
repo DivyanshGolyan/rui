@@ -11,6 +11,7 @@ const Bounded = @import("../../bounded.zig").Bounded;
 const mutation_answer = @import("../../mutation_answer.zig");
 const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
+const archive_membership = @import("archive_membership.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
 const ScratchBudget = @import("../../ScratchBudget.zig");
@@ -193,7 +194,7 @@ pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, operation: u64
 }
 
 pub const archive_state = rsql.Read(.{
-    .sql = "SELECT " ++ command_domain.archive_state_sql ++ " AS archive_state FROM session_archive session WHERE session_ref=?1",
+    .sql = "SELECT " ++ archive_membership.stateSql("session") ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { archive_state: session_archive.State },
     .cardinality = .optional,

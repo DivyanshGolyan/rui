@@ -934,12 +934,7 @@ pub const RecoverUncertain = struct {
     }
 };
 
-const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN model_operation earlier_operation ON earlier_operation.operation_id=earlier.parent_operation_id " ++
-    "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
-    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND EXISTS(" ++ mcpCallSelectSql("earlier", "earlier_operation", "1") ++
-    " AND (tool.read_only=0 OR (" ++ mcpCallSelectSql("action", "operation", "tool.read_only") ++ ")=0)))";
-
-const mcp_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND " ++ mcp_serial_sql;
+const mcp_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active");
 
 const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,NULL AS timeout_override_ms " ++
     "FROM action_operation action @index(action_operation_executable) " ++

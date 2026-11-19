@@ -202,6 +202,8 @@ test {
     _ = @import("store/sqlite_tests/schema.zig");
     _ = @import("store/sqlite_tests/search_activity.zig");
     _ = @import("store/sqlite_tests/session_list.zig");
+    _ = @import("store/sqlite_tests/archive_membership.zig");
+    _ = @import("store/sqlite_tests/tool_record_hint.zig");
     _ = @import("store/sqlite_tests/skills_migration.zig");
     _ = @import("store/sqlite_tests/tool_set.zig");
     _ = @import("store/sqlite_tests/tool_set_migration.zig");

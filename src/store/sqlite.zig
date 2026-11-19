@@ -162,10 +162,10 @@ pub fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
 }
 
 pub const touch_oracle_tables = .{
-    "session",         "session_revision", "message_admission",     "sent_rejection",
-    "turn",            "session_stop",     "session_archive",       "session_pin",
-    "model_operation", "action_operation", "conversation_entry",    "model_output_item",
-    "model_tool_call", "session_change",   "session_skill_catalog",
+    "session",          "session_revision",      "message_admission", "sent_rejection",
+    "turn",             "session_stop",          "session_pin",       "model_operation",
+    "action_operation", "conversation_entry",    "model_output_item", "model_tool_call",
+    "session_change",   "session_skill_catalog",
 };
 
 pub fn createTouchOracleForTesting(database: *c.sqlite3) !void {

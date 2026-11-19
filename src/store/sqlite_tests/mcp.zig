@@ -372,7 +372,7 @@ test "MCP selection cost does not grow with earlier Operations of an open Turn" 
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
-test "MCP attempts serialize Sessions and recover without replay" {
+test "MCP calls in one Session run at once and recover without replay" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -380,7 +380,7 @@ test "MCP attempts serialize Sessions and recover without replay" {
     defer storage.close() catch unreachable;
     var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
     for (&sessions, 0..) |*session, index| {
-        const key = if (index == 0) "mcp-serial-a" else "mcp-serial-b";
+        const key = if (index == 0) "mcp-parallel-a" else "mcp-parallel-b";
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         var command = try completeConfiguration(key, "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
         command.configuration.tools = try .of(&.{ "fetch_page", "message_agent" });
@@ -389,14 +389,14 @@ test "MCP attempts serialize Sessions and recover without replay" {
         const reply = try storage.configure(&command, .{});
         try std.testing.expect(reply == .accepted);
         session.* = reply.accepted.session;
-        try submitTestMessage(&storage, &tmp, key, if (index == 0) "mcp-serial-message-a" else "mcp-serial-message-b", session.slice(), "fetch");
+        try submitTestMessage(&storage, &tmp, key, if (index == 0) "mcp-parallel-message-a" else "mcp-parallel-message-b", session.slice(), "fetch");
         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         const calls = [_]TestingCall{
             .{ .item_id = "one", .name = "fetch_page", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             .{ .item_id = "two", .name = "fetch_page", .encoded_call_id = "two", .decoded_call_id = "two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             .{ .item_id = "core", .name = "message_agent", .encoded_call_id = "core", .decoded_call_id = "core", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" },
         };
-        try settleCallsForTesting(&storage, &tmp, model, if (index == 0) "mcp-serial-calls-a" else "mcp-serial-calls-b", calls[0..(if (index == 0) @as(usize, 3) else 2)]);
+        try settleCallsForTesting(&storage, &tmp, model, if (index == 0) "mcp-parallel-calls-a" else "mcp-parallel-calls-b", calls[0..(if (index == 0) @as(usize, 3) else 2)]);
     }
     var replacement_records = mcp_records;
     for (&replacement_records) |*record| {
@@ -411,7 +411,8 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const first = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
     try std.testing.expectEqual(first, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
     const binding = (try storage.admitActionAttempt(.{ .action_id = first, .runner = .mcp }, 1234, .{})).?.permit.binding;
-    try std.testing.expect((try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})) == null);
+    try std.testing.expectEqual(first + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
+    _ = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 1234, .{})).?.permit.binding;
     var input: action_domain.ActionExecutionInput = undefined;
     try storage.readActionExecutionInput(.mcp, binding, &input);
     try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
@@ -426,19 +427,20 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const core = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = false })).?.action;
     try std.testing.expectEqual(first + 2, core.binding.action_id);
     try std.testing.expect(try storage.failCoreCall(core.binding, "Invalid arguments: missing target.", .{}));
-    const other = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
-    try std.testing.expect(other > first + 1);
     try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
-    try std.testing.expectEqual(first + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
-    const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
-    var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
+    try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
+    for ([_]u64{ first, first + 1 }) |recovered| {
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.attempt_ordinal=1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ recovered, "%Host stopped%" }));
+    }
+    const other = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
+    try std.testing.expect(other > first + 2);
+    const unsent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 600_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(other + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
+    const sent = (try storage.admitActionAttempt(.{ .action_id = other + 1, .runner = .mcp }, 5_000, .{})).?.permit.binding;
+    var stop = try completeSessionStop("mcp-parallel-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
-    const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
-    var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
-    try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }

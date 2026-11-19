@@ -43,7 +43,7 @@ focus: @import("app_input.zig").ChoiceFocus = .{ .filter = null },
 filter_drawn: bool = false,
 scroll: usize = 0,
 query_bytes: [catalog.max_model_bytes]u8 = undefined,
-editor: Editor = .init(&.{}),
+editor: Editor = .initLocked(&.{}, .line_refusals_release),
 pasting: bool = false,
 no_match: bool = false,
 failure: ?[]const u8 = null,
@@ -61,7 +61,7 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
     self.menu = menu orelse &fallback;
     self.provider = provider;
     self.current = current;
-    self.editor = .init(&self.query_bytes);
+    self.editor = .initLocked(&self.query_bytes, .line_refusals_release);
     self.no_match = false;
     self.failure = null;
     self.pasting = false;

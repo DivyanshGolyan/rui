@@ -56,6 +56,19 @@ trap 'exit 1' HUP INT TERM
 mkdir -p "$openssl_build" "$nghttp2_build" "$prefix"
 : >"$log"
 
+# nghttp2's configure requires pkg-config even for --enable-lib-only, which
+# uses no package. This stand-in passes the version check and finds no
+# package, so the build is the same on every host, with or without pkg-config.
+no_packages="$build_root/pkg-config"
+cat >"$no_packages" <<'SHIM'
+#!/bin/sh
+case "${1-}" in
+    --atleast-pkgconfig-version|--version) exit 0 ;;
+esac
+exit 1
+SHIM
+chmod +x "$no_packages"
+
 if [ "${sdk:-}" ]; then
     mkdir -p "$prefix/sdk/System/Library" "$prefix/sdk/usr"
     rm -f \
@@ -82,7 +95,7 @@ fi
 
 (
     cd "$nghttp2_build"
-    CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
+    CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" PKG_CONFIG="$no_packages" \
     sh "$nghttp2_source/configure" --host="$host" \
         --prefix="$prefix" --enable-lib-only --disable-shared --enable-static
     # The pinned release includes generated Autotools files. Archive extraction
@@ -94,8 +107,8 @@ fi
     exit 1
 }
 
-grep '^# *define OPENSSL_VERSION_STR "3.6.3"' "$prefix/include/openssl/opensslv.h" >/dev/null
-grep '^#define NGHTTP2_VERSION "1.70.0"' "$prefix/include/nghttp2/nghttp2ver.h" >/dev/null
+grep '^# *define OPENSSL_VERSION_STR "3.6.5"' "$prefix/include/openssl/opensslv.h" >/dev/null
+grep '^#define NGHTTP2_VERSION "1.71.0"' "$prefix/include/nghttp2/nghttp2ver.h" >/dev/null
 test -f "$prefix/lib/libnghttp2.a"
 test -f "$prefix/lib/libssl.a"
 test -f "$prefix/lib/libcrypto.a"

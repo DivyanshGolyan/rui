@@ -141,7 +141,7 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
     required = {"execution": "unavailable"}
     if endpoint is not None:
         args += ["--set", "providers={}", "--set", "providers.codex.endpoint=" + str(endpoint), "--set", "providers.codex.unauthenticated=true"]
-        required = {"execution": "enabled", "nghttp2": "1.70.0"}
+        required = host_process.READY_TRANSPORT
     args += extra
     if observations is not None and "--test-phase-trace" not in args:
         args.append("--test-phase-trace")

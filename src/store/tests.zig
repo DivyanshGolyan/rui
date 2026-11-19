@@ -1283,6 +1283,10 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
 
 pub const RoundMeter = struct {
     storage: *Store,
+    /// Checked by default: no counter may move back over a window, since nothing resets them on an unrepeated leg, so a
+    /// wrapped difference there would hide a count that was never taken. Only a run-again leg, which reconnects and
+    /// restarts the connection's query count, opts out (SH-110's rerun leg).
+    checked: bool = true,
     rounds_before: u16 = 0,
     content_before: u16 = 0,
     shape_before: QueryShape = .{},
@@ -1315,8 +1319,16 @@ pub const RoundMeter = struct {
         pub fn since(after: QueryShape, before: QueryShape) QueryShape {
             var delta: QueryShape = undefined;
             inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
-                @field(delta, name) = @field(after, name) - @field(before, name);
+                // A run-again leg reconnects, which restarts the connection's query count, so a window there can
+                // run backwards; the wrapped difference is only read on an unrepeated leg (RoundMeter.checked).
+                @field(delta, name) = @field(after, name) -% @field(before, name);
             return delta;
+        }
+
+        /// Fails when a count went back over a window, so one test fails rather than the test binary.
+        pub fn checkForward(after: QueryShape, before: QueryShape) error{CounterWentBack}!void {
+            inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
+                if (@field(after, name) < @field(before, name)) return error.CounterWentBack;
         }
 
         pub fn expected(shape: QueryShape) u64 {
@@ -1330,12 +1342,18 @@ pub const RoundMeter = struct {
         meter.shape_before = QueryShape.snapshot(meter.storage);
     }
 
-    pub fn stop(meter: *RoundMeter, point: EntryPoint) void {
-        std.debug.assert(meter.measured.get(point) == null);
+    pub fn stop(meter: *RoundMeter, point: EntryPoint) error{ WindowRepeated, CounterWentBack }!void {
+        if (meter.measured.get(point) != null) return error.WindowRepeated;
+        const shape = QueryShape.snapshot(meter.storage);
+        if (meter.checked) {
+            if (meter.storage.testing_content_work.rounds < meter.rounds_before) return error.CounterWentBack;
+            if (meter.storage.testing_content_work.content_rounds < meter.content_before) return error.CounterWentBack;
+            try shape.checkForward(meter.shape_before);
+        }
         meter.measured.set(point, .{
-            .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
-            .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
-            .shape = QueryShape.snapshot(meter.storage).since(meter.shape_before),
+            .rounds = meter.storage.testing_content_work.rounds -% meter.rounds_before,
+            .content_rounds = meter.storage.testing_content_work.content_rounds -% meter.content_before,
+            .shape = shape.since(meter.shape_before),
         });
     }
 };

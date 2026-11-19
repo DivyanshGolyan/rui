@@ -1763,6 +1763,16 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
+// Kept out of prepareReply so the configure path pays only its own frame, not
+// the whole switch's frame.
+noinline fn prepareConfigure(host: *Host, fd: *Reply, header: Header, command: *const wire_request.ConfigureCommand) !void {
+    // One bounded receipt per active creating exchange; ordinary exchanges
+    // are limited by Host intake capacity. It lives only through encoding.
+    const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+    defer if (receipt) |value| host.allocator.destroy(value);
+    _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
+}
+
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
@@ -1805,13 +1815,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (host.stopAsked()) wakeListener(host);
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
-        .configure => |*command| {
-            // One bounded receipt per active creating exchange; ordinary exchanges
-            // are limited by Host intake capacity. It lives only through encoding.
-            const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
-            defer if (receipt) |value| host.allocator.destroy(value);
-            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
-        },
+        .configure => |*command| try prepareConfigure(host, fd, header, command),
         .message => |*command| {
             if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
             const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
@@ -5146,7 +5150,7 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT settings_revision FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
         const description = protocol.contentDigest(if (round == 0) "old page" else "new page");
-        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2 AND t.read_only=?3", .{ binding.operation_id, testing.Blob{ .bytes = &description }, @intFromBool(round == 1) }));
+        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN session_revision r ON r.session_ref=m.session_ref AND r.revision=m.settings_revision JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2", .{ binding.operation_id, testing.Blob{ .bytes = &description } }));
         try testing.settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
         try std.testing.expect(script.request_received.load(.acquire));
         try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
