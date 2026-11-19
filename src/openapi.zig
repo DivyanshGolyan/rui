@@ -1721,6 +1721,15 @@ fn matches(pattern: []const u8, text: []const u8) bool {
         for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
         return true;
     }
+    if (std.mem.eql(u8, pattern, archived_cursor_pattern)) {
+        if (std.mem.eql(u8, text, "head") or std.mem.eql(u8, text, "tail")) return true;
+        const colon = std.mem.indexOfScalar(u8, text, ':') orelse return false;
+        if (!std.mem.eql(u8, text[0..colon], "below") and !std.mem.eql(u8, text[0..colon], "above")) return false;
+        const digits = text[colon + 1 ..];
+        if (digits.len == 0 or digits[0] == '0') return false;
+        for (digits) |byte| if (!std.ascii.isDigit(byte)) return false;
+        return true;
+    }
     const lower_name = std.mem.startsWith(u8, pattern, "^[a-z0-9_-]{1,");
     if (lower_name or std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
         const begin = std.mem.indexOfScalar(u8, pattern, ',').? + 1;
