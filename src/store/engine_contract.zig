@@ -2481,7 +2481,7 @@ test "SH-103 a transition saves all it queued when it commits and nothing otherw
     }.run);
 }
 
-test "SH-5 writes run back to back commit together, and one that fails rolls back alone" {
+test "SH-5 concurrent commands derive distinct ranks, and a reused savepoint preserves earlier writes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             if (case.engine == .mysql and !case.rerun) try sh5_store_mysql_live_reused_savepoint_replaces_its();
@@ -2501,13 +2501,10 @@ test "SH-104 every value a statement binds reads back equal" {
     }.run);
 }
 
-test "SH-105 a read answers the rows its cardinality names, and a write the rows it states" {
+test "SH-105 a write commits only when it changes the rows its caller states, and its guard and visitor storage hold" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try sh105_a_queued_read_s_destination_holds_poison(case);
-            try sh105_a_queued_readinto_s_found_is_pending(case);
             try sh105_a_counted_write_commits_only_when_it(case);
-            try sh105_a_transition_s_round_names_the_failed(case);
             if (case.engine == .mysql and !case.rerun) try sh105_store_mysql_live_client_found_rows_counts();
             if (case.engine == .mysql and !case.rerun) try sh105_store_mysql_live_first_access_guard_survives();
         }
@@ -2515,9 +2512,12 @@ test "SH-105 a read answers the rows its cardinality names, and a write the rows
     try sh105_an_each_visitor_supplies_storage_for_a();
 }
 
-test "SH-106 a pass steps what was queued, in order, in rounds of its mode's size" {
+test "SH-106 a pass steps what was queued in rounds of its mode's size, and fills a destination only when it steps it" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            try sh105_a_queued_read_s_destination_holds_poison(case);
+            try sh105_a_queued_readinto_s_found_is_pending(case);
+            try sh105_a_transition_s_round_names_the_failed(case);
             try sh106_a_transition_with_a_wide_pass_steps(case);
             try sh106_a_step_sees_its_transaction_open_once(case);
             try sh106_a_transition_s_paged_round_runs_again(case);
@@ -2547,7 +2547,7 @@ test "SH-108 every row a write dates carries its transaction's one second" {
     }.run);
 }
 
-test "SH-3 a step the engine fails fences the Store" {
+test "SH-3 a read step the engine fails fences the Store" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             try sh3_canonical_step_faults_fence_rather_than_reading(case);

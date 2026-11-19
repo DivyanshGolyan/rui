@@ -6,7 +6,7 @@ First drafts, written from the README and the contracts and checked against fixe
 | Area | Invariants |
 | --- | --- |
 | [Admission and Session stops](admission-sessions.md) | 53 |
-| [Store, Host lifetime, install and upgrade](store-host.md) | 93 |
+| [Store, Host lifetime, install and upgrade](store-host.md) | 99 |
 | [Tools, execution, recovery and resources](execution-resources.md) | 66 |
 | [Conversation, settings and model requests](conversation-model.md) | 38 |
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 50 |

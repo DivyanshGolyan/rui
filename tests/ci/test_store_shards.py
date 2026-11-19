@@ -52,9 +52,20 @@ class TerminalTimesTest(unittest.TestCase):
 class ExclusiveOwnerTest(unittest.TestCase):
     def test_every_server_global_mutator_is_in_the_exclusive_owner(self):
         import flake_sources
-        source = (ROOT / "src/store/mysql_testing.zig").read_text()
-        _, tests, declarations = flake_sources.zig_blocks(source)
-        bodies = {name: source[start:end] for start, end, name in declarations}
+        # Both files hold MySQL tests that reach SET GLOBAL. The contract suite
+        # reaches the helpers in mysql_testing.zig through its `mt.` alias, so
+        # the callee closure runs across both files.
+        sources = {
+            "store.mysql_testing.test.": (ROOT / "src/store/mysql_testing.zig").read_text(),
+            "store.engine_contract.test.": (ROOT / "src/store/engine_contract.zig").read_text(),
+        }
+        bodies = {}
+        test_blocks = []
+        for prefix, source in sources.items():
+            _, tests, declarations = flake_sources.zig_blocks(source)
+            for start, end, name in declarations:
+                bodies.setdefault(name, source[start:end])
+            test_blocks.extend((prefix, source[start:end], name) for start, end, name in tests)
         global_functions = {name for name, body in bodies.items() if "SET GLOBAL" in body}
         while True:
             callers = {name for name, body in bodies.items()
@@ -62,10 +73,12 @@ class ExclusiveOwnerTest(unittest.TestCase):
             if callers <= global_functions:
                 break
             global_functions |= callers
-        expected = {name for start, end, name in tests if "SET GLOBAL" in source[start:end] or
-                    any(re.search(r"\b" + re.escape(callee) + r"\s*\(", source[start:end]) for callee in global_functions)}
+        expected = {prefix + name for prefix, body, name in test_blocks if "SET GLOBAL" in body or
+                    any(re.search(r"\b" + re.escape(callee) + r"\s*\(", body) for callee in global_functions)}
         owner = (ROOT / "src/unit_test_partition.zig").read_text().split("pub fn exclusive(", 1)[1].split("fn fixedOwner", 1)[0]
         registered = set(re.findall(r'^\s*"(store\.mysql live[^"\n]+)",', owner, re.MULTILINE))
+        registered = {"store.mysql_testing.test." + name for name in registered}
+        registered |= set(re.findall(r'^\s*"(store\.engine_contract\.test\.[^"\n]+)",', owner, re.MULTILINE))
         self.assertTrue(expected)
         self.assertEqual(registered, expected)
 
