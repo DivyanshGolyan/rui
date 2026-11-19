@@ -80,6 +80,16 @@ class PrepushTest(unittest.TestCase):
         self.assertIn(artifact, diff)
         self.assertIn(artifact, out.getvalue())
 
+    def test_local_feedback_refuses_a_push_of_another_checkouts_commit(self):
+        head, other = "a" * 40, "b" * 40
+        self.assertIsNone(prepush.other_checkout([head], head))
+        self.assertIsNone(prepush.other_checkout([head, head], head))
+        for pushed in ([other], [head, other]):
+            with self.subTest(pushed=pushed):
+                refusal = prepush.other_checkout(pushed, head)
+                self.assertIn(other[:12], refusal)
+                self.assertIn("whose HEAD is the pushed commit", refusal)
+
     def test_default_and_hook_are_feedback_only(self):
         paths = ["src/store/schema.zig", "src/cli_args.zig", "tests/integration/activity_integration.py"]
         self.commands(paths)
@@ -417,7 +427,8 @@ class PrepushTest(unittest.TestCase):
         orphan = self.commit("c", "1\n", "no history shared with main")
         self.git("checkout", "-q", "feature")
         self.assertIsNone(prepush.pushed_key(orphan, "main"))
-        self.assertTrue(push(orphan)[0], "a commit with no merge base is not covered: --quick runs")
+        code, _ = run("--quick", "--base", "main", pushed=orphan)
+        self.assertIn("whose HEAD is the pushed commit", code, "an uncovered commit other than HEAD is refused, not judged by HEAD's tree")
 
     def test_whitespace_in_committed_lines_is_fixed_in_the_working_tree_and_still_fails(self):
         self.git("init", "-q")

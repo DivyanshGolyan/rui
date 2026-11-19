@@ -624,6 +624,22 @@ def install_hook():
 HOOK_REPOSITORY = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX")
 
 
+def other_checkout(pushed, head):
+    """Why local feedback cannot speak for the pushed commits, or None.
+
+    Every check runs on this checkout's HEAD, so a push of a commit that is not
+    HEAD (another branch, or another worktree's commit), and that no passing
+    receipt covers, would be judged by the wrong commit. Pushed shas arrive
+    peeled to commits, so an annotated tag of HEAD is HEAD. Uncommitted edits
+    are outside this check; commands read the working tree by design.
+    """
+    others = sorted(set(pushed) - {head})
+    if not others:
+        return None
+    return (f"prepush: this checkout's HEAD is {head[:12]}, but the push sends {', '.join(sha[:12] for sha in others)}; "
+            "local checks would judge the wrong tree. Push from the checkout (or worktree) whose HEAD is the pushed commit.")
+
+
 def leave_hook_repository():
     for name in HOOK_REPOSITORY:
         os.environ.pop(name, None)
@@ -665,6 +681,9 @@ def main():
                 if "skipped" in result:
                     print(f"== {result['name']}: skipped: {result['skipped']}")
             raise SystemExit(0)
+        # No receipt speaks for the pushed commits, so the checks below must, and they judge HEAD's tree.
+        if refusal := other_checkout([git("rev-parse", sha + "^{commit}") for sha in pushed], git("rev-parse", "HEAD")):
+            raise SystemExit(refusal)
     base = git("merge-base", "HEAD", args.base)
     paths, _ = changed_paths(base, "HEAD")
     planned = list(checks(paths, available, base, mode,
