@@ -1,7 +1,7 @@
 const std = @import("std");
 const product = @import("product.zig");
 
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: product.PinnedTransport) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: product.PinnedTransport, tool_target: ?std.Build.ResolvedTarget) void {
     const linux_cross_step = b.step(
         "cross-check-linux",
         "Compile Linux x86-64 and experimental Linux ARM64",
@@ -30,7 +30,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
     );
     {
         const apple = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-        macos_types_step.dependOn(&product.addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null).step);
+        macos_types_step.dependOn(&product.addRui(b, apple, .ReleaseSafe, "rui-typecheck-macos", null, tool_target).step);
         const apple_tests = b.addTest(.{
             .name = "test-typecheck-macos",
             .root_module = b.createModule(.{
@@ -39,7 +39,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
                 .optimize = .ReleaseSafe,
             }),
         });
-        product.configureUnitRoot(b, apple_tests, apple, null);
+        product.configureUnitRoot(b, apple_tests, apple, null, tool_target);
         macos_types_step.dependOn(&apple_tests.step);
         macos_types_step.dependOn(&b.addTest(.{ .name = "test-typecheck-macos-os", .root_module = product.addOsRoot(b, apple) }).step);
     }
@@ -64,6 +64,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
                 @tagName(resolved.result.os.tag),
             }),
             cross_transport,
+            tool_target,
         );
         switch (resolved.result.os.tag) {
             .linux => {
