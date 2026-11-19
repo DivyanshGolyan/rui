@@ -36,6 +36,8 @@ class GoalTest(unittest.TestCase):
             ("Fixes #12", False),
             ("Fixes: #12 one two", False),
             ("Fixesx #12 Support the workstream goal", False),
+            ("fixes #12 Support the workstream goal", False),
+            ("Fixes #12 by restoring it\nGoal: #13 serves the workstream", True),
             ("<!-- Fixes #12 Support the workstream goal -->", False),
             ("No issue: Routine housekeeping", True),
             ("No issue:   ", False),
