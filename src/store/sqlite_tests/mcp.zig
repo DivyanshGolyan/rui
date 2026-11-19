@@ -412,6 +412,7 @@ test "MCP calls in one Session run at once and recover without replay" {
     try std.testing.expectEqual(first, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
     const binding = (try storage.admitActionAttempt(.{ .action_id = first, .runner = .mcp }, 1234, .{})).?.permit.binding;
     try std.testing.expectEqual(first + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
+    _ = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 1234, .{})).?.permit.binding;
     var input: action_domain.ActionExecutionInput = undefined;
     try storage.readActionExecutionInput(.mcp, binding, &input);
     try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
@@ -427,18 +428,19 @@ test "MCP calls in one Session run at once and recover without replay" {
     try std.testing.expectEqual(first + 2, core.binding.action_id);
     try std.testing.expect(try storage.failCoreCall(core.binding, "Invalid arguments: missing target.", .{}));
     try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
-    try std.testing.expectEqual(first + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
-    const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
-    var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
+    try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
+    for ([_]u64{ first, first + 1 }) |recovered| {
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.attempt_ordinal=1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ recovered, "%Host stopped%" }));
+    }
+    const other = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
+    try std.testing.expect(other > first + 2);
+    const unsent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 600_000, .{})).?.permit.binding;
+    try std.testing.expectEqual(other + 1, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id);
+    const sent = (try storage.admitActionAttempt(.{ .action_id = other + 1, .runner = .mcp }, 5_000, .{})).?.permit.binding;
+    var stop = try completeSessionStop("mcp-parallel-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='spawn_failed' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not available%" }));
-    const other = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.mcp.action_id;
-    try std.testing.expect(other > first + 1);
-    const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
-    var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
-    try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='succeeded' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%terminal result raced stop%" }));
 }
