@@ -386,60 +386,6 @@ jobs:
         run: |
           echo "::error::Policy checks: $POLICY; format check: $FORMAT. Compile and tests still ran."
           exit 1
-  native_shard_matrix:
-    # TEMP experiment, not admission-required: the sharded native unit root at varied
-    # RUI_UNIT_SHARD_COUNT values. Same setup and compile as pr_linux, restricted to test-native.
-    # The hash placement takes no seed, so there is no shuffled variant.
-    name: native shards k=${{ matrix.k }}
-    needs: plan
-    if: ${{ needs.plan.outputs.pr_job == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        k: [2, 3, 4, 6]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.candidate_ref }}
-          fetch-depth: 0
-          filter: blob:none
-      - uses: ./.github/actions/setup
-        with:
-          targets: '["test-native"]'
-          cache-part: compiled
-      - name: Install the pinned packages tests/ci imports
-        run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-      - name: Compile the native unit root
-        run: |
-          set -euo pipefail
-          python3 -B tests/ci/build_artifact.py compile '["test-native"]'
-          zig build --fetch=all
-      - name: Give tests macOS's temporary directory shape
-        uses: ./.github/actions/darwin-tmpdir
-      - name: Run test-native at this shard count
-        timeout-minutes: 35
-        env:
-          RUI_UNIT_SHARD_COUNT: ${{ matrix.k }}
-          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
-        run: |
-          set -euo pipefail
-          echo "Native shard count $RUI_UNIT_SHARD_COUNT; source SHA $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py '["test-native"]' --ci-artifacts .zig-cache/o/ci-compiled
-      - name: Retain bounded failed-fixture diagnostics
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: failure-native-shards-k${{ matrix.k }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rui-failure-artifacts
-          retention-days: 3
-          if-no-files-found: ignore
   linux_build:
     needs: plan
     if: ${{ needs.plan.outputs.pr_job == 'false' && needs.plan.outputs.linux_compile_targets != '' && needs.plan.outputs.linux_compile_targets != '[]' }}
