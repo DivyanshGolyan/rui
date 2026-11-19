@@ -4,6 +4,7 @@ import sys
 
 import live_engines
 import network_variables
+import runtime_leftovers
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -387,6 +388,10 @@ WIRE_VERSION = _owned("src/wire_version.zig", r'^pub const wire_version = "(\d+)
 STORE_SCHEMA = int(_owned("src/store/schema.zig", r"^pub const schema_version: u32 = (\d+);$", "schema_version"))
 
 
+NGHTTP2_VERSION = _owned("src/h2/h2.zig", r'^pub const nghttp2_version = "([^"]+)";$', "nghttp2_version")
+READY_TRANSPORT = {"execution": "enabled", "nghttp2": NGHTTP2_VERSION}
+
+
 def assert_caller_error(stderr, context, code, not_sent=True):
     text = stderr.decode() if isinstance(stderr, bytes) else stderr
     ending = (" Nothing was captured or sent." if not_sent else "") + f" [{code}]\n"
@@ -527,6 +532,22 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
         else:
             clock.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
+
+
+def retire_settled(store, timeout=2):
+    """Retire a disposed Host's socket, waiting briefly for it to stop accepting.
+
+    A Host run under a wrapper such as strace --kill-on-exit dies only after the
+    reaped wrapper does, so its socket can still accept for a moment. A socket
+    that keeps accepting is a successor serving the same Store and stays.
+    """
+    def settled():
+        runtime_leftovers.retire(store)
+        return not runtime_leftovers.hinted(store)
+    try:
+        wait_for(settled, f"Host socket for {store} to retire", timeout=timeout, drain=False)
+    except WaitTimeout:
+        pass
 
 
 def wait_for_execution_release(inspect, deadline):
@@ -1198,7 +1219,9 @@ def close_stdin(process):
         process.stdin = None
 
 
-def stop_process(process, timeout=10, *, seal_observations=True):
+def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
+    """Reap a Host and dispose its fixture state. `retire=False` leaves its socket and .store hint
+    behind, as a real crash does; the caller's final disposal of the Store then retires them."""
     deadline = time.monotonic() + timeout
     errors = []
     incoming_error = sys.exc_info()[1]
@@ -1220,6 +1243,12 @@ def stop_process(process, timeout=10, *, seal_observations=True):
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException as error:
         errors.append(error)
+    if retire:
+        try:
+            if (store := disposed_store(process)) is not None:
+                retire_settled(store)
+        except BaseException as error:
+            errors.append(error)
     diagnostics = getattr(process, "rui_diagnostics", None)
     for close in (observations.close if observations else None, diagnostics.close if diagnostics else None,
                   process.stdout.close if process.stdout else None, process.stderr.close if process.stderr else None):
@@ -1245,6 +1274,19 @@ def stop_process(process, timeout=10, *, seal_observations=True):
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
+
+
+def disposed_store(process):
+    """The Store a Host was started on: its ready field, else its --store or --store-hex argument, else None."""
+    store = getattr(process, "rui_ready_fields", {}).get("store")
+    if store is not None:
+        return store
+    args = [str(argument) for argument in process.args] if isinstance(process.args, (list, tuple)) else []
+    if "--store" in args and args.index("--store") + 1 < len(args):
+        return os.path.realpath(args[args.index("--store") + 1])
+    if "--store-hex" in args and args.index("--store-hex") + 1 < len(args):
+        return os.path.realpath(os.fsdecode(bytes.fromhex(args[args.index("--store-hex") + 1])))
+    return None
 
 
 def _tail(buffer, chunk, limit):

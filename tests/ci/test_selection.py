@@ -981,7 +981,7 @@ class SelectionTest(unittest.TestCase):
         job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
         expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
         expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
-        script = dedent(job.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
+        script = Path('tests/ci/require_linux_parts.sh').read_text()
         cases = []
         for targets in ('[]', ''):
             cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
@@ -1026,7 +1026,8 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
-                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)),
+                                         event_name='workflow_call')
                 admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
                                              'needs': needs, 'github': github})
                 if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):
@@ -1184,6 +1185,26 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("check-full", result["native_targets"])
         self.assertIn("login-signal-integration", result["targets"])
         self.assertNotIn("login-signal-integration", result["native_targets"])
+
+    def test_sqlite_pin_change_runs_the_store_suite_on_the_pr(self):
+        zon = """.{
+        .openssl = .{
+            .url = "https://example.invalid/openssl-3.0.zip",
+            .hash = "1220aaaa",
+        },
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "1220bbbb",
+        },
+}
+"""
+        pin_bump = zon.replace("sqlite-amalgamation-3540100", "sqlite-amalgamation-3541000").replace("1220bbbb", "1220cccc")
+        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, pin_bump)})
+        self.assertIn("test-store", result["fast_targets"])
+        self.assertTrue(covers("test-store", set(result["targets"])))
+        other_dependency = zon.replace("openssl-3.0", "openssl-3.1").replace("1220aaaa", "1220dddd")
+        result = select(["build.zig.zon"], "review", AVAILABLE, contents={"build.zig.zon": (zon, other_dependency)})
+        self.assertNotIn("test-store", result["fast_targets"])
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
         for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",

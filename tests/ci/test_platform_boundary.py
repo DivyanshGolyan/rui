@@ -332,7 +332,8 @@ class PlatformBoundaryTest(unittest.TestCase):
         gate = re.search(r"(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)", workflow)[1]
         needs = re.search(r"(?m)^    needs: \[(.*?)\]$", gate)[1]
         self.assertIn("macos_typecheck", [name.strip() for name in needs.split(",")])
-        self.assertIn('test "$TYPECHECK_RESULT" = success', gate)
+        self.assertIn('test "$TYPECHECK_RESULT" = success', (Path(__file__).parents[2] / 'tests/ci/require_linux_parts.sh').read_text())
+        self.assertIn('bash tests/ci/require_linux_parts.sh', gate)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import model_fixture as fixture
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 import host_process
 import os_semantics
-from host_process import HostDiagnostics, PauseGate, retain_failure_state, start_ready_process
+from host_process import HostDiagnostics, PauseGate, READY_TRANSPORT, retain_failure_state, start_ready_process
 from control_fixture import raw_request
 from codex_fixture import ACCESS, ACCOUNT, OPENAI_KEY, credentials, expected_user_agent
 
@@ -69,7 +69,7 @@ def start(store, endpoint, *extra, pause=None):
     host, _ = start_ready_process(
         [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2',
          "--set", f"providers.codex.endpoint={endpoint}", *extra],
-        required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
+        required_fields=READY_TRANSPORT,
         observations="managed" if "--test-phase-trace" in extra else None,
         pause=pause,
     )

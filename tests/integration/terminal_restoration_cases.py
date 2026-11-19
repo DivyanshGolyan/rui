@@ -21,7 +21,7 @@ from collections import Counter
 import canonical_fixture as canonical
 import model_fixture as fixture
 import human_cli_fixture as human
-from host_process import HostStartError, canonical_fixture_root, cleanup_failure, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
+from host_process import HostStartError, READY_TRANSPORT, canonical_fixture_root, cleanup_failure, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
 from product_defaults import DEFAULTS
 from terminal_restoration_fixture import assert_file_flags, preserve_renderer_comparison, stop_receipt_case
@@ -1403,7 +1403,7 @@ def host_diagnostic_cases(state, library):
             try:
                 result.append(start_ready_process(fixture.host_arguments(store,
                     f"http://127.0.0.1:{endpoint.server_port}/responses", "--test-phase-trace"),
-                    env=env, required_fields={"execution": "enabled", "nghttp2": "1.70.0"}))
+                    env=env, required_fields=READY_TRANSPORT))
             except BaseException as error:
                 result.append(error)
 
@@ -1528,7 +1528,7 @@ def host_diagnostic_cases(state, library):
                 *(["--fault", fault] if fault != "success" else []),
                 *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention-host", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
                 observations="control" if credit == "diagnostic-contention-host" else None,
-                required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+                required_fields=READY_TRANSPORT)
             session = fixture.configure(root, store, "config", None, "gpt-6-sol")
             if credit == "diagnostic-contention-host":
                 other_session = fixture.configure(root, store, "config-other", None, "gpt-6-sol")
