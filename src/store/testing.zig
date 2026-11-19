@@ -704,7 +704,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
-    try dropFormat86Indexes(storage);
+    try dropFormat87Indexes(storage);
     try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
     const Native = struct {
@@ -747,9 +747,9 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Undoes format 86's partial indexes (on MySQL, their `_lead` generated columns too). Every helper that
-/// rewinds a Store below format 86 runs this first, through dropPinOrganization.
-fn dropFormat86Indexes(storage: *Store) !void {
+/// Undoes format 87's partial indexes (on MySQL, their `_lead` generated columns too). Every helper that
+/// rewinds a Store below format 87 runs this first, through dropPinOrganization.
+fn dropFormat87Indexes(storage: *Store) !void {
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "ALTER TABLE action_operation DROP INDEX action_operation_unaccepted, DROP COLUMN action_operation_unaccepted_lead");
         return mysql_testing.rawExec(storage, "ALTER TABLE turn DROP INDEX turn_outcome_unpositioned, DROP COLUMN turn_outcome_unpositioned_lead");

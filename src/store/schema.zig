@@ -66,7 +66,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 84, .digest = 0xdc2ba87b89266567 },
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
-    .{ .schema_version = 87, .digest = 0x0000000000000000 },
+    .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -3795,9 +3795,9 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
 }
 
-test "schema 86 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {
-    const step = migrations[85 - migration_baseline];
-    try std.testing.expectEqual(@as(u32, 85), step.from);
+test "schema 87 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {
+    const step = migrations[86 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 86), step.from);
     try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
     try std.testing.expectEqualStrings("CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL", step.sqlite[0]);
     try std.testing.expectEqualStrings("CREATE INDEX turn_outcome_unpositioned ON turn(session_ref) WHERE outcome_position IS NULL", step.sqlite[1]);
@@ -3809,7 +3809,7 @@ test "schema 86 adds the unaccepted action and unpositioned outcome partial inde
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
     for (migrations) |migration| {
-        if (migration.from >= 85) break;
+        if (migration.from >= 86) break;
         for (migration.sqlite) |statement| try sqlite.exec(database, statement);
     }
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_unaccepted'"));

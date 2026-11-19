@@ -76,7 +76,7 @@ test "schema 85 archive membership migration keeps every Session's archive state
     try store_schema.openExisting(std.testing.io, raw, root, null, null);
 }
 
-test "format 86 live Session page reads session_tab and the archiving probe reads the in-flight indexes" {
+test "format 87 live Session page reads session_tab and the archiving probe reads the in-flight indexes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -122,7 +122,7 @@ test "format 86 live Session page reads session_tab and the archiving probe read
 // The archiving probe must find a Session whose archive is pending on an open turn alone, and one whose
 // turn is settled in code but unpositioned, when no Action is unaccepted. Both raw rows are built here:
 // the stop's interrupt would otherwise settle the turn in the same commit.
-test "format 86 archiving probe finds an open turn and an unpositioned turn with no unaccepted Action" {
+test "format 87 archiving probe finds an open turn and an unpositioned turn with no unaccepted Action" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
