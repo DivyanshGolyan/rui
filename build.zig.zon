@@ -17,8 +17,8 @@
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
         .nghttp2 = .{
-            .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
-            .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",
+            .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz",
+            .hash = "N-V-__8AAIgi2gDhTopghJsa3wlge0oN1fD9tnXH_0WYb6AB",
         },
         .openssl = .{
             .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",

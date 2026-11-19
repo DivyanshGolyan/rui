@@ -12,7 +12,7 @@ pub const testing = if (@import("builtin").is_test) struct {
     pub const Peer = @import("testing/Peer.zig");
 } else struct {};
 
-pub const nghttp2_version = "1.70.0";
+pub const nghttp2_version = "1.71.0";
 pub const openssl_version = "3.6.3";
 
 pub const max_url_bytes = url_value.max_url_bytes;
