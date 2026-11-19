@@ -95,6 +95,8 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
         .{ .bytes = "{\"error\":{\"type\":\"usage_not_included\"}}", .permanent = true, .plan = true },
         .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"code\":null,\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
         .{ .bytes = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"type\":\"usage_limit_reached\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"type\":\"usage_limit_reached\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":7,\"type\":\"usage_limit_reached\",\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
         .{ .bytes = "{\"error\":{\"type\":\"usage_limit_reached\",\"type\":\"x\"}}", .permanent = false },
         .{ .bytes = "{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"Slow down\"}}", .permanent = false },
         .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\"}}", .permanent = true },

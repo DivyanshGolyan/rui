@@ -332,6 +332,24 @@ comptime {
     for (std.meta.fieldNames(RefusalCode)) |name| std.debug.assert(name.len <= json.max_text_bytes);
 }
 
+/// What one member of an error object says: `.absent` (missing, null, not a string, or
+/// repeated where a repeat voids it), `.unreadable` (a string with no readable text), or the text.
+const Authority = union(enum) { absent, unreadable, text: []const u8 };
+
+/// The refusal word an error object names. A string `code` is the authority whenever it is
+/// present, even an unreadable one, which names nothing and never falls back to `type`.
+/// Without a string `code`, the `type` string is the authority.
+fn refusalWord(code: Authority, kind: Authority) ?[]const u8 {
+    const named = switch (code) {
+        .absent => kind,
+        .unreadable, .text => code,
+    };
+    return switch (named) {
+        .text => |text| text,
+        .absent, .unreadable => null,
+    };
+}
+
 pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
     out.context_overflow = false;
     out.refusal = null;
@@ -428,13 +446,13 @@ pub const ClassifyScratch = struct {
         if (failure.count > 1 or !self.error_object) return;
         const code = self.failure.get(.code);
         const kind = self.failure.get(.type);
-        const authority: ?[]const u8 = if (code.count == 1 and self.code_length != 0)
-            self.code[0..self.code_length]
-        else if (code.count <= 1 and kind.count == 1 and self.kind_length != 0)
-            self.kind[0..self.kind_length]
-        else
-            null;
-        if (authority) |text| {
+        const code_authority: Authority = switch (code.count) {
+            0 => .absent,
+            1 => if (code.is_string) .{ .text = self.code[0..self.code_length] } else .absent,
+            else => .unreadable,
+        };
+        const kind_authority: Authority = if (kind.count == 1 and kind.is_string) .{ .text = self.kind[0..self.kind_length] } else .absent;
+        if (refusalWord(code_authority, kind_authority)) |text| {
             if (std.mem.eql(u8, text, "context_length_exceeded")) {
                 found.context_overflow = true;
             } else if (refusalOf(text)) |refusal| {
@@ -1619,14 +1637,22 @@ fn streamError(scratch: *InterpretScratch, data: []const u8, reported: ?*const N
     if ((fields.message.get() catch null) orelse (fields.detail.get() catch null)) |message| {
         if (message.shape == .string) failed.report.message = reportRange(message);
     }
-    const value = code orelse return error.ReportedProviderFailure;
-    if (value.word == .context_length_exceeded) return error.ContextOverflow;
-    if (value.decoded <= json.max_text_bytes) {
-        var text: json.Text = .{ .length = 0 };
-        json.decode(slice(data, value.range), &text);
-        failed.refusal = refusalOf(text.slice().?);
-    }
+    var code_text: json.Text = .{ .length = 0 };
+    var kind_text: json.Text = .{ .length = 0 };
+    const code_authority: Authority = if (try fields.code.get()) |value| textAuthority(data, value, &code_text) else .absent;
+    const kind_authority: Authority = if (fields.type) |kind| if (kind.get() catch null) |value| textAuthority(data, value, &kind_text) else .absent else .absent;
+    const word = refusalWord(code_authority, kind_authority) orelse return error.ReportedProviderFailure;
+    if (std.mem.eql(u8, word, "context_length_exceeded")) return error.ContextOverflow;
+    failed.refusal = refusalOf(word);
     return error.ReportedProviderFailure;
+}
+
+/// A string member's text, decoded into `text` (which the caller keeps alive while the result is used).
+fn textAuthority(data: []const u8, member: *const Named, text: *json.Text) Authority {
+    if (member.shape != .string) return .absent;
+    if (member.decoded > json.max_text_bytes) return .unreadable;
+    json.decode(slice(data, member.range), text);
+    return .{ .text = text.slice() orelse return .unreadable };
 }
 
 const Report = struct { code: *const Named, type: ?*const Named, message: *const Named, detail: *const Named };
