@@ -15,7 +15,7 @@ pub const Intent = struct {
     }
 
     /// Whether the command line names a provider or model, which makes a wide
-    /// launch's binding explicit rather than bare.
+    /// launch's binding explicit.
     pub fn namesBinding(self: Intent) bool {
         return self.provider != null or self.model != null;
     }
