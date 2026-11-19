@@ -6328,7 +6328,7 @@
           ]
         },
         {
-          "wait": "Sign-in expired"
+          "sleep": 2
         },
         {
           "text": "Unserved send witness"
