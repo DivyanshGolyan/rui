@@ -197,8 +197,12 @@ func TestRetireSocketRemovesOnlyARefusingSocketHintedToTheStore(t *testing.T) {
 		{"dead", store, false, true},
 		{"live", store, true, false},
 		{"foreign", other, false, false},
+		{"gone", store, false, true},
 	} {
 		socket := listen(row.name, row.live)
+		if row.name == "gone" {
+			os.Remove(socket)
+		}
 		path := hint(socket, row.named)
 		retireSocket(socket, store)
 		if exists(socket) == row.retired || exists(path) == row.retired {
@@ -810,6 +814,14 @@ func TestConfigureContract(t *testing.T) {
 	defer func() {
 		if err := host.Stop(TeardownAllowance); err != nil {
 			t.Error(err)
+		}
+		// Stop kills the Host, so the stop owner must retire the socket and the hint Rui
+		// published beside it (platform.zig storeHintPath); a leftover fails the leak check.
+		socket := host.Ready["socket"]
+		for _, path := range []string{socket, strings.TrimSuffix(socket, ".sock") + ".store"} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("stopped Host left %s (%v)", path, err)
+			}
 		}
 	}()
 	client := Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
