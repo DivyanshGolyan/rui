@@ -6295,7 +6295,7 @@
     },
     {
       "name": "provider-unserved-night",
-      "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; the chat settles and shows the Session's own message",
+      "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; a message typed in the composer then says its provider isn't served by this Host (the cast turn's earlier Sign-in notice stays in history)",
       "theme": "night",
       "open": "Unserved night witness",
       "cast": [
@@ -6347,8 +6347,7 @@
       "absent": [
         "Sending…",
         "Sending...",
-        "Not confirmed",
-        "Sign-in expired"
+        "Not confirmed"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
