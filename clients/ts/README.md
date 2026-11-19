@@ -196,11 +196,14 @@ The settings process test also runs on MySQL when `RUI_TEST_MYSQL_SOCKET`, `RUI_
 
 ## Session settings
 
-`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
+Creation requires a `model`, supplied directly or by a named preset.
+Root creation also carries the caller's `workspace`, supplied directly or by the preset.
+Within that Workspace, the Host fills omitted `effort`, `compactAt`, `tools`, `loadedTools` and `permissionMode` settings.
+An explicit `tools: []` allows no tools.
 `provider` may be left out when the Host serves one provider.
-`effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
-Updates may change the model within the Session's fixed provider; the Workspace also remains fixed.
-An omitted setting stays as it is.
+A creation naming `parent` inherits that Session's Workspace and provider and cannot supply either field.
+`effort: null` and `compactAt: null` request the Host defaults for the selected model.
+Updates preserve omitted settings and may change the model within the Session's fixed provider; the Workspace remains fixed.
 
 ```ts
 const session = await rui.sessions.create({
@@ -227,15 +230,16 @@ if (interruptTarget) await session.interrupt(interruptTarget, { key: "interrupt:
 
 `key` is also accepted by other writes using `WriteOptions`; it takes precedence if `idempotencyKey` is also supplied. `operation_resolved` and `target_mismatch` resolve without effect; other rejections throw. The convenience `interrupt({ key: "interrupt:1" })` uses the last target observed by this handle through `status()` or a feed page. It sends nothing if the handle has observed no target, or its last observation had a null target. Neither form reads first.
 
-Presets are complete agent specs passed at connect and kept only in Host memory.
-Creation copies the preset, with every supplied field (including `null`) overriding it.
+Presets supply a model and may omit the other agent settings; they are passed at connect and kept only in Host memory.
+Creation copies the preset, with every supplied field (including `null`) overriding it, then the Host resolves omitted settings.
+A root creation must resolve a Workspace from the preset or its overrides.
 
 ```ts
 const rui = await Rui.connect({
 	store: { sqlite: { dir: "/var/lib/myapp/rui-store" } },
 	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: process.env.OPENAI_API_KEY! } },
 	presets: {
-		review: { model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: [], permissionMode: "ask" },
+		review: { workspace: "/work/project", model: "gpt-6.1-sol", instructions: "Review patches", tools: [], permissionMode: "ask" },
 	},
 });
 const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });

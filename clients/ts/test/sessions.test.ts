@@ -24,7 +24,7 @@ async function connect(settings: Partial<HostSettings> = {}): Promise<Rui> {
 	}, { binary: binary ?? "rui" });
 }
 
-const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" } satisfies AgentSpec;
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -285,7 +285,8 @@ test("create parent inherits binding and refuses widening as field-specific requ
 			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
 			[{ parent: "zzzzzz" }, "unknown_session"],
 		] as const) {
-			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides }, { idempotencyKey: `parent:${code}` }),
+			// Exercise Host validation for values a JavaScript caller can still send.
+			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides } as never, { idempotencyKey: `parent:${code}` }),
 				(error: unknown) => error instanceof RuiRequestError && error.code === code);
 		}
 	} finally {

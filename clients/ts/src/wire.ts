@@ -931,17 +931,23 @@ export interface components {
         AgentSpec: {
             model: string;
             instructions?: string;
-            tools: string[];
+            tools?: string[];
             loadedTools?: string[];
             /** @enum {string} */
-            permissionMode: "ask" | "bypass";
+            permissionMode?: "ask" | "bypass";
             /** @description Optional JSON output schema object; null clears it. */
             outputSchema?: Record<string, never> | null;
-            compactAt: number | null;
+            compactAt?: number | null;
             outputReservation?: number | null;
             /** @enum {string|null} */
-            effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+            effort?: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
             label?: string | null;
+            preferences?: {
+                /** @enum {string} */
+                reasoning_effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+                /** @enum {string} */
+                permission_mode?: "ask" | "bypass";
+            };
             /** @enum {string} */
             provider?: "codex" | "openai" | "chatgpt";
             workspace?: string;
@@ -973,6 +979,7 @@ export interface components {
             effort?: string | null;
             label?: string | null;
             parent?: string;
+            preferences?: components["schemas"]["PreferencesShape"];
         };
         ConfigureConflictReply: {
             /** @constant */
@@ -1025,6 +1032,40 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 revision: components["schemas"]["Decimal"];
+                created: boolean;
+                configuration: {
+                    /** @enum {string} */
+                    provider: "codex" | "openai" | "chatgpt";
+                    model: string;
+                    /** @enum {unknown} */
+                    reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+                    workspace: string;
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    tools: string[];
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    loaded_tools: string[];
+                    /** @enum {string} */
+                    permission_mode: "ask" | "bypass";
+                    compaction_trigger: components["schemas"]["Decimal"] | null;
+                };
+            };
+            execution: {
+                /** @constant */
+                status: "unavailable";
+                /** @constant */
+                reason: "direct_reply_does_not_wait_for_model_processing";
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "configuration_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                revision: components["schemas"]["Decimal"];
                 /** @constant */
                 created: false;
                 /** @enum {string} */
@@ -1047,7 +1088,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update";
                 message: string | null;
             };
             execution: {
@@ -1690,11 +1731,48 @@ export interface components {
             type: "message_reply";
             answer: {
                 /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                admission: components["schemas"]["Decimal"];
+                configuration: {
+                    /** @enum {string} */
+                    provider: "codex" | "openai" | "chatgpt";
+                    model: string;
+                    /** @enum {unknown} */
+                    reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+                    workspace: string;
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    tools: string[];
+                    /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                    loaded_tools: string[];
+                    /** @enum {string} */
+                    permission_mode: "ask" | "bypass";
+                    compaction_trigger: components["schemas"]["Decimal"] | null;
+                };
+            };
+            input: components["schemas"]["MessageInput"];
+            queue: {
+                /** @constant */
+                status: "queued";
+                admission: components["schemas"]["Decimal"];
+            };
+            execution: {
+                /** @constant */
+                status: "queued";
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "message_reply";
+            answer: {
+                /** @constant */
                 status: "rejected";
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
             };
             input: {
@@ -1718,7 +1796,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
             };
             input: {
@@ -2837,6 +2915,12 @@ export interface components {
             action: components["schemas"]["Decimal"];
             /** @enum {string} */
             decision: "allow_once" | "deny";
+        };
+        PreferencesShape: {
+            /** @enum {string} */
+            reasoning_effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+            /** @enum {string} */
+            permission_mode?: "ask" | "bypass";
         };
         PublicPart: {
             ordinal: components["schemas"]["Decimal"];

@@ -35,7 +35,7 @@ pub fn renderConfigureReply(
 ) !void {
     const shapes = protocol.configuration_reply;
     try switch (result) {
-        .accepted => |value| if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.revision, value.created, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger }) else if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
         .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
@@ -49,7 +49,7 @@ pub fn renderMessageReply(
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, protocol.MessageInputJson{ .value = value.content }, value.admission_id }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, protocol.MessageInputJson{ .value = value.content }, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, protocol.MessageInputJson{ .value = value.content }, value.admission_id }),
         .rejected => |value| switch (value.form) {
             .bytes => renderToolRejection(response, session, value, shapes.rejected),
             .parts => renderToolRejection(response, session, value, shapes.rejected_parts),
@@ -357,10 +357,27 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     };
 
+    var config: command_reply.CreationConfiguration = .{
+        .provider = Worst.tag(protocol.Provider),
+        .model = .{},
+        .reasoning_effort = Worst.tag(protocol.ReasoningEffort),
+        .workspace = .{},
+        .tools = .{},
+        .loaded_tools = .{},
+        .permission_mode = Worst.tag(@import("cli_value.zig").PermissionMode),
+        .compaction_trigger = max,
+    };
+    try config.model.set(&@as([protocol.max_model_bytes]u8, @splat(1)));
+    try config.workspace.set(&@as([protocol.max_workspace_bytes]u8, @splat(1)));
+    var names: [protocol.max_tool_names_bytes]u8 = @splat('x');
+    for (0..127) |i| names[32 + i * 33] = ',';
+    try config.tools.set(&names);
+    try config.loaded_tools.set(&names);
     const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
+            command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .configuration = &config } },
             command_reply.ConfigureReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
@@ -372,6 +389,8 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
             command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = .{ .text = content }, .session = session } },
             command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = parts, .session = session } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = .{ .text = content }, .session = session, .configuration = &config } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = parts, .session = session, .configuration = &config } },
             command_reply.MessageReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
@@ -379,6 +398,9 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             command_reply.MessageReply{ .rejected = .{ .form = .parts, .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
         }) + message_expansion,
     ));
+
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.configuration_reply.accepted_create), protocol.configuration_reply.max_bytes);
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.message_reply.accepted_create), protocol.message_reply.max_bytes);
 
     try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderMutationReply(.session_stop), @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },

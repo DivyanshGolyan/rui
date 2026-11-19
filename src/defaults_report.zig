@@ -253,7 +253,7 @@ pub fn writeSignIns(writer: *std.Io.Writer, readiness: *const provider_selection
     }
 }
 
-test "CLI-24 the defaults report is a function of its facts" {
+test "CLI-30 the defaults report is a function of its facts" {
     const names: Names = .{
         .shown = .{ "ChatGPT (device code)", "OpenAI", "ChatGPT" },
         .login = .{ "rui auth login chatgpt --device-code", "rui auth login openai", "rui auth login chatgpt" },

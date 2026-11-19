@@ -569,7 +569,7 @@ def fix_whitespace(base):
 
 
 def regenerate():
-    if subprocess.run(["zig", "build", "openapi", "--summary", "none"], cwd=ROOT).returncode:
+    if subprocess.run(["zig", "build", "-j1", "openapi", "--summary", "none"], cwd=ROOT).returncode:
         return 1
     if (ROOT / "clients/ts/node_modules").is_dir():
         if subprocess.run(["npm", "--prefix", "clients/ts", "run", "--silent", "generate"], cwd=ROOT).returncode:

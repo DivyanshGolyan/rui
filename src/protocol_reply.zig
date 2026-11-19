@@ -287,7 +287,7 @@ pub const ActivityPage = struct {
         else
             queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
                 queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1 or
-                !ownedBy(queued.newest_content orelse return error.InvalidActivityPage, .{ .message = queued.newest_admission })) return error.InvalidActivityPage;
+                !mutation_answer.matchesMessageAdmission(queued.newest_content orelse return error.InvalidActivityPage, queued.newest_admission)) return error.InvalidActivityPage;
         page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
@@ -316,14 +316,6 @@ pub const ActivityPage = struct {
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
-    /// A Message value is text, or parts owned by that Message's admission.
-    fn ownedBy(value: content_value.Value, owner: content_value.Owner) bool {
-        return switch (value) {
-            .text => true,
-            .parts => |parts| std.meta.eql(parts.owner, owner),
-        };
-    }
-
     fn textOf(value: JsonContentValue) !content_value.Reference {
         return value.text() catch error.InvalidActivityPage;
     }
@@ -419,6 +411,11 @@ pub const HostInfoProfile = enum {
             .released_13 => "13",
             .released_9 => "9",
         };
+    }
+
+    pub fn fromWire(text: []const u8) ?HostInfoProfile {
+        for (std.enums.values(HostInfoProfile)) |profile| if (std.mem.eql(u8, profile.wire(), text)) return profile;
+        return null;
     }
 
     fn Providers(comptime self: HostInfoProfile) type {
@@ -685,6 +682,12 @@ test "Host information accepts both wire-13 shapes and requires complete current
             try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", sample.profile));
         }
     }
+}
+
+test "upgrade Host information profiles map every wire back to their profile" {
+    for (std.enums.values(HostInfoProfile)) |profile| try std.testing.expectEqual(profile, HostInfoProfile.fromWire(profile.wire()).?);
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire("8"));
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire(""));
 }
 
 test "upgrade Host information profiles retain the entire strict shape" {
@@ -2027,6 +2030,7 @@ pub const CommandObservation = struct {
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
                 .processing => if (self.binding == null) return error.InvalidObservation,
+                // A newer Message hides the decision while automatic denial is pending.
                 .waiting_for_permission => {},
                 .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
             }
@@ -3752,6 +3756,21 @@ test "keyed observation rejects malformed consequential fields before outcome in
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     var oversized: [protocol.command_observation_reply.max_bytes + 1]u8 = undefined;
     try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
+}
+
+test "keyed observation retains superseded approval work without a decision" {
+    inline for (.{ "", testing_observation_binding }) |binding| {
+        const facts = testing_observation_message ++ ",\"state\":\"waiting_for_permission\"" ++ testing_observation_input ++ testing_observation_queue ++ binding ++
+            ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"37\",\"step\":\"0\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(.waiting_for_permission, observed.state.?);
+        try std.testing.expect(observed.work.?.first_action == null and observed.work.?.actions.decide == null);
+        try std.testing.expectEqual(.needs_you, observed.work.?.group);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
 }
 
 test "keyed observation rejects contradictory permission work variants" {

@@ -101,11 +101,11 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
             try submitTestMessage(&storage, &tmp, "refused-agent-message", "refused-agent-key", parent.slice(), "start children");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const cases = .{
-                .{ "\"effort\":null,\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "model" },
-                .{ "\"model\":\"gpt-6.1-sol\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "effort" },
-                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"tools\":[],\"permissionMode\":\"ask\"", "compactAt" },
-                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"permissionMode\":\"ask\"", "tools" },
-                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"tools\":[]", "permissionMode" },
+                .{ "\"model\":null", "model" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":123", "effort" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"compactAt\":0", "compactAt" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"tools\":null", "tools" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"permissionMode\":\"never\"", "permissionMode" },
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":1050001,\"tools\":[],\"permissionMode\":\"ask\"", "compact_at_too_large" },
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"none\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "unsupported_reasoning_effort" },
             };
@@ -941,6 +941,139 @@ test "received and sent Activity reject disagreement with their accepted Message
                     try std.testing.expect(storage.isFenced());
                 }
             }
+        }
+    }.run);
+}
+
+test "parent authority refuses omitted defaults across Configure Message and start_agent and preserves refused replay" {
+    try store_testing.forEachEngine(struct {
+        const Surface = enum { configure, message, start_agent };
+
+        fn widen(storage: *Store, parent: protocol.Bounded(protocol.max_session_bytes)) !void {
+            var patch: wire_request.ConfigureCommand = .{ .session = parent };
+            try patch.key.set("default-parent-widen");
+            patch.configuration.tools.state = .value;
+            for (tool_defs.built_in_tool_set.records) |record| try patch.configuration.tools.insert(record.name);
+            patch.configuration.loaded_tools = patch.configuration.tools;
+            patch.configuration.permission_mode.state = .value;
+            try patch.configuration.permission_mode.value.set("bypass");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            for (std.enums.values(Surface)) |surface| for ([_]bool{ false, true }) |permission_only| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("default-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                create.configuration.tools = try .of(&.{"start_agent"});
+                try create.configuration.permission_mode.value.set("ask");
+                const parent = (try storage.configure(&create, .{})).accepted.session;
+                const expected: protocol.ConfigurationRejection = if (permission_only) .permission_mode_wider_than_parent else .tools_not_in_parent;
+                var child: wire_request.ConfigureCommand = .{};
+                try child.key.set("default-child");
+                child.configuration.model.state = .value;
+                try child.configuration.model.value.set("model-a");
+                if (permission_only) child.configuration.tools = try .of(&.{});
+                if (surface == .start_agent) {
+                    try submitTestMessage(&storage, &tmp, "default-parent-message", "default-parent-message", parent.slice(), "start agents");
+                    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try settleCallsForTesting(&storage, &tmp, model, "default-parent-calls", &.{
+                        .{ .item_id = "default-item-one", .name = "start_agent", .encoded_call_id = "default-call-one", .decoded_call_id = "default-call-one", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                        .{ .item_id = "default-item-two", .name = "start_agent", .encoded_call_id = "default-call-two", .decoded_call_id = "default-call-two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                    });
+                    const first = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                    try std.testing.expect(try storage.startAgent(first.binding, parent.slice(), "read", true, &child.configuration, null, .{}) == .failed);
+                    const reason = if (permission_only)
+                        "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started."
+                    else
+                        "spec.tools: bash is not one of your tools. Nothing was started.";
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ first.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+                    try widen(&storage, parent);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ first.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+                    const second = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                    try std.testing.expect(try storage.startAgent(second.binding, parent.slice(), "read", true, &child.configuration, null, .{}) == .started);
+                } else {
+                    child.configuration.parent.state = .value;
+                    try child.configuration.parent.value.set(parent.slice());
+                    if (surface == .configure) {
+                        const refused = try storage.configure(&child, .{});
+                        try std.testing.expect(refused == .rejected);
+                        try std.testing.expectEqual(expected, refused.rejected.code);
+                        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+                        try widen(&storage, parent);
+                        const replay = try storage.configure(&child, .{});
+                        try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                        try std.testing.expectEqual(expected, replay.rejected.code);
+                        try child.key.set("default-child-fresh");
+                        try std.testing.expect(try storage.configure(&child, .{}) == .accepted);
+                    } else {
+                        const text = "child task";
+                        const file = try tmp.dir.createFile(std.testing.io, "default-child-message", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var message = try completeMessage("default-child", "", file, text);
+                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                        message.configuration = child.configuration;
+                        const refused = storage.submitMessageWithModel(&message, null, .{});
+                        try std.testing.expect(refused == .rejected);
+                        try std.testing.expectEqualStrings(@tagName(expected), @tagName(refused.rejected.code));
+                        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+                        try widen(&storage, parent);
+                        const replay = storage.submitMessageWithModel(&message, null, .{});
+                        try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                        try std.testing.expectEqualStrings(@tagName(expected), @tagName(replay.rejected.code));
+                        try message.key.set("default-child-fresh");
+                        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                    }
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND model=?2", .{ parent.slice(), "model-a" }));
+            };
+        }
+    }.run);
+}
+
+test "start_agent validates its model before parent tool authority" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var parent_spec = try completeConfiguration("agent-model-order-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            parent_spec.configuration.tools = try .of(&.{"start_agent"});
+            const parent = (try storage.configure(&parent_spec, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "agent-model-order-message", "agent-model-order-message", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "agent-model-order-calls", &.{
+                .{ .item_id = "missing", .name = "start_agent", .encoded_call_id = "missing", .decoded_call_id = "missing", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "null", .name = "start_agent", .encoded_call_id = "null", .decoded_call_id = "null", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "empty", .name = "start_agent", .encoded_call_id = "empty", .decoded_call_id = "empty", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            });
+            for (0..3) |index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var child: wire_request.ConfigureCommand = .{};
+                child.configuration.model.state = switch (index) {
+                    0 => .omitted,
+                    1 => .explicit_null,
+                    else => .value,
+                };
+                const reason = if (index == 0)
+                    "Rui could not start the agent (incomplete_initial_configuration). Nothing was started."
+                else
+                    "Rui could not start the agent (invalid_model). Nothing was started.";
+                try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "read", true, &child.configuration, null, .{}) == .failed);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }

@@ -1255,6 +1255,20 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
+    def test_start_receipt_helper_selects_its_public_human_cli_fixture(self):
+        helper = "tests/integration/start_receipt_cases.py"
+        # Include the added source before its first commit, then let the normal
+        # import reader discover the edge from the actual entry point.
+        names = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+        root = Path(__file__).resolve().parents[2]
+        graph = Graph({name for name in (*names, helper) if name and (root / name).is_file()},
+                      lambda name: (root / name).read_text())
+        self.assertIn(helper, graph.scripts(FIXTURES["human-cli-integration"][0]))
+        result = select([helper], "review", AVAILABLE, graph)
+        for family in ("targets", "native_targets"):
+            self.assertIn("human-cli-integration", result[family])
+        self.assertTrue(setup_requirements(result["targets"])["python"])
+
     def test_public_parts_owner_selects_part_cli_fixture(self):
         for path in ("src/store/domain/public_parts.zig", "src/store/tests/public_parts.zig",
                      "src/protocol.zig", "src/protocol_reply.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
@@ -1449,6 +1463,13 @@ class SelectionTest(unittest.TestCase):
         for target in ("settings-integration", "check", "check-full"):
             self.assertTrue(setup_requirements([target])["node"], target)
 
+    def test_creation_parity_helper_selects_both_engine_fixtures_and_screen(self):
+        for fixture in ("empty-creation.ts", "preferences-bridge.ts"):
+            targets = select(["clients/ts/test/fixtures/" + fixture], "review", AVAILABLE)["targets"]
+            self.assertTrue(covers("settings-integration", targets), (fixture, targets))
+            self.assertTrue(setup_requirements(targets)["screen"], fixture)
+            self.assertTrue(setup_requirements(targets)["node"], fixture)
+
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})
         self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "screen": False, "tmux": False})
@@ -1464,7 +1485,7 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
-        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["read-image-integration"], ["test-logic", "direct-pty"]):
+        for targets in (["check"], ["check-full"], ["settings-integration"], ["terminal-restoration-integration"], ["read-image-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()
@@ -1878,19 +1899,33 @@ fi
         self.assertEqual(result.stdout, '1' * 40)
 
 
+class FakeClock:
+    """Time that moves only when a wait sleeps, so a 30 second disposal budget costs no real time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class FullCheckPartitionTest(unittest.TestCase):
     @staticmethod
-    def wait_for_group_retirement(group, deadline):
+    def wait_for_group_retirement(group, deadline, clock=time):
         def live_members():
+            # The census is a real watchdog: the fake clock can leave a tiny remainder that real ps would miss.
             census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                    text=True, check=True, timeout=max(0, deadline - time.monotonic()))
+                                    text=True, check=True, timeout=30)
             return [state for pgid, state in (row.split() for row in census.stdout.splitlines())
                     if int(pgid) == group and not state.startswith("Z")]
-        wait_for(live_members, f"live driver group {group} to retire", interval=.005, deadline=deadline,
-                 ready=lambda live: not live)
+        wait_for(live_members, f"live driver group {group} to retire", interval=.25, deadline=deadline,
+                 ready=lambda live: not live, clock=clock)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False):
+                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False, clock=time):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -1902,7 +1937,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                     if process is not None and not retired:
                         self.wait_for_group_retirement(
                             process.pid, disposal_deadline if disposal_deadline is not None
-                            else time.monotonic() + 30)
+                            else clock.monotonic() + 30, clock)
                     shutil.rmtree(root)
                 except BaseException as cleanup:
                     if failure is None:
@@ -1984,8 +2019,30 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                        HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
                        RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
+                # One real slow start per interpreter role, each claimed by an O_EXCL marker. check.sh runs
+                # three kinds of python3 -: the version probe (first no-argv start, never reads the clock),
+                # then run_timed's started probe (no arguments, reads the clock) and record probe (four
+                # arguments, reads the clock). The version and started probes both have len(sys.argv) 1, so
+                # the version role is claimed at startup, before any clock read; started and record are claimed
+                # at their clock read, which only they make.
                 (root / "sitecustomize.py").write_text(
-                    f"import time\ntime.sleep({python_delay!r})\n")
+                    "import os, sys, time\n"
+                    f"DELAY = {python_delay!r}\n"
+                    "GATE = os.environ['GATE_DIR']\n"
+                    "REAL_MONOTONIC_NS = time.monotonic_ns\n"
+                    "def claim(role):\n"
+                    "    try:\n"
+                    "        os.close(os.open(os.path.join(GATE, 'slow-' + role), os.O_CREAT | os.O_EXCL))\n"
+                    "    except FileExistsError:\n"
+                    "        return False\n"
+                    "    return True\n"
+                    "if len(sys.argv) == 1 and claim('version'):\n"
+                    "    time.sleep(DELAY)\n"
+                    "def delayed_monotonic_ns():\n"
+                    "    if claim('started' if len(sys.argv) == 1 else 'record'):\n"
+                    "        time.sleep(DELAY)\n"
+                    "    return REAL_MONOTONIC_NS()\n"
+                    "time.monotonic_ns = delayed_monotonic_ns\n")
                 env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
@@ -2008,8 +2065,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 command = ["/bin/sh", driver, "release", "debug", *arguments]
             releases = []
             if timing:
-                clock = root / "clock"
-                clock.write_text("10000000000")
+                clock_file = root / "clock"
+                clock_file.write_text("10000000000")
                 (root / "sitecustomize.py").write_text(
                     "import os, time\nfrom pathlib import Path\n"
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
@@ -2038,8 +2095,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 wait_for(timed_started, "both timed fixtures to start", interval=.005, deadline=deadline)
                                 if fail_at == "timed_ready":
                                     self.fail("injected failure at timed_ready")
-                                clock.with_suffix(".next").write_text("13000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("13000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                                 os.write(releases[1], b"r\n")
                                 def timing_recorded():
                                     self.assertIsNone(process.poll())
@@ -2049,8 +2106,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                          interval=.005, deadline=deadline)
                                 if fail_at == "timed_recorded":
                                     self.fail("injected failure at timed_recorded")
-                                clock.with_suffix(".next").write_text("30000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("30000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                             elif hold:
                                 def held_started():
                                     self.assertIsNone(process.poll())
@@ -2088,7 +2145,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             timeout=.001 if timeout_after_held else max(0, deadline - time.monotonic()))
                     except BaseException as failure:
                         failure.add_note(f"driver_pid={process.pid}")
-                        disposal_deadline = time.monotonic() + 30
+                        disposal_deadline = clock.monotonic() + 30
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
                         except ProcessLookupError:
@@ -2100,20 +2157,31 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             except BaseException as cleanup:
                                 failure.add_note(f"driver kill failed: {cleanup!r}")
                         try:
-                            process.wait(timeout=max(0, disposal_deadline - time.monotonic()))
+                            # A real watchdog for the leader's reap. The disposal budget is on the injected
+                            # clock, so it is not a real timeout; the leader was just SIGKILLed and reaps at once.
+                            process.wait(timeout=30)
                             failure.add_note(f"driver_pid={process.pid}, returncode={process.returncode}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver reap failed: {cleanup!r}")
                         try:
-                            stdout, stderr = process.communicate(timeout=max(0, disposal_deadline - time.monotonic()))
-                            failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
-                        except BaseException as cleanup:
-                            failure.add_note(f"driver disposal failed: {cleanup!r}")
-                        try:
-                            self.wait_for_group_retirement(process.pid, disposal_deadline)
+                            self.wait_for_group_retirement(process.pid, disposal_deadline, clock)
                             retired = True
                         except BaseException as cleanup:
                             failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
+                        try:
+                            if retired:
+                                # Once the group has retired its pipes close at once. The 10 s real watchdog is
+                                # only a backstop for a pipe held by a process that left the group.
+                                stdout, stderr = process.communicate(timeout=10)
+                                failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
+                            else:
+                                # A surviving group keeps its pipes open by design, so close ours rather than
+                                # waiting for a drain that cannot finish.
+                                process.stdout.close()
+                                process.stderr.close()
+                                failure.add_note("stdout: not drained, driver group unretired")
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver disposal failed: {cleanup!r}")
                         failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
                         try:
                             peers = root / "peer-pids"
@@ -2135,7 +2203,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
         self.assertEqual(lines[-1], "host_allocator_test.py release")
-        self.assertEqual(self.records(result)[-1][:2], ("host-allocator", "42"))
+        records = self.records(result)
+        self.assertEqual(records[-1][:2], ("host-allocator", "42"))
+        # Every case is timed, not only the last one: a bound on any probe reads elapsed=unavailable.
+        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
 
     def test_driver_deadline_reaps_and_preserves_the_original_failure(self):
         for part, options, error, message, held in (
@@ -2188,12 +2259,13 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
         for fault in ("diagnostic", "retirement"):
             with self.subTest(fault=fault):
+                rejected = None
                 try:
                     with patch.object(Path, "read_text", diagnostic_failure) if fault == "diagnostic" else patch(
                             "os.killpg", side_effect=PermissionError("injected group retirement failure")):
                         with self.assertRaisesRegex(AssertionError, "injected failure at held_ready") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     notes = "\n".join(rejected.exception.__notes__)
                     driver = re.search(r"driver_pid=(\d+), returncode=(-?\d+)", notes)
                     self.assertIsNotNone(driver, notes)
@@ -2202,10 +2274,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
                                   else "driver group retirement unconfirmed", notes)
                 finally:
-                    if fault == "retirement" and rejected.exception.__notes__:
-                        pid = int(rejected.exception.__notes__[0].split("=")[1])
-                        self.wait_for_group_retirement(pid, time.monotonic() + 30)
-                        for note in rejected.exception.__notes__:
+                    # Every subtest reaps its driver group, whichever fault it injected, so a slow real
+                    # retirement cannot leak the group. The 30 s wait is a real watchdog, not the fake budget.
+                    raised = getattr(rejected, "exception", None)
+                    if raised is not None and raised.__notes__:
+                        driver = re.search(r"driver_pid=(\d+)", "\n".join(raised.__notes__))
+                        if driver:
+                            self.wait_for_group_retirement(int(driver[1]), time.monotonic() + 30)
+                        for note in raised.__notes__:
                             if note.startswith("retained driver root: "):
                                 shutil.rmtree(note.removeprefix("retained driver root: "))
 
@@ -2274,7 +2350,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             "shutil.rmtree", side_effect=delete_after_retirement):
                         with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     self.assertTrue(observed_live, "the counterexample must contain a live descendant")
                     notes = rejected.exception.__notes__
                     self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)

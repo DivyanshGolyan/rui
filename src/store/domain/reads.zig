@@ -434,7 +434,7 @@ const public_page = rsql.Read(.{
     .compound = true,
 });
 
-pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.ConversationPage, page: *PublicConversationPage) !void {
+pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.ConversationPage, page: *PublicConversationPage, reads: *[PublicConversationPage.capacity]PublicRowRead) !void {
     if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
         request.before_ordinal > std.math.maxInt(i64) or
         (request.end == 0 and request.before_position != 0) or
@@ -487,17 +487,17 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.
     }
     page.count = shown.len;
     const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
-    try readPublicRows(a, session, shown, page.items[0..shown.len], if (page.more) page.items[page.count - 1].position else 0, upper, content_cursor);
+    try readPublicRows(a, reads[0..shown.len], session, shown, page.items[0..shown.len], if (page.more) page.items[page.count - 1].position else 0, upper, content_cursor);
 }
 
-const PublicRowRead = struct {
+pub const PublicRowRead = struct {
     reads: union(enum) { content: PublicContentRead, hosted: HostedRead },
     label: LabelRead = undefined,
     presentation: PresentationRead = undefined,
 };
 
-noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const public_page.Row, items: []PublicConversationItem, lower: u64, upper: u64, cursor: ?*PublicContentRead) !void {
-    var reads: [PublicConversationPage.capacity]PublicRowRead = undefined;
+// The row reads are about 8 KiB, so the caller provides them before the Store is entered.
+noinline fn readPublicRows(a: *ReadAccess, reads: []PublicRowRead, session: []const u8, rows: []const public_page.Row, items: []PublicConversationItem, lower: u64, upper: u64, cursor: ?*PublicContentRead) !void {
     var missing: missing_assistant_entry.Result = null;
     if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
     for (items, reads[0..items.len]) |*item, *read| {

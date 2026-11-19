@@ -727,7 +727,10 @@ def observe(store, key, *, deadline=None):
         if result["state"] in TERMINAL_MESSAGE_STATES:
             assert "work" not in result, result
         else:
-            assert "state" in result["work"] and "first_action" in result["work"], result
+            work = result["work"]
+            assert isinstance(work, dict) and {"state", "first_action", "attention", "group", "actions"} <= work.keys(), result
+            actions = work["actions"]
+            assert isinstance(actions, dict) and {"stop", "interrupt", "decide"} <= actions.keys(), result
     assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"
     return result
 

@@ -146,9 +146,11 @@ class LauncherTest(unittest.TestCase):
             "else:\n"
             f"    assert Path({str(done)!r}).exists(), 'peer overlapped SET GLOBAL'\n"
             "    print('1/1 store.test.normal' + str(i) + '...OK', flush=True)\n", names="exclusive")
+        environ = dict(os.environ)
+        environ.pop(shards.live_engines.MYSQL_RECORD, None)
         with self.release_gates(ready.exists, [gate]):
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(shards.run(self.binary, [], 60, 'run', os.environ), 0)
+                self.assertEqual(shards.run(self.binary, [], 60, 'run', environ), 0)
 
     @contextmanager
     def release_gates(self, ready, gates):

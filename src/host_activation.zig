@@ -19,6 +19,9 @@ pub const Limitation = enum {
 /// The steps after a Host was asked to stop.
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
 
+/// The target-build steps before any stop; a failure there leaves the Host untouched.
+pub const TargetStep = enum { resolving, inspecting, checking };
+
 /// How one Host's restart ended. `HostLifecycle` re-exports it as
 /// `ActivationOutcome`; `host_coordinator` serializes it by field name.
 pub const Outcome = union(enum) {
@@ -32,6 +35,8 @@ pub const Outcome = union(enum) {
     unsupported: Limitation,
     replacement_observed,
     cancelled,
+    /// The target build could not be resolved, inspected or checked; nothing was stopped (#1791, #1793).
+    target_unusable: TargetStep,
     refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
     failed: Stage,
     unconfirmed: Stage,
@@ -112,6 +117,8 @@ pub const Facts = struct {
     },
     /// Whether the Host restart-all listed is still the one observed now.
     census: enum { same, replaced } = .same,
+    /// A target step the shell could not complete; set only for the step `next` asked for.
+    target_failed: ?TargetStep = null,
     /// The target's executable resolves to the running one.
     same_executable: ?bool = null,
     /// Read only when the executable is the same.
@@ -123,7 +130,7 @@ pub const Facts = struct {
     /// The target's public settings check.
     check: ?union(enum) {
         cancelled,
-        /// It could not run or did not finish in time (#1793).
+        /// It could not run or did not finish in time.
         unavailable,
         refused: start_report.Failure,
         untyped,
@@ -169,6 +176,7 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
     if (cancelled and facts.same_executable == null) return .{ .done = .cancelled };
     if (managed.order == .gt) return .{ .done = .superseded };
     if (!managed.environment_parses) return .{ .done = .{ .unsupported = .configuration_unavailable } };
+    if (facts.target_failed) |step| return .{ .done = .{ .target_unusable = step } };
     if (facts.same_executable orelse return .resolve_target) return .{ .done = switch (facts.current orelse return .confirm_current) {
         .unreadable => .{ .unconfirmed = .verifying },
         .changed => .replacement_observed,
@@ -178,7 +186,7 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
     if (!(facts.sources orelse return .reconstruct_sources)) return .{ .done = .{ .unsupported = .configuration_unavailable } };
     switch (facts.check orelse return .check_target) {
         .cancelled => return .{ .done = .cancelled },
-        .unavailable => return .{ .done = .{ .unsupported = .configuration_unavailable } },
+        .unavailable => return .{ .done = .{ .target_unusable = .checking } },
         .refused => |failure| return .{ .done = .{ .refused = .{ .stage = .checking, .failure = failure } } },
         .untyped, .bad_frame => return .{ .done = .{ .unsupported = .target_capability } },
         .ok => {},
@@ -308,14 +316,14 @@ pub fn category(outcome: Outcome) Category {
         .ready, .client_incompatible => .restarted,
         .already_ready => .current,
         .superseded, .not_needed, .unsupported => .skipped,
-        .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => .failed,
+        .replacement_observed, .cancelled, .target_unusable, .failed, .unconfirmed, .refused => .failed,
     };
 }
 
 /// Whether the outcome leaves recovery instructions for the person.
 pub fn guides(outcome: Outcome) bool {
     return switch (outcome) {
-        .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
+        .unsupported, .replacement_observed, .cancelled, .target_unusable, .failed, .unconfirmed, .refused => true,
         .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
     };
 }
@@ -324,7 +332,7 @@ pub fn guides(outcome: Outcome) bool {
 pub fn clientSafe(outcome: Outcome) bool {
     return switch (outcome) {
         .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-        .not_needed, .superseded, .already_ready, .ready, .unsupported, .cancelled => true,
+        .not_needed, .superseded, .already_ready, .ready, .unsupported, .cancelled, .target_unusable => true,
     };
 }
 
@@ -410,6 +418,9 @@ const sh60 = struct {
         .{ .outcome = .{ .unsupported = .target_capability }, .category = .skipped, .guides = true, .safe = true },
         .{ .outcome = .replacement_observed, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .cancelled, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .target_unusable = .resolving }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .target_unusable = .inspecting }, .category = .failed, .guides = true, .safe = true },
+        .{ .outcome = .{ .target_unusable = .checking }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .{ .failed = .stopping }, .category = .failed, .guides = true, .safe = false },
@@ -618,10 +629,11 @@ test "SH-24 a stop is asked for only after every check before it holds" {
     const currents = [_]?fixture.Current{ null, .unreadable, .changed, .{ .same = fixture.running } };
     var stops: usize = 0;
     var count: usize = 0;
+    const target_failures = [_]?TargetStep{ null, .resolving, .inspecting, .checking };
     for (eligibilities) |eligible| for ([_]@FieldType(Facts, "census"){ .same, .replaced }) |census| for ([_]bool{ false, true }) |cancelled|
-        for (fixture.flags) |same_executable| for (currents) |current| for (fixture.flags) |known_bad| for (fixture.flags) |sources|
+        for (target_failures) |target_failed| for (fixture.flags) |same_executable| for (currents) |current| for (fixture.flags) |known_bad| for (fixture.flags) |sources|
             for (checks) |check| for (fixture.readings) |before_stop| for (fixture.readings) |snapshot| {
-                const facts: Facts = .{ .eligibility = eligible, .census = census, .same_executable = same_executable, .current = current, .known_bad = known_bad, .sources = sources, .check = check, .before_stop = before_stop, .snapshot = snapshot };
+                const facts: Facts = .{ .eligibility = eligible, .census = census, .target_failed = target_failed, .same_executable = same_executable, .current = current, .known_bad = known_bad, .sources = sources, .check = check, .before_stop = before_stop, .snapshot = snapshot };
                 const expected: Effect = expected: {
                     // 1. Not a managed Host.
                     const managed = switch (eligible) {
@@ -637,6 +649,8 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     if (managed.order == .gt) break :expected .{ .done = .superseded };
                     // 5. An environment entry without a value.
                     if (!managed.environment_parses) break :expected .{ .done = .{ .unsupported = .configuration_unavailable } };
+                    // 5a. A target step the shell could not complete.
+                    if (target_failed) |step| break :expected .{ .done = .{ .target_unusable = step } };
                     // 6, 7. The target is the running executable.
                     const same = same_executable orelse break :expected .resolve_target;
                     if (same) break :expected switch (current orelse break :expected .confirm_current) {
@@ -651,8 +665,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     // 10. The target's check.
                     switch (check orelse break :expected .check_target) {
                         .cancelled => break :expected .{ .done = .cancelled },
-                        // #1793: a check that could not run is reported as a configuration limit.
-                        .unavailable => break :expected .{ .done = .{ .unsupported = .configuration_unavailable } },
+                        .unavailable => break :expected .{ .done = .{ .target_unusable = .checking } },
                         .refused => break :expected .{ .done = .{ .refused = .{ .stage = .checking, .failure = fixture.refusal } } },
                         .untyped, .bad_frame => break :expected .{ .done = .{ .unsupported = .target_capability } },
                         .ok => {},
@@ -677,7 +690,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 try fixture.expectEffect(expected, actual);
                 // The stop is asked for exactly when every line holds.
                 const holds = eligible == .managed and eligible.managed.order != .gt and eligible.managed.environment_parses and census == .same and
-                    same_executable == false and known_bad == false and sources == true and check != null and check.? == .ok and
+                    target_failed == null and same_executable == false and known_bad == false and sources == true and check != null and check.? == .ok and
                     before_stop == .same and snapshot == .same;
                 try std.testing.expectEqual(holds, actual == .stop);
                 // Nothing before the stop is reported at a stage after it.
@@ -690,7 +703,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 stops += @intFromBool(holds);
                 count += 1;
             };
-    try std.testing.expectEqual(eligibilities.len * 2 * 2 * 3 * 4 * 3 * 3 * checks.len * 4 * 4, count);
+    try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * 4 * 3 * 3 * checks.len * 4 * 4, count);
     // Both orders below the target, each value of `cancelled` and of `current`.
     try std.testing.expectEqual(2 * 2 * 4, stops);
 }
@@ -721,7 +734,7 @@ test "SH-81 after the stop every ending names a stage" {
             const actual = next(facts, cancelled);
             try fixture.expectEffect(expected, actual);
             if (actual == .done) switch (actual.done) {
-                .cancelled, .unsupported, .not_needed, .superseded, .already_ready => return error.TestUnexpectedResult,
+                .cancelled, .unsupported, .not_needed, .superseded, .already_ready, .target_unusable => return error.TestUnexpectedResult,
                 .unconfirmed, .failed => {},
                 .refused => |refused| try std.testing.expectEqual(.starting, refused.stage),
                 .ready, .client_incompatible, .replacement_observed => {},

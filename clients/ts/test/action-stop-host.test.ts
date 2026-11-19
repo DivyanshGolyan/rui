@@ -7,8 +7,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { Rui, RuiRequestError } from "../src/index.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
+import type { components } from "../src/wire.ts";
 
 const binary = process.env.RUI_BINARY;
+
+type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
+
+async function currentReport(rui: Rui, session: string): Promise<CurrentReport> {
+	return JSON.parse((await rui.exchange("/v1/inspect-session", (store) => JSON.stringify({
+		version: WIRE_VERSION, kind: "inspect_session", store, session,
+	} satisfies components["schemas"]["InspectSessionRequest"]))).toString("utf8")) as CurrentReport;
+}
 
 test("stopAction reaches the native owner and recovers its original answer", { skip: binary ? false : "set RUI_BINARY to a built rui", timeout: 30_000 }, async (t) => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-action-stop-")));
@@ -58,11 +68,33 @@ test("stopAction reaches the native owner and recovers its original answer", { s
 			if (entry.kind === "approval_requested") { action = entry.action; break; }
 		}
 		assert.ok(action, JSON.stringify({ calls, status: await session.status() }));
+		const observe = JSON.parse((await rui.exchange("/v1/observe-command", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "observe_command", store, key: "message",
+		} satisfies components["schemas"]["ObserveCommandRequest"]))).toString("utf8")) as components["schemas"]["ObserveCommandReply"];
+		assert.ok("observation" in observe);
+		const observation = observe.observation;
+		assert.ok("kind" in observation && observation.kind === "message" && "work" in observation);
+		assert.equal(observation.state, "waiting_for_permission");
+		const waiting = await currentReport(rui, session.id);
+		assert.deepEqual(observation.work, {
+			state: waiting.work.state, first_action: waiting.work.first_action,
+			attention: waiting.work.attention, group: waiting.work.group, actions: waiting.work.actions,
+		});
+		assert.equal(observation.work.state.kind, "approval");
+		assert.equal(observation.work.first_action, action);
+		assert.equal(observation.work.attention?.kind, "approval");
+		assert.equal(observation.work.group, "needs_you");
+		assert.deepEqual(observation.work.actions, { stop: true, interrupt: null, decide: action });
+		assert.deepEqual(waiting.actionable_permissions.map((permission) => permission.action), [action]);
 		assert.equal(await session.stopAction(action, { idempotencyKey: "stop" }), null);
 		const final = await session.readAction(action);
 		assert.equal(final.state, "resolved");
 		assert.ok(final.final);
 		assert.equal(final.final.code, "cancelled");
+		const current = await currentReport(rui, session.id);
+		assert.deepEqual(current.actionable_permissions, []);
+		assert.equal(current.work.first_action, null);
+		assert.equal(current.work.actions.decide, null);
 		assert.equal(await session.stopAction(action, { idempotencyKey: "stop" }), null);
 		assert.equal(await session.stopAction(action, { idempotencyKey: "after" }), final.final.position);
 		const foreign = await rui.sessions.create(spec, { idempotencyKey: "foreign" });

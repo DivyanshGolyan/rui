@@ -205,7 +205,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
     for (batch.entries) |*entry| {
         if (entry.state != .observed) continue;
         const facts = entry.state.observed;
-        // #1791: an error `activate` returns, even before the stop, is reported as an unconfirmed start.
+        // Errors `activate` returns are allocation failures or failures after the stop, so both map to an unconfirmed start.
         entry.state = .{ .outcome = outcome: {
             process.check(options.cancellation) catch break :outcome .cancelled;
             var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
@@ -341,6 +341,19 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
         .cancelled => {
             try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
         },
+        .target_unusable => |step| {
+            const doing: []const u8 = switch (step) {
+                .resolving => "resolving the target",
+                .inspecting => "inspecting the target",
+                .checking => "checking the target",
+            };
+            const done: []const u8 = switch (step) {
+                .resolving => "resolved",
+                .inspecting => "inspected",
+                .checking => "checked",
+            };
+            try writer.print("failed at {s}: the target build could not be {s}; Host left running; check the installation, then retry", .{ doing, done });
+        },
         .refused => |refusal| {
             try writer.print("refused at {s}\n", .{@tagName(refusal.stage)});
             var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
@@ -366,6 +379,9 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
         .{ .outcome = .not_needed, .text = "no longer running; no Host started", .result = .skipped },
         .{ .outcome = .replacement_observed, .text = "failed at verifying: a replacement Host was observed; inspect with its owning client, then retry", .result = .failed },
         .{ .outcome = .cancelled, .text = "failed at activation: cancelled; inspect Host status, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .resolving }, .text = "failed at resolving the target: the target build could not be resolved; Host left running; check the installation, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .inspecting }, .text = "failed at inspecting the target: the target build could not be inspected; Host left running; check the installation, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .checking }, .text = "failed at checking the target: the target build could not be checked; Host left running; check the installation, then retry", .result = .failed },
     };
     var covered: std.EnumSet(std.meta.Tag(HostLifecycle.ActivationOutcome)) = .empty;
     for (cases) |case| {

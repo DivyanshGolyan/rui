@@ -659,7 +659,7 @@ pub const HostProcessReading = union(enum) {
 pub fn observeHostProcessForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostProcessReading {
     return switch (try readHostControlProfile(io, store_path, .current, deadline, .upgrade)) {
         .compatible => |observed| .{ .ready = .{ .ready = observed.facts, .pid = observed.pid } },
-        .incompatible => |peer| .{ .incompatible = peer },
+        .incompatible => |peer| .{ .incompatible = peer.pid },
     };
 }
 
@@ -682,19 +682,20 @@ pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128
 }
 
 fn observeHostForUpgradeAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !HostControlObservation {
-    // Every known profile shares one absolute discovery budget, including connection.
+    // One current-profile exchange learns the peer's wire; at most one more
+    // reads that wire's own profile, so every supported Host costs at most
+    // two round trips inside the shared discovery budget (#1835).
     const until = hostObservationDeadline(io, deadline);
-    for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
-        const reading = readHostControlAt(io, paths, profile, until, .strict) catch |err| switch (err) {
-            error.WrongWireVersion => continue,
-            else => return err,
-        };
-        return switch (reading) {
-            .compatible => |observed| observed,
-            .incompatible => error.WrongWireVersion,
-        };
-    }
-    return error.WrongWireVersion;
+    const peer = switch (try readHostControlAt(io, paths, .current, until, .upgrade)) {
+        .compatible => |observed| return observed,
+        .incompatible => |advertised| advertised,
+    };
+    const profile = protocol_reply.HostInfoProfile.fromWire(peer.wire.slice()) orelse return error.WrongWireVersion;
+    if (profile == .current) return error.WrongWireVersion;
+    return switch (try readHostControlAt(io, paths, profile, until, .strict)) {
+        .compatible => |observed| observed,
+        .incompatible => error.WrongWireVersion,
+    };
 }
 
 pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !?HostControlObservation {
@@ -975,7 +976,7 @@ pub fn observeHostForUpgradeProfile(io: std.Io, store_path: []const u8, profile:
     };
 }
 
-const HostControlReading = union(enum) { compatible: HostControlObservation, incompatible: c_int };
+const HostControlReading = union(enum) { compatible: HostControlObservation, incompatible: struct { pid: c_int, wire: protocol.Bounded(8) } };
 const HostObservationMode = enum { strict, upgrade };
 
 fn readHostControlProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
@@ -1000,7 +1001,7 @@ fn readHostControlAt(io: std.Io, paths: *const platform.Paths, profile: protocol
     const reply = try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, until);
     if (!envelope.wire_matches) {
         if (!hostProtocolMismatch(envelope, reply.body, paths.store_identity.slice())) return error.InvalidHostInfo;
-        return .{ .incompatible = pid };
+        return .{ .incompatible = .{ .pid = pid, .wire = envelope.wire } };
     }
     if (reply.status != 200) return error.InvalidHostInfo;
     return .{ .compatible = .{
@@ -1124,6 +1125,31 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             return .{ .nanoseconds = nanoseconds.load(.acquire) };
         }
     };
+    // Every supported Host wire is observed in at most two exchanges.
+    const requestCount = struct {
+        fn of(mode: Mode) usize {
+            return switch (mode) {
+                .historical, .historical_20, .historical_18, .historical_17, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .budget => 2,
+                else => 1,
+            };
+        }
+    }.of;
+    const responseWire = struct {
+        fn of(mode: Mode) []const u8 {
+            return switch (mode) {
+                .current, .unavailable, .activation_current => protocol.wire_version,
+                .unknown => "8",
+                .historical_20, .strict_20, .exact_20 => protocol_reply.HostInfoProfile.released_20.wire(),
+                .historical_18, .strict_18, .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
+                .historical_17, .strict_17, .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
+                .historical_16, .strict_16, .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
+                .historical_15, .strict_15, .exact_15 => protocol_reply.HostInfoProfile.released_15.wire(),
+                .historical_14, .strict_14, .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
+                .historical_13, .historical_13_chatgpt, .strict_13, .exact_13 => protocol_reply.HostInfoProfile.released_13.wire(),
+                else => protocol_reply.HostInfoProfile.released_9.wire(),
+            };
+        }
+    }.of;
     const Peer = struct {
         listener: *std.Io.net.Server,
         store: []const u8,
@@ -1140,23 +1166,11 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
         fn serve(self: *@This()) !void {
             const io = std.testing.io;
             const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 2 * std.time.ns_per_s;
-            const count: usize = switch (self.mode) {
-                .historical, .body_mismatch, .unknown => 9,
-                .historical_13, .historical_13_chatgpt => 8,
-                .historical_14 => 7,
-                .historical_15 => 6,
-                .historical_16 => 5,
-                .historical_17 => 4,
-                .historical_18 => 3,
-                .historical_20, .budget => 2,
-                else => 1,
-            };
-            for (0..count) |index| {
+            for (0..requestCount(self.mode)) |index| {
                 if (!try waitRequest(.{ .io = io }, self.listener.socket.handle, std.posix.POLL.IN, until)) return error.TestPeerConnectionMissing;
                 const connection = try self.listener.accept(io);
                 defer connection.close(io);
                 const fd = connection.socket.handle;
-                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_20.wire(), protocol_reply.HostInfoProfile.released_18.wire(), protocol_reply.HostInfoProfile.released_17.wire(), protocol_reply.HostInfoProfile.released_16.wire(), protocol_reply.HostInfoProfile.released_15.wire(), protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
                 const expected_wire = switch (self.mode) {
                     .exact => protocol_reply.HostInfoProfile.released_9.wire(),
                     .exact_20 => protocol_reply.HostInfoProfile.released_20.wire(),
@@ -1166,7 +1180,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     .exact_15 => protocol_reply.HostInfoProfile.released_15.wire(),
                     .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
                     .exact_13 => protocol_reply.HostInfoProfile.released_13.wire(),
-                    else => order[index],
+                    else => if (index == 0) protocol.wire_version else responseWire(self.mode),
                 };
                 var expected_buffer: [1024]u8 = undefined;
                 const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"{s}\",\"kind\":\"host_info\",\"store\":\"{s}\"}}", .{ expected_wire, self.store });
@@ -1204,18 +1218,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         continue;
                     }
                 }
-                const response_wire = switch (self.mode) {
-                    .current, .unavailable, .activation_current => protocol.wire_version,
-                    .unknown => "8",
-                    .historical_20, .strict_20, .exact_20 => protocol_reply.HostInfoProfile.released_20.wire(),
-                    .historical_18, .strict_18, .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
-                    .historical_17, .strict_17, .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
-                    .historical_16, .strict_16, .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
-                    .historical_15, .strict_15, .exact_15 => protocol_reply.HostInfoProfile.released_15.wire(),
-                    .historical_14, .strict_14, .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
-                    .historical_13, .historical_13_chatgpt, .strict_13, .exact_13 => protocol_reply.HostInfoProfile.released_13.wire(),
-                    else => protocol_reply.HostInfoProfile.released_9.wire(),
-                };
+                const response_wire = responseWire(self.mode);
                 const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
                 const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_20.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_18.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_17.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_16.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_15.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
@@ -1256,7 +1259,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 .activation_oversize,
                 => return switch (try observeHostProcessForUpgrade(io, root, null)) {
                     .ready => |observed| .{ .compatible = .{ .profile = .current, .facts = observed.ready, .pid = observed.pid } },
-                    .incompatible => |pid| .{ .incompatible = pid },
+                    .incompatible => |pid| .{ .incompatible = .{ .pid = pid, .wire = .{} } },
                 },
                 else => {},
             }
@@ -1342,7 +1345,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     .activation_200, .activation_400 => {
                         const reading = try result;
                         try std.testing.expect(reading == .incompatible);
-                        try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
+                        try std.testing.expectEqual(std.c.getpid(), reading.incompatible.pid);
                     },
                     .current, .historical, .historical_20, .historical_18, .historical_17, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_20, .exact_18, .exact_17, .exact_16, .exact_15, .exact_14, .exact_13, .activation_current => {
                         const reading = try result;
@@ -1371,17 +1374,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     },
                 }
                 try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
-                try std.testing.expectEqual(@as(usize, switch (mode) {
-                    .historical, .body_mismatch, .unknown => 9,
-                    .historical_13, .historical_13_chatgpt => 8,
-                    .historical_14 => 7,
-                    .historical_15 => 6,
-                    .historical_16 => 5,
-                    .historical_17 => 4,
-                    .historical_18 => 3,
-                    .historical_20, .budget => 2,
-                    else => 1,
-                }), peer.seen);
+                try std.testing.expectEqual(requestCount(mode), peer.seen);
             }
             active_mode.* = null;
             const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
@@ -2647,6 +2640,22 @@ const Capture = struct {
                 }
             }
         }
+        if (input.preferences.reasoning_effort != null or input.preferences.permission_mode != null) {
+            try self.write(separator);
+            try self.write("\"preferences\":{");
+            var preference_separator: []const u8 = "";
+            if (input.preferences.reasoning_effort) |effort| {
+                try self.write("\"reasoning_effort\":");
+                try self.writeJsonString(@tagName(effort));
+                preference_separator = ",";
+            }
+            if (input.preferences.permission_mode) |mode| {
+                try self.write(preference_separator);
+                try self.write("\"permission_mode\":");
+                try self.writeJsonString(@tagName(mode));
+            }
+            try self.write("}");
+        }
         try self.write("}");
     }
 
@@ -3630,25 +3639,43 @@ test "transport failure provenance excludes local sinks, valid physical EOF and 
     }
 }
 
-test "observation transport owns a larger buffer without growing ordinary replies" {
+test "observation transport enforces its own bound independently of ordinary replies" {
     try std.testing.expectEqual(@sizeOf(protocol.ResponseBuffer), @sizeOf(ReplyBuffer));
     try std.testing.expectEqual(@sizeOf(protocol.CommandObservationBuffer), @sizeOf(ObservationBuffer));
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
-    var body: [protocol.max_response_bytes + 1]u8 = @splat(' ');
+    const capacity: c_int = 1024;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.setsockopt(sockets[1], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &capacity, @sizeOf(c_int)));
+    var body: [protocol.command_observation_reply.max_bytes]u8 = @splat(' ');
     body[0] = '{';
     body[1] = '}';
     var header: [256]u8 = undefined;
     try writeAll(sockets[1], try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
-    try writeAll(sockets[1], &body);
+    const Writer = struct {
+        fd: std.posix.fd_t,
+        bytes: []const u8,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            writeAll(self.fd, self.bytes) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var producer: Writer = .{ .fd = sockets[1], .bytes = &body };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{&producer});
     var observation: ObservationBuffer = .{};
     const read = readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &observation, .{}, null);
+    // If reading failed, wake a writer that may be blocked on a full socket.
+    _ = socket_os.shutdown(sockets[0], std.c.SHUT.RD);
+    writer.join();
+    if (producer.failure) |err| return err;
     try std.testing.expectEqual(@as(?anyerror, null), if (read) |_| @as(?anyerror, null) else |err| @as(?anyerror, err));
     const reply = try read;
     try std.testing.expectEqualStrings(&body, reply.body);
-    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = body.len, .total = null, .next = null };
     var ordinary: ReplyBuffer = .{};
+    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = ordinary.bytes.len + 1, .total = null, .next = null };
     try std.testing.expectError(error.ResponseTooLarge, readCommandBodyUntil(.{ .io = std.testing.io }, sockets[0], head, &ordinary, .{}, null));
     var too_large = head;
     too_large.content_length = observation.bytes.len + 1;
@@ -3981,7 +4008,7 @@ test "client recovery rejects noncanonical Session references without retransmis
     }
 }
 
-test "capture creating Messages writes configuration and optional model admission" {
+fn checkCreatingMessageCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -4021,7 +4048,7 @@ test "capture creating Messages writes configuration and optional model admissio
     }
 }
 
-test "capture configure requests a Store allocated Session and retains model admission" {
+fn checkCreatingConfigureCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6641,7 +6668,7 @@ test "read-only capture routing does not eagerly validate a replay body" {
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }
 
-test "capture semantic tool arrays distinguish singleton none from the CLI sentinel" {
+fn checkSemanticToolsCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6683,7 +6710,7 @@ test "capture semantic tool arrays distinguish singleton none from the CLI senti
     }
 }
 
-test "parent relation survives Configure and creating Message capture through native ingress" {
+fn checkParentCapture() !void {
     const host_request = @import("wire_request.zig");
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6742,7 +6769,7 @@ test "parent relation survives Configure and creating Message capture through na
     }
 }
 
-test "preset Configure capture reopens with sparse settings through native ingress" {
+fn checkPresetCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6805,6 +6832,41 @@ test "Action stop captures preserve target and bytes through generated and expli
     for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
         try std.testing.expectError(error.InvalidTarget, captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root }));
     }
+}
+
+fn checkPreferencesCapture() !void {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureConfigure(io, .{
+        .store = root,
+        .session = .create,
+        .reasoning_effort = .{ .present = true, .value = "low" },
+        .preferences = .{ .reasoning_effort = .high, .permission_mode = .ask },
+    }, .{ .generated = root }).get();
+    defer captured.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try captured.file.readPositionalAll(io, &bytes, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
+    const configuration = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("low", configuration.get("effort").?.string);
+    try std.testing.expect(!configuration.contains("model"));
+    const prefs = configuration.get("preferences").?.object;
+    try std.testing.expectEqualStrings("high", prefs.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("ask", prefs.get("permission_mode").?.string);
+}
+
+test "CLI-4 configuration_intent" {
+    try checkCreatingMessageCapture();
+    try checkCreatingConfigureCapture();
+    try checkSemanticToolsCapture();
+    try checkParentCapture();
+    try checkPresetCapture();
+    try checkPreferencesCapture();
 }
 
 test "ADM-24 frozen multipart request recovers canonical identity" {

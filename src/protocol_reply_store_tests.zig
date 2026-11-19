@@ -291,7 +291,7 @@ const PromotedAction = struct {
 
         const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
         defer std.testing.allocator.destroy(produced);
-        try storage.publicConversationPage(&.{ .session = self.session }, produced);
+        try storage.publicConversationPage(&.{ .session = self.session }, produced, std.testing.allocator);
         var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rendered.deinit();
         try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
@@ -331,6 +331,46 @@ fn readNativeActivity(storage: *store.Store, request: *const protocol.ActivityPa
     defer rendered.deinit();
     try @import("host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, produced);
     decoded.* = try protocol_reply.ActivityPage.parse(rendered.written(), .{ .end = request.end, .position = request.position, .ordinal = request.ordinal, .direction = request.direction, .kinds = request.kinds, .limit = request.limit });
+}
+
+test "client Message decoder retains automatic denial wait after a new Message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store.Store = undefined;
+    try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var configure = try store.testingCompleteConfiguration("decline-config", "", workspace, "model-a");
+    try configure.configuration.permission_mode.value.set("ask");
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try store.testingSubmitMessage(&storage, &tmp, "decline-first-file", "decline-first", session.slice(), "Run the tool.");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"description\":\"Held tool\",\"cmd\":\"true\"}";
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+    defer std.testing.allocator.free(encoded);
+    try store.settleCallsForTesting(&storage, &tmp, model, "decline-calls", &.{.{
+        .item_id = "call-item",
+        .name = "bash",
+        .encoded_call_id = "call-id",
+        .decoded_call_id = "call-id",
+        .encoded_arguments = encoded[1 .. encoded.len - 1],
+        .decoded_arguments = arguments,
+    }});
+    try store.testingSubmitMessage(&storage, &tmp, "decline-next-file", "decline-next", session.slice(), "Use new instructions.");
+    for ([_][]const u8{ "decline-first", "decline-next" }) |key| {
+        const observation = try store.testing.observeCommandForTesting(&storage, key);
+        try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observation.requestState().?);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderFullCommandObservation(.{ .writer = &rendered.writer }, key, &observation, null);
+        const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = rendered.written() }, key);
+        try std.testing.expectEqual(.waiting_for_permission, decoded.state.?);
+        try std.testing.expectEqual(observation.kind.message.?.work.?.first_action, decoded.work.?.first_action);
+        try std.testing.expect(decoded.work.?.first_action == null and decoded.work.?.actions.decide == null);
+        try std.testing.expect(decoded.work.?.actions.stop);
+        try std.testing.expectEqual(.needs_you, decoded.work.?.group);
+    }
 }
 
 test "client decoders retain promoted old Turn approval before and after continuation" {
@@ -513,7 +553,7 @@ test "derived work facts are served across all work replies" {
             try observation_buffer.render(@import("host_reply.zig").renderFullCommandObservation, .{ "facts-message", &observed, @as(?[]const u8, null) });
             const observation = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, observation_buffer.bytes[0..observation_buffer.len], .{});
             defer observation.deinit();
-            inline for (.{ "attention", "group", "actions" }) |field| {
+            inline for (.{ "state", "first_action", "attention", "group", "actions" }) |field| {
                 try checkField(expected, list_work, field);
                 try checkField(expected, activity.value.object.get("work").?, field);
                 try checkField(expected, observation.value.object.get("observation").?.object.get("work").?, field);
