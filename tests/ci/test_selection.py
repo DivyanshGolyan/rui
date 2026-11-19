@@ -778,6 +778,11 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(path=path, family=family):
                     self.assertIn("measurement-check", result[family])
 
+    def test_cli_invocation_selects_logic_and_human_cli(self):
+        result = select(["src/cli_invocation.zig"], "review", AVAILABLE)
+        self.assertIn("test-logic", result["targets"])
+        self.assertIn("human-cli-integration", result["targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
@@ -786,6 +791,12 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_batch_core_selects_logic_and_store_roots(self):
+        path = "src/store/write_batch.zig"
+        result = select([path], "review", AVAILABLE)
+        self.assertIn("test-logic", result["targets"])
+        self.assertTrue({"test-logic", "test-store"} <= set(result["fast_targets"]))
 
     def test_store_tests_reach_no_store_caller(self):
         graph = tree_graph()
@@ -1326,6 +1337,7 @@ class SelectionTest(unittest.TestCase):
         cases = {
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
+            "src/preference_document.zig": {"admission-debug-integration", "test-logic"},
             "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
             "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }

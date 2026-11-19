@@ -392,9 +392,9 @@ export class Session {
 	}
 
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
-	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+	async readAction(action: string, offset = "0", after = "0"): Promise<ActionStatus> {
 		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
-			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset, after,
 		} satisfies Schemas["ReadActionRequest"])));
 	}
 

@@ -16,10 +16,11 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
 pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
-pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. This is polling, not a subscription.";
+pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. Published values are returned in pages; pass the returned values.next as after to continue. This is polling, not a subscription.";
 pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
     std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
+    ",\"after\":{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":19,\"description\":\"Return values after this ordinal; omitted means zero.\"}" ++
     "},\"required\":[\"action\"],\"additionalProperties\":false}";
 
 pub const stop_action_description = "Stop an Action in your own Session by its decimal Action ID. Returns its final Resolution once it has ended.";
@@ -435,15 +436,28 @@ const built_in_records = blk: {
 const built_in_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [built_in_records.len][32]u8 = undefined;
-    for (&built_in_records, &out) |*each, *digest| digest.* = recordDigest(each);
+    selectDigests(&built_in_records, &@import("tool_digests_generated.zig").entries, &out);
     break :blk out;
 };
 
-test "the built-in tool set is valid and finds each built-in by name" {
-    try std.testing.expect(built_in_tool_set.valid());
-    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
+/// Select a matching snapshot for each record, computing the digest when one is absent or stale.
+pub fn selectDigests(records: []const Record, snapshots: anytype, out: [][32]u8) void {
+    std.debug.assert(records.len == out.len);
+    for (records, out, 0..) |*each, *digest, index| {
+        if (index < snapshots.len and sameRecord(each, &snapshots[index].record)) {
+            digest.* = snapshots[index].digest;
+        } else {
+            digest.* = recordDigest(each);
+        }
+    }
+}
+
+// A snapshot serves only the exact record it was generated from. A changed record is hashed
+// normally, so an out-of-date snapshot cannot change a tool's persistent identity.
+fn sameRecord(a: *const Record, b: anytype) bool {
+    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.read_only == b.read_only and
+        std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
+        std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
 }
 
 comptime {
@@ -491,7 +505,48 @@ test "every built-in runner matches its table row" {
     }
 }
 
-test "tool record read-only identity preserves existing digests" {
+test "EXR-65 tool identities survive matching, stale and missing digest snapshots" {
+    const Snapshot = @import("tool_digests_generated.zig").Entry;
+    const base: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
+    const expected = recordDigest(&base);
+    const snapshot: Snapshot = .{ .record = .{ .name = base.name, .owner = .mcp, .server = base.server, .description = base.description, .input_schema = base.input_schema, .read_only = base.read_only }, .digest = expected };
+    const snapshots = [_]Snapshot{snapshot};
+    var selected: [2][32]u8 = undefined;
+    selectDigests(&.{base}, &snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+
+    var changes: [5]Record = .{ base, base, base, base, base };
+    changes[0].name = "fetch_other";
+    changes[1].description = "Fetch another page.";
+    changes[2].input_schema = "{}";
+    changes[3].server = "other";
+    changes[4].read_only = true;
+    for (changes) |changed| {
+        selectDigests(&.{changed}, &snapshots, selected[0..1]);
+        try std.testing.expectEqualSlices(u8, &recordDigest(&changed), &selected[0]);
+    }
+    var owner_base = base;
+    owner_base.owner = .rui;
+    owner_base.server = "";
+    var owner_snapshot = snapshot;
+    owner_snapshot.record.owner = .rui;
+    owner_snapshot.record.server = "";
+    owner_snapshot.digest = recordDigest(&owner_base);
+    var owner_changed = owner_base;
+    owner_changed.owner = .provider;
+    const owner_snapshots = [_]Snapshot{owner_snapshot};
+    selectDigests(&.{owner_changed}, &owner_snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&owner_changed), &selected[0]);
+    selectDigests(&.{base}, &@as([0]Snapshot, .{}), selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    selectDigests(&.{ base, changes[0] }, &snapshots, &selected);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&changes[0]), &selected[1]);
+
+    try std.testing.expect(built_in_tool_set.valid());
+    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
     const provider = recordDigest(&web_search_record);
     try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };

@@ -137,7 +137,7 @@ FIXTURES = {
                                  ("src/Overview.zig", "src/SessionFrontend.zig", "src/model_picker_view.zig")),
     "human-cli-integration": ((I + "human_cli_integration.py",), ("src/terminal_notice_test.zig",),
                               (CALLER, "src/SessionFrontend.zig", "src/Overview.zig", "src/request_wait.zig",
-                               "src/cli_args.zig", "src/slash_commands.zig")),
+                               "src/cli_invocation.zig", "src/cli_args.zig", "src/slash_commands.zig")),
 }
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
 TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
@@ -463,7 +463,7 @@ RULES = (
       "server-delivery-integration", "measurement-check"),
      "Shared model context prose: fixture consumers and Go request oracles"),
     (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
-      "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig",
+      "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/preference_document.zig",
       "src/provider_selection.zig", "src/client_defaults.zig", "src/configure_input.zig", "src/new_session_selection.zig",
       "src/preference_values.zig", "src/product_defaults.zig", "tests/integration/product_defaults.py"),
      ("admission-debug-integration",), ("admission-debug-integration",),

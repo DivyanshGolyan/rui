@@ -505,6 +505,7 @@ const Handle = union(enum) {
     instructions,
     sender,
     action_final,
+    action_value,
 };
 
 const Segment = struct {
@@ -543,6 +544,8 @@ pub const Preparation = struct {
     sender: protocol.Bounded(protocol.max_session_bytes) = undefined,
     source_action: [20]u8 = undefined,
     source_action_len: usize = 0,
+    source_ordinal: [20]u8 = undefined,
+    source_ordinal_len: usize = 0,
     tool: store.HistoricalTool = undefined,
     state: State,
 
@@ -558,7 +561,7 @@ pub const Preparation = struct {
         history_position: u64 = 0,
         replayed_images: u16 = 0,
         image_capability: model_catalog.ImageCapability = .unknown,
-        input_prefix: enum { none, sender, action_final } = .none,
+        input_prefix: enum { none, sender, action_final, action_value } = .none,
         input_kind: enum { message, tool_result } = .message,
         declaration: ?store.Declaration = null,
         declaration_open: bool = false,
@@ -839,7 +842,11 @@ pub const Preparation = struct {
                             if (entry.source_action) |action| {
                                 const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
                                 self.source_action_len = text.len;
-                                self.state.input_prefix = .action_final;
+                                self.state.input_prefix = if (action.ordinal()) |ordinal| blk: {
+                                    const value = std.fmt.bufPrint(&self.source_ordinal, "{d}", .{ordinal}) catch unreachable;
+                                    self.source_ordinal_len = value.len;
+                                    break :blk .action_value;
+                                } else .action_final;
                             }
                             self.state.stage = .input_open;
                             return .pending;
@@ -858,7 +865,11 @@ pub const Preparation = struct {
                         if (entry.source_action) |action| {
                             const text = std.fmt.bufPrint(&self.source_action, "{d}", .{action.id}) catch unreachable;
                             self.source_action_len = text.len;
-                            self.handles[1] = .action_final;
+                            self.handles[1] = if (action.ordinal()) |ordinal| blk: {
+                                const value = std.fmt.bufPrint(&self.source_ordinal, "{d}", .{ordinal}) catch unreachable;
+                                self.source_ordinal_len = value.len;
+                                break :blk .action_value;
+                            } else .action_final;
                             handles |= 0b10;
                         }
                         return self.loadItemHeader(.{ .message = if (entry.kind == .instruction) .instruction else .user }, handles);
@@ -920,6 +931,7 @@ pub const Preparation = struct {
                         self.handles[0] = switch (prefix) {
                             .sender => .sender,
                             .action_final => .action_final,
+                            .action_value => .action_value,
                             .none => unreachable,
                         };
                         return self.loadItemHeader(.input_text, 0b1);
@@ -1248,6 +1260,14 @@ pub const Preparation = struct {
                 0 => .{ .source = .{ .bytes = "[Rui: background Action " } },
                 1 => .{ .source = .{ .bytes = self.source_action[0..self.source_action_len] } },
                 2 => .{ .source = .{ .bytes = " reached its final Resolution. The result follows.]\n" } },
+                else => null,
+            },
+            .action_value => switch (index) {
+                0 => .{ .source = .{ .bytes = "[Rui: background Action " } },
+                1 => .{ .source = .{ .bytes = self.source_action[0..self.source_action_len] } },
+                2 => .{ .source = .{ .bytes = " published value " } },
+                3 => .{ .source = .{ .bytes = self.source_ordinal[0..self.source_ordinal_len] } },
+                4 => .{ .source = .{ .bytes = ". The value follows.]\n" } },
                 else => null,
             },
             .sender => switch (index) {
@@ -4604,7 +4624,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
     const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
     const first_text = try std.json.Stringify.valueAlloc(arena, text[0..4096], .{});
     const second_text = try std.json.Stringify.valueAlloc(arena, text[4096..], .{});
-    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}}}}";
+    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}";
     const expected_first = try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 0), @as(usize, 4096), "true", first_text });
     const expected = [_][]const u8{
         expected_first,
@@ -4681,7 +4701,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     const final = read.status.resolved.resolution;
     const text = "Action was stopped.";
     const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
-    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
+    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
     const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{stop.binding.action_id});
     const reference = try store.testingContentReference(&setup.storage, result_id);
     const bytes = try arena.alloc(u8, @intCast(reference.length));

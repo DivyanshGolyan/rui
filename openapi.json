@@ -714,6 +714,52 @@
         }
       }
     },
+    "/v1/action-publish": {
+      "post": {
+        "operationId": "actionPublish",
+        "summary": "Publishes one value from the running Action identified by its sender handle.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionPublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionPublishReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/read-action": {
       "post": {
         "operationId": "readAction",
@@ -1669,6 +1715,77 @@
           "key",
           "session",
           "action"
+        ],
+        "additionalProperties": false
+      },
+      "ActionPublishReply": {
+        "type": "object",
+        "properties": {
+          "action_id": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "admission_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action_id",
+          "ordinal",
+          "admission_id",
+          "replayed"
+        ],
+        "additionalProperties": false
+      },
+      "ActionPublishRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "21"
+          },
+          "kind": {
+            "const": "action_publish"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "handle": {
+            "type": "string",
+            "maxLength": 32,
+            "x-rui-max-bytes": 32
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 16384,
+            "x-rui-max-bytes": 16384
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "handle",
+          "key",
+          "value"
         ],
         "additionalProperties": false
       },
@@ -12055,6 +12172,52 @@
               },
               "final": {
                 "type": "null"
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -12063,7 +12226,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           },
@@ -12135,6 +12299,52 @@
                   "window"
                 ],
                 "additionalProperties": false
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -12143,7 +12353,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           },
@@ -12192,6 +12403,52 @@
                   "window"
                 ],
                 "additionalProperties": false
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -12200,7 +12457,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           }
@@ -12229,6 +12487,9 @@
             "$ref": "#/components/schemas/Decimal"
           },
           "offset": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "after": {
             "$ref": "#/components/schemas/Decimal"
           }
         },

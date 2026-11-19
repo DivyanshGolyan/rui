@@ -1777,6 +1777,12 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover" },
         .{ "/wait", "! Unknown command /wait" },
         .{ "/model gpt-5.5", "! Usage: /model" },
+        .{ "/new unexpected", "! Usage: /new" },
+        .{ "/clear unexpected", "! Usage: /clear" },
+        .{ "/model unexpected", "! Usage: /model" },
+        .{ "/archive unexpected", "! Usage: /archive" },
+        .{ "/unarchive unexpected", "! Usage: /unarchive" },
+        .{ "/requests unexpected", "! Usage: /requests" },
         .{ "/configure --permission-mode ask", "! Unknown command /configure" },
 
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
@@ -3447,8 +3453,13 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 held.size = size;
                 const file = try held.adopt(40);
                 defer file.close(std.testing.io);
+                const initial = try held.shown();
+                try std.testing.expect(std.mem.indexOf(u8, initial, "Allow once") != null);
+                try std.testing.expect(std.mem.indexOf(u8, initial, "Deny") != null);
                 if (typing) try held.keys("kept draft");
                 const before = try held.shown();
+                if (typing) try std.testing.expect(std.mem.indexOf(u8, before, "kept draft") != null);
+                try std.testing.expect(std.mem.indexOf(u8, before, "shift+") == null);
                 const expected = if (size.height.? == 30) "… 15 more lines" else "… 5 more lines";
                 try std.testing.expect(std.mem.indexOf(u8, before, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, before, "row 039") == null);
@@ -3485,6 +3496,7 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 const opened = try held.shown();
                 try std.testing.expect(std.mem.indexOf(u8, opened, "row 039") != null);
                 try std.testing.expect(std.mem.indexOf(u8, opened, "more lines") == null);
+                if (typing) try std.testing.expect(std.mem.indexOf(u8, opened, "kept draft") != null);
                 try std.testing.expectEqual(.action, held.screen.view);
                 try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
                 try std.testing.expectEqualStrings(if (typing) "kept draft" else "", held.self.input.composition().bytes);
@@ -3519,18 +3531,23 @@ test "App Session binds the hover role to every widget it owns with a hover styl
 }
 
 test "App Session fitting request has no overflow state or open side effect" {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const file = try held.adopt(3);
-    defer file.close(std.testing.io);
-    const before = try std.testing.allocator.dupe(u8, try held.shown());
-    defer std.testing.allocator.free(before);
-    try std.testing.expect(std.mem.indexOf(u8, before, "row 002") != null);
-    try std.testing.expect(std.mem.indexOf(u8, before, "more lines") == null);
-    try std.testing.expectEqual(null, held.self.app_preview.continuation());
-    try held.keys("\x0f");
-    try held.settle();
-    try std.testing.expectEqualStrings(before, try held.shown());
+    for ([_]vxfw.MaxSize{ .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 40 } }) |size| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = size;
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        const before = try std.testing.allocator.dupe(u8, try held.shown());
+        defer std.testing.allocator.free(before);
+        try std.testing.expect(std.mem.indexOf(u8, before, "Allow once") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "Deny") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "row 002") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "more lines") == null);
+        try std.testing.expectEqual(null, held.self.app_preview.continuation());
+        try held.keys("\x0f");
+        try held.settle();
+        try std.testing.expectEqualStrings(before, try held.shown());
+    }
 }
 
 test "a held frontend stops a read still running and joins it before it is freed" {
@@ -4619,10 +4636,22 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
 }
 
 test "chat footer background click and Alt-I share natural panel opening and Escape restores the feed" {
-    for ([_]u16{ 46, 140 }) |width| {
+    const picker = @import("model_picker.zig");
+    const entries = comptime blk: {
+        var result: [10]picker.Entry = undefined;
+        for (&result, 0..) |*entry, index| entry.* = .{
+            .id = if (index < 2) std.fmt.comptimePrint("luna-{d}", .{index}) else std.fmt.comptimePrint("model-{d}", .{index}),
+            .known = false,
+            .catalogued = false,
+            .providers = .initOne(.codex),
+        };
+        break :blk result;
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 46, .height = 18 } }) |size| {
         const held = try HeldFrontend.create();
         defer held.destroy();
-        held.size = .{ .width = width, .height = 40 };
+        held.size = .{ .width = size.width, .height = size.height };
         try seedFeed(held.screen, "earlier feed line\nlatest feed line\n");
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1b[D");
@@ -4640,11 +4669,11 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         const base = clicked.children[0].surface;
         const panel = try held.drawnPanel(base);
         const draft = (try held.drawnInput(base));
-        try std.testing.expect(panel.origin.row > 0);
+        if (size.height >= 30) try std.testing.expect(panel.origin.row > 0);
         try std.testing.expectEqual(base.children[0].surface.size.height, draft.origin.row);
         try std.testing.expectEqual(draft.origin.row + 1, panel.origin.row);
         try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row - 2, panel.origin.row + panel.surface.size.height);
-        try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+        if (size.height >= 30) try std.testing.expect((try rowWith(held, "latest feed line")) != null);
         const footer_row: i16 = @intCast(draft.origin.row + draft.surface.children[1].origin.row);
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, clicked, .{ .row = footer_row, .col = col, .button = .left, .mods = .{}, .type = kind });
         try std.testing.expect(held.self.info_open and !held.self.app_info.hasChoice());
@@ -4657,6 +4686,29 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         const keyed_panel = try held.drawnPanel(keyed.children[0].surface);
         try std.testing.expectEqual(panel.origin, keyed_panel.origin);
         try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
+        held.self.app_info.panel.selected = 4;
+        held.self.app_info.model_choice.open(&menu, .codex, "model-2");
+        const expanded_frame = try held.draw();
+        const expanded_input = try held.drawnInput(expanded_frame.children[0].surface);
+        const expanded_panel = try held.drawnPanel(expanded_frame.children[0].surface);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "kept draft") != null);
+        if (size.height >= 30) {
+            try std.testing.expectEqual(panel.origin.row - 8, expanded_panel.origin.row);
+            try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row, expanded_input.origin.row + expanded_input.surface.children[1].origin.row);
+            try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+            try held.keys("luna");
+            const filtered_frame = try held.draw();
+            const filtered_input = try held.drawnInput(filtered_frame.children[0].surface);
+            const filtered_panel = try held.drawnPanel(filtered_frame.children[0].surface);
+            try std.testing.expectEqual(panel.origin.row - 2, filtered_panel.origin.row);
+            try std.testing.expectEqual(@as(usize, 2), held.self.app_info.model_choice.hits.len);
+            try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row, filtered_input.origin.row + filtered_input.surface.children[1].origin.row);
+        }
+        try held.keys("\x1b");
+        const restored = try held.draw();
+        const restored_panel = try held.drawnPanel(restored.children[0].surface);
+        try std.testing.expectEqual(panel.origin, restored_panel.origin);
+        try std.testing.expectEqual(panel.surface.size, restored_panel.surface.size);
         try held.keys("\x1b");
         try std.testing.expect(!held.self.info_open and held.left == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
@@ -4745,6 +4797,88 @@ test "chat info inspection refresh preserves a choice and late captures never re
     try std.testing.expect(!held.self.info_open);
     try held.keys("\x1bi");
     try std.testing.expect((try rowWith(held, "Late")) != null);
+}
+
+test "SUI-4 late activity inspection cannot cover Settings Keys" {
+    const Frame = struct {
+        fn text(held: *HeldFrontend) ![]const u8 {
+            const width = held.size.width.?;
+            const height = held.size.height.?;
+            const allocator = held.arena.allocator();
+            const surface = try held.root.widget().draw(.{ .arena = allocator, .cell_arena = allocator, .min = .{}, .max = held.size, .cell_size = .{} });
+            var screen: vaxis.Screen = try .init(allocator, .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+            try surface.render(window, held.root.settings_page.widget());
+            var result: std.Io.Writer.Allocating = .init(allocator);
+            for (0..height) |row| {
+                for (0..width) |col| try result.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+                try result.writer.writeByte('\n');
+            }
+            return result.written();
+        }
+        fn keys(held: *HeldFrontend) ![]const u8 {
+            const shown = try text(held);
+            errdefer std.debug.print("Keys frame:\n{s}\n", .{shown});
+            try std.testing.expect(held.root.input.layer.settingsOpen());
+            try std.testing.expect(held.root.settings_page.keys_open);
+            try std.testing.expect(!held.self.info_open);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
+            // The shared Keys row legitimately says "list/chat · info actions".
+            // Only that occurrence of the info marker may appear here.
+            const info_count = std.mem.count(u8, shown, " · info");
+            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "list/chat · info actions") != null), info_count);
+            for ([_][]const u8{ "Copy last answer", "/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "ctrl+c/d", "pgup/pgdn", "first session", "latest / last", "scroll / select" }) |stale|
+                try std.testing.expect(std.mem.indexOf(u8, shown, stale) == null);
+            return shown;
+        }
+    };
+    for ([_]vxfw.MaxSize{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        var checkpoint: []const u8 = "fixture";
+        errdefer std.debug.print("late inspection width={d} checkpoint={s}\n", .{ size.width.?, checkpoint });
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size = size;
+        checkpoint = "opening";
+        try fixture.page(.opening, &.{.{ .key = 1, .text = "answer before inspection\n" }}, true, true);
+        checkpoint = "open info";
+        try captureInfo(held, "Before");
+        try held.keys("\x1bi");
+        try std.testing.expect(self.info_open and self.inspection.status_requested);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Copy last answer") != null);
+
+        // Freeze the activity read while info owns it, then defer settlement
+        // until after the user has closed info and opened Settings > Keys.
+        checkpoint = "freeze activity";
+        const job = self.freeze(.activity);
+        try std.testing.expect(job.open_status and job.watch_status);
+        status_page.sample(job.status_taken);
+        try job.status_taken.label.set("Late inspection");
+        job.result.status = true;
+        try self.launch(job, struct {
+            fn complete(_: *anyopaque, _: *Task) !void {}
+        }.complete);
+        checkpoint = "close info";
+        try held.keys("\x1b");
+        try std.testing.expect(!self.info_open);
+        var ctx = held.context();
+        checkpoint = "open settings";
+        try held.root.openSettings(&ctx);
+        _ = try Frame.text(held);
+        held.root.settings_page.select(.keys);
+        try @import("testing/app_events.zig").send(&ctx, "\r", held.root.widget(), held.root.settings_page.widget());
+        checkpoint = "keys before";
+        const before = try Frame.keys(held);
+        checkpoint = "settle";
+        try self.settleReader();
+        checkpoint = "keys after";
+        const after = try Frame.keys(held);
+        try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings("Late inspection", self.inspection.sessions[self.inspection.status.?].label.slice());
+        const next = try Frame.keys(held);
+        try std.testing.expectEqualStrings(before, next);
+    }
 }
 
 test "chat info saves typed edits without touching the draft and reports refusal on the field" {
@@ -6860,6 +6994,86 @@ test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
         try std.testing.expect(std.mem.indexOf(u8, taken, "› waiting one") != null);
         try std.testing.expect(std.mem.indexOf(u8, taken, "◌ waiting two") != null);
     }
+
+    // The tool may be rejected before the follow-up is sent or after it is queued.
+    // Repainting after draft edits must preserve the one visible representation.
+    const assertFrame = struct {
+        fn check(held: *HeldFrontend, draft: []const u8, queued: bool) !void {
+            const shown = try held.shown();
+            try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+            if (draft.len != 0) {
+                const prompt = try std.fmt.allocPrint(held.arena.allocator(), "› {s}", .{draft});
+                try std.testing.expect(std.mem.indexOf(u8, shown, prompt) != null);
+            }
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Tool call · rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Thinking") != null);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "MIDTURN-HI"));
+            try std.testing.expect((std.mem.indexOf(u8, shown, "◌ MIDTURN-HI") != null) == queued);
+            try std.testing.expect((std.mem.indexOf(u8, shown, "› MIDTURN-HI") != null) == !queued);
+        }
+    }.check;
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ true, false }) |rejection_first| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size.width = width;
+        held.size.height = if (width == 46) 30 else 40;
+        try fixture.page(.opening, &.{.{ .key = 9, .text = "› FIRST-QUESTION\n" }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        if (rejection_first) {
+            try fixture.page(.scan, &.{.{ .key = 10, .text = "× Tool call · rejected\n" }}, true, true);
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            const rejected = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "Tool call · rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "Thinking") != null);
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "MIDTURN-HI") == null);
+        }
+        self.live.queued = .{ .count = 1, .oldest_position = 11, .newest_admission = 1, .newest_position = 11 };
+        self.live.queued_line = .{ .admission = 1, .line = .{} };
+        try self.live.queued_line.?.line.set("MIDTURN-HI");
+        if (rejection_first) {
+            try assertFrame(held, "", true);
+        } else {
+            const queued = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, queued, "Thinking") != null);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, queued, "MIDTURN-HI"));
+            try std.testing.expect(std.mem.indexOf(u8, queued, "◌ MIDTURN-HI") != null);
+            try std.testing.expect(std.mem.indexOf(u8, queued, "› MIDTURN-HI") == null);
+        }
+        if (!rejection_first) {
+            try fixture.page(.scan, &.{
+                .{ .key = 12, .text = "× Tool call · rejected\n" },
+                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+            }, true, true);
+            self.live.queued = .{};
+            self.live.queued_line = null;
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            try assertFrame(held, "", false);
+        }
+        const edits = [_]struct { keys: []const u8, draft: []const u8 }{
+            .{ .keys = "x", .draft = "x" },
+            .{ .keys = "\x7f", .draft = "" },
+            .{ .keys = "y", .draft = "y" },
+            .{ .keys = "\x7f", .draft = "" },
+        };
+        for (edits) |edit| {
+            try held.keys(edit.keys);
+            try assertFrame(held, edit.draft, rejection_first);
+        }
+        if (rejection_first) {
+            try fixture.page(.scan, &.{
+                .{ .key = 12, .text = "AFTER-REJECTION\n" },
+                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+            }, true, true);
+            self.live.queued = .{};
+            self.live.queued_line = null;
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            try assertFrame(held, "", false);
+            const taken = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, taken, "AFTER-REJECTION") != null);
+        }
+    };
 }
 
 test "SessionFrontend keeps recovery visible beside an invisible queued Admission" {
@@ -6963,6 +7177,42 @@ fn idleRead(self: *Self) ?feed_reads.Read {
     return FeedPolicy.nextRead(state);
 }
 
+test "SUI-17 fresh conversation scroll keeps each Message once in order" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        held.size = .{ .width = width, .height = 30 };
+        try fixture.page(.opening, &.{
+            .{ .key = 1, .text = "› fresh start\n" },
+            .{ .key = 2, .text = "renderer answer fresh start\n" },
+        }, true, true);
+        for (0..3) |_| {
+            try held.keys("\x1b[5~");
+            const shown = try held.shown();
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "› fresh start"));
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "renderer answer fresh start"));
+            try std.testing.expect(std.mem.indexOf(u8, shown, "› fresh start").? < std.mem.indexOf(u8, shown, "renderer answer fresh start").?);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Start of conversation") == null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Earlier messages unavailable") == null);
+        }
+    }
+    const empty = try FeedFixture.create();
+    defer empty.destroy();
+    try empty.page(.opening, &.{}, true, true);
+    const opened = try empty.held.shown();
+    for ([_][]const u8{ "\x1b[1;2A", "\x1b[5~" }) |key| {
+        try empty.held.keys(key);
+        try empty.held.keys("x");
+        const typed = try empty.held.shown();
+        try std.testing.expectEqualStrings("x", empty.held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, typed, "↓") == null);
+        try std.testing.expect(std.mem.indexOf(u8, typed, "Start of conversation") == null);
+        try empty.held.keys("\x15");
+        try std.testing.expectEqualStrings(opened, try empty.held.shown());
+    }
+}
+
 test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
@@ -6978,6 +7228,47 @@ test "SessionFrontend feed opens full bottom aligned and page round trip is an i
     for (0..3) |_| try held.keys("\x1b[6~");
     try std.testing.expect(held.screen.anchor.following());
     try std.testing.expectEqualStrings(initial, try held.shown());
+
+    try held.keys("keep");
+    const live = try held.shown();
+    const feed_height = held.screen.height;
+    for ([_]struct { up: []const u8, back: []const u8 }{
+        .{ .up = "\x1b[1;2A", .back = "\x1b[1;5F" },
+        .{ .up = "\x1b[5~", .back = "\x1b" },
+    }) |keys| {
+        try held.keys(keys.up);
+        const scrolled = try held.shown();
+        try std.testing.expect(!held.screen.anchor.following());
+        try std.testing.expectEqualStrings("keep", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "↓") != null);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "Browsing") == null);
+        try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left);
+        try std.testing.expect(held.self.chrome.status.bar.notice == null);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "entry 115 line 7") == null);
+        try std.testing.expectEqual(feed_height, held.screen.height);
+        var before = std.mem.splitScalar(u8, firstRows(live, feed_height), '\n');
+        var before_row: usize = 0;
+        var matched: usize = 0;
+        while (before.next()) |line| : (before_row += 1) {
+            if (std.mem.indexOf(u8, line, "entry ") == null) continue;
+            var after = std.mem.splitScalar(u8, firstRows(scrolled, feed_height), '\n');
+            var after_row: usize = 0;
+            while (after.next()) |candidate| : (after_row += 1) {
+                if (!std.mem.eql(u8, line, candidate)) continue;
+                try std.testing.expectEqual(before_row + feed_height / 2, after_row);
+                matched += 1;
+            }
+        }
+        try std.testing.expect(matched > 0);
+        try held.keys("\x1b[F");
+        const end_key = try held.shown();
+        try std.testing.expect(!held.screen.anchor.following());
+        try std.testing.expectEqualStrings(firstRows(scrolled, feed_height), firstRows(end_key, feed_height));
+        try std.testing.expectEqualStrings("keep", held.self.input.composition().bytes);
+        try held.keys(keys.back);
+        try std.testing.expect(held.screen.anchor.following());
+        try std.testing.expectEqualStrings(live, try held.shown());
+    }
 }
 
 fn heldScrollArrivals() !void {
@@ -6999,12 +7290,16 @@ fn heldScrollArrivals() !void {
     try std.testing.expectEqualStrings(held_frame, try held.shown());
     const before = try held.shown();
     const anchor = held.screen.anchor.anchor;
+    const feed_height = held.screen.height;
     try fixture.page(.scan, &.{ .{ .key = 116, .text = "new settled row\n" }, .{ .key = 117, .text = "another settled row\n" } }, false, true);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
     try std.testing.expectEqual(@as(usize, 2), held.self.new_below);
     const after = try held.shown();
-    try std.testing.expectEqualStrings(firstRows(before, held.screen.height), firstRows(after, held.screen.height));
+    try std.testing.expectEqual(feed_height, held.screen.height);
+    try std.testing.expectEqualStrings(firstRows(before, feed_height), firstRows(after, feed_height));
     try std.testing.expect(std.mem.indexOf(u8, after, "↓ 2 new") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRows(after, feed_height), "new settled row") == null);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
 
 test "SessionFrontend feed jump after high eviction keeps old rows until the opening lands" {
@@ -9473,6 +9768,53 @@ test "App Session palette total budget stays between input rules and reserves fe
             return null;
         }
     };
+    for ([_]struct { width: u16, height: u16, more: []const u8 }{
+        .{ .width = 140, .height = 40, .more = "3 more" },
+        .{ .width = 46, .height = 30, .more = "6 more" },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = case.width, .height = case.height };
+        const before = try held.draw();
+        const input_before = Find.widget(before, held.self.app_input.widget()).?;
+        try held.keys("/");
+        const opened = try held.draw();
+        const input_open = Find.widget(opened, held.self.app_input.widget()).?;
+        const panel = Find.widget(opened, held.self.app_palette.widget()).?;
+        try std.testing.expect(input_open.origin.row < input_before.origin.row);
+        try std.testing.expectEqual(input_before.origin.row + input_before.surface.size.height, input_open.origin.row + input_open.surface.size.height);
+        const text = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, text, "/new") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "type to narrow") == null);
+
+        var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = case.height, .cols = case.width, .x_pixel = 0, .y_pixel = 0 });
+        try opened.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = case.width, .height = case.height, .screen = &rendered }, held.self.app_input.composer.widget());
+        const ground = rendered.readCell(case.width - 1, case.height - 3).?.style.bg;
+        const selected = style.of(held.self.app_caps, .{ .background = .selection });
+        var last: std.Io.Writer.Allocating = .init(held.arena.allocator());
+        for (0..panel.surface.size.height) |row| for (0..panel.surface.size.width) |col| {
+            const cell = panel.surface.readCell(@intCast(col), @intCast(row));
+            if (row == panel.surface.size.height - 1) try last.writer.writeAll(cell.char.grapheme);
+            if (row == 0) {
+                try std.testing.expectEqual(selected.bg, cell.style.bg);
+                try std.testing.expectEqual(selected.reverse, cell.style.reverse);
+            } else {
+                try std.testing.expectEqual(ground, cell.style.bg);
+                try std.testing.expect(!cell.style.reverse);
+            }
+            for ([_][]const u8{ "┌", "┐", "└", "┘", "│" }) |border|
+                try std.testing.expect(!std.mem.eql(u8, border, cell.char.grapheme));
+        };
+        try std.testing.expectEqualStrings(case.more, std.mem.trim(u8, last.written(), " "));
+        try held.keys("\x7f");
+        const closed = try held.draw();
+        const input_closed = Find.widget(closed, held.self.app_input.widget()).?;
+        try std.testing.expectEqual(input_before.origin.row, input_closed.origin.row);
+        try std.testing.expectEqual(input_before.surface.size.height, input_closed.surface.size.height);
+        try std.testing.expect(Find.widget(closed, held.self.app_palette.widget()) == null);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/new") == null);
+    }
     const held = try HeldFrontend.create();
     defer held.destroy();
     const before = try held.draw();
@@ -10570,6 +10912,24 @@ test "App Session bracketed paste keeps Tab literal with drawn command and skill
     };
 }
 
+test "SUI-12 rejected paste preserves the draft and editing clears the notice" {
+    for ([_][]const u8{ "\u{301}discarded", "prefix\n\u{301}discarded" }) |paste| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try held.keys("kept\x01");
+        try held.keys("\x1b[200~");
+        try held.keys(paste);
+        try held.keys("\x1b[201~");
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") != null);
+        try std.testing.expect(held.self.submission.intent == null);
+        try held.keys("x\x7f");
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") == null);
+        try std.testing.expect(held.self.submission.intent == null);
+    }
+}
+
 test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "pq" }) |paste| for (0..3) |cursor| {
         const held = try HeldFrontend.create();
@@ -10851,6 +11211,12 @@ test "SUI-44 empty chat welcome is centred until the first message" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "cotton") == null);
         held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .folder = .{} };
         try held.self.line.folder.?.set("/work");
+        for ([_]bool{ false, true }) |asks| {
+            held.self.line.asks = asks;
+            const welcome = try held.shown();
+            for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
+                try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
+        }
         const empty = try held.shown();
         var lines = std.mem.splitScalar(u8, empty, '\n');
         var found = false;

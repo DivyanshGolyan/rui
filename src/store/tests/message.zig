@@ -1183,6 +1183,53 @@ test "INS-12 every public reader projects parts with their owner" {
     }.run);
 }
 
+test "background Action publication replay fences on compound content" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            const session = try shared_fixtures.configureTestSessionAsk(&storage, "compound-publication-config");
+            try submitTestMessage(&storage, &tmp, "compound-publication-input", "compound-publication-message", session.slice(), "run actions");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, model, "compound-publication-calls");
+            const action_id = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action_id, .decision = .allow_once };
+            try allow.key.set("compound-publication-allow");
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            var background: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = action_id };
+            try background.session.set(session.slice());
+            try background.key.set("compound-publication-background");
+            try std.testing.expect(storage.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+
+            const parts_session = try configureTestSession(&storage, "compound-publication-parts-config");
+            const parts_key = "compound-publication-parts-message";
+            try store_testing.submitTestMessageParts(&storage, &tmp, parts_key, parts_session.slice(), &.{
+                .{ .bytes = "look" },
+                .{ .bytes = @embedFile("../../testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{ .assertion = .jpeg } } },
+            });
+            const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{parts_key});
+
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            const handle = input.sender_handle.slice();
+            const key = "compound-guard";
+            const payload = "ordinary text";
+            const first = try storage.publishActionValue(handle, key, payload);
+            try std.testing.expect(first == .accepted and first.accepted.action_id == action_id and first.accepted.admission_id != null);
+            const replay = try storage.publishActionValue(handle, key, payload);
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try store_testing.exec(&storage, "UPDATE action_value SET content_id=?1 WHERE action_id=?2 AND publication_key=?3", .{ content_id, action_id, key });
+            try std.testing.expectError(error.CorruptStore, storage.publishActionValue(handle, key, payload));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
 /// The report names a parts value owned by `kind` `id`.
 fn expectPartsOwner(report: []const u8, comptime kind: []const u8, id: u64) !void {
     var buffer: [64]u8 = undefined;

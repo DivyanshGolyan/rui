@@ -1318,6 +1318,12 @@ const BrowserRig = struct {
         return browserField(page, "stray");
     }
 
+    fn deviceCode(page: *Self) bool {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        return page.code.len != 0;
+    }
+
     fn port(self: *BrowserRig) ![]const u8 {
         const link = self.page.browser.?.value.link.slice();
         const at = (std.mem.indexOf(u8, link, "127.0.0.1%3A") orelse return error.TestUnexpectedResult) + "127.0.0.1%3A".len;
@@ -1821,6 +1827,66 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
     const reported = report.written().len;
     try rig.page.stopTo(&report.writer);
     try std.testing.expectEqual(reported, report.written().len);
+}
+
+test "SUI-7 Sign-in Escape cancels waiting browser and device journeys and returns to the method frame" {
+    for ([_]core.Method{ .browser, .device }) |method| {
+        var rig: BrowserRig = undefined;
+        try rig.open();
+        defer rig.close();
+        try rig.send("\r");
+        if (method == .device) try rig.send("\t");
+        try rig.send("\r");
+        if (method == .browser) {
+            try rig.wait(BrowserRig.linked);
+            try rig.send("\x1b[200~not-the-address\x1b[201~\r");
+            try rig.wait(BrowserRig.strayed);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Not the sign-in address. Paste again.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "not-the-address") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Change method ]") != null);
+        } else {
+            try rig.wait(BrowserRig.deviceCode);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "BDL9-KI88H") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Copy code ]") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "C copies code") != null);
+        }
+        try rig.page.widget().handleEvent(&rig.ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+        try std.testing.expect(rig.page.state.page == .stopping);
+        try rig.wait(testingCompleted);
+        try rig.page.advance(&rig.ctx);
+        try std.testing.expect(rig.page.task.thread == null and rig.page.state.page == .method);
+        const returned = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+        try std.testing.expect(std.mem.indexOf(u8, try testingText(returned, rig.ctx.alloc), "ChatGPT account") != null);
+        for ([_][]const u8{ ".config/rui/preferences", ".config/rui/codex.json", ".config/rui/chatgpt.json", ".config/rui/requests" }) |path|
+            try std.testing.expectError(error.FileNotFound, rig.tmp.dir.access(std.testing.io, path, .{}));
+    }
+}
+
+test "SUI-6 Sign-in ignores account typing and Escape returns from API key to welcome" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var page: Self = .{};
+    defer page.closeForm();
+    try testingSend(&page, &ctx, "hello", 90, 28);
+    try std.testing.expect(page.state.page == .account and page.state.focus == .chatgpt and page.task.thread == null);
+    try testingSend(&page, &ctx, "\x1b[C", 90, 28);
+    try std.testing.expectEqual(core.Control.api_key, page.state.focus);
+    try testingSend(&page, &ctx, "\r", 90, 28);
+    try std.testing.expect(page.state.page == .api);
+    const api = try testingDraw(&page, ctx.alloc, 90, 28);
+    try std.testing.expect(std.mem.indexOf(u8, try testingText(api, ctx.alloc), "Connect with an API key") != null);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(page.state.page == .account and page.task.thread == null);
+    const welcome = try testingDraw(&page, ctx.alloc, 90, 28);
+    const text = try testingText(welcome, ctx.alloc);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Welcome to Rui") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "hello") == null);
 }
 
 test "Sign-in both OAuth methods retry published Host failures without authenticating again" {

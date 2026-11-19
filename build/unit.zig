@@ -164,7 +164,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         const compile = b.addTest(.{
             .name = definition.name,
             .max_rss = darwin.unitMaxRss(test_filters.len, target),
-            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+            // Zig 0.17.1's x86-64 backend crashes (SIGSEGV) on the Store root of a collect build,
+            // so that one compile takes the default backend; rsql_table.py reads only its exports.
+            .use_llvm = if (target.result.cpu.arch == .x86_64 and !(identity == .store and product.rsqlCollect(b))) false else null,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(definition.source),
                 .target = target,

@@ -269,7 +269,7 @@ Both methods notify local activity followers without submitting a Message or sta
 
 `session.stopAction(action, { idempotencyKey })` selects one Action in that Session for stop.
 It returns the existing Resolution position when the Action has already ended, or `null` when stop selection precedes completion.
-Use `session.readAction(action)` to read completion and saved output.
+Use `session.readAction(action)` to read completion, saved output, and published values. To continue a value page, pass its `values.next` as the third argument: `session.readAction(action, "0", values.next)`. The second argument is the independent final-output byte offset.
 Retain the key and exact inputs before sending. Retry them unchanged to recover a lost reply.
 A stop selection suppresses that Action's final Session input and preserves its sole Resolution.
 Other Actions continue.

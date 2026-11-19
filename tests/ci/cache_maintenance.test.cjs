@@ -169,6 +169,31 @@ test('build restores keep each part apart and seed parts without snapshots from 
   const setupAction = readFileSync(`${root}/.github/actions/setup/action.yml`, 'utf8');
   assert.match(setupAction, /- uses: \.\/\.github\/actions\/setup\/caches\n +id: caches\n +with:\n +check-part: \$\{\{ inputs\.cache-part \|\| inputs\.check-part \}\}\n/,
                'setup restores cache-part when a job names one');
+  // CI-32: exercise the actual setup guard across cache and setup states.
+  const cacheAction = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+  assert.match(cacheAction, /packages-hit:\n +description: [^\n]+\n +value: \$\{\{ steps\.packages-cache\.outputs\.cache-hit \}\}/);
+  assert.match(cacheAction, /id: packages-cache\n[\s\S]*?path: zig-pkg\n +key: rui-packages-v1-\$\{\{ hashFiles\('build\.zig\.zon'\) \}\}\n +restore-keys: rui-packages-v1-/);
+  const guard = setupAction.match(/- name: Fetch the existing pinned dependency graph\n +if: \$\{\{ (.*?) \}\}/)[1];
+  const decideFetch = values => {
+    const expression = guard.replace(/inputs\.(?:compiled|cold)|steps\.caches\.outputs\.(?:packages-hit|build-hit)/g, name => {
+      assert.ok(Object.hasOwn(values, name), `unknown guard input ${name}`);
+      return JSON.stringify(values[name]);
+    });
+    assert.match(expression, /^[\s\w'"!=&|().-]+$/);
+    return Function(`return (${expression})`)();
+  };
+  for (const compiled of ['true', 'false']) {
+    for (const cold of ['true', 'false']) {
+      for (const buildHit of ['true', 'false', '']) {
+        for (const packagesHit of ['true', 'false', '']) {
+          const values = {'inputs.compiled': compiled, 'inputs.cold': cold,
+            'steps.caches.outputs.build-hit': buildHit, 'steps.caches.outputs.packages-hit': packagesHit};
+          assert.equal(decideFetch(values), compiled !== 'true' && (cold === 'true' || packagesHit !== 'true'),
+            JSON.stringify(values));
+        }
+      }
+    }
+  }
   const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
   const keys = (part, deps, sources = s2) => nameKeys(part, deps, sources);
   // actions/cache: an exact key, else the newest key matching the first restore
@@ -799,8 +824,8 @@ test('partial compilation restores by existing prefixes without claiming an exac
     assert.notEqual(saveKey({kind, key, setupOutcome: 'success', workOutcome: 'failure', runId: '123', runAttempt: '2'}), partial);
   }
   const setup = readFileSync(`${__dirname}/../../.github/actions/setup/action.yml`, 'utf8');
-  const fetches = setup.match(/if: .*steps.caches.outputs.build-hit != 'true'.*/g);
-  assert.equal(fetches.length, 2, 'both fetch paths still run on prefix/partial hits');
+  assert.match(setup, /- name: Fetch the screen observer's pinned package graph\n +if: .*steps\.caches\.outputs\.build-hit != 'true'/,
+    'the separate screen graph still fetches on a partial build snapshot');
 });
 
 test('prune retains newest partial per build or CPU prefix independently of complete snapshots', async () => {
