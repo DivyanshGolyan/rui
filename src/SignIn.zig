@@ -823,12 +823,12 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os").linkOpener(init_.environ_map) orelse {
-                self.issue = "No browser opener is available. Open the displayed URL manually.";
+            const opener = @import("os").linkOpener(init_.environ_map) orelse {
+                self.issue = if (self.state.page == .browser) "No browser opener is available. Copy URL to open it manually." else "No browser opener is available. Open the displayed URL manually.";
                 return;
             };
-            plan_login.openBrowser(init_.io, command, link_) catch {
-                self.issue = "Couldn't open a browser. Open the displayed URL manually.";
+            opener.open(init_.io, link_) catch {
+                self.issue = if (self.state.page == .browser) "Couldn't open a browser. Copy URL to open it manually." else "Couldn't open a browser. Open the displayed URL manually.";
                 return;
             };
             self.issue = "Browser open requested.";
@@ -1083,11 +1083,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             }
         },
         .browser => {
-            try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) browser_link else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
+            const value_width = Panel.valueWidth(width);
+            const visible = line.fit(ctx, browser_link, value_width).text;
+            const link_label = if (visible.len < browser_link.len and value_width > 3)
+                try std.fmt.allocPrint(a, "{s}...", .{line.fit(ctx, browser_link, value_width - 3).text})
+            else
+                visible;
+            try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) link_label else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
             const mask = try a.alloc(u8, @min(browser_typed, Panel.valueWidth(width) -| 1));
             @memset(mask, '*');
             try append(&rows, a, "Paste callback", if (browser_typed != 0) mask else if (browser_stray) "Not the sign-in address. Paste again." else if (browser_checking) "Checking address..." else "Paste final browser address, then Enter", .callback, .callback);
             try button(&buttons, a, "Open browser", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
+            try button(&buttons, a, "Copy URL", .copy_url, if (browser_link.len != 0) .{ .copy_url = browser_link } else null);
             try button(&buttons, a, "Change method", .switch_method, .switch_method);
             try button(&buttons, a, "Back", .back, .back);
         },
@@ -1881,83 +1888,151 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
     }
 }
 
-test "Sign-in device URL is fully readable and linked across narrow rows beside explicit copy buttons" {
-    const url = "https://auth.openai.com/codex/device";
-    for ([_]u16{ 46, 140 }) |width| {
+test "SUI-7 Sign-in copy preserves drawn browser and device values across input and layout domains" {
+    {
+        const url = "https://example.invalid/authorize?client_id=synthetic&state=synthetic&scope=example";
+        const status = "Couldn't open a browser. Copy URL to open it manually.";
+        for ([_]u16{ 46, 140 }) |width| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            var page: Self = .{ .state = .{ .page = .browser, .focus = .callback }, .issue = status };
+            page.browser = try pages.Mapped(Browser).map();
+            defer _ = page.closeBrowser();
+            page.browser.?.value.init();
+            try page.browser.?.value.link.set(url);
+            const frame = try testingDraw(&page, ctx.alloc, width, 30);
+            const text = try testingText(frame, ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Copy URL ]") != null);
+            var compact: std.ArrayList(u8) = .empty;
+            for (text) |byte| if (!std.ascii.isWhitespace(byte)) try compact.append(ctx.alloc, byte);
+            try std.testing.expect(std.mem.indexOf(u8, compact.items, "Couldn'topenabrowser.CopyURLtoopenitmanually.") != null);
+            try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+            try testingSend(&page, &ctx, "\t\t\r", width, 30);
+            try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+            try std.testing.expectEqualStrings(url, ctx.cmds.items[0].copy_to_clipboard);
+        }
+    }
+    {
+        const url = "https://auth.openai.com/codex/device";
+        for ([_]u16{ 46, 140 }) |width| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            var page: Self = .{ .state = .{ .page = .device, .focus = .copy_code } };
+            try page.code.set("ABCD-1234");
+            const frame = try testingDraw(&page, ctx.alloc, width, 30);
+            var readable: std.ArrayList(u8) = .empty;
+            const dialog = frame.children[0].surface;
+            var url_rows: usize = 0;
+            for (0..dialog.size.height) |row| {
+                var linked = false;
+                for (0..dialog.size.width) |col| {
+                    const cell = dialog.readCell(@intCast(col), @intCast(row));
+                    if (cell.link.uri.len == 0) continue;
+                    try std.testing.expectEqualStrings(url, cell.link.uri);
+                    if (std.mem.eql(u8, cell.char.grapheme, " ")) continue;
+                    try readable.appendSlice(ctx.alloc, cell.char.grapheme);
+                    linked = true;
+                }
+                url_rows += @intFromBool(linked);
+            }
+            try std.testing.expectEqualStrings(url, readable.items);
+            try std.testing.expectEqual(@as(usize, if (width == 46) 2 else 1), url_rows);
+            try std.testing.expectEqualStrings("ABCD-1234", page.drawn.copy.?.slice());
+            try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "C copies code. Esc back.") != null);
+            try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+            var copied = false;
+            for (page.drawn.hits) |hit| if (hit.action == .copy) {
+                try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+                copied = true;
+                break;
+            };
+            try std.testing.expect(copied);
+            try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+            try std.testing.expectEqualStrings("ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
+        }
+    }
+    {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         var page: Self = .{ .state = .{ .page = .device, .focus = .copy_code } };
         try page.code.set("ABCD-1234");
-        const frame = try testingDraw(&page, ctx.alloc, width, 30);
-        var readable: std.ArrayList(u8) = .empty;
-        const dialog = frame.children[0].surface;
-        var url_rows: usize = 0;
-        for (0..dialog.size.height) |row| {
-            var linked = false;
-            for (0..dialog.size.width) |col| {
-                const cell = dialog.readCell(@intCast(col), @intCast(row));
-                if (cell.link.uri.len == 0) continue;
-                try std.testing.expectEqualStrings(url, cell.link.uri);
-                if (std.mem.eql(u8, cell.char.grapheme, " ")) continue;
-                try readable.appendSlice(ctx.alloc, cell.char.grapheme);
-                linked = true;
-            }
-            url_rows += @intFromBool(linked);
-        }
-        try std.testing.expectEqualStrings(url, readable.items);
-        try std.testing.expectEqual(@as(usize, if (width == 46) 2 else 1), url_rows);
-        try std.testing.expectEqualStrings("ABCD-1234", page.drawn.copy.?.slice());
-        try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "C copies code. Esc back.") != null);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
         try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
-        var copied = false;
-        for (page.drawn.hits) |hit| if (hit.action == .copy) {
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
-            copied = true;
-            break;
-        };
-        try std.testing.expect(copied);
+        try std.testing.expectEqualStrings("ABCD-1234", page.drawn.copy.?.slice());
+        try testingSend(&page, &ctx, "\x1b[200~c\r\x1b[201~", 90, 28);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        try testingSend(&page, &ctx, "c", 90, 28);
         try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
         try std.testing.expectEqualStrings("ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
+        page.state.focus = .open_page;
+        const tiny = try testingDraw(&page, ctx.alloc, 72, 3);
+        try std.testing.expect(page.drawn.copy == null);
+        try std.testing.expect(std.mem.indexOf(u8, try testingText(tiny, ctx.alloc), "ABCD-1234") == null);
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .text = "c" } });
+        try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+        for ([_]u16{ 0, 1, 2, 3 }) |height| for ([_]u16{ 0, 1, 8, 9, 28, 72 }) |width| {
+            page.state.focus = .copy_code;
+            const frame = try testingDraw(&page, ctx.alloc, width, height);
+            if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
+        };
+        for ([_]u16{ 27, 28, 29, 30, 31 }) |width| {
+            page.state.focus = .copy_code;
+            const frame = try testingDraw(&page, ctx.alloc, width, 30);
+            try std.testing.expectEqual(width >= 30, page.drawn.copy != null);
+            if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
+        }
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        const old = page.drawn.copy.?;
+        page.state.attempt += 1;
+        try page.activateDrawn(&ctx, .{ .copy = old });
+        try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
     }
-}
 
-test "Sign-in exact drawn device code copies only explicitly and never after clipping scrolling or paste" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    var page: Self = .{ .state = .{ .page = .device, .focus = .copy_code } };
-    try page.code.set("ABCD-1234");
-    _ = try testingDraw(&page, ctx.alloc, 90, 28);
-    try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
-    try std.testing.expectEqualStrings("ABCD-1234", page.drawn.copy.?.slice());
-    try testingSend(&page, &ctx, "\x1b[200~c\r\x1b[201~", 90, 28);
-    try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
-    try testingSend(&page, &ctx, "c", 90, 28);
-    try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
-    try std.testing.expectEqualStrings("ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
-    page.state.focus = .open_page;
-    const tiny = try testingDraw(&page, ctx.alloc, 72, 3);
-    try std.testing.expect(page.drawn.copy == null);
-    try std.testing.expect(std.mem.indexOf(u8, try testingText(tiny, ctx.alloc), "ABCD-1234") == null);
-    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .text = "c" } });
-    try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
-    for ([_]u16{ 0, 1, 2, 3 }) |height| for ([_]u16{ 0, 1, 8, 9, 28, 72 }) |width| {
-        page.state.focus = .copy_code;
-        const frame = try testingDraw(&page, ctx.alloc, width, height);
-        if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
+    for ([_]bool{ false, true }) |browser_method| for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = .{ .page = if (browser_method) .browser else .device, .focus = if (browser_method) .copy_url else .copy_code } };
+        try page.code.set("ABCD-1234");
+        if (browser_method) {
+            page.browser = try pages.Mapped(Browser).map();
+            page.browser.?.value.init();
+            try page.browser.?.value.link.set("https://example.invalid/?a=1&b=2");
+        }
+        defer _ = page.closeBrowser();
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        try testingSend(&page, &ctx, "\x1b[200~c\r\x1b[201~", width, 30);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        const action = page.drawn.focused.?.action;
+        page.state.attempt += 1;
+        try page.activateDrawn(&ctx, action);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        page.state.page = .method;
+        try page.activateDrawn(&ctx, action);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        page.state.page = if (browser_method) .browser else .device;
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab } });
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        page.state.focus = if (browser_method) .copy_url else .copy_code;
+        _ = try testingDraw(&page, ctx.alloc, 0, 0);
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        const copy_tag: std.meta.Tag(core.Action) = if (browser_method) .copy_url else .copy;
+        for (page.drawn.hits) |hit| if (std.meta.activeTag(hit.action) == copy_tag) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+            break;
+        };
+        try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+        try std.testing.expectEqualStrings(if (browser_method) "https://example.invalid/?a=1&b=2" else "ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
     };
-    for ([_]u16{ 27, 28, 29, 30, 31 }) |width| {
-        page.state.focus = .copy_code;
-        const frame = try testingDraw(&page, ctx.alloc, width, 30);
-        try std.testing.expectEqual(width >= 30, page.drawn.copy != null);
-        if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
-    }
-    _ = try testingDraw(&page, ctx.alloc, 90, 28);
-    const old = page.drawn.copy.?;
-    page.state.attempt += 1;
-    try page.activateDrawn(&ctx, .{ .copy = old });
-    try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
 }
 
 test "Sign-in browser shows URL rejects stray long callback and switches only after cancellation joins" {

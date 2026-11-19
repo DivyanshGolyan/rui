@@ -4,7 +4,7 @@ import signal
 import subprocess
 import sys
 
-from host_process import close_stdin, dispose_all, stop_process, wait_for
+from host_process import close_stdin, dispose_all, host_store, stop_process, wait_for
 import os_semantics
 import runtime_leftovers
 
@@ -42,11 +42,7 @@ def matching_hosts(store, *, descendants=False):
     owned = os_semantics.processes_executing(RUI)
     matches = []
     for pid, text in os_semantics.process_commands():
-        if pid in owned and len(text) >= 5 and text[1:4] == ["host", "serve", "--store"]:
-            try:
-                selected = str(pathlib.Path(text[4]).resolve())
-            except OSError:
-                continue
+        if pid in owned and text[1:3] == ["host", "serve"] and (selected := host_store(text)) is not None:
             if selected == expected or (descendants and pathlib.Path(selected).is_relative_to(expected)):
                 matches.append((pid, selected))
     return matches

@@ -3,6 +3,11 @@ const platform = @import("../store_path.zig");
 const tool_defs = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
+const isBounded = @import("../bounded.zig").isBounded;
+const Bounded = @import("../bounded.zig").Bounded;
+const session_id = @import("../session_id.zig");
+const action_domain = @import("domain/action.zig");
+const change_ring = @import("../change_ring.zig");
 const wire_request = @import("../wire_request.zig");
 const output_format = @import("../output_format.zig");
 const output_decode = @import("../output_decode.zig");
@@ -1138,6 +1143,283 @@ fn hashLength(hasher: *std.crypto.hash.sha2.Sha256, length: usize) void {
     std.mem.writeInt(u64, &bytes, length, .little);
     hasher.update(&bytes);
 }
+
+/// Test-only reply digest (design C10): every reply a journey reads, in the order it reads them, as one hash that does
+/// not depend on how a run numbered, timed or keyed its rows, or on the random identity of the Store instance. `keep`
+/// records a reply where the journey receives it and returns it unchanged; a reply a call fills through an out-parameter
+/// is kept after that call. Its bytes are kept until `finish`, which canonicalises them as `logicalDigest` does, and
+/// masks what legitimately differs per run or per engine:
+/// - a session reference (a value of a session-id type: `Bounded(session_id.bytes)`, `Bounded(session_id.max_reference_bytes)`,
+///   or a `change_ring.Id`) is numbered by the order its value first appears (an entry point's own Store holds its
+///   Sessions, so this Store's rows cannot number them); a session reference inside text is its creation order;
+/// - a content's digest is the digest of its stored bytes with references replaced;
+/// - a commit counter (`generation` of `change_ring.Token`, `change_ring.SessionToken` and `Store.RetryDeadlineRead`) is
+///   not kept, on any leg: MySQL's count moves on entry points that save nothing (#1940), so it is not compared until
+///   #1940 is fixed. A catalog generation (`model_facts` Source and Fact) is data and is kept;
+/// - a clock reading is kept as whether it is set, as `clock_columns` masks it in the rows, and a Unix second in text is
+///   masked the same way;
+/// - a Store's selector (`HistoricalSettings.store`, its location), a session affinity (a hash over that selector) and an
+///   action's `sender_handle` (random per run) are kept as whether they are set, as logicalDigest masks their rows;
+/// - a forward's identity (`forward_id`, and the integer of a `forward` union) is kept on the plain legs and left out by
+///   `finish(storage, true)`, the rerun leg's comparison: that leg numbers it differently (see `masked`).
+/// A tag or error name is kept as written. Replies a shared helper consumes (for example `submitTestMessage`) are not kept.
+pub const ReplyDigest = struct {
+    gpa: std.mem.Allocator,
+    /// Every byte kept, a forward's identity included.
+    stream: std.ArrayList(u8) = .empty,
+    /// The same bytes with no forward identity: what `finish(storage, true)` digests.
+    unforwarded: std.ArrayList(u8) = .empty,
+    six: std.AutoHashMapUnmanaged([6]u8, u64) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator) ReplyDigest {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *ReplyDigest) void {
+        self.stream.deinit(self.gpa);
+        self.unforwarded.deinit(self.gpa);
+        self.six.deinit(self.gpa);
+    }
+
+    pub fn keep(self: *ReplyDigest, value: anytype) @TypeOf(value) {
+        self.write(value);
+        return value;
+    }
+
+    fn write(self: *ReplyDigest, value: anytype) void {
+        const T = @TypeOf(value);
+        switch (@typeInfo(T)) {
+            .void => {},
+            .bool => self.put(&.{@intFromBool(value)}),
+            .int => {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, @bitCast(@as(i128, value)), .little);
+                self.put(&bytes);
+            },
+            // The integer, not the name: a non-exhaustive enum (rsql.Positive) has values without a name.
+            .@"enum" => self.write(@as(@typeInfo(T).@"enum".tag_type, @backingInt(value))),
+            .optional => if (value) |inner| {
+                self.put(&.{1});
+                self.write(inner);
+            } else self.put(&.{0}),
+            .error_union => if (value) |ok| {
+                self.put(&.{1});
+                self.write(ok);
+            } else |err| {
+                self.put(&.{0});
+                self.name(@errorName(err));
+            },
+            .error_set => self.name(@errorName(value)),
+            .@"union" => {
+                const tag_name = @tagName(std.meta.activeTag(value));
+                self.name(tag_name);
+                switch (value) {
+                    inline else => |payload| {
+                        if (@typeInfo(@TypeOf(payload)) == .int and std.mem.eql(u8, tag_name, "forward")) return self.writeForward(payload);
+                        self.write(payload);
+                    },
+                }
+            },
+            .@"struct" => {
+                if (comptime isBounded(T)) {
+                    if (comptime isSessionText(T)) self.sessionText(value.slice()) else self.text(value.slice());
+                    return;
+                }
+                // A struct's `count` names how many entries of its array are set; the rest is unset memory (Recovery.calls).
+                const counted = comptime countedArray(T);
+                const commit_counter = comptime isCommitCounter(T);
+                inline for (@typeInfo(T).@"struct".field_names) |field_name| {
+                    const field_value = @field(value, field_name);
+                    if (comptime commit_counter and std.mem.eql(u8, field_name, "generation")) continue;
+                    // A per-run or per-engine value, kept as whether it is set: a Store's selector (its location, masked as
+                    // logicalDigest masks the store_selector row), a session affinity (a hash of that selector and the
+                    // session reference), and an action's sender handle (random, as logicalDigest masks action_value.handle).
+                    if (comptime maskedField(T, field_name)) {
+                        self.put(&.{@intFromBool(field_value.len != 0)});
+                        continue;
+                    }
+                    if (comptime std.mem.eql(u8, field_name, "forward_id")) {
+                        self.writeForward(field_value);
+                    } else if (comptime isClockField(field_name)) {
+                        self.put(&.{@intFromBool(clockSet(field_value))});
+                    } else if (comptime counted != null and std.mem.eql(u8, field_name, counted.?)) {
+                        self.write(field_value[0..@as(usize, @intCast(value.count))]);
+                    } else {
+                        self.write(field_value);
+                    }
+                }
+            },
+            .array => |info| {
+                if (info.child != u8) {
+                    for (value) |item| self.write(item);
+                } else if (T == change_ring.Id) self.sessionText(&value) else self.text(&value);
+            },
+            .pointer => |info| switch (info.size) {
+                // A pointer to the Store or to a request view is the run's handle, not a reply's content (a view holds allocators).
+                .one => if (info.child == store_core.Store) self.name("store") else if (info.child == historical_domain.RequestPage) self.name("view") else self.write(value.*),
+                .slice => if (info.child == u8) self.text(value) else {
+                    self.length(value.len);
+                    for (value) |item| self.write(item);
+                },
+                else => @compileError("reply digest cannot keep " ++ @typeName(T)),
+            },
+            else => @compileError("reply digest cannot keep " ++ @typeName(T)),
+        }
+    }
+
+    fn maskedField(comptime T: type, comptime field_name: []const u8) bool {
+        if (T == historical_domain.HistoricalSettings) return std.mem.eql(u8, field_name, "store") or std.mem.eql(u8, field_name, "session_affinity");
+        if (T == action_domain.ActionExecutionInput) return std.mem.eql(u8, field_name, "sender_handle");
+        return false;
+    }
+
+    /// The commit counter a token or a retry read carries: each engine's count of changed rows differs (#1940).
+    fn isCommitCounter(comptime T: type) bool {
+        return T == change_ring.Token or T == change_ring.SessionToken or T == store_core.Store.RetryDeadlineRead;
+    }
+
+    /// The types a session reference is held in: numbered by first appearance, not by its length.
+    fn isSessionText(comptime T: type) bool {
+        return T == Bounded(session_id.bytes) or T == Bounded(session_id.max_reference_bytes);
+    }
+
+    /// The array a struct's `count` sizes, when it has one: the first array field besides `count`.
+    fn countedArray(comptime T: type) ?[]const u8 {
+        if (!@hasField(T, "count")) return null;
+        for (@typeInfo(T).@"struct".field_names) |field_name| {
+            if (std.mem.eql(u8, field_name, "count")) continue;
+            if (@typeInfo(@FieldType(T, field_name)) == .array) return field_name;
+        }
+        return null;
+    }
+
+    fn isClockField(comptime field_name: []const u8) bool {
+        @setEvalBranchQuota(10_000);
+        for (clock_columns) |clock| if (std.mem.eql(u8, field_name, clock)) return true;
+        return std.mem.endsWith(u8, field_name, "_at") or std.mem.endsWith(u8, field_name, "_at_ms") or
+            std.mem.eql(u8, field_name, "since") or std.mem.eql(u8, field_name, "now_ms") or std.mem.eql(u8, field_name, "at");
+    }
+
+    fn clockSet(value: anytype) bool {
+        return switch (@typeInfo(@TypeOf(value))) {
+            .optional => value != null,
+            .int => value != 0,
+            else => @compileError("reply digest cannot mask a clock " ++ @typeName(@TypeOf(value))),
+        };
+    }
+
+    /// A session reference's text: a six-byte value is numbered by the order it first appears; any other length is kept.
+    fn sessionText(self: *ReplyDigest, bytes: []const u8) void {
+        self.length(bytes.len);
+        if (bytes.len != session_id.bytes) return self.put(bytes);
+        const gop = self.six.getOrPut(self.gpa, bytes[0..session_id.bytes].*) catch |err| @panic(@errorName(err));
+        if (!gop.found_existing) gop.value_ptr.* = self.six.count() - 1;
+        var number: [8]u8 = undefined;
+        std.mem.writeInt(u64, &number, gop.value_ptr.*, .little);
+        self.put(&number);
+    }
+
+    fn text(self: *ReplyDigest, bytes: []const u8) void {
+        self.length(bytes.len);
+        self.put(bytes);
+    }
+
+    /// A tag or an error name, kept as written (it is not a session reference, whatever its length).
+    fn name(self: *ReplyDigest, bytes: []const u8) void {
+        self.text(bytes);
+    }
+
+    fn length(self: *ReplyDigest, count: usize) void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, count, .little);
+        self.put(&bytes);
+    }
+
+    fn put(self: *ReplyDigest, bytes: []const u8) void {
+        self.stream.appendSlice(self.gpa, bytes) catch |err| @panic(@errorName(err));
+        self.unforwarded.appendSlice(self.gpa, bytes) catch |err| @panic(@errorName(err));
+    }
+
+    /// A forward's identity: kept in `stream` only, so `finish(storage, true)` leaves it out.
+    fn writeForward(self: *ReplyDigest, value: anytype) void {
+        var bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &bytes, @bitCast(@as(i128, value)), .little);
+        self.stream.appendSlice(self.gpa, &bytes) catch |err| @panic(@errorName(err));
+    }
+
+    /// The digest of every reply kept, canonicalised against the run's rows and its Store instance. `mask_forward` leaves
+    /// out each forward's identity: the rerun leg's comparison.
+    pub fn finish(self: *const ReplyDigest, storage: *Store, mask_forward: bool) ![32]u8 {
+        var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var ordinals = try sessionOrdinals(storage, arena);
+        var payloads = try contentPayloads(storage, arena);
+        var content_digests = try contentDigests(storage, arena, &ordinals, &payloads);
+        const canon: Canon = .{ .gpa = self.gpa, .sessions = &ordinals, .digests = &content_digests, .instance = &storage.instance };
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        try canon.apply(if (mask_forward) self.unforwarded.items else self.stream.items, &out);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(out.items, &digest, .{});
+        return digest;
+    }
+
+    const Canon = struct {
+        gpa: std.mem.Allocator,
+        sessions: *const Ordinals,
+        digests: *const Digests,
+        instance: *const [16]u8,
+
+        fn apply(self: Canon, bytes: []const u8, out: *std.ArrayList(u8)) !void {
+            const instance_hex = std.fmt.bytesToHex(self.instance.*, .lower);
+            var i: usize = 0;
+            while (i < bytes.len) {
+                if (i + 16 <= bytes.len and std.mem.eql(u8, bytes[i..][0..16], self.instance)) {
+                    try out.appendSlice(self.gpa, "instance");
+                    i += 16;
+                    continue;
+                }
+                if (i + 32 <= bytes.len and std.mem.eql(u8, bytes[i..][0..32], &instance_hex)) {
+                    try out.appendSlice(self.gpa, "instance");
+                    i += 32;
+                    // A text token's commit counter follows the instance as ".N" (the read version).
+                    if (i < bytes.len and bytes[i] == '.') {
+                        i += 1;
+                        while (i < bytes.len and std.ascii.isDigit(bytes[i])) i += 1;
+                    }
+                    continue;
+                }
+                if (i + 32 <= bytes.len) if (self.digests.get(bytes[i..][0..32].*)) |canonical| {
+                    try out.appendSlice(self.gpa, "content");
+                    try out.appendSlice(self.gpa, &canonical);
+                    i += 32;
+                    continue;
+                };
+                // A reading of the clock in a text reply: a Unix second (ten digits from 1), as the rows mask a time.
+                if (std.ascii.isDigit(bytes[i]) and (i == 0 or !std.ascii.isDigit(bytes[i - 1]))) {
+                    var end = i;
+                    while (end < bytes.len and std.ascii.isDigit(bytes[end])) end += 1;
+                    if (end - i == 10 and bytes[i] == '1') {
+                        try out.appendSlice(self.gpa, "clock");
+                        i = end;
+                        continue;
+                    }
+                }
+                if (i + 6 <= bytes.len) if (self.sessions.get(bytes[i..][0..6].*)) |ordinal| {
+                    var number: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &number, ordinal, .little);
+                    try out.appendSlice(self.gpa, "session");
+                    try out.appendSlice(self.gpa, &number);
+                    i += 6;
+                    continue;
+                };
+                try out.append(self.gpa, bytes[i]);
+                i += 1;
+            }
+        }
+    };
+};
 
 const Ordinals = std.AutoHashMap([6]u8, u64);
 
