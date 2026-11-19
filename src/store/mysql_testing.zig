@@ -256,6 +256,55 @@ pub fn rawExec(storage: *Store, sql: []const u8) !void {
     try run(sql);
 }
 
+/// Test-only: every row of `table` as SELECT * returns it, field bytes (null for SQL NULL), in the server's order.
+pub fn tableRows(storage: *Store, arena: std.mem.Allocator, table: []const u8) !testing.TableRows {
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    const text = try std.fmt.allocPrint(arena, "SELECT * FROM `{s}`", .{table});
+    try root.query(text);
+    var names: std.ArrayList([]const u8) = .empty;
+    var table_rows: std.ArrayList([]const ?[]const u8) = .empty;
+    var count: usize = 0;
+    while (!root.isReady()) switch (try root.next()) {
+        .columns => |n| {
+            count = n;
+            for (0..n) |_| switch (try root.next()) {
+                .column => |column| try names.append(arena, try arena.dupe(u8, column.name)),
+                else => return error.ProtocolViolation,
+            };
+        },
+        .row => {
+            const fields = try arena.alloc(?[]const u8, count);
+            for (fields) |*field| {
+                const len = switch (try root.next()) {
+                    .value => |value| value,
+                    else => return error.ProtocolViolation,
+                };
+                field.* = if (len) |n| try readField(arena, n) else null;
+            }
+            try table_rows.append(arena, fields);
+        },
+        .err => return error.QueryFailed,
+        else => {},
+    };
+    return .{ .names = try names.toOwnedSlice(arena), .rows = try table_rows.toOwnedSlice(arena) };
+}
+
+fn readField(arena: std.mem.Allocator, len: u32) ![]const u8 {
+    const bytes = try arena.alloc(u8, len);
+    var filled: usize = 0;
+    while (filled < len) switch (try root.next()) {
+        .bytes => |chunk| {
+            if (chunk.len > len - filled) return error.ProtocolViolation;
+            @memcpy(bytes[filled..][0..chunk.len], chunk);
+            filled += chunk.len;
+        },
+        else => return error.ProtocolViolation,
+    };
+    return bytes;
+}
+
 pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);

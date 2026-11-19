@@ -1283,6 +1283,8 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
 
 pub const RoundMeter = struct {
     storage: *Store,
+    /// Set on an unrepeated leg, where no counter moves back: a window that does is a failure, not a wrapped count.
+    checked: bool = false,
     rounds_before: u16 = 0,
     content_before: u16 = 0,
     shape_before: QueryShape = .{},
@@ -1315,9 +1317,17 @@ pub const RoundMeter = struct {
         pub fn since(after: QueryShape, before: QueryShape) QueryShape {
             var delta: QueryShape = undefined;
             inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
-                // A run-again leg can move a counter back, so the difference wraps; only the unrepeated legs assert it.
+                // A run-again leg reconnects, which restarts the connection's query count, so a window there can
+                // run backwards; the wrapped difference is only read on an unrepeated leg (RoundMeter.checked).
                 @field(delta, name) = @field(after, name) -% @field(before, name);
             return delta;
+        }
+
+        /// Asserts that no count went back over a window: on an unrepeated leg nothing resets them, so a wrapped
+        /// difference there would hide a count that was never taken.
+        pub fn assertForward(after: QueryShape, before: QueryShape) void {
+            inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
+                std.debug.assert(@field(after, name) >= @field(before, name));
         }
 
         pub fn expected(shape: QueryShape) u64 {
@@ -1333,10 +1343,16 @@ pub const RoundMeter = struct {
 
     pub fn stop(meter: *RoundMeter, point: EntryPoint) void {
         std.debug.assert(meter.measured.get(point) == null);
+        const shape = QueryShape.snapshot(meter.storage);
+        if (meter.checked) {
+            std.debug.assert(meter.storage.testing_content_work.rounds >= meter.rounds_before);
+            std.debug.assert(meter.storage.testing_content_work.content_rounds >= meter.content_before);
+            shape.assertForward(meter.shape_before);
+        }
         meter.measured.set(point, .{
             .rounds = meter.storage.testing_content_work.rounds -% meter.rounds_before,
             .content_rounds = meter.storage.testing_content_work.content_rounds -% meter.content_before,
-            .shape = QueryShape.snapshot(meter.storage).since(meter.shape_before),
+            .shape = shape.since(meter.shape_before),
         });
     }
 };

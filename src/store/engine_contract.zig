@@ -1553,6 +1553,9 @@ fn sh109_store_mysql_touch_oracle_observes_and_clears() !void {
     try std.testing.expectEqual(@as(u64, 0), try mt.queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }
 
+// Test-only: the SQLite leg's logical-row digest, which each MySQL leg of the journey must reproduce.
+var sh110_sqlite_digest: ?[32]u8 = null;
+
 // Moved from src/store/tests/round_budget.zig: "each Store entry point takes its round budget on its common path"
 fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void {
     var tmp = std.testing.tmpDir(.{});
@@ -1560,7 +1563,7 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
     var storage: Store = undefined;
     try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    var meter: RoundMeter = .{ .storage = &storage };
+    var meter: RoundMeter = .{ .storage = &storage, .checked = !case.rerun };
     meter.start();
     _ = try storage.publishRetryCrossings(0, 1);
     meter.stop(.publishRetryCrossings);
@@ -1613,6 +1616,16 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
         std.debug.print("stop budget setup failed: {s}\n", .{@errorName(err)});
         return err;
     };
+    // The SQLite leg runs first in forEachEngine, so each MySQL leg compares with the leg of the same test run.
+    const logical = try store_testing.logicalDigest(&storage);
+    if (case.engine == .sqlite) {
+        sh110_sqlite_digest = logical;
+    } else if (sh110_sqlite_digest) |expected| {
+        if (!std.mem.eql(u8, &expected, &logical)) {
+            std.debug.print("logical rows differ from the SQLite leg (rerun: {any})\n", .{case.rerun});
+            return error.LogicalRowsChanged;
+        }
+    }
     var failed = false;
     for (std.enums.values(EntryPoint)) |point| {
         const measured = meter.measured.get(point) orelse {
