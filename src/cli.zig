@@ -21,6 +21,7 @@ fn recordExit(status: caller_exit.Status) void {
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const cli_invocation = @import("cli_invocation.zig");
+const store_target = @import("store_target.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -982,21 +983,38 @@ fn homeRequired(comptime _: []const u8) error{HomeUnavailable} {
 const plain_caller = "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...";
 
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
-    if (explicit) |path| return rememberStore(init, path, false);
-    if (init.environ_map.get("RUI_STORE")) |path| {
-        const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
-        const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
-        if (path.len == 0 or handle.len == 0 or !protocol.validSessionId(address)) return error.InvalidRuiAddress;
-        return rememberStore(init, path, true);
-    }
-    if (init.environ_map.get("RUI_ADDRESS") != null or init.environ_map.get("RUI_SENDER_HANDLE") != null) return error.InvalidRuiAddress;
-    const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
-    const defaults = preferences.load(home) catch |err| return preferenceFailure(err);
-    if (defaults.store.len != 0) {
-        @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
-        return rememberStore(init, buffer[0..defaults.store.len], true);
-    }
-    return rememberStore(init, try preferences.defaultStore(home, buffer), false);
+    const home = init.environ_map.get("HOME");
+    var saved: ?store_target.SavedStore = null;
+    while (true) switch (store_target.next(.{
+        .explicit = explicit,
+        .env_store = init.environ_map.get("RUI_STORE"),
+        .env_address = init.environ_map.get("RUI_ADDRESS"),
+        .env_handle = init.environ_map.get("RUI_SENDER_HANDLE"),
+        .home = home,
+        .saved = saved,
+    })) {
+        .load_saved => saved = savedStore(home.?, buffer),
+        .selected => |selected| {
+            const path = switch (selected.path) {
+                .given => |given| given,
+                .home_default => try preferences.defaultStore(home.?, buffer),
+            };
+            return rememberStore(init, path, selected.must_exist);
+        },
+        .refused => |refused| return switch (refused) {
+            .invalid_address => error.InvalidRuiAddress,
+            .home_required => homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store"),
+            .preferences => |err| preferenceFailure(err),
+        },
+    };
+}
+
+/// The saved default's Store, copied into `buffer` because the loaded defaults are local.
+fn savedStore(home: []const u8, buffer: []u8) store_target.SavedStore {
+    const defaults = preferences.load(home) catch |err| return .{ .failed = err };
+    if (defaults.store.len == 0) return .none;
+    @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
+    return .{ .path = buffer[0..defaults.store.len] };
 }
 
 fn rememberStore(init: std.process.Init, path: []const u8, require_existing: bool) ![]const u8 {
