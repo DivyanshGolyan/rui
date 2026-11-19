@@ -558,7 +558,7 @@ fn sh5_store_mysql_live_reused_savepoint_replaces_its() !void {
     try std.testing.expect(!storage.isFenced());
 }
 
-// Moved from src/store/pin_tests.zig: "Session pin concurrent commands derive distinct ranks from serialized pt.command sequence"
+// Moved from src/store/pin_tests.zig: "Session pin concurrent commands derive distinct ranks from serialized command sequence"
 fn sh5_session_pin_concurrent_commands_derive_distinct_ranks(case: *store_testing.Case) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2187,7 +2187,7 @@ fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) 
     try std.testing.expectEqual(@as(u16, 0), rounds.taken().rounds);
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a mt.connection lost around COMMIT reconnects and reports what landed"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a connection lost around COMMIT reconnects and reports what landed"
 fn sh2_store_mysql_live_a_connection_lost_around() !void {
     for ([_]Drop{ .before_commit, .after_commit }) |drop| {
         var tmp = std.testing.tmpDir(.{});
@@ -2249,7 +2249,7 @@ fn sh2_store_mysql_live_a_reconnect_onto_a() !void {
     try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.testing_shape.reconnects);
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a reconnect never ends a session that does not hold the mt.Store's lock"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a reconnect never ends a session that does not hold the Store's lock"
 fn sh2_store_mysql_live_a_reconnect_never_ends() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2299,7 +2299,7 @@ fn sh2_store_mysql_live_a_commit_and_the() !void {
     try std.testing.expect(!storage.isFenced());
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a mt.connection lost after COMMIT's OK keeps the commit and never runs it again"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a connection lost after COMMIT's OK keeps the commit and never runs it again"
 fn sh2_store_mysql_live_a_connection_lost_after() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2376,7 +2376,7 @@ fn sh2_store_mysql_live_a_commit_lost_with() !void {
     }
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a write whose mt.connection was lost with nothing saved runs again, unseen"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a write whose connection was lost with nothing saved runs again, unseen"
 fn sh2_store_mysql_live_a_write_whose_connection() !void {
     for ([_]Drop{ .next_pass, .before_commit }) |drop| {
         var tmp = std.testing.tmpDir(.{});
@@ -2396,7 +2396,7 @@ fn sh2_store_mysql_live_a_write_whose_connection() !void {
     }
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a batch that loses its mt.connection mid-pass runs every write again"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a batch that loses its connection mid-pass runs every write again"
 fn sh2_store_mysql_live_a_batch_that_loses() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2427,7 +2427,7 @@ fn sh2_store_mysql_live_a_batch_that_loses() !void {
     try std.testing.expectEqual(@as(u64, 2), try mt.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id IN (9000300,9000301)", .{}));
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live a write that loses its mt.connection twice fences"
+// Moved from src/store/mysql_testing.zig: "store.mysql live a write that loses its connection twice fences"
 fn sh2_store_mysql_live_a_write_that_loses() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2446,7 +2446,7 @@ fn sh2_store_mysql_live_a_write_that_loses() !void {
     try std.testing.expect(storage.isFenced());
 }
 
-// Moved from src/store/mysql_testing.zig: "store.mysql live GET_LOCK excludes a second mt.Store on the same mt.database"
+// Moved from src/store/mysql_testing.zig: "store.mysql live GET_LOCK excludes a second Store on the same database"
 fn sh27_store_mysql_live_get_lock_excludes_a() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

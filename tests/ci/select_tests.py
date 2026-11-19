@@ -140,7 +140,7 @@ FIXTURES = {
                                "src/cli_invocation.zig", "src/cli_args.zig", "src/slash_commands.zig")),
 }
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
-TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
+TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig", "src/store/engine_contract.zig",
              "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig")
 LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration"}
 
