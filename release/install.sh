@@ -63,9 +63,23 @@ trap 'exit 143' TERM
 
 archive="rui-$version-$platform.tar.gz"
 printf 'Downloading Rui %s for %s ...\n' "$version" "$platform"
-curl --fail --location --show-error --silent --connect-timeout 10 --max-time 300 \
-    --retry 2 --retry-delay 1 \
-    "https://github.com/$repository/releases/download/v$version/$archive" -o "$release/$archive"
+url="https://github.com/$repository/releases/download/v$version/$archive"
+if elapsed=$(curl --disable --fail --location --show-error --silent --connect-timeout @CONNECT_TIMEOUT_SECONDS@ --max-time @DOWNLOAD_TIMEOUT_SECONDS@ --retry 0 \
+    --write-out '%{time_total}' "$url" -o "$release/$archive"); then
+    :
+else
+    status=$?
+    case $status in @RETRY_EXIT_CODES@) ;; *) exit "$status" ;; esac
+    seconds=${elapsed%%.*}
+    case $seconds in ''|*[!0-9]*) exit "$status" ;; esac
+    while [ "${seconds#0}" != "$seconds" ]; do seconds=${seconds#0}; done
+    seconds=${seconds:-0}
+    if [ "${#seconds}" -gt 5 ] || [ "$seconds" -ge @DOWNLOAD_TIMEOUT_SECONDS@ ]; then exit "$status"; fi
+    remaining=$((@DOWNLOAD_TIMEOUT_SECONDS@ - seconds - 1))
+    if [ "$remaining" -lt @CONNECT_TIMEOUT_SECONDS@ ]; then exit "$status"; fi
+    curl --disable --fail --location --show-error --silent --connect-timeout @CONNECT_TIMEOUT_SECONDS@ --max-time "$remaining" --retry 0 \
+        --ipv4 "$url" -o "$release/$archive"
+fi
 actual=$(digest "$release/$archive")
 if [ "$actual" != "$expected" ]; then
     printf 'Downloaded archive digest %s does not match %s. No installation changed.\n' "$actual" "$expected" >&2
