@@ -146,8 +146,8 @@ test "Session settings Current report and typed Settings round trip every settin
     try std.testing.expectEqualStrings("low", @tagName(current.reasoning_effort.?.value));
     try std.testing.expectEqualStrings("low", @tagName(current.reasoning_effort_override.?.value));
     try std.testing.expectEqualStrings("Every setting", current.label.?.slice());
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), current.instructions.sha256.slice());
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), current.output_schema.?.sha256.slice());
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), &std.fmt.bytesToHex(current.instructions.value.text.digest, .lower));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), &std.fmt.bytesToHex(current.output_schema.?.value.text.digest, .lower));
 }
 
 const PromotedApproval = struct {
@@ -263,8 +263,7 @@ const PromotedAction = struct {
                         try std.testing.expectEqual(self_.action, row.action.value);
                         try std.testing.expectEqualStrings(final.code.slice(), row.code.slice());
                         try std.testing.expectEqual(final.position, row.acceptance_position.value);
-                        try std.testing.expectEqual(final.content.length, row.result.bytes.value);
-                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(final.content.digest, .lower), row.result.sha256.slice());
+                        try std.testing.expectEqualDeep(final.content, row.result.value);
                         try std.testing.expect(row.presentation.value.publication_position == null);
                         self_.resolved += 1;
                     },
@@ -287,12 +286,12 @@ const PromotedAction = struct {
         const message = page.facts.items[0].value.received;
         try std.testing.expectEqual(@as(?u64, self.action), message.source_action);
         try std.testing.expect(message.sender == null);
-        try std.testing.expectEqual(@as(u64, text.len), message.content.length);
-        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.digest);
+        try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
 
         const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
         defer std.testing.allocator.destroy(produced);
-        try storage.publicConversationPage(&.{ .session = self.session }, produced);
+        try storage.publicConversationPage(&.{ .session = self.session }, produced, std.testing.allocator);
         var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rendered.deinit();
         try @import("host_reply.zig").renderConversationPage(.{ .writer = &rendered.writer }, produced);
@@ -301,14 +300,14 @@ const PromotedAction = struct {
         for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
             try std.testing.expectEqual(self.action, source);
             try std.testing.expect(item.sender == null);
-            try std.testing.expectEqual(@as(u64, text.len), item.content.bytes);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+            try std.testing.expectEqual(@as(u64, text.len), item.content.text.length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.text.digest);
             sources += 1;
         };
         try std.testing.expectEqual(@as(usize, 1), sources);
     }
 
-    fn receipt(self: PromotedAction, storage: *store.Store) !@import("activity_facts.zig").Item.Content {
+    fn receipt(self: PromotedAction, storage: *store.Store) !@import("content_value.zig").Value {
         var request: protocol.ActivityPage = .{ .kinds = .initOne(.tool_result) };
         try request.session.set(self.session.slice());
         const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
@@ -332,6 +331,46 @@ fn readNativeActivity(storage: *store.Store, request: *const protocol.ActivityPa
     defer rendered.deinit();
     try @import("host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, produced);
     decoded.* = try protocol_reply.ActivityPage.parse(rendered.written(), .{ .end = request.end, .position = request.position, .ordinal = request.ordinal, .direction = request.direction, .kinds = request.kinds, .limit = request.limit });
+}
+
+test "client Message decoder retains automatic denial wait after a new Message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store.Store = undefined;
+    try store.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var configure = try store.testingCompleteConfiguration("decline-config", "", workspace, "model-a");
+    try configure.configuration.permission_mode.value.set("ask");
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try store.testingSubmitMessage(&storage, &tmp, "decline-first-file", "decline-first", session.slice(), "Run the tool.");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"description\":\"Held tool\",\"cmd\":\"true\"}";
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+    defer std.testing.allocator.free(encoded);
+    try store.settleCallsForTesting(&storage, &tmp, model, "decline-calls", &.{.{
+        .item_id = "call-item",
+        .name = "bash",
+        .encoded_call_id = "call-id",
+        .decoded_call_id = "call-id",
+        .encoded_arguments = encoded[1 .. encoded.len - 1],
+        .decoded_arguments = arguments,
+    }});
+    try store.testingSubmitMessage(&storage, &tmp, "decline-next-file", "decline-next", session.slice(), "Use new instructions.");
+    for ([_][]const u8{ "decline-first", "decline-next" }) |key| {
+        const observation = try store.testing.observeCommandForTesting(&storage, key);
+        try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observation.requestState().?);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderFullCommandObservation(.{ .writer = &rendered.writer }, key, &observation, null);
+        const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = rendered.written() }, key);
+        try std.testing.expectEqual(.waiting_for_permission, decoded.state.?);
+        try std.testing.expectEqual(observation.kind.message.?.work.?.first_action, decoded.work.?.first_action);
+        try std.testing.expect(decoded.work.?.first_action == null and decoded.work.?.actions.decide == null);
+        try std.testing.expect(decoded.work.?.actions.stop);
+        try std.testing.expectEqual(.needs_you, decoded.work.?.group);
+    }
 }
 
 test "client decoders retain promoted old Turn approval before and after continuation" {
@@ -514,7 +553,7 @@ test "derived work facts are served across all work replies" {
             try observation_buffer.render(@import("host_reply.zig").renderFullCommandObservation, .{ "facts-message", &observed, @as(?[]const u8, null) });
             const observation = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, observation_buffer.bytes[0..observation_buffer.len], .{});
             defer observation.deinit();
-            inline for (.{ "attention", "group", "actions" }) |field| {
+            inline for (.{ "state", "first_action", "attention", "group", "actions" }) |field| {
                 try checkField(expected, list_work, field);
                 try checkField(expected, activity.value.object.get("work").?, field);
                 try checkField(expected, observation.value.object.get("observation").?.object.get("work").?, field);

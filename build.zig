@@ -21,6 +21,11 @@ pub fn build(b: *std.Build) void {
         @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
+    // Host tools (generators, translate-c) run on the build host. CI builds them for the same baseline CPU as
+    // the products so their cache snapshots are reusable across runners; local builds keep the host's native
+    // CPU. The check above makes CI's target the native platform with the baseline CPU. Dependencies share
+    // graph.host, so this must come before any b.dependency call.
+    if (ci_mode) b.graph.host = target;
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
         .policy = "baseline",
         .arch = @tagName(target.result.cpu.arch),
@@ -44,7 +49,7 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    const units = unit_module.add(b, ci, target, pinned_transport, test_filters);
+    const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
@@ -56,6 +61,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     openapi_emitter.root_module.addImport("url", product.addUrl(b));
+    _ = product.useOs(b, openapi_emitter.root_module);
     const emit_openapi = b.addRunArtifact(openapi_emitter);
     const update_openapi = b.addUpdateSourceFiles();
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
@@ -80,7 +86,7 @@ pub fn build(b: *std.Build) void {
     const pg_root = unit_module.root(.pg);
     const h2_test_step = b.step(h2_root.target, "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step(pg_root.target, "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| {
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
         const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
         h2.root_source_file = b.path(h2_root.source);
         const h2_tests = b.addTest(.{ .name = h2_root.name, .root_module = h2, .filters = test_filters });
@@ -110,8 +116,23 @@ pub fn build(b: *std.Build) void {
     product.configureTerminalEditor(b, terminal_notice);
 
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
-    const release_safe = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
+    const release_safe_compile = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
+    // Promotion tests the release archive's own executable instead of compiling a second ReleaseSafe rui.
+    const rui_under_test = b.option([]const u8, "rui-under-test", "Run ReleaseSafe integrations against this prebuilt rui instead of compiling one");
+    const release_safe: std.Build.LazyPath = if (rui_under_test) |path| .{ .cwd_relative = path } else ci.path(release_safe_compile);
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
+    const pause_rui = product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci);
+    const pause_fixture = b.addExecutable(.{
+        .name = "pause-socket-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pause_socket_fixture.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        }),
+    });
+    product.configurePauses(b, pause_fixture, true);
+    _ = product.useOs(b, pause_fixture.root_module);
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
@@ -120,7 +141,7 @@ pub fn build(b: *std.Build) void {
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
-    terminal_restoration.addFileArg(ci.path(release_safe));
+    terminal_restoration.addFileArg(release_safe);
     terminal_restoration.addPassthruArgs();
     const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
     terminal_restoration_step.dependOn(&terminal_restoration.step);
@@ -141,15 +162,33 @@ pub fn build(b: *std.Build) void {
     b.step(
         "direct-pty",
         "Run the synthetic direct-PTY key matrix (nonblocking)",
-    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/matrix.py", release_safe).step);
     b.step(
         "direct-pty-controls",
         "Run direct-PTY driver and disposal controls (nonblocking)",
-    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/qualification/direct-pty/controls.py", release_safe).step);
     b.step(
         "input-equivalence",
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
-    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
+    ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", release_safe).step);
+
+    const public_parts_seed = b.addTest(.{
+        .name = "public-parts-seed",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = target, .optimize = .ReleaseSafe }),
+        .filters = &.{"seed CLI mixed parts fixture"},
+    });
+    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport);
+    const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
+    public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
+    public_parts_integration.addFileArg(release_safe);
+    public_parts_integration.addFileArg(ci.path(public_parts_seed));
+    b.step("public-parts-integration", "List and read Store-seeded Message and Action parts through the CLI").dependOn(&public_parts_integration.step);
+
+    const cli_image_integration = b.addSystemCommand(&.{ "python3", "-B" });
+    cli_image_integration.addFileArg(b.path("tests/integration/cli_image_integration.py"));
+    cli_image_integration.addFileArg(release_safe);
+    b.step("cli-image-integration", "Run ordered CLI image capture through provider fixtures").dependOn(&cli_image_integration.step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -171,7 +210,7 @@ pub fn build(b: *std.Build) void {
     session_list_client.root_module.addImport("rui_client", read_client);
     const session_list_integration = b.addSystemCommand(&.{"python3"});
     session_list_integration.addFileArg(b.path("tests/integration/session_list_integration.py"));
-    session_list_integration.addFileArg(ci.path(release_safe));
+    session_list_integration.addFileArg(release_safe);
     session_list_integration.addFileArg(ci.path(session_list_client));
     b.step("session-list-integration", "Run native Session listing and idle Host resource checks").dependOn(&session_list_integration.step);
     const activity_client = b.addExecutable(.{
@@ -187,12 +226,12 @@ pub fn build(b: *std.Build) void {
     activity_client.root_module.addImport("rui_client", read_client);
     const activity_integration = b.addSystemCommand(&.{"python3"});
     activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
-    activity_integration.addFileArg(ci.path(release_safe));
+    activity_integration.addFileArg(release_safe);
     activity_integration.addFileArg(ci.path(activity_client));
     b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
-    integration.addFileArg(ci.path(release_safe));
+    integration.addFileArg(release_safe);
     const integration_step = b.step(
         "admission-integration",
         "Run fresh-process configuration/message admission and recovery cases",
@@ -201,10 +240,10 @@ pub fn build(b: *std.Build) void {
 
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
-    h2_integration.addFileArg(ci.path(release_safe));
+    h2_integration.addFileArg(ci.path(pause_rui));
     const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
     h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
-    h2_oracle_tests.addFileArg(ci.path(release_safe));
+    h2_oracle_tests.addFileArg(release_safe);
     h2_integration.step.dependOn(&h2_oracle_tests.step);
     const h2_integration_step = b.step(
         "transport-h2-integration",
@@ -277,7 +316,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
+        mysql_connection.addImport("tls_client", tls_client);
+        mysql_connection.addImport("os", tls_client.import_table.get("os").?);
+    }
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -316,13 +358,13 @@ pub fn build(b: *std.Build) void {
     host_status_integration.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     host_status_integration.addArg("python3");
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
-    host_status_integration.addFileArg(ci.path(release_safe));
+    host_status_integration.addFileArg(release_safe);
     host_status_integration.addFileArg(ci.path(host_status_actor));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
     const upgrade_release = product.addIntegrationRui(b, target, "rui-upgrade-release-fixture", pinned_transport, pr_ci, .{
-        .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
+        .version = b.fmt("0.{d}.10000", .{product.schemaVersion(b)}),
         .revision = product.buildIdentity(b).revision,
     });
     // Keep PR archive work representative of stripped Linux release payloads.
@@ -337,13 +379,13 @@ pub fn build(b: *std.Build) void {
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
     upgrade_step.dependOn(&upgrade_integration.step);
 
-    const settings_integration = b.addSystemCommand(&.{"python3"});
+    const settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     settings_integration.addFileArg(b.path("tests/integration/settings_integration.py"));
-    settings_integration.addFileArg(ci.path(release_safe));
+    settings_integration.addFileArg(release_safe);
     settings_integration.addArg("--require-mcp-sdk");
-    const mysql_settings_integration = b.addSystemCommand(&.{"python3"});
+    const mysql_settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     mysql_settings_integration.addFileArg(b.path("tests/integration/settings_mysql_integration.py"));
-    mysql_settings_integration.addFileArg(ci.path(release_safe));
+    mysql_settings_integration.addFileArg(release_safe);
     mysql_settings_integration.addFileArg(ci.path(mysql_launch_admin));
     const settings_step = b.step("settings-integration", "Run SQLite and MySQL settings documents: readiness, safe credentials, ownership and stdin liveness");
     settings_step.dependOn(&settings_integration.step);
@@ -352,7 +394,7 @@ pub fn build(b: *std.Build) void {
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
     ts_client.addArgs(&.{ "exec-mysql", "env" });
-    ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
+    ts_client.addPrefixedFileArg("RUI_BINARY=", release_safe);
     ts_client.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });
     ts_client.setCwd(b.path("clients/ts"));
@@ -360,7 +402,7 @@ pub fn build(b: *std.Build) void {
 
     const host_stop_integration = b.addSystemCommand(&.{"python3"});
     host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
-    host_stop_integration.addFileArg(ci.path(release_safe));
+    host_stop_integration.addFileArg(ci.path(pause_rui));
     host_stop_integration.addFileArg(ci.path(host_status_actor));
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
@@ -370,7 +412,7 @@ pub fn build(b: *std.Build) void {
     human_cli.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
-    human_cli.addFileArg(ci.path(release_safe));
+    human_cli.addFileArg(release_safe);
     b.step(
         "human-cli-integration",
         "Run public caller recovery, the interactive frontend and exact Bash authorization (includes terminal restoration and canonical failure)",
@@ -378,7 +420,7 @@ pub fn build(b: *std.Build) void {
     const model_picker_integration = b.step("model-picker-integration", "Run the model picker through a plain PTY");
     const model_picker = screen_module.screenCommand(b, screen, &.{"python3"});
     model_picker.addFileArg(b.path("tests/integration/model_picker_integration.py"));
-    model_picker.addFileArg(ci.path(release_safe));
+    model_picker.addFileArg(release_safe);
     model_picker_integration.dependOn(&model_picker.step);
     for ([_][]const u8{
         "tests/integration/model_picker_signin_integration.py",
@@ -386,7 +428,7 @@ pub fn build(b: *std.Build) void {
     }) |path| {
         const run = screen_module.screenCommand(b, screen, &.{"python3"});
         run.addFileArg(b.path(path));
-        run.addFileArg(ci.path(release_safe));
+        run.addFileArg(release_safe);
         model_picker_integration.dependOn(&run.step);
     }
     const host_process_test = b.addSystemCommand(&.{"python3"});
@@ -401,7 +443,7 @@ pub fn build(b: *std.Build) void {
         "Run the documented Debug artifact through configuration/message recovery",
     );
     debug_integration_step.dependOn(&debug_integration.step);
-    fixtures_module.add(b, screen, ci.path(release_safe), ci.path(debug));
+    fixtures_module.add(b, screen, release_safe, ci.path(debug), ci.path(pause_rui), ci.path(pause_fixture));
 
     const check_step = b.step(
         "check",
@@ -420,9 +462,11 @@ pub fn build(b: *std.Build) void {
     const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     fast_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    fast_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_BINARY=", ci.path(pause_rui));
+    fast_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_SOCKET_BINARY=", ci.path(pause_fixture));
     fast_integrations.addArg("sh");
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
-    fast_integrations.addFileArg(ci.path(release_safe));
+    fast_integrations.addFileArg(release_safe);
     fast_integrations.addFileArg(ci.path(debug));
     fast_integrations.addArg("parallel");
     if (unit_module.includes("check", .all, .native_pair)) fast_integrations.addFileArg(ci.path(units.native_binaries[0])) else fast_integrations.addArg("");
@@ -439,6 +483,7 @@ pub fn build(b: *std.Build) void {
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&units.run_renderer_allocation.step);
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
+    fast_integrations.step.dependOn(&units.run_os_tests.step);
     check_step.dependOn(&fast_integrations.step);
     const stack_frames_step = b.step(
         "stack-frames",
@@ -452,6 +497,18 @@ pub fn build(b: *std.Build) void {
         stack_frames_step.dependOn(&stack_frames.step);
     }
     if (!pr_ci) check_step.dependOn(stack_frames_step);
+    const rsql_table_step = b.step(
+        "rsql-table",
+        "Fail when src/store/rsql_table.zig differs from what rsql's comptime path renders (Linux only)",
+    );
+    if (target.result.os.tag == .linux) {
+        const rsql_table = b.addSystemCommand(&.{ "python3", "-B" });
+        rsql_table.addFileArg(b.path("tests/ci/rsql_table.py"));
+        rsql_table.addArgs(&.{ "check", "--zig", b.graph.zig_exe });
+        rsql_table.has_side_effects = true;
+        rsql_table_step.dependOn(&rsql_table.step);
+    }
+    if (!pr_ci) check_step.dependOn(rsql_table_step);
 
     const full_check_step = b.step(
         "check-full",
@@ -460,9 +517,11 @@ pub fn build(b: *std.Build) void {
     const check_part = b.option(unit_module.Part, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     process_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    process_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_BINARY=", ci.path(pause_rui));
+    process_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_SOCKET_BINARY=", ci.path(pause_fixture));
     process_integrations.addArg("sh");
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
-    process_integrations.addFileArg(ci.path(release_safe));
+    process_integrations.addFileArg(release_safe);
     process_integrations.addFileArg(ci.path(debug));
     process_integrations.addFileArg(ci.path(host_status_actor));
     process_integrations.addFileArg(ci.path(session_list_client));
@@ -476,6 +535,7 @@ pub fn build(b: *std.Build) void {
     unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs);
     if (unit_module.includes("check-full", check_part, .native_pair)) {
         native_gate.dependOn(&units.run_renderer_allocation.step);
+        native_gate.dependOn(&units.run_os_tests.step);
     }
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);

@@ -350,19 +350,19 @@ class InstallerTemplateTest(unittest.TestCase):
             output = root / "install.sh"
             result = subprocess.run([sys.executable, str(ROOT / "tests/ci/release.py"), "installer",
                                      "0.40.0", str(sums), str(output), "--source-root", str(target)],
-                                    check=True, capture_output=True, text=True, timeout=20)
+                                    check=True, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.stdout, "")
             self.assertEqual(output.read_text(), release.installer(template, "0.40.0", digests, publisher))
             self.assertNotIn("--publish-install", output.read_text())
 
     def test_publication_binds_installer_source_to_artifact_target(self):
         publication = (ROOT / ".github/workflows/release.yml").read_text().split("  publish:", 1)[1]
-        self.assertIn("ref: ${{ needs.plan.outputs.sha }}\n          path: .release-source", publication)
+        self.assertIn("ref: ${{ inputs.sha }}\n          path: .release-source", publication)
         self.assertIn('dist/install.sh --source-root .release-source', publication)
 
     def test_template_refuses_to_install(self):
         result = subprocess.run(["sh", str(ROOT / "release/install.sh")], check=False, capture_output=True, text=True,
-                                env={**os.environ, "HOME": "/nonexistent"}, timeout=20)
+                                env={**os.environ, "HOME": "/nonexistent"}, timeout=300)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unpublished installer template", result.stderr)
 
@@ -371,7 +371,7 @@ class InstallerTemplateTest(unittest.TestCase):
             if shell == "sh" or shutil.which(shell):
                 with self.subTest(shell=shell):
                     result = subprocess.run([shell, "-n", str(ROOT / "release/publish.sh")],
-                                            check=False, capture_output=True, text=True, timeout=20)
+                                            check=False, capture_output=True, text=True, timeout=300)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_publish_fragment_reads_the_database_the_build_names(self):

@@ -45,7 +45,7 @@ def declarations(request):
 def requests_for(w, session):
     with w.endpoint.lock:
         bodies = [json.loads(body) for body in w.endpoint.requests]
-    return [body for body in bodies if fixture.instructions_session(body["instructions"]) == session]
+    return [body for body in bodies if fixture.instructions_session(fixture.request_system_prompt(body)) == session]
 
 
 def finished(w, session):
@@ -86,10 +86,10 @@ def fresh_callers(world, engine):
             known = references(w)
             with w.overview(columns=columns, keep_launch=True) as screen:
                 if columns < 100:
-                    screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                                and "Type a task" not in frame, "narrow overview ready")
+                    screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                                and "What shall we work on?" not in frame, "narrow overview ready")
                     screen.keys(b"\x1b[H\r")
-                screen.wait(lambda frame: "Type a task" in frame and screen.capture.draft("", 2),
+                screen.wait(lambda frame: "What shall we work on?" in frame and screen.capture.draft("", 2),
                             "fresh chat composer")
                 session, = references(w) - known
                 profile(w, session, allowed, loaded)
@@ -143,7 +143,7 @@ def restrictions_and_resume(world, engine):
                 keyed_frame(master, b"", lambda screen, x, y: "› " in screen)
                 profile(w, session, allowed, loaded, "ask")
                 os.write(master, b"\x03")
-                read_terminal(master, "Detached.")
+                read_terminal(master, "Your chats keep working while you are away.")
                 assert caller.wait(timeout=5) == 0
             resumed = profile(w, session, allowed, loaded, "ask")
             assert resumed["revision"] == revised["revision"], resumed

@@ -17,6 +17,7 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
+const model_admission_domain = @import("model_admission.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const tool_set = @import("tool_set.zig");
@@ -129,6 +130,53 @@ const ListPage = struct {
         return true;
     }
 };
+
+// Deadline changes are read facts, so they share the listing revision owner.
+const retry_crossings = rsql.Read(.{
+    .sql = "SELECT s.session_ref,s.workspace_key FROM model_operation o @index(model_operation_retry_due) " ++
+        "JOIN turn t ON t.operation_id=o.operation_id AND t.outcome_code IS NULL " ++
+        "JOIN session s ON s.session_ref=o.session_ref " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ model_admission_domain.retry_allowance_open_sql ++
+        " AND o.retry_due_at_ms>?1 AND o.retry_due_at_ms<=?2 LIMIT " ++ std.fmt.comptimePrint("{d}", .{change_ring.Touched.max + 1}),
+    .Args = struct { after: u64, through: u64 },
+    .Row = struct { session_ref: SessionText, workspace_key: rsql.Positive },
+    .cardinality = .each,
+});
+
+const next_retry_crossing = rsql.Read(.{
+    .sql = "SELECT o.retry_due_at_ms FROM model_operation o @index(model_operation_retry_due) " ++
+        "JOIN turn t ON t.operation_id=o.operation_id AND t.outcome_code IS NULL " ++
+        "WHERE o.resolution_code IS NULL AND o." ++ model_admission_domain.retry_allowance_open_sql ++
+        " AND o.retry_due_at_ms>?1 " ++
+        "ORDER BY o.retry_due_at_ms LIMIT 1",
+    .Args = struct { after: u64 },
+    .Row = struct { retry_due_at_ms: u64 },
+    .cardinality = .optional,
+});
+
+pub const RetryCrossings = struct {
+    touched: change_ring.Touched = .{},
+    corrupt: bool = false,
+
+    pub fn visit(self: *RetryCrossings, row: *const retry_crossings.Row) bool {
+        const ref = row.session_ref.slice();
+        if (ref.len != change_ring.id_bytes) {
+            self.corrupt = true;
+            return false;
+        }
+        if (self.touched.needsEntry(ref)) self.touched.add(.{ .session = ref[0..change_ring.id_bytes].*, .workspace = row.workspace_key.get() });
+        return !self.touched.everything;
+    }
+};
+
+pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCrossings) !?u64 {
+    var next: next_retry_crossing.Result = null;
+    a.readEach(retry_crossings, .{ .after = @min(from, now), .through = @max(from, now) }, change_ring.Touched.max + 1, crossings);
+    a.read(next_retry_crossing, .{ .after = now }, &next);
+    try store_access.runAs(a, error.SessionReadFailed);
+    if (crossings.corrupt) return error.CorruptStore;
+    return if (next) |row| row.retry_due_at_ms else null;
+}
 
 pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, visitor: anytype) !void {
     const self = a.store;
@@ -492,10 +540,7 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, rollups: []c
             a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
     }
     const ran = runList(a);
-    if (read.failure) |err| {
-        if (read.unsupported_first) |first| try report_domain.verifyFirstMessage(a, first);
-        return err;
-    }
+    if (read.failure) |err| return err;
     try ran;
     if (read.shown != rows.len) return error.CorruptStore;
 }
@@ -509,7 +554,6 @@ fn RowsRead(comptime Visitor: type) type {
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
-        unsupported_first: ?struct { first_admission: ?rsql.Positive, first_form: ?u8, first_length: ?u64, first_digest: ?[32]u8 } = null,
         failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
 
         pub fn visit(read: *@This(), row: *const ListRow) bool {
@@ -517,7 +561,6 @@ fn RowsRead(comptime Visitor: type) type {
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
             var values = rowValues(read.rows, read.rollups, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
-                if (err == error.InputPartsNotSupported) read.unsupported_first = .{ .first_admission = row.first_admission, .first_form = row.first_form, .first_length = row.first_length, .first_digest = row.first_digest };
                 read.failure = err;
                 return false;
             };

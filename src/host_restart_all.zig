@@ -1,6 +1,7 @@
 const std = @import("std");
 const client = @import("client.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
+const activation = @import("host_activation.zig");
 const Installation = @import("Installation.zig");
 const release = @import("release_candidate.zig");
 const process = @import("upgrade_process.zig");
@@ -35,28 +36,14 @@ pub const Target = struct {
     }
 };
 
-const Result = enum { restarted, current, skipped, failed };
-const Totals = struct {
-    restarted: usize = 0,
-    current: usize = 0,
-    skipped: usize = 0,
-    failed: usize = 0,
+const Result = activation.Category;
+const Totals = activation.Counts;
 
-    fn add(self: *Totals, result: Result) void {
-        switch (result) {
-            .restarted => self.restarted += 1,
-            .current => self.current += 1,
-            .skipped => self.skipped += 1,
-            .failed => self.failed += 1,
-        }
-    }
-
-    fn write(self: Totals, writer: *std.Io.Writer) !void {
-        const total = self.restarted + self.current + self.skipped + self.failed;
-        if (total == 0) return writer.writeAll("No running Hosts.\n");
-        try writer.print("{d} Hosts: {d} restarted, {d} already current, {d} left unchanged, {d} failed.\n", .{ total, self.restarted, self.current, self.skipped, self.failed });
-    }
-};
+fn writeTotals(totals: Totals, writer: *std.Io.Writer) !void {
+    const total = totals.restarted + totals.current + totals.skipped + totals.failed;
+    if (total == 0) return writer.writeAll("No running Hosts.\n");
+    try writer.print("{d} Hosts: {d} restarted, {d} already current, {d} left unchanged, {d} failed.\n", .{ total, totals.restarted, totals.current, totals.skipped, totals.failed });
+}
 
 pub const Stage = enum { discovery, observation, selection };
 pub const Failure = struct {
@@ -100,44 +87,39 @@ pub const Batch = struct {
     }
 
     pub fn selectedOutcome(self: *const Batch, store: []const u8) HostLifecycle.ActivationOutcome {
-        var unknown = self.failure != null;
-        for (self.entries) |entry| {
-            const path = entry.directory orelse entry.store orelse {
-                unknown = true;
-                continue;
-            };
-            if (!std.mem.eql(u8, path, store)) continue;
-            return switch (entry.state) {
-                .outcome => |outcome| outcome,
-                .failed, .observed => .{ .unconfirmed = .verifying },
-            };
-        }
-        if ((self.failure orelse error.Unexpected) == error.Cancelled) return .cancelled;
-        return if (unknown) .{ .unconfirmed = .verifying } else .not_needed;
+        return self.summary(store).own;
     }
 
     pub fn hasGuidance(self: *const Batch) bool {
-        if (self.failure != null) return true;
-        for (self.entries) |entry| switch (entry.state) {
-            .failed => return true,
-            .observed => unreachable,
-            .outcome => |outcome| switch (outcome) {
-                .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => return true,
-                .not_needed, .superseded, .already_ready, .ready, .client_incompatible => {},
-            },
-        };
-        return false;
+        self.assertSettled();
+        return self.summary(null).guidance;
     }
 
     pub fn totals(self: *const Batch) Totals {
-        var result: Totals = .{};
-        if (self.failure != null) result.add(.failed);
-        for (self.entries) |entry| switch (entry.state) {
-            .observed => unreachable,
-            .failed => result.add(.failed),
-            .outcome => |outcome| result.add(category(outcome)),
-        };
-        return result;
+        self.assertSettled();
+        return self.summary(null).counts;
+    }
+
+    /// Every entry placed against `store` (none when null) and folded by
+    /// `host_activation`; an entry still only observed counts as failed there.
+    pub fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
+        var tally: activation.Tally = .{};
+        for (self.entries) |entry| tally.add(.{
+            .place = if (entry.directory orelse entry.store) |path|
+                (if (store != null and std.mem.eql(u8, path, store.?)) .own else .other)
+            else
+                .unlocated,
+            .state = switch (entry.state) {
+                .outcome => |outcome| .{ .outcome = outcome },
+                .failed, .observed => .failed,
+            },
+        });
+        return tally.finish(if (self.failure) |err| if (err == error.Cancelled) .cancelled else .other else null);
+    }
+
+    /// A restart batch has settled every Host it observed.
+    fn assertSettled(self: *const Batch) void {
+        for (self.entries) |entry| if (entry.state == .observed) unreachable;
     }
 
     pub fn write(self: *const Batch, writer: *std.Io.Writer) !void {
@@ -147,7 +129,7 @@ pub const Batch = struct {
             .failed => |failure| try writeEntryFailure(writer, &entry, failure),
             .outcome => |outcome| _ = try writeOutcome(writer, entry.directory orelse entry.store.?, outcome, self.version),
         };
-        try self.totals().write(writer);
+        try writeTotals(self.totals(), writer);
     }
 
     pub fn writeWarning(self: *const Batch, writer: *std.Io.Writer) !void {
@@ -223,6 +205,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
     for (batch.entries) |*entry| {
         if (entry.state != .observed) continue;
         const facts = entry.state.observed;
+        // Errors `activate` returns are allocation failures or failures after the stop, so both map to an unconfirmed start.
         entry.state = .{ .outcome = outcome: {
             process.check(options.cancellation) catch break :outcome .cancelled;
             var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
@@ -244,9 +227,9 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
             }
             const target = options.target orelse &selected.?;
             const current = observation.managed.observed;
-            if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
-                !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) break :outcome .replacement_observed;
-            break :outcome HostLifecycle.activate(init, allocator, &observation, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
+            const census: @FieldType(activation.Facts, "census") = if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
+                !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) .replaced else .same;
+            break :outcome HostLifecycle.activate(init, allocator, &observation, census, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
         } };
     }
     return batch;
@@ -317,15 +300,6 @@ fn field(writer: *std.Io.Writer, text: []const u8) !void {
     try terminal.finish(writer);
 }
 
-fn category(outcome: HostLifecycle.ActivationOutcome) Result {
-    return switch (outcome) {
-        .ready, .client_incompatible => .restarted,
-        .already_ready => .current,
-        .superseded, .not_needed, .unsupported => .skipped,
-        .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => .failed,
-    };
-}
-
 fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycle.ActivationOutcome, version: ?release.Version) !Result {
     try field(writer, store);
     try writer.writeAll(": ");
@@ -351,7 +325,11 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
             try writer.print("left running: {s}", .{switch (limitation) {
                 .inaccessible => "Store or Host is inaccessible; check access with its owning client",
                 .incompatible => "Host protocol is unsupported; use its owning client",
-                .ownership_unconfirmed => "ownership is unconfirmed; do not stop a guessed Host",
+                .ownership_status => "ownership is unconfirmed; do not stop a guessed Host (Host status unavailable while owned)",
+                .ownership_observation => "ownership is unconfirmed; do not stop a guessed Host (initial Host observation failed)",
+                .ownership_directory_unavailable => "ownership is unconfirmed; do not stop a guessed Host (Host directory could not be canonicalized)",
+                .ownership_directory_mismatch => "ownership is unconfirmed; do not stop a guessed Host (Host directories differ)",
+                .ownership_confirmation => "ownership is unconfirmed; do not stop a guessed Host (Host identity confirmation failed)",
                 .application_owned => "application-owned Host (including MySQL); restart through its application",
                 .configuration_unavailable => "launch configuration cannot be safely reconstructed; restart through its owner",
                 .target_capability => "target build cannot safely check a detached restart; Host left running",
@@ -363,21 +341,34 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
         .cancelled => {
             try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
         },
+        .target_unusable => |step| {
+            const doing: []const u8 = switch (step) {
+                .resolving => "resolving the target",
+                .inspecting => "inspecting the target",
+                .checking => "checking the target",
+            };
+            const done: []const u8 = switch (step) {
+                .resolving => "resolved",
+                .inspecting => "inspected",
+                .checking => "checked",
+            };
+            try writer.print("failed at {s}: the target build could not be {s}; Host left running; check the installation, then retry", .{ doing, done });
+        },
         .refused => |refusal| {
             try writer.print("refused at {s}\n", .{@tagName(refusal.stage)});
             var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
             try writer.writeAll(@import("start_report.zig").line(&refusal.failure, &line));
-            return category(outcome);
+            return activation.category(outcome);
         },
         .failed, .unconfirmed => |stage| {
             try writer.print("failed at {s}: {s}; inspect Host status with its owning client, then retry", .{ @tagName(stage), if (outcome == .failed) "restart failed" else "restart is unconfirmed" });
         },
     }
     try writer.writeByte('\n');
-    return category(outcome);
+    return activation.category(outcome);
 }
 
-test "restart all reports every activation outcome and limitation with exit truth" {
+test "SH-50 restart all reports every activation outcome and limitation with exit truth" {
     const identity = .{ .instance = @as([16]u8, @splat(1)), .pid = @as(c_int, 42) };
     const Case = struct { outcome: HostLifecycle.ActivationOutcome, text: []const u8, result: Result };
     const cases = [_]Case{
@@ -388,6 +379,9 @@ test "restart all reports every activation outcome and limitation with exit trut
         .{ .outcome = .not_needed, .text = "no longer running; no Host started", .result = .skipped },
         .{ .outcome = .replacement_observed, .text = "failed at verifying: a replacement Host was observed; inspect with its owning client, then retry", .result = .failed },
         .{ .outcome = .cancelled, .text = "failed at activation: cancelled; inspect Host status, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .resolving }, .text = "failed at resolving the target: the target build could not be resolved; Host left running; check the installation, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .inspecting }, .text = "failed at inspecting the target: the target build could not be inspected; Host left running; check the installation, then retry", .result = .failed },
+        .{ .outcome = .{ .target_unusable = .checking }, .text = "failed at checking the target: the target build could not be checked; Host left running; check the installation, then retry", .result = .failed },
     };
     var covered: std.EnumSet(std.meta.Tag(HostLifecycle.ActivationOutcome)) = .empty;
     for (cases) |case| {
@@ -401,7 +395,11 @@ test "restart all reports every activation outcome and limitation with exit trut
     const limitations = [_][]const u8{
         "Store or Host is inaccessible; check access with its owning client",
         "Host protocol is unsupported; use its owning client",
-        "ownership is unconfirmed; do not stop a guessed Host",
+        "ownership is unconfirmed; do not stop a guessed Host (Host status unavailable while owned)",
+        "ownership is unconfirmed; do not stop a guessed Host (initial Host observation failed)",
+        "ownership is unconfirmed; do not stop a guessed Host (Host directory could not be canonicalized)",
+        "ownership is unconfirmed; do not stop a guessed Host (Host directories differ)",
+        "ownership is unconfirmed; do not stop a guessed Host (Host identity confirmation failed)",
         "application-owned Host (including MySQL); restart through its application",
         "launch configuration cannot be safely reconstructed; restart through its owner",
         "target build cannot safely check a detached restart; Host left running",
@@ -439,12 +437,12 @@ test "restart all reports every activation outcome and limitation with exit trut
 test "restart all totals distinguish no Hosts success skips and failures" {
     var bytes: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
-    try (Totals{}).write(&writer);
+    try writeTotals(.{}, &writer);
     try std.testing.expectEqualStrings("No running Hosts.\n", writer.buffered());
     writer.end = 0;
     var totals: Totals = .{};
     for ([_]Result{ .restarted, .current, .skipped, .failed }) |result| totals.add(result);
-    try totals.write(&writer);
+    try writeTotals(totals, &writer);
     try std.testing.expectEqualStrings("4 Hosts: 1 restarted, 1 already current, 1 left unchanged, 1 failed.\n", writer.buffered());
 }
 
@@ -463,7 +461,7 @@ test "restart all counts every outcome even after its output reader closes" {
         totals.add(try writeOutcome(&output.writer, "/store", outcome, .{ .schema = 1, .patch = 2 }));
         try output.writer.flush();
     }
-    try totals.write(&output.writer);
+    try writeTotals(totals, &output.writer);
     try output.writer.flush();
     try std.testing.expectEqual(info.field_names.len, totals.restarted + totals.current + totals.skipped + totals.failed);
 }

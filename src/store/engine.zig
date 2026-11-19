@@ -6,7 +6,7 @@ pub const Kind = @import("../store_target.zig").Kind;
 
 pub const Statement = *opaque {};
 
-pub const Control = enum { begin, commit, rollback, savepoint, release, rollback_to };
+pub const Control = @import("write_batch.zig").Control;
 
 pub const ControlError = Failure;
 

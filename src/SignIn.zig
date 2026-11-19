@@ -812,7 +812,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os/os.zig").linkOpener(init_.environ_map) orelse {
+            const command = @import("os").linkOpener(init_.environ_map) orelse {
                 self.issue = "No browser opener is available. Open the displayed URL manually.";
                 return;
             };
@@ -936,7 +936,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 const Button = struct { label: []const u8, control: core.Control, action: ?core.Action };
 fn button(buttons: *std.ArrayList(Button), alloc: std.mem.Allocator, label: []const u8, control: core.Control, action: ?core.Action) !void {
-    try buttons.append(alloc, .{ .label = try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
+    try buttons.append(alloc, .{ .label = if (std.mem.eql(u8, label, "Close")) try alloc.dupe(u8, label) else try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
 }
 const Row = struct { label: []const u8, value: []const u8 = "", control: ?core.Control = null, action: ?core.Action = null, caret: ?u16 = null };
 fn append(rows: *std.ArrayList(Row), alloc: std.mem.Allocator, label: []const u8, value: []const u8, control: ?core.Control, action: ?core.Action) !void {
@@ -997,7 +997,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var code_field: ?usize = null;
     const a = ctx.arena;
     const title: []const u8 = switch (self.state.page) {
-        .account => "Sign in to Rui",
+        .account => "Welcome to Rui",
         .method => "ChatGPT account",
         .api => "Connect with an API key",
         .browser => "Continue in your browser",
@@ -1044,7 +1044,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (self.form) |mapped| {
                 const form = mapped.value;
                 const field_width = Panel.valueWidth(width) -| 1;
-                try append(&rows, a, "Scope", "Selected Host. New Sessions here only.", null, null);
+                try append(&rows, a, "Scope", "Selected Host. New chats here only.", null, null);
                 try appendEditor(&rows, ctx, if (form.endpointEdit() == .unchanged and !std.mem.endsWith(u8, form.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL", &form.base, .base, field_width, "HTTPS base URL");
                 try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
                 try appendEditor(&rows, ctx, "Model ID", &form.model, .model, field_width, "Required for custom services");
@@ -1084,7 +1084,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
         .pending => {
             try append(&rows, a, "Saved", "The serving Host may still use old settings.", null, null);
-            try append(&rows, a, "Warning", "Pause interrupts ALL Sessions on this Store.", null, null);
+            try append(&rows, a, "Warning", "Pause interrupts ALL chats on this Store.", null, null);
             const pause_command = try hostCommand(a, "pause", self.target.slice());
             const start_command = try hostCommand(a, "start", self.target.slice());
             try appendWrapped(&rows, ctx, "Copy pause cmd", pause_command, .pause_command, .{ .command = pause_command }, width);
@@ -1096,7 +1096,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Return", .close, .close);
         },
         .connected => {
-            try append(&rows, a, "Connected", "This terminal is configured for new Sessions.", null, null);
+            try append(&rows, a, "Connected", "This terminal is configured for new chats.", null, null);
             try button(&buttons, a, "Close", .close, .close);
         },
     }
@@ -1121,9 +1121,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     var footer_surface: ?vxfw.Surface = null;
-    if (width > 6) {
+    if (width > 6 and self.state.page == .device) {
         const footer = try a.create(vxfw.Text);
-        footer.* = .{ .text = if (self.state.page == .device) "Tab / Shift-Tab move. Enter chooses.\nC copies code. Esc back." else "Tab / Shift-Tab move. Enter chooses. Esc back.", .style = self.quiet, .width_basis = .parent };
+        footer.* = .{ .text = "C copies code. Esc back.", .style = self.quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
         if (natural.size.height + 3 <= size.height) footer_surface = natural;
     }
@@ -1132,7 +1132,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
-        .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
+        .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
         .unicode = self.unicode,
         .fields = fields,
         .actions = labels,
@@ -1316,6 +1316,12 @@ const BrowserRig = struct {
 
     fn strayed(page: *Self) bool {
         return browserField(page, "stray");
+    }
+
+    fn deviceCode(page: *Self) bool {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        return page.code.len != 0;
     }
 
     fn port(self: *BrowserRig) ![]const u8 {
@@ -1624,11 +1630,11 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
         const text = try testingText(account, ctx.alloc);
         try std.testing.expectEqual(@as(usize, 3), page.drawn.hits.len);
         try std.testing.expect(std.mem.indexOf(u8, text, "Choose account") == null and std.mem.indexOf(u8, text, "Navigation") == null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Choose an account.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") != null);
-        try std.testing.expectEqual(@as(usize, 2), account.children[0].surface.children.len);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Sign in to begin.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") == null);
+        try std.testing.expectEqual(@as(usize, 1), account.children[0].surface.children.len);
         const button_hit = page.drawn.hits[2];
         try std.testing.expect(button_hit.action == .close and button_hit.row > page.drawn.hits[1].row + 1);
-        try std.testing.expectEqualStrings("[", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
+        try std.testing.expectEqualStrings("C", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
         try testingSend(&page, &ctx, "\t\t\r", width, 30);
         try std.testing.expectEqual(@as(usize, 1), owner.closed);
         _ = try testingDraw(&page, ctx.alloc, width, 30);
@@ -1646,7 +1652,7 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
             .{ .page = .{ .saving = .key }, .labels = &.{"[ Back ]"}, .controls = &.{.back} },
             .{ .page = .{ .failed = .{ .failure = .expired, .retry = .device } }, .labels = &.{ "[ Retry ]", "[ Back ]" }, .controls = &.{ .retry, .back } },
             .{ .page = .pending, .labels = &.{ "[ Recheck ]", "[ Back ]", "[ Return ]" }, .controls = &.{ .recheck, .back, .close } },
-            .{ .page = .connected, .labels = &.{"[ Close ]"}, .controls = &.{.close} },
+            .{ .page = .connected, .labels = &.{"Close"}, .controls = &.{.close} },
         };
         for (cases) |case| {
             page.state.page = case.page;
@@ -1821,6 +1827,66 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
     const reported = report.written().len;
     try rig.page.stopTo(&report.writer);
     try std.testing.expectEqual(reported, report.written().len);
+}
+
+test "SUI-7 Sign-in Escape cancels waiting browser and device journeys and returns to the method frame" {
+    for ([_]core.Method{ .browser, .device }) |method| {
+        var rig: BrowserRig = undefined;
+        try rig.open();
+        defer rig.close();
+        try rig.send("\r");
+        if (method == .device) try rig.send("\t");
+        try rig.send("\r");
+        if (method == .browser) {
+            try rig.wait(BrowserRig.linked);
+            try rig.send("\x1b[200~not-the-address\x1b[201~\r");
+            try rig.wait(BrowserRig.strayed);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Not the sign-in address. Paste again.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "not-the-address") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Change method ]") != null);
+        } else {
+            try rig.wait(BrowserRig.deviceCode);
+            const frame = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+            const text = try testingText(frame, rig.ctx.alloc);
+            try std.testing.expect(std.mem.indexOf(u8, text, "BDL9-KI88H") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "[ Copy code ]") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "C copies code") != null);
+        }
+        try rig.page.widget().handleEvent(&rig.ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+        try std.testing.expect(rig.page.state.page == .stopping);
+        try rig.wait(testingCompleted);
+        try rig.page.advance(&rig.ctx);
+        try std.testing.expect(rig.page.task.thread == null and rig.page.state.page == .method);
+        const returned = try testingDraw(&rig.page, rig.ctx.alloc, 90, 28);
+        try std.testing.expect(std.mem.indexOf(u8, try testingText(returned, rig.ctx.alloc), "ChatGPT account") != null);
+        for ([_][]const u8{ ".config/rui/preferences", ".config/rui/codex.json", ".config/rui/chatgpt.json", ".config/rui/requests" }) |path|
+            try std.testing.expectError(error.FileNotFound, rig.tmp.dir.access(std.testing.io, path, .{}));
+    }
+}
+
+test "SUI-6 Sign-in ignores account typing and Escape returns from API key to welcome" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var page: Self = .{};
+    defer page.closeForm();
+    try testingSend(&page, &ctx, "hello", 90, 28);
+    try std.testing.expect(page.state.page == .account and page.state.focus == .chatgpt and page.task.thread == null);
+    try testingSend(&page, &ctx, "\x1b[C", 90, 28);
+    try std.testing.expectEqual(core.Control.api_key, page.state.focus);
+    try testingSend(&page, &ctx, "\r", 90, 28);
+    try std.testing.expect(page.state.page == .api);
+    const api = try testingDraw(&page, ctx.alloc, 90, 28);
+    try std.testing.expect(std.mem.indexOf(u8, try testingText(api, ctx.alloc), "Connect with an API key") != null);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(page.state.page == .account and page.task.thread == null);
+    const welcome = try testingDraw(&page, ctx.alloc, 90, 28);
+    const text = try testingText(welcome, ctx.alloc);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Welcome to Rui") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "hello") == null);
 }
 
 test "Sign-in both OAuth methods retry published Host failures without authenticating again" {

@@ -139,8 +139,8 @@ test "a compaction's floor read costs the same however long its Session's histor
         fn addOlder(store: *Store, ref: []const u8, comptime first: u64) !void {
             const sequence = std.fmt.comptimePrint("WITH RECURSIVE sequence(value) AS (VALUES({d}) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) ", .{ first, first + 999 });
             try store_testing.sqlite_only.withoutForeignKeys(store, sequence ++
-                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at) " ++
-                "SELECT session_ref,entry_ordinal+value*10,session_position-value-1,entry_kind,turn_id,source_admission_id+value*10,NULL,NULL,content_id,recorded_at " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,source_revision,source_operation_id,content_id,recorded_at) " ++
+                "SELECT session_ref,entry_ordinal+value*10,session_position-value-1,entry_kind,turn_id,source_admission_id+value*10,source_kind,NULL,NULL,content_id,recorded_at " ++
                 "FROM conversation_entry CROSS JOIN sequence WHERE session_ref=?1 AND entry_ordinal=2", .{ref});
         }
     };

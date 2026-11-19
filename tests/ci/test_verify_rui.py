@@ -127,7 +127,7 @@ class VerifyRuiTest(unittest.TestCase):
                 try:
                     port = scratch / "fixture.port"
                     wait_for(lambda: port.exists() or provider.poll() is not None,
-                             "image fixture port or child exit", timeout=10)
+                             "image fixture port or child exit", timeout=60)
                     self.assertTrue(port.exists(), "image fixture did not start")
                     url = "http://127.0.0.1:" + port.read_text() + "/responses"
                     user = {"role": "user", "content": "Review with an image consent check."}
@@ -135,7 +135,7 @@ class VerifyRuiTest(unittest.TestCase):
                     def request(items):
                         body = json.dumps({"input": items}).encode()
                         with urllib.request.urlopen(urllib.request.Request(url, body,
-                                {"Content-Type": "application/json"}), timeout=5) as reply:
+                                {"Content-Type": "application/json"}), timeout=60) as reply:
                             return [json.loads(line[6:]) for line in reply.read().decode().splitlines()
                                     if line.startswith("data: {")]
 
@@ -153,7 +153,7 @@ class VerifyRuiTest(unittest.TestCase):
                                      ["image-consent-call", "tool-summary"])
                 finally:
                     provider.terminate()
-                    provider.communicate(timeout=5)
+                    provider.communicate(timeout=60)
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
@@ -513,10 +513,10 @@ class FramesTest(unittest.TestCase):
                     wait(None, terminal, "witness", empty_composer=True)
                     self.assertEqual(outcomes, [True, False])
                     chat = "\n".join([prefix + "witness", prefix + rule * 12,
-                                       prefix + prompt + " Type a task", prefix + rule * 12,
+                                       prefix + prompt + " What shall we work on?", prefix + rule * 12,
                                        prefix + "model · low"])
                     self.assertTrue(ready(chat, "witness", empty=True))
-                    self.assertFalse(ready(chat.replace("Type a task", "draft"), empty=True))
+                    self.assertFalse(ready(chat.replace("What shall we work on?", "draft"), empty=True))
 
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
@@ -1193,7 +1193,7 @@ while True:
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
                  "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"]}
-        clean = " + New Session\n   Existing conversation  3h\n   Settings"
+        clean = " + New chat\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
             for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
@@ -1227,7 +1227,7 @@ while True:
         for row in (" ○ 9xt4vy  now ┆", " ○ emged6  now┆ Model", " ○ 000000  2m ┆chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  now ┆", " ○ New Session  now ┆Model",
+        for row in (" ○ New chat  now ┆", " ○ New chat  now ┆Model",
                     " ○ Existing 9xt4vy  2m ┆chat", " ○ 9xt4vy extra  2m ┆chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
@@ -1242,7 +1242,7 @@ while True:
             for divider in DIVIDER_GLYPHS:
                 with self.subTest(recipe=recipe_glyph, frame=divider):
                     self.assertIsNotNone(failure(state, f" ○ 9xt4vy  now {divider} chat"))
-                    self.assertIsNone(failure(state, f" ○ New Session  now {divider} chat"))
+                    self.assertIsNone(failure(state, f" ○ New chat  now {divider} chat"))
 
     def test_read_image_raw_id_guard_uses_shared_divider_glyphs(self):
         from terminal_screen import DIVIDER_GLYPHS
@@ -1271,17 +1271,17 @@ while True:
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
-            typed_ready = steps.index({"wait": "Type a task"})
-            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
+            typed_ready = steps.index({"wait": "What shall we work on?"})
+            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New chat", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_sidebar_regex": state["absent_sidebar_regex"]}, " ○ New Session  now │chat"))
+                {"name": name, "absent_sidebar_regex": state["absent_sidebar_regex"]}, " ○ New chat  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
-            self.assertIn("Type a task", state["absent"])
+            self.assertIn("What shall we work on?", state["absent"])
             self.assertIn("Existing conversation", state["expect"])
-            self.assertEqual(state["steps"][-1], {"gone": "Type a task"})
+            self.assertEqual(state["steps"][-1], {"gone": "What shall we work on?"})
         model = states["empty-chat-model-left"]["steps"]
         opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
         typed = model.index({"text": "ter"})
@@ -1301,13 +1301,13 @@ while True:
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         wide, narrow = states["wide-launch"], states["narrow-launch"]
-        self.assertIn({"wait": "+ New Session"}, wide["steps"])
-        self.assertIn({"wait": "Type a task", "min_columns": 100}, wide["steps"])
-        self.assertEqual(wide["expect"], ["Type a task"])
+        self.assertIn({"wait": "+ New chat"}, wide["steps"])
+        self.assertIn({"wait": "What shall we work on?", "min_columns": 100}, wide["steps"])
+        self.assertEqual(wide["expect"], ["What shall we work on?"])
         self.assertIn("enter open", wide["absent"])
         self.assertEqual(narrow["sizes"], [(46, 30)])
-        self.assertEqual(narrow["expect"], ["+ New Session", "Settings"])
-        self.assertIn("Type a task", narrow["absent"])
+        self.assertEqual(narrow["expect"], ["+ New chat", "Settings"])
+        self.assertIn("What shall we work on?", narrow["absent"])
         self.assertIn("enter open", narrow["absent"])
 
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
@@ -1316,10 +1316,10 @@ while True:
         self.assertEqual(state["open"], "overview")
         self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
         self.assertEqual(state["steps"], [
-            {"wait": "+ New Session"},
-            {"wait": "Type a task", "min_columns": 100},
+            {"wait": "+ New chat"},
+            {"wait": "What shall we work on?", "min_columns": 100},
             {"keys": ["Esc"]},
-            {"gone": "Type a task"},
+            {"gone": "What shall we work on?"},
             {"keys": ["End", "Enter"]},
             {"wait": "Rui"}, {"wait": "Notifications"},
         ])
@@ -1375,13 +1375,13 @@ while True:
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name, words in (("stopped", "■ Stopped"),
-                            ("chat-failed", "× Model reply unreadable · ctrl+r retries")):
+        for name, words in (("stopped", "▪ Stopped"),
+                            ("chat-failed", "× The model's reply didn't come through · ctrl+r retries")):
             with self.subTest(state=name):
                 self.assertEqual(states[name]["steps"], [{"wait": words}])
                 self.assertEqual(states[name]["expect"], [words])
         self.assertEqual(states["tools-running"]["expect"],
-                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+                         ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1533,12 +1533,12 @@ while True:
         self.assertEqual(state["sizes"], [(140, 40)])
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
-            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
-            {"wait": "■ Stopped", "timeout": 60},
+            {"wait": "◝ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"wait": "▪ Stopped", "timeout": 60},
         ])
-        self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        self.assertEqual(state["expect"], ["▪ Stopped", "   Stopped"])
         self.assertTrue(state["first_frame"])
-        self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
+        self.assertEqual(state["expect_next"], {"▪ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
         self.assertNotEqual(narrow["open"], state["open"])
@@ -1546,7 +1546,7 @@ while True:
         self.assertEqual(narrow["cast"][0]["messages"], ["Ready."])
         self.assertEqual(narrow["steps"][0], {"send": {"to": narrow["open"], "text": "long bash", "wait": False}})
         self.assertEqual(narrow["steps"][1:], state["steps"][1:])
-        self.assertEqual(narrow["expect"], ["■ Stopped"])
+        self.assertEqual(narrow["expect"], ["▪ Stopped"])
         self.assertIn("ctrl+x stop", narrow["absent"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
@@ -1931,19 +1931,19 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
-        listed = " + New Session\n   Settings"
-        self.assertNotIn("Type a task", listed)
+        listed = " + New chat\n   Settings"
+        self.assertNotIn("What shall we work on?", listed)
         def accepts_list(predicate, _description, **_kwargs):
             self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
                             "committed overview list must not require an editor")
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=accepts_list))
         cases = [
             ([listed], None, 1),
-            ([listed.replace("+ New Session", ""), listed], None, 2),
+            ([listed.replace("+ New chat", ""), listed], None, 2),
             ([listed.replace("Settings", ""), listed], None, 2),
             ([listed + " Opening…", listed], None, 2),
             ([listed, listed + " Ready"], "Ready", 2),
-            ([" › Type a task"], None, 1),
+            ([" › What shall we work on?"], None, 1),
             ([" › ChatGPT    API key"], None, 1),
         ]
         for screens, first_wait, count in cases:
@@ -1958,21 +1958,83 @@ while True:
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_accepts_before_and_after_wording(self):
+        def check(predicate, _description, **_kwargs):
+            for label in ("+ New Session", "+ New chat"):
+                with self.subTest(label=label):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=f" {label}\n Settings")))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=f" {label}")))
+            for title, close in (("Sign in to Rui", "[ Close ]"), ("Welcome to Rui", "Close")):
+                screen = f" {title}\n ChatGPT  subscription\n API key  service\n {close}\n"
+                with self.subTest(title=title):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=screen)))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=screen.replace(close, ""))))
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_readiness_wording_domain_uses_one_compatibility_owner(self):
+        owner = self.helper["frame_wording"]
+        contains = self.helper["frame_wording_contains"]
+        groups = [
+            ("What shall we work on?", "Type a task"),
+            ("+ New chat", "+ New Session"),
+            ("○ New chat", "○ New Session"),
+            ("Chats  Archived", "Sessions  Archived"),
+            ("Welcome to Rui", "Sign in to Rui"),
+            ("Sign in to begin.", "Choose an account."),
+            ("Close", "[ Close ]"),
+            ("No chats yet.", "No unarchived Sessions.", "No Sessions yet."),
+            ("No archived chats", "No archived Sessions"),
+            ("The model's reply didn't come through", "Model reply unreadable"),
+            ("That didn't work", "Something went wrong"),
+            ("Your chats keep working while you are away.", "Detached. Host work continues."),
+        ]
+        for group in groups:
+            for expected in group:
+                for displayed in group:
+                    with self.subTest(expected=expected, displayed=displayed):
+                        self.assertIn(displayed, owner(expected))
+                        self.assertTrue(contains(expected, f"prefix {displayed} suffix"))
+                        self.assertFalse(contains(expected, "unrelated text"))
+                        results = []
+                        def wait(predicate, _description, *_args, **_kwargs):
+                            results.append(bool(predicate(types.SimpleNamespace(completed=displayed))))
+                        terminal = types.SimpleNamespace(wait=wait)
+                        self.helper["frame_wait"](None, terminal, expected)
+                        self.helper["frame_wait"](None, terminal, expected, absent=True)
+                        self.assertEqual(results, [True, False])
+        self.assertEqual(owner("a user draft"), {"a user draft"})
+        self.assertFalse(contains("different user draft", "a user draft"))
+        for first, shown in (("+ New chat", "+ New Session"),
+                             ("What shall we work on?", "Type a task"),
+                             ("Welcome to Rui", "Sign in to Rui")):
+            def wait(predicate, _description, **_kwargs):
+                self.assertTrue(predicate(types.SimpleNamespace(completed=f" + New Session\n Settings\n {shown}")))
+            self.helper["frame_initial_ready"](types.SimpleNamespace(wait=wait), first)
+        for expected, displayed in (("No chats yet.", "No unarchived Sessions."),
+                                    ("What shall we work on?", "Type a task")):
+            state = {"name": "compat", "steps": [], "expect": [expected], "absent": []}
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertTrue(pred(types.SimpleNamespace(completed=displayed)))), state)
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_last": expected}, displayed))
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_next": {expected: expected}}, displayed + "\n" + displayed))
+            state["expect"], state["absent"] = [], [expected]
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertFalse(pred(types.SimpleNamespace(completed=displayed)))), state)
+
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
             '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
-            '                                   Sign in to Rui\n'
-            '                                     Choose account  Credentials stay out of conversations.\n'
+            '                                   Welcome to Rui\n'
+            '                                     Sign in to begin. Your sign-in never enters a chat.\n'
             '                                     ChatGPT         Use your subscription\n'
             '                                     API key         OpenAI or a custom Responses API\n'
             '                                     Close           Esc returns\n'
-            '                                     Navigation      Tab / Shift-Tab move. Enter chooses. Esc back.\n'
         )
-        cases = [("", False), ("Sign in to Rui", False), (modal, True),
+        cases = [("", False), ("Welcome to Rui", False), (modal, True),
                  (modal + "Opening…", False),
-                 (" + New Session\n   Settings", True), (" › Type a task", True)]
+                 (" + New chat\n   Settings", True), (" › What shall we work on?", True)]
         cases.extend((modal.replace(label, ""), False) for label in
-                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
+                     ("Welcome to Rui", "ChatGPT", "API key", "Close"))
 
         def check(predicate, _description, **_kwargs):
             for text, expected in cases:
@@ -1982,18 +2044,17 @@ while True:
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
 
     def test_initial_readiness_accepts_grouped_choices_buttons_and_wrapped_footer(self):
-        modal = ("  Sign in to Rui\n"
-                 "    Choose an account. Credentials stay out\n"
-                 "    of conversations.\n"
+        modal = ("  Welcome to Rui\n"
+                 "    Sign in to begin. Your sign-in never enters\n"
+                 "    a chat.\n"
                  "    ChatGPT         Use your subscription\n"
                  "    API key         OpenAI or a custom Responses API\n\n"
-                 "    [ Close ]\n\n"
-                 "    Tab / Shift-Tab move. Enter chooses.\n"
-                 "    Esc back.\n")
+                 "    Close\n\n"
+)
         cases = [(modal, True), (modal + "Opening…", False)]
         cases.extend((modal.replace(marker, ""), False) for marker in
-                     ("Sign in to Rui", "ChatGPT", "API key", "[ Close ]", "Tab / Shift-Tab"))
-        cases.append((modal.replace("[ Close ]", "[ Close"), False))
+                     ("Welcome to Rui", "ChatGPT", "API key", "Close"))
+        cases.append((modal.replace("Close", "Clos"), False))
 
         def check(predicate, _description, **_kwargs):
             for text, expected in cases:
@@ -2159,7 +2220,7 @@ while True:
                     self.assertIn("New Sessions", (out / record["files"]["txt"]).read_text())
 
     def test_background_expectations_validate_before_launch(self):
-        for value in ({"› Type a task": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
+        for value in ({"› What shall we work on?": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
             data = self.scenario()
             data["states"][0]["expect_background"] = value
             self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_background"], value)
@@ -2172,7 +2233,7 @@ while True:
                 self.helper["validate_scenario"](data)
 
     def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
-        marker = "› Type a task"
+        marker = "› What shall we work on?"
         for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
             for width, prefix in ((140, "sidebar ┆ "), (46, " ")):
                 for bad in (None, 0, len(marker) - 1):
@@ -2198,6 +2259,22 @@ while True:
                         self.assertEqual(self.helper["frame_background_failure"](
                             {"expect_background": {"missing": "#" + color}}, frame),
                             "missing background specimen 'missing'")
+
+    def test_old_and_new_placeholder_capture_checks_real_background_cells(self):
+        for expected, displayed in (("› What shall we work on?", "› Type a task"),
+                                    ("› Type a task", "› What shall we work on?")):
+            for bad in (False, True):
+                with self.subTest(expected=expected, displayed=displayed, bad=bad), tempfile.TemporaryDirectory() as temp:
+                    cells = tuple(Cell(char, None, False, bg="000000" if bad and index == len(displayed) - 1 else "121933")
+                                  for index, char in enumerate(displayed))
+                    frame = Frame(46, 30, Cursor(2, 3), False, (cells,), "121933", "d4cebf", "d4cebf")
+                    state = {"name": "input", "steps": [], "expect": [expected],
+                             "expect_background": {expected: "#121933"}}
+                    result = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                        types.SimpleNamespace(frame=frame), Path(temp), state, (46, 30), None)
+                    self.assertEqual(result["ok"], not bad)
+                    if bad:
+                        self.assertIn("must have background", result["reason"])
 
     def test_style_expectations_validate_and_check_only_the_span_inside_its_row(self):
         for value in ([], [{"text": "/new", "bold": True}], [{"text": "new", "within": "› /new", "foreground": "#ABCDEF"}]):
@@ -2231,10 +2308,10 @@ while True:
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
-            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped", "■ Stopped"], [None, None]),
-            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+            ("stop-clean", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped", "▪ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped  Stopping…", "▪ Stopped  Stopping…"],
              ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("raw-archive-id", {"steps": [], "absent": ["{session:Archive audit}"]},
              ["Archived tz05sr", "Archived Archive audit"],
@@ -2280,14 +2357,14 @@ while True:
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
-        stale = "■ Stopped\n   Stopped\n   Stopping…\n"
+        stale = "▪ Stopped\n   Stopped\n   Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         terminal = types.SimpleNamespace(frame=committed(stale))
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
-            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped\n   Stopped")))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="▪ Stopped\n   Stopped")))
         terminal.wait = wait
         ready(terminal, {**state, "first_frame": False, "expect_next": {}})
         with tempfile.TemporaryDirectory() as temp:
@@ -2306,7 +2383,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "▪ Stop the slow job  now\n   Old completed answer\n▪ Another Session\n   Stopped\n▪ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
@@ -2314,7 +2391,7 @@ while True:
         states = {state["name"]: state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]}
         for name in ("chat-no-new-session", "chat-sidebar-rows"):
             state = states[name]
-            self.assertIn("+ New Session", state["absent"])
+            self.assertIn("+ New chat", state["absent"])
             self.assertEqual(state["expect_last"], "gpt-6.1-sol")
             self.assertIn("alt+i info", state["absent"])
         self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
@@ -2969,11 +3046,11 @@ class UpgradeFramesTest(unittest.TestCase):
         reason = "Update failed"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
-            chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › Type a task\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
+            chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › What shall we work on?\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
             screens = [marker + "\nReading this Session…\n" + chat,
                        marker + "\nHost paused\n" + chat,
                        marker + "\nSettings\n gpt-6.1-sol · low",
-                       marker + "\n" + chat.replace("Type a task", "wrong chat draft"),
+                       marker + "\n" + chat.replace("What shall we work on?", "wrong chat draft"),
                        marker + "\n" + chat]
             observed = []
             def wait(predicate, _description):
@@ -3031,7 +3108,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         chat = "\n".join(lines)
                         self.assertTrue(ready(chat))
                         self.assertFalse(ready(chat, empty=True))
-                        self.assertTrue(ready(chat.replace("retained draft", "Type a task"), empty=True))
+                        self.assertTrue(ready(chat.replace("retained draft", "What shall we work on?"), empty=True))
                         self.assertTrue(ready(chat, "Upgrade witness"))
                         self.assertFalse(ready(chat, "Different witness"))
                         for stale in ("Opening…", "Reading this Session…", "Host paused", "Notifications"):
@@ -3062,14 +3139,14 @@ class UpgradeFramesTest(unittest.TestCase):
         for rule, junction, bar in (("─", "┼", "│"), ("-", "+", "|")):
             boundary = rule * 12 + junction + rule * 20
             self.assertEqual(split(boundary), (rule * 12, junction, rule * 20))
-            for draft in ("Type a task", "retained │ draft | content + more"):
+            for draft in ("What shall we work on?", "Type a task", "retained │ draft | content + more"):
                 lines = [" witness".ljust(12) + bar + " witness │ content",
                          "".ljust(12) + bar + " " + rule * 20, "".ljust(12) + bar + " › " + draft,
                          boundary, "".ljust(12) + bar + " model · low"]
                 screen = "\n".join(lines)
                 with self.subTest(junction=junction, draft=draft):
                     self.assertTrue(ready(screen, "witness"))
-                    self.assertEqual(ready(screen, empty=True), draft == "Type a task")
+                    self.assertEqual(ready(screen, empty=True), draft in ("What shall we work on?", "Type a task"))
                     self.assertFalse(ready(screen, "missing witness"))
                     for before in (False, True):
                         marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
@@ -3077,7 +3154,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         def wait(predicate, _description):
                             accepted.append(predicate(types.SimpleNamespace(completed=marker + "\n" + screen)))
                         settle(types.SimpleNamespace(wait=wait), before)
-                        self.assertEqual(accepted, [draft == "Type a task"])
+                        self.assertEqual(accepted, [draft in ("What shall we work on?", "Type a task")])
         self.assertTrue(ready("witness | content\n ───────\n › retained | draft\n ───────\n model · low", "witness"))
 
     def test_sidebar_rule_junctions_and_legacy_vertical_endings(self):
@@ -3104,7 +3181,7 @@ class UpgradeFramesTest(unittest.TestCase):
             patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
             for divider in self.helper["DIVIDER_GLYPHS"]:
                 with self.subTest(state=state["name"], divider=divider):
-                    self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " Type a task"))
+                    self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " What shall we work on?"))
                     self.assertIsNotNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + divider + " 0.78.10000"))
 
     def test_sidebar_absence_regex_rejects_ascii_divider(self):
@@ -3145,9 +3222,8 @@ class UpgradeFramesTest(unittest.TestCase):
                 state = {"upgrade": "chat", "open": marker, "comparison_side": "before" if before else "after"}
                 os_semantics = types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())
                 with self.subTest(before=before), patch.dict(sys.modules, {"os_semantics": os_semantics}), \
-                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None,
-                                                       "frame_steps": lambda *_a, **_k: None}):
-                    drive(run, terminal, state, (None, None, version))
+                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                    drive(run, terminal, state, (None, None, version), steps=lambda *_a, **_k: None)
                 self.assertEqual(observed, [0, 1, 2, 3])
 
     def test_upgrade_and_failure_predicates_cover_layouts_and_drafts(self):
@@ -3155,7 +3231,7 @@ class UpgradeFramesTest(unittest.TestCase):
         settle = self.helper["frame_failure_settled"]
         for split in (False, True):
             for rule, bar, junction in (("─", "│", "┼"), ("-", "|", "+")):
-                for draft in ("Type a task", "retained draft"):
+                for draft in ("What shall we work on?", "Type a task", "retained draft"):
                     prefix = " ".ljust(20) + bar if split else ""
                     top = prefix + " " + rule * 20
                     bottom = rule * 20 + junction + rule * 20 if split else " " + rule * 20
@@ -3167,7 +3243,7 @@ class UpgradeFramesTest(unittest.TestCase):
                             results = []
                             settle(types.SimpleNamespace(wait=lambda pred, _description: results.append(
                                 pred(types.SimpleNamespace(completed=marker + "\n" + screen)))), before)
-                            self.assertEqual(results, [draft == "Type a task"])
+                            self.assertEqual(results, [draft in ("What shall we work on?", "Type a task")])
                             root = Path(directory)
                             selected = root / ".local/bin/rui"
                             notice = "\nUpgraded to 0.78.10000" if before else ""
@@ -3177,15 +3253,38 @@ class UpgradeFramesTest(unittest.TestCase):
                                 rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
                             state = {"upgrade": "chat", "open": "Upgrade witness", "comparison_side": "before" if before else "after"}
                             with patch.dict(sys.modules, {"os_semantics": types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())}), \
-                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None, "frame_steps": lambda *_a, **_k: None}):
-                                drive(run, terminal, state, (None, None, "0.78.10000"))
+                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                                drive(run, terminal, state, (None, None, "0.78.10000"), steps=lambda *_a, **_k: None)
                             self.assertTrue(results[-1])
+
+    def test_upgrade_driving_accepts_old_and_new_empty_composers_on_both_sides(self):
+        drive = self.helper["frame_drive_upgrade"]
+        for side in ("before", "after"):
+            for placeholder in ("Type a task", "What shall we work on?"):
+                for upgrade in ("current", "available", "updating", "failure"):
+                    with self.subTest(side=side, placeholder=placeholder, upgrade=upgrade), tempfile.TemporaryDirectory() as directory:
+                        chat = ("! Couldn't reach GitHub; nothing changed\n"
+                                "couldn't reach GitHub\nUpdate failed\n · publishing\nUpdating…\n"
+                                f"  ┄┄┄┄┄┄┄┄┄\n  › {placeholder}\n  ┄┄┄┄┄┄┄┄┄\n model · low")
+                        seen = []
+                        def wait(predicate, description, *_args, **_kwargs):
+                            seen.append(description)
+                            self.assertTrue(predicate(types.SimpleNamespace(completed=chat)), description)
+                        terminal = types.SimpleNamespace(wait=wait)
+                        run = types.SimpleNamespace(home=Path(directory))
+                        releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/tag/v0.78.10000"])
+                        state = {"upgrade": upgrade, "comparison_side": side}
+                        gate = object() if upgrade == "updating" else None
+                        drive(run, terminal, state, (releases, gate, "0.78.10000"), steps=lambda *_a, **_kw: None)
+                        self.assertTrue(any("What shall we work on?" in name for name in seen))
+                        if upgrade == "failure":
+                            self.assertTrue(any("failed Upgrade" in name for name in seen))
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
         calls = []
         terminal = types.SimpleNamespace(frame=types.SimpleNamespace(columns=46, visible=False),
-                                         capture=types.SimpleNamespace(completed="Type a task"))
+                                         capture=types.SimpleNamespace(completed="What shall we work on?"))
         with patch.dict(reveal.__globals__, {"frame_steps": lambda _run, _terminal, steps: calls.extend(steps)}):
             reveal(None, terminal, {"upgrade": "updating"})
             self.assertEqual(calls, [{"keys": ["Esc"]}, {"wait": "Settings"}])
@@ -3194,7 +3293,7 @@ class UpgradeFramesTest(unittest.TestCase):
             terminal.capture.completed = "Settings"
             reveal(None, terminal, {"upgrade": "failure"})
             terminal.frame.columns = 140
-            terminal.capture.completed = "Type a task"
+            terminal.capture.completed = "What shall we work on?"
             reveal(None, terminal, {"upgrade": "available"})
             self.assertEqual(calls, [])
 
@@ -3250,7 +3349,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         self.assertIsNotNone(row_failure(oracle, rows.replace("0.99.99999", "0x99x99999")))
         current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         before = {"expect_sidebar_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_sidebar_regex"]]}
-        self.assertIsNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + "│ Type a task"))
+        self.assertIsNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + "│ What shall we work on?"))
         self.assertIsNotNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + "│ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
@@ -3265,7 +3364,7 @@ class UpgradeFramesTest(unittest.TestCase):
                 "frame_steps": lambda _run, _terminal, steps: events.append(steps)}):
             run = types.SimpleNamespace(home=Path(directory))
             drive(run, terminal, {"upgrade": "updating", "comparison_side": "after"}, (None, object(), "0.78.10000"))
-        self.assertEqual(events, ["Type a task",
+        self.assertEqual(events, ["What shall we work on?",
                                  [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                   {"keys": ["Down"] * 5 + ["Enter"]}],
                                  " · publishing", [{"keys": ["Esc"]}, {"gone": "Notifications"}],

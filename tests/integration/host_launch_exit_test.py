@@ -101,7 +101,7 @@ def check_process_discovery(cleanup):
     Path = owner.pathlib.Path
     with tempfile.TemporaryDirectory(prefix="rui-proc-discovery-") as directory:
         store = Path(directory).resolve() / "store"
-        proc = Path("/proc")
+        proc = owner.os_semantics.PROCESS_RECORDS
         vanished, selected, unrelated, other_store, nested, other_executable = (proc / str(pid) for pid in range(41001, 41007))
         command = [str(owner.RUI), "host", "serve", "--store", str(store)]
         arguments = {
@@ -130,7 +130,7 @@ def check_process_discovery(cleanup):
                 assert pid in expected and sig == owner.signal.SIGKILL, (pid, sig)
                 killed.add(pid)
 
-            with patch.object(Path, "is_dir", return_value=True), \
+            with owner.os_semantics.simulate("linux"), \
                     patch.object(Path, "iterdir", return_value=[vanished, *arguments]), \
                     patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill), \
                     patch.object(owner.os_semantics, "processes_executing", return_value=owned):

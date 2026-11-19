@@ -10,6 +10,8 @@ const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const content_value = @import("content_value.zig");
+const input_parts = @import("input_parts.zig");
 comptime {
     std.debug.assert(mutation_answer.max_code_bytes == protocol.max_code_bytes);
     std.debug.assert(mutation_answer.max_session_bytes == protocol.max_session_bytes);
@@ -35,7 +37,8 @@ pub const ConversationPage = struct {
         position: u64,
         ordinal: u64,
         kind: protocol.ConversationItemKind,
-        content: CommandObservation.ContentReference,
+        /// Always text on an `assistant` item.
+        content: content_value.Value,
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null,
         sender: ?protocol.NamedPeer = null,
@@ -56,7 +59,7 @@ pub const ConversationPage = struct {
             position: JsonString(20),
             ordinal: JsonString(20),
             kind: JsonEnum(@FieldType(Item, "kind")),
-            content: ?struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) } = null,
+            content: ?JsonContentValue = null,
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null,
@@ -84,7 +87,7 @@ pub const ConversationPage = struct {
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             const hosted = row.kind.value == .hosted_call;
             if (hosted == (row.content != null)) return error.InvalidConversationPage;
-            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
+            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } };
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
@@ -94,12 +97,8 @@ pub const ConversationPage = struct {
                 (item.sender != null and item.source_action != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
-            if (row.content) |reference| {
-                item.content.bytes = try decimalId(reference.bytes, true);
-                if (!reference.display.eql("omitted") or reference.sha256.slice().len != 64) return error.InvalidConversationPage;
-                _ = std.fmt.hexToBytes(&item.content.digest, reference.sha256.slice()) catch return error.InvalidConversationPage;
-            }
-            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
+            if (row.content) |value| item.content = if (item.kind == .assistant) .{ .text = value.text() catch return error.InvalidConversationPage } else value.value;
+            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or
                 ((item.kind == .tool_result) != (item.ordinal != 0)) or
                 (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
             position = item.position;
@@ -141,7 +140,7 @@ pub const ActivityPage = struct {
     pub fn parse(bytes: []const u8, cursor: ActivityCursor) !ActivityPage {
         try cursor.validate();
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
-        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+        const Ref = JsonContentValue;
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
@@ -158,7 +157,7 @@ pub const ActivityPage = struct {
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
         const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions, last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
-        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
+        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20), newest_content: ?Ref };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -195,13 +194,13 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
                     if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .sent => |sent| {
-                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
+                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = sent.content.value } };
                     if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
                 },
                 .approval_requested => |request| {
@@ -232,10 +231,10 @@ pub const ActivityPage = struct {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
                 },
-                .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try content(assistant.content), .final = assistant.final } },
+                .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try textOf(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
                     if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
-                    fact.value = .{ .tool_result = .{ .content = try content(result.content), .presentation = result.presentation.value } };
+                    fact.value = .{ .tool_result = .{ .content = result.content.value, .presentation = result.presentation.value } };
                 },
                 .hosted_call => |call| {
                     if (call.presentation.value.publication_position != fact.position or call.presentation.value.description == null) return error.InvalidActivityPage;
@@ -245,7 +244,7 @@ pub const ActivityPage = struct {
                     var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined, .description = if (call.description) |text| text.value else null, .tool = if (call.tool) |text| text.value else null, .server = if (call.server) |text| text.value else null };
                     if ((value.action != null) == (value.rejection != null)) return error.InvalidActivityPage;
                     for (call.fields, &value.fields) |reference, *field| {
-                        const decoded = try content(reference);
+                        const decoded = try textOf(reference);
                         field.* = .{ .length = decoded.length, .digest = decoded.digest };
                     }
                     fact.value = .{ .call = value };
@@ -257,7 +256,7 @@ pub const ActivityPage = struct {
                     const cancelled = ending == .stopped or ending == .interrupted;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
+                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
                 },
                 .stop => |stop| {
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
@@ -282,12 +281,13 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
-        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true) };
+        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true), .newest_content = if (wire.queued.newest_content) |value| value.value else null };
         if (if (queued.count == 0)
             !std.meta.eql(queued, protocol.Queued{})
         else
             queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
-                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1) return error.InvalidActivityPage;
+                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1 or
+                !mutation_answer.matchesMessageAdmission(queued.newest_content orelse return error.InvalidActivityPage, queued.newest_admission)) return error.InvalidActivityPage;
         page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
@@ -316,10 +316,8 @@ pub const ActivityPage = struct {
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
-    fn content(value: anytype) !protocol.ActivityItem.Content {
-        const reference = try CommandObservation.decodeReference(value);
-        if (reference.bytes > protocol.max_sqlite_content_bytes) return error.InvalidActivityPage;
-        return .{ .length = reference.bytes, .digest = reference.digest };
+    fn textOf(value: JsonContentValue) !content_value.Reference {
+        return value.text() catch error.InvalidActivityPage;
     }
 };
 
@@ -388,6 +386,7 @@ test "a model list reply reads as what the Host writes" {
 
 pub const HostInfoProfile = enum {
     current,
+    released_20,
     released_18,
     released_17,
     released_16,
@@ -403,6 +402,7 @@ pub const HostInfoProfile = enum {
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
+            .released_20 => "20",
             .released_18 => "18",
             .released_17 => "17",
             .released_16 => "16",
@@ -413,9 +413,15 @@ pub const HostInfoProfile = enum {
         };
     }
 
+    pub fn fromWire(text: []const u8) ?HostInfoProfile {
+        for (std.enums.values(HostInfoProfile)) |profile| if (std.mem.eql(u8, profile.wire(), text)) return profile;
+        return null;
+    }
+
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
+            .released_20 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_18 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_17 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
@@ -678,6 +684,12 @@ test "Host information accepts both wire-13 shapes and requires complete current
     }
 }
 
+test "upgrade Host information profiles map every wire back to their profile" {
+    for (std.enums.values(HostInfoProfile)) |profile| try std.testing.expectEqual(profile, HostInfoProfile.fromWire(profile.wire()).?);
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire("8"));
+    try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire(""));
+}
+
 test "upgrade Host information profiles retain the entire strict shape" {
     const legacy_wire = comptime HostInfoProfile.released_9.wire();
     const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
@@ -686,6 +698,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
     try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
     try std.testing.expectEqualStrings("14", HostInfoProfile.released_14.wire());
+    try std.testing.expectEqualStrings("20", HostInfoProfile.released_20.wire());
     try std.testing.expectEqualStrings("18", HostInfoProfile.released_18.wire());
     try std.testing.expectEqualStrings("17", HostInfoProfile.released_17.wire());
     try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
@@ -702,6 +715,12 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(historical);
     const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
     defer std.testing.allocator.free(historical_full);
+    const released_20 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_20.wire() ++ "\"");
+    defer std.testing.allocator.free(released_20);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_20, "/one"));
+    const missing_20 = try std.mem.replaceOwned(u8, std.testing.allocator, released_20, ",\"chatgpt\":\"unserved\"", "");
+    defer std.testing.allocator.free(missing_20);
+    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_20, "/one", .released_20));
     const released_18 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_18.wire() ++ "\"");
     defer std.testing.allocator.free(released_18);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_18, "/one"));
@@ -733,6 +752,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(missing_14);
     try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_14, "/one", .released_14));
     const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
+        .{ .body = released_20, .profile = .released_20, .historical = true },
         .{ .body = released_18, .profile = .released_18, .historical = true },
         .{ .body = released_17, .profile = .released_17, .historical = true },
         .{ .body = released_16, .profile = .released_16, .historical = true },
@@ -866,6 +886,190 @@ pub const ReportReply = union(enum) {
     command: CommandReply,
 };
 
+/// A `public_parts` reply captured in a report file. `decode` checks the whole
+/// list once; `PartList.iterator` then re-reads it one bounded entry at a time.
+pub const PublicPartsReply = union(enum) {
+    list: PartList,
+    failure: ReadFailure,
+
+    /// What the caller asked for: the owner always, the manifest identity when it holds one.
+    pub const Expected = struct { session: []const u8, owner: content_value.Owner, identity: ?content_value.Reference = null };
+
+    /// Validates that the head names the requested Session and owner (and identity, when
+    /// given), that ordinals run contiguously from 0, and that kinds and media are known.
+    pub fn decode(io: std.Io, file: std.Io.File, reply: ReportReply, expected: Expected) !PublicPartsReply {
+        const bytes = switch (reply) {
+            .command => |command| return .{ .failure = try decodeReadFailure(command, false) },
+            .report => |report| report.bytes,
+        };
+        if (bytes > protocol.public_parts_reply.max_bytes) return error.InvalidPartList;
+        var walk: PartWalk = undefined;
+        try walk.open(io, file, bytes);
+        const value = try walk.head(expected.session);
+        if (!std.meta.eql(value.owner, expected.owner)) return error.InvalidPartList;
+        if (expected.identity) |identity| if (!std.meta.eql(identity, value.identity)) return error.InvalidPartList;
+        var count: u32 = 0;
+        while (try walk.next(count)) |_| count += 1;
+        if (count == 0) return error.InvalidPartList;
+        try walk.finish();
+        return .{ .list = .{ .io = io, .file = file, .bytes = bytes, .count = count, .value = value, .session = expected.session } };
+    }
+};
+
+pub const PartList = struct {
+    io: std.Io,
+    file: std.Io.File,
+    bytes: u64,
+    count: u32,
+    value: content_value.Value.Parts,
+    session: []const u8,
+
+    /// Restartable: each iterator reads the file from its start.
+    pub fn iterator(self: *const PartList, out: *PartIterator) !void {
+        out.list = self;
+        out.read = 0;
+        try out.walk.open(self.io, self.file, self.bytes);
+        _ = try out.walk.head(self.session);
+    }
+};
+
+pub const PartIterator = struct {
+    list: *const PartList,
+    read: u32,
+    walk: PartWalk,
+
+    pub fn next(self: *PartIterator) !?content_value.Part {
+        const part = try self.walk.next(self.read) orelse {
+            if (self.read != self.list.count) return error.InvalidPartList;
+            return null;
+        };
+        self.read += 1;
+        return part;
+    }
+};
+
+/// One forward pass over a captured `public_parts` reply. Holds pointers into
+/// itself, so it is opened in place and never moved.
+const PartWalk = struct {
+    file_reader: std.Io.File.Reader,
+    input: [protocol.content_window_bytes]u8,
+    body: std.Io.Reader.Limited,
+    reader_storage: [256]u8,
+    reader_fixed: std.heap.FixedBufferAllocator,
+    value_storage: [2048]u8,
+    value_fixed: std.heap.FixedBufferAllocator,
+    json: std.json.Reader,
+
+    const WireOwner = struct { message: ?JsonString(20) = null, action: ?JsonString(20) = null };
+    const WireValue = struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64), owner: WireOwner };
+    const WirePart = struct {
+        ordinal: JsonString(20),
+        type: JsonString(8),
+        bytes: JsonString(20),
+        sha256: JsonString(64),
+        mime: ?JsonString(16) = null,
+        width: ?JsonString(20) = null,
+        height: ?JsonString(20) = null,
+        name: ?JsonString(input_parts.max_name_bytes) = null,
+    };
+
+    fn open(self: *PartWalk, io: std.Io, file: std.Io.File, bytes: u64) !void {
+        self.file_reader = file.reader(io, &.{});
+        self.body = self.file_reader.interface.limited(.limited64(bytes), &self.input);
+        self.reader_fixed = .init(&self.reader_storage);
+        self.value_fixed = .init(&self.value_storage);
+        self.json = std.json.Reader.init(self.reader_fixed.allocator(), &self.body.interface);
+    }
+
+    fn parse(self: *PartWalk, comptime T: type) !T {
+        self.value_fixed.reset();
+        // innerParse, unlike parseFrom*, does not default the member-name bound.
+        return std.json.innerParse(T, self.value_fixed.allocator(), &self.json, .{ .ignore_unknown_fields = false, .max_value_len = input_parts.max_name_bytes }) catch error.InvalidPartList;
+    }
+
+    fn key(self: *PartWalk) ![]const u8 {
+        self.value_fixed.reset();
+        return switch (self.json.nextAlloc(self.value_fixed.allocator(), .alloc_if_needed) catch return error.InvalidPartList) {
+            .string, .allocated_string => |name| name,
+            else => error.InvalidPartList,
+        };
+    }
+
+    /// Reads every head member up to and including `"parts":[`, which comes last.
+    fn head(self: *PartWalk, session: []const u8) !content_value.Value.Parts {
+        if ((self.json.next() catch return error.InvalidPartList) != .object_begin) return error.InvalidPartList;
+        const Field = enum { version, type, session, value, parts };
+        var seen: std.enums.EnumSet(Field) = .empty;
+        var value: ?content_value.Value.Parts = null;
+        while (true) {
+            const field = std.meta.stringToEnum(Field, try self.key()) orelse return error.InvalidPartList;
+            if (seen.contains(field)) return error.InvalidPartList;
+            seen.insert(field);
+            switch (field) {
+                .version => if (!(try self.parse(JsonString(8))).eql(protocol.wire_version)) return error.InvalidPartList,
+                .type => if (!(try self.parse(JsonString(16))).eql("public_parts")) return error.InvalidPartList,
+                .session => if (!(try self.parse(JsonString(protocol.max_session_bytes))).eql(session)) return error.InvalidPartList,
+                .value => value = try decodeValue(try self.parse(WireValue)),
+                .parts => {
+                    if (seen.count() != std.enums.values(Field).len) return error.InvalidPartList;
+                    if ((self.json.next() catch return error.InvalidPartList) != .array_begin) return error.InvalidPartList;
+                    return value.?;
+                },
+            }
+        }
+    }
+
+    /// The next part, which must carry `ordinal`, or null at the end of the list.
+    fn next(self: *PartWalk, ordinal: u32) !?content_value.Part {
+        if ((self.json.peekNextTokenType() catch return error.InvalidPartList) == .array_end) return null;
+        if (ordinal == input_parts.max_parts) return error.InvalidPartList;
+        const wire = try self.parse(WirePart);
+        if (try decimal(wire.ordinal, true) != ordinal) return error.InvalidPartList;
+        const reference: content_value.Reference = .{ .length = try decimal(wire.bytes, true), .digest = try digest(wire.sha256) };
+        if (wire.type.eql("text")) {
+            if (wire.mime != null or wire.width != null or wire.height != null or wire.name != null) return error.InvalidPartList;
+            return .{ .ordinal = ordinal, .kind = .text, .reference = reference };
+        }
+        if (!wire.type.eql("image")) return error.InvalidPartList;
+        const mime = wire.mime orelse return error.InvalidPartList;
+        const format: @import("input_media.zig").Format = if (mime.eql("image/png")) .png else if (mime.eql("image/jpeg")) .jpeg else return error.InvalidPartList;
+        const width = try decimal(wire.width orelse return error.InvalidPartList, false);
+        const height = try decimal(wire.height orelse return error.InvalidPartList, false);
+        if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32)) return error.InvalidPartList;
+        const name: ?input_parts.Name = if (wire.name) |text| input_parts.displayName(text.slice()) catch return error.InvalidPartList else null;
+        return .{ .ordinal = ordinal, .kind = .{ .image = .{ .media = .{ .format = format, .width = @intCast(width), .height = @intCast(height) }, .name = name } }, .reference = reference };
+    }
+
+    fn finish(self: *PartWalk) !void {
+        if ((self.json.next() catch return error.InvalidPartList) != .array_end or
+            (self.json.next() catch return error.InvalidPartList) != .object_end or
+            (self.json.next() catch return error.InvalidPartList) != .end_of_document or
+            self.body.remaining != .nothing) return error.InvalidPartList;
+    }
+
+    fn decodeValue(wire: WireValue) !content_value.Value.Parts {
+        if (!wire.type.eql("parts")) return error.InvalidPartList;
+        const owner: content_value.Owner = if (wire.owner.message) |id|
+            (if (wire.owner.action != null) return error.InvalidPartList else .{ .message = try decimal(id, false) })
+        else
+            .{ .action = try decimal(wire.owner.action orelse return error.InvalidPartList, false) };
+        return .{ .identity = .{ .length = try decimal(wire.bytes, true), .digest = try digest(wire.sha256) }, .owner = owner };
+    }
+
+    fn decimal(text: JsonString(20), allow_zero: bool) !u64 {
+        return decimalId(text, allow_zero) catch error.InvalidPartList;
+    }
+
+    fn digest(text: JsonString(64)) ![32]u8 {
+        var out: [32]u8 = undefined;
+        const hex = text.slice();
+        if (hex.len != 64) return error.InvalidPartList;
+        for (hex) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidPartList;
+        _ = std.fmt.hexToBytes(&out, hex) catch return error.InvalidPartList;
+        return out;
+    }
+};
+
 pub const CurrentReply = union(enum) {
     unconfigured,
     current: Current,
@@ -890,24 +1094,7 @@ pub const CurrentReply = union(enum) {
 pub const Current = struct {
     pub const Id = ReportNumber(false);
     pub const Count = ReportNumber(true);
-    pub const Reference = struct {
-        bytes: Count,
-        sha256: JsonString(64),
-        type: OmittableJson(JsonEnum(enum { text })) = .{},
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Reference {
-            const Wire = struct { bytes: Count, sha256: JsonString(64), type: @FieldType(Reference, "type") = .{} };
-            const wire = try std.json.innerParse(Wire, allocator, source, options);
-            var digest: [32]u8 = undefined;
-            if (wire.sha256.slice().len != 64) return error.InvalidObservation;
-            _ = std.fmt.hexToBytes(&digest, wire.sha256.slice()) catch return error.InvalidObservation;
-            return .{ .bytes = wire.bytes, .sha256 = wire.sha256, .type = wire.type };
-        }
-
-        pub fn jsonStringify(self: Reference, jw: anytype) !void {
-            try writeObject(self, jw);
-        }
-    };
+    pub const Reference = JsonContentValue;
     pub const Settings = struct {
         reference: JsonString(protocol.max_session_bytes),
         parent: ?JsonString(protocol.session_id_bytes),
@@ -1166,14 +1353,14 @@ pub const Current = struct {
             (if (settings.parent) |parent| !protocol.validSessionId(parent.slice()) or parent.eql(session) else false) or
             (if (settings.label) |label| !protocol.validLabel(label.slice()) else false) or
             (if (settings.context_estimate.value) |estimate| estimate != null and settings.compaction_trigger == null else false) or
-            settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
+            settings.instructions.value != .text or (if (settings.output_schema) |schema| schema.value != .text else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
         const peers = wire.peers.value orelse return error.InvalidObservation;
         if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
-            if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
+            if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.value != .text else false)) return error.InvalidObservation;
         }
         const recent = wire.recent_messages.value orelse return error.InvalidObservation;
         const actions = wire.actions.value orelse return error.InvalidObservation;
@@ -1284,7 +1471,9 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
             while (try source.peekNextTokenType() != .array_end) {
                 const row = try std.json.innerParse(@FieldType(Current.Attention, @tagName(tag)), allocator, source, options);
                 inline for (comptime std.meta.fieldNames(@TypeOf(row))) |name| {
-                    if (@FieldType(@TypeOf(row), name) == Current.Reference and @field(row, name).type.value == null) return error.InvalidObservation;
+                    // Only a resolved Action's result can be a parts value; call fields and rejections are model text.
+                    const parts_allowed = tag == .resolved and comptime std.mem.eql(u8, name, "result");
+                    if (@FieldType(@TypeOf(row), name) == Current.Reference and !parts_allowed and @field(row, name).value != .text) return error.InvalidObservation;
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
@@ -1599,7 +1788,7 @@ pub const CommandObservation = struct {
     code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
     created: ?bool = null,
-    input: ?ContentReference = null,
+    input: ?content_value.Value = null,
     state: ?protocol.MessageRequestState = null,
     queue: ?struct { admission: u64, admitted_at: u64 } = null,
     binding: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
@@ -1649,7 +1838,7 @@ pub const CommandObservation = struct {
         if (self.revision) |revision| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ revision, self.created.? });
         if (self.input) |input| {
             try writer.writeAll(",\"input\":");
-            try writeContentReference(writer, input);
+            try (protocol.MessageInputJson{ .value = input }).writeJson(writer);
         }
         if (self.queue) |queue| try writer.print(",\"queue\":{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\"}}", .{ queue.admission, queue.admitted_at });
         if (self.binding) |binding| try writer.print(",\"binding\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
@@ -1661,7 +1850,7 @@ pub const CommandObservation = struct {
             }
             if (result.text) |text| {
                 try writer.writeAll(",\"text\":");
-                try writeContentReference(writer, text);
+                try protocol.ContentValueJson.text(.{ .length = text.bytes, .digest = text.digest }).writeJson(writer);
             }
             try writer.writeByte('}');
         }
@@ -1704,10 +1893,6 @@ pub const CommandObservation = struct {
         try writer.writeByte('}');
     }
 
-    fn writeContentReference(writer: *std.Io.Writer, reference: ContentReference) !void {
-        try writer.print("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ reference.bytes, std.fmt.bytesToHex(reference.digest, .lower) });
-    }
-
     pub fn parse(reply: CommandReply, key: []const u8) !CommandObservation {
         return switch (try parseReply(reply, key)) {
             .observation => |full| full.facts,
@@ -1726,6 +1911,7 @@ pub const CommandObservation = struct {
         const universe = comptime shapes ++ .{ protocol.error_reply, protocol.session_pin_reply.accepted };
         const JsonTypes = struct {
             pub fn Type(comptime T: type) type {
+                if (T == protocol.MessageInputJson) return mutation_answer.InputWire;
                 if (T == protocol.WorkStateJson) return JsonWorkState;
                 if (T == protocol.WorkAttentionJson) return JsonWorkAttention;
                 if (T == protocol.WorkActionsJson) return JsonWorkActions;
@@ -1774,7 +1960,7 @@ pub const CommandObservation = struct {
             @field(observed, name) = @field(facts, name);
         };
         if (comptime @hasField(Facts, "revision")) observed.revision = try decimalId(facts.revision, false);
-        if (comptime @hasField(Facts, "input")) observed.input = try decodeReference(facts.input);
+        if (comptime @hasField(Facts, "input")) observed.input = facts.input.contentValue(protocol.max_sqlite_content_bytes) catch return error.InvalidObservation;
         if (comptime @hasField(Facts, "state")) observed.state = std.meta.stringToEnum(protocol.MessageRequestState, facts.state.slice()) orelse return error.InvalidObservation;
         if (comptime @hasField(Facts, "queue")) observed.queue = .{ .admission = try decimalId(facts.queue.admission, false), .admitted_at = try decimalId(facts.queue.admitted_at, false) };
         if (comptime @hasField(Facts, "binding")) observed.binding = .{ .turn = try decimalId(facts.binding.turn, false), .operation = try decimalId(facts.binding.operation, false), .attempt = try decimalId(facts.binding.attempt, true) };
@@ -1835,10 +2021,12 @@ pub const CommandObservation = struct {
         if (kind != .message) return;
         const state = self.state orelse return error.InvalidObservation;
         if (!accepted) {
-            if (state != .rejected or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
+            if (state != .rejected or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
             return;
         }
-        if (self.input == null or self.queue == null or state == .rejected) return error.InvalidObservation;
+        const input = self.input orelse return error.InvalidObservation;
+        const queue = self.queue orelse return error.InvalidObservation;
+        if (state == .rejected or !mutation_answer.matchesMessageAdmission(input, queue.admission)) return error.InvalidObservation;
         if (self.result) |result| {
             if (self.work != null or !std.mem.eql(u8, @tagName(state), @tagName(result.status))) return error.InvalidObservation;
             if (result.status != .cancelled and self.binding == null) return error.InvalidObservation;
@@ -1851,6 +2039,7 @@ pub const CommandObservation = struct {
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
                 .processing => if (self.binding == null) return error.InvalidObservation,
+                // A newer Message hides the decision while automatic denial is pending.
                 .waiting_for_permission => {},
                 .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
             }
@@ -1909,15 +2098,14 @@ pub const JsonFirstMessage = struct {
     value: protocol.FirstMessage,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
-        const Wire = struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
+        const Wire = struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: JsonContentValue };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         return .{ .value = .{
             .position = ActivityPage.id(wire.position, false) catch return error.InvalidCharacter,
             .admission = ActivityPage.id(wire.admission, false) catch return error.InvalidCharacter,
             .admitted_at = ActivityPage.id(wire.admitted_at, false) catch return error.InvalidCharacter,
             .sender = if (wire.sender) |sender| sender.peer() catch return error.InvalidCharacter else null,
-            .content = ActivityPage.content(wire.content) catch return error.InvalidCharacter,
+            .content = wire.content.value,
         } };
     }
 
@@ -1925,6 +2113,31 @@ pub const JsonFirstMessage = struct {
         var buffer: [protocol.FirstMessage.max_json_bytes]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         self.value.writeJson(&out) catch unreachable;
+        try jw.print("{s}", .{out.buffered()});
+    }
+};
+
+/// The one reader of a `ContentValue` member.
+pub const JsonContentValue = struct {
+    value: content_value.Value,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const wire = try mutation_answer.InputWire.jsonParse(allocator, source, options);
+        return .{ .value = try wire.contentValue(protocol.max_sqlite_content_bytes) };
+    }
+
+    /// Model text (an answer, an outcome, a call field) is never parts.
+    pub fn text(self: JsonContentValue) error{InvalidCharacter}!content_value.Reference {
+        return switch (self.value) {
+            .text => |reference| reference,
+            .parts => error.InvalidCharacter,
+        };
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        var buffer: [protocol.ContentValueJson.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        (protocol.ContentValueJson{ .value = self.value }).writeJson(&out) catch unreachable;
         try jw.print("{s}", .{out.buffered()});
     }
 };
@@ -1958,6 +2171,7 @@ pub const JsonWorkState = struct {
         const Wire = struct {
             kind: JsonEnum(Kind),
             since: JsonString(20),
+            compaction: OmittableJson(bool) = .{},
             due_at_ms: OmittableJson(JsonString(20)) = .{},
             cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             attempt: OmittableJson(JsonString(20)) = .{},
@@ -1979,9 +2193,11 @@ pub const JsonWorkState = struct {
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
+        if (wire.compaction.isPresent() and kind != .working) return error.InvalidCharacter;
         if (wire.call.isPresent() and kind != .bash) return error.InvalidCharacter;
         const since = number(wire.since, false) catch return error.InvalidCharacter;
         const value: protocol.WorkState = switch (kind) {
+            .working => .{ .working = .{ .since = since, .compaction = wire.compaction.value orelse false } },
             .retrying => .{ .retrying = .{
                 .since = since,
                 .due_at_ms = number(wire.due_at_ms.value.?, false) catch return error.InvalidCharacter,
@@ -2012,7 +2228,7 @@ pub const JsonWorkState = struct {
                 .since = since,
                 .cause = std.meta.stringToEnum(protocol.session_work.StopCause, wire.cause.value.?.slice()) orelse return error.InvalidCharacter,
             } },
-            inline .idle, .pending, .working, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
+            inline .idle, .pending, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
         };
         return .{ .value = value };
     }
@@ -2108,12 +2324,12 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
     var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
-    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1 };
+    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } };
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
         .at = std.math.maxInt(i64) - index,
-        .value = .{ .tool_result = .{ .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
+        .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
     };
     facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
     for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
@@ -2163,6 +2379,32 @@ test "activity page preserves the canonical row preview with its work" {
         defer std.testing.allocator.free(malformed);
         try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(malformed, .{}));
         facts.end = 1;
+    }
+}
+
+test "CLI-17 activity_served_work" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{
+        .revision = 1,
+        .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 2, .served_attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .served_group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 } } },
+    } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for (0..2) |i| {
+        if (i == 1) facts.work.work.actions.interrupt = null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work.work, parsed.facts.work.work);
+        for ([_][]const u8{
+            "\"attention\":{\"kind\":\"approval\",\"turn\":\"1\",\"step\":\"7\"},",
+            "\"group\":\"needs_you\",",
+            if (i == 0) ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"1\",\"operation\":\"2\"},\"decide\":null}" else ",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}",
+        }) |field| {
+            try std.testing.expect(std.mem.indexOf(u8, out.buffered(), field) != null);
+            const missing = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), field, "");
+            defer std.testing.allocator.free(missing);
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(missing, .{}));
+        }
     }
 }
 
@@ -2254,19 +2496,37 @@ test "activity page delta variants validate tokens and preserve the cursor" {
     try std.testing.expect((try ActivityPage.parse(writer.buffered(), .{})).facts.token == null);
 }
 
+test "INS-7 the integration empty queue matches the Activity writer and decoder" {
+    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    try facts.work.workspace.set("/w");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&writer, &facts);
+    const fixture = @embedFile("codecs/fixtures/activity/empty-queue.json");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), fixture) != null);
+    try std.testing.expectEqualDeep(protocol.Queued{}, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+}
+
 test "an activity page's queued Messages are none or a span at its boundary" {
     var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     const Case = struct { queued: protocol.Queued, valid: bool };
+    const text: content_value.Value = .{ .text = .{ .length = 1, .digest = @splat(1) } };
     for ([_]Case{
         .{ .queued = .{}, .valid = true },
-        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40 }, .valid = true },
-        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .message = 9 } } } }, .valid = true },
+        // The newest Message's value is its own: another owner, or none while one waits, is refused.
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .message = 8 } } } }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .action = 9 } } } }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .newest_content = text }, .valid = false },
         .{ .queued = .{ .newest_admission = 9 }, .valid = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41 }, .valid = false },
-        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31 }, .valid = false },
-        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40 }, .valid = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40, .newest_content = text }, .valid = false },
     }) |case| {
         facts.queued = case.queued;
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -2279,8 +2539,8 @@ test "an activity page's queued Messages are none or a span at its boundary" {
 }
 
 test "a turn_ended row's ending agrees with its saved code and content, and a final answer crosses" {
-    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(1) };
-    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?protocol.ActivityItem.Content, valid: bool };
+    const content: content_value.Reference = .{ .length = 1, .digest = @splat(1) };
+    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?content_value.Reference, valid: bool };
     for ([_]Case{
         .{ .ending = .done, .code = "completed", .content = content, .valid = true },
         .{ .ending = .done, .code = "completed", .content = null, .valid = false },
@@ -2312,7 +2572,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
 }
 
 test "an activity row carries its time, and a Message's rows carry its admission time" {
-    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+    const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("k7m2qx");
@@ -2322,7 +2582,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
         .{ .value = .{ .sent = sent }, .at = 1792925000 },
         .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
-        .{ .value = .{ .assistant = .{ .content = content } }, .at = 0, .failure = error.InvalidResponse },
+        .{ .value = .{ .assistant = .{ .content = content.text } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
@@ -2348,7 +2608,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
     }
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content } } };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content.text } } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2382,7 +2642,7 @@ test "refused peer activity retains absent and canonical targets" {
     }
 }
 
-test "a work state reads back exactly the facts its kind owns" {
+test "SUI-47 work state wire preserves owned facts" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -2393,6 +2653,7 @@ test "a work state reads back exactly the facts its kind owns" {
         .{ .idle = .{ .since = 1 } },
         .{ .pending = .{ .since = 2 } },
         .{ .working = .{ .since = 3 } },
+        .{ .working = .{ .since = 3, .compaction = true } },
         .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
         .{ .bash = .{ .since = 5, .call = 0, .description = description, .running = 1, .approvals = 0 } },
         .{ .bash = .{ .since = 5, .call = 3, .description = null, .running = 2, .approvals = 3 } },
@@ -2411,10 +2672,20 @@ test "a work state reads back exactly the facts its kind owns" {
         try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
         const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, writer.buffered(), .{});
         defer parsed.deinit();
+        try std.testing.expectEqual(std.meta.activeTag(state), std.meta.activeTag(parsed.value.value));
+        if (state == .working) {
+            try std.testing.expectEqual(state.working.since, parsed.value.value.working.since);
+            try std.testing.expectEqual(state.working.compaction, parsed.value.value.working.compaction);
+        }
         var again: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
         var again_writer = std.Io.Writer.fixed(&again);
         try std.json.Stringify.value(parsed.value, .{}, &again_writer);
         try std.testing.expectEqualStrings(writer.buffered(), again_writer.buffered());
+        if (state != .working) {
+            var forged: [protocol.WorkStateJson.max_json_bytes + 24]u8 = undefined;
+            const bytes = try std.fmt.bufPrint(&forged, "{s},\"compaction\":true}}", .{writer.buffered()[0 .. writer.buffered().len - 1]});
+            try std.testing.expectError(error.InvalidCharacter, std.json.parseFromSlice(JsonWorkState, std.testing.allocator, bytes, .{}));
+        }
     }
     for ([_][]const u8{
         "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
@@ -2424,11 +2695,21 @@ test "a work state reads back exactly the facts its kind owns" {
         defer parsed.deinit();
         try std.testing.expectEqual(call, parsed.value.value.bash.call);
     }
+    for ([_]bool{ false, true }) |compaction| {
+        var bytes: [80]u8 = undefined;
+        const text = try std.fmt.bufPrint(&bytes, "{{\"kind\":\"working\",\"since\":\"3\",\"compaction\":{}}}", .{compaction});
+        const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, text, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(compaction, parsed.value.value.working.compaction);
+    }
     for ([_][]const u8{
         "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"working\",\"since\":\"3\",\"call\":\"0\"}",
+        "{\"kind\":\"pending\",\"since\":\"3\",\"compaction\":true}",
+        "{\"kind\":\"working\",\"since\":\"3\",\"compaction\":null}",
+        "{\"kind\":\"working\",\"since\":\"3\",\"compaction\":\"true\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
         "{\"kind\":\"pending\",\"since\":\"0\"}",
         "{\"kind\":\"pending\",\"since\":2}",
@@ -2753,10 +3034,10 @@ const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.
 const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"state_change_at\":\"1\",\"subtree_state_change_at\":\"1\",\"descendant_count\":\"0\",\"descendant_needs_you_count\":\"0\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":null}";
 const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"1\",\"end\":\"9\"," ++
-    "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
+    "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
-test "Session list facts own complete rows and render semantic output after scratch reuse" {
+fn listValidationCase0() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2764,8 +3045,8 @@ test "Session list facts own complete rows and render semantic output after scra
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"3\",\"end\":\"9\"," ++
-        "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}," ++
+        "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
+        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -2791,6 +3072,9 @@ test "Session list facts own complete rows and render semantic output after scra
     try std.testing.expectEqualStrings("p33rs1", row.first_message.?.sender.?.session.slice());
     try std.testing.expectEqual(@as(u64, 1792925300), row.work.state.since());
     try std.testing.expectEqualStrings("Run the tests", row.work.state.bash.description.?.slice());
+    try std.testing.expectEqual(@import("session_work.zig").Group.needs_you, row.work.group);
+    try std.testing.expectEqualDeep(@as(?@import("session_work.zig").Attention, .{ .kind = .approval, .turn = 2, .step = 8 }), row.work.attention);
+    try std.testing.expectEqualDeep(@import("session_work.zig").Actions{ .stop = true, .interrupt = .{ .turn = 2, .operation = 6 } }, row.work.actions);
     try std.testing.expectEqual(@as(?u64, 1792925200), row.peers.from_person_at);
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
@@ -2799,6 +3083,30 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
+    for ([_][]const u8{
+        "\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},",
+        "\"group\":\"needs_you\",",
+        ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}",
+    }) |field| {
+        try std.testing.expect(std.mem.indexOf(u8, wire, field) != null);
+        const missing = try std.mem.replaceOwned(u8, std.testing.allocator, wire, field, "");
+        defer std.testing.allocator.free(missing);
+        try file.writePositionalAll(io, missing, 0);
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, missing.len, "/w\nµ", .{}));
+    }
+    const collision = try std.mem.replaceOwned(u8, std.testing.allocator, wire, "\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"}", "\"interrupt\":null");
+    defer std.testing.allocator.free(collision);
+    try file.writePositionalAll(io, collision, 0);
+    const decoded_collision = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = collision.len } });
+    const other = decoded_collision.page.rows[0].work;
+    try std.testing.expectEqualDeep(row.work.state, other.state);
+    try std.testing.expectEqual(row.work.turn, other.turn);
+    try std.testing.expectEqual(row.work.operation, other.operation);
+    try std.testing.expectEqualDeep(row.work.attention, other.attention);
+    try std.testing.expectEqual(row.work.group, other.group);
+    try std.testing.expect(other.actions.interrupt == null);
+    try std.testing.expectEqual(row.work.actions.stop, other.actions.stop);
+    try std.testing.expectEqual(row.work.actions.decide, other.actions.decide);
 }
 
 test "Session list reply owns read failure facts without asserting absence or admission" {
@@ -2888,7 +3196,7 @@ test "Session list byte range validates junk inside and ignores junk outside the
     try std.testing.expectEqual(@as(usize, 0), spaced.page.count);
 }
 
-test "Session list facts reject malformed metadata and consequential ambiguity" {
+fn listValidationCase1() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3134,7 +3442,7 @@ test "Session list rows retain host tool names" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"tools\":[\"bash\",\"fetch_page\"]") != null);
 }
 
-test "Session list facts attain eight maximum escaped rows and bind the continuation cohort" {
+fn listValidationCase2() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3157,7 +3465,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try maximal.workspace.set(&workspace);
     try maximal.model.set(&model);
     try maximal.label.?.set(&text);
-    maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) } };
+    maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .parts = .{ .identity = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) }, .owner = .{ .message = largest } } } };
     try maximal.first_message.?.sender.?.session.set("zzzzzz");
     const call_text = @as([protocol.max_tool_description_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
@@ -3208,13 +3516,14 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
 }
 
 const testing_observation_input = ",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+const testing_observation_parts_head = ",\"input\":{\"type\":\"parts\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"";
 const testing_observation_queue = ",\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
 const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
 const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
 const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":";
 const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\"";
 
-test "keyed observation retains Host state independently of admission and binding" {
+test "ADM-27 keyed observation preserves input identity across states" {
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     inline for (.{
         .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
@@ -3227,21 +3536,66 @@ test "keyed observation retains Host state independently of admission and bindin
         .{ "cancelled", testing_observation_binding, ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
         .{ "cancelled", "", ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
     }) |case| {
-        const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
-        const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
-        try std.testing.expectEqual(.accepted, observed.status);
-        try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
-        try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
-        try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
-        if (observed.binding) |binding| {
-            try std.testing.expectEqual(@as(u64, 37), binding.turn);
-            try std.testing.expectEqual(@as(u64, 41), binding.operation);
-            try std.testing.expectEqual(@as(u64, 0), binding.attempt);
+        inline for (.{ "text", "parts" }) |form| {
+            const parts = comptime std.mem.eql(u8, form, "parts");
+            const input = if (parts) testing_observation_parts_head ++ ",\"owner\":{\"message\":\"23\"}}" else testing_observation_input;
+            const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
+            const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
+            try std.testing.expectEqual(.accepted, observed.status);
+            const value = observed.input.?;
+            try std.testing.expectEqualStrings(form, @tagName(value));
+            try std.testing.expectEqualDeep(content_value.Reference{ .length = 11, .digest = @splat(0xaa) }, value.identity());
+            if (parts) try std.testing.expectEqualDeep(content_value.Owner{ .message = 23 }, value.parts.owner);
+            try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
+            try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
+            try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
+            if (observed.binding) |binding| {
+                try std.testing.expectEqual(@as(u64, 37), binding.turn);
+                try std.testing.expectEqual(@as(u64, 41), binding.operation);
+                try std.testing.expectEqual(@as(u64, 0), binding.attempt);
+            }
+            var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&output);
+            try observed.writeJson(&writer);
+            try std.testing.expectEqualStrings(facts, writer.buffered());
         }
-        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&output);
-        try observed.writeJson(&writer);
-        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+    const rejection = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"invalid_input\",\"state\":\"rejected\"";
+    const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ rejection ++ "}}" }, "k");
+    try std.testing.expectEqual(.rejected, observed.status);
+    try std.testing.expect(observed.input == null);
+    var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try observed.writeJson(&writer);
+    try std.testing.expectEqualStrings(rejection ++ "}", writer.buffered());
+    inline for (.{ testing_observation_input, testing_observation_parts_head ++ ",\"owner\":{\"message\":\"23\"}}", ",\"input\":null" }) |input| {
+        const body = testing_observation_prefix ++ rejection ++ input ++ "}}";
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    }
+}
+
+test "ADM-27 keyed observation rejects invalid Message input owners" {
+    const prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"queued\"";
+    const suffix = "}" ++ testing_observation_queue ++ testing_observation_work ++ "}}";
+    const owner = ",\"owner\":{\"message\":\"23\"}";
+    inline for (.{
+        "",
+        ",\"owner\":null",
+        ",\"owner\":{}",
+        ",\"owner\":{\"message\":null}",
+        ",\"owner\":{\"message\":\"23\",\"action\":null}",
+        ",\"owner\":{\"message\":\"23\",\"extra\":true}",
+        ",\"owner\":{\"message\":\"23\",\"messa\\u0067e\":\"23\"}",
+        owner ++ owner,
+        ",\"owner\":{\"action\":\"23\"}",
+        ",\"owner\":{\"message\":\"22\"}",
+    }) |invalid_owner| {
+        const body = prefix ++ testing_observation_parts_head ++ invalid_owner ++ suffix;
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    }
+    inline for (.{ owner, ",\"owner\":null" }) |invalid_owner| {
+        const body = prefix ++ testing_observation_input[0 .. testing_observation_input.len - 1] ++ invalid_owner ++ suffix;
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     }
 }
 
@@ -3293,9 +3647,7 @@ fn expectObservationFieldPresence(original: *const CommandObservation) !void {
             try std.json.Stringify.value(facts.value, .{}, &writer);
             try writer.writeByte('}');
             const parsed = CommandObservation.parse(.{ .status = 200, .body = writer.buffered() }, "k");
-            if (std.mem.eql(u8, name, "input") and original.kind == .message and original.status == .rejected) {
-                _ = try parsed;
-            } else try std.testing.expectError(error.InvalidObservation, parsed);
+            try std.testing.expectError(error.InvalidObservation, parsed);
         }
     }
 }
@@ -3425,6 +3777,21 @@ test "keyed observation rejects malformed consequential fields before outcome in
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     var oversized: [protocol.command_observation_reply.max_bytes + 1]u8 = undefined;
     try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
+}
+
+test "keyed observation retains superseded approval work without a decision" {
+    inline for (.{ "", testing_observation_binding }) |binding| {
+        const facts = testing_observation_message ++ ",\"state\":\"waiting_for_permission\"" ++ testing_observation_input ++ testing_observation_queue ++ binding ++
+            ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"37\",\"step\":\"0\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(.waiting_for_permission, observed.state.?);
+        try std.testing.expect(observed.work.?.first_action == null and observed.work.?.actions.decide == null);
+        try std.testing.expectEqual(.needs_you, observed.work.?.group);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
 }
 
 test "keyed observation rejects contradictory permission work variants" {
@@ -3558,7 +3925,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
+    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
     const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
@@ -3692,7 +4059,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
+    const reference = "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
@@ -3706,7 +4073,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqualStrings("p33rs1", facts.settings.parent.?.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
+    try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.value.text.length);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
     try std.testing.expectEqual(@as(u64, 91), facts.work.operation.?.value);
@@ -3743,10 +4110,10 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     const page = try ConversationPage.parse(conversation, .{ .end = 0 });
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
-    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.bytes);
+    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.text.length);
     try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
     for ([_][]const u8{
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"display\":\"omitted\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":null,\"code\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\"}",
         "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
@@ -4064,4 +4431,176 @@ test "derived observation payloads cover caller fields" {
             try std.testing.expect(owned);
         }
     }
+}
+
+test "CLI-12 list_page_validation" {
+    try listValidationCase0();
+    try listValidationCase1();
+    try listValidationCase2();
+}
+
+test "WIR-5 released_host_info_profiles" {
+    const Case = struct { wire: []const u8, chatgpt: bool };
+    for ([_]Case{
+        .{ .wire = "9", .chatgpt = false },
+        .{ .wire = "13", .chatgpt = false },
+        .{ .wire = "13", .chatgpt = true },
+        .{ .wire = "14", .chatgpt = true },
+        .{ .wire = "15", .chatgpt = true },
+        .{ .wire = "16", .chatgpt = true },
+        .{ .wire = "17", .chatgpt = true },
+        .{ .wire = "18", .chatgpt = true },
+        .{ .wire = "20", .chatgpt = true },
+    }) |case| {
+        var selected: ?HostInfoProfile = null;
+        for (std.enums.values(HostInfoProfile)) |profile| {
+            if (profile.historical() and std.mem.eql(u8, profile.wire(), case.wire)) selected = profile;
+        }
+        const profile = selected orelse return error.MissingReleasedProfile;
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ case.wire, if (case.chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
+        defer std.testing.allocator.free(body);
+        const facts = try parseHostInfoForProfile(body, "/one", profile);
+        try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
+        try std.testing.expect(facts.store.eql("/one"));
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
+        const incomplete = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"paused\":true,", "");
+        defer std.testing.allocator.free(incomplete);
+        try std.testing.expectError(error.MissingField, parseHostInfoForProfile(incomplete, "/one", profile));
+    }
+}
+
+test "WIR-4 a content value reads back only as text or as parts with one owner" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const identity: content_value.Reference = .{ .length = 7, .digest = @bitCast(@as([2][16]u8, @splat(.{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef }))) };
+    const largest = std.math.maxInt(i64);
+    for ([_]content_value.Value{
+        .{ .text = identity },
+        .{ .text = .{ .length = 0, .digest = identity.digest } },
+        .{ .text = .{ .length = protocol.max_sqlite_content_bytes, .digest = identity.digest } },
+        .{ .parts = .{ .identity = identity, .owner = .{ .message = 1 } } },
+        .{ .parts = .{ .identity = identity, .owner = .{ .action = largest } } },
+    }) |value| {
+        var buffer: [protocol.ContentValueJson.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        try (protocol.ContentValueJson{ .value = value }).writeJson(&out);
+        const decoded = try std.json.parseFromSliceLeaky(JsonContentValue, arena.allocator(), out.buffered(), .{});
+        try std.testing.expectEqualDeep(value, decoded.value);
+        try std.testing.expectEqual(value == .text, if (decoded.text()) |_| true else |_| false);
+    }
+    const head = "{\"bytes\":\"7\",\"sha256\":\"" ++ digest ++ "\"";
+    for ([_][]const u8{
+        head ++ "}",
+        "{\"type\":\"text\"," ++ head[1..] ++ ",\"display\":\"omitted\"}",
+        "{\"type\":\"text\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"1\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ "}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":null}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"1\",\"action\":\"2\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"0\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"action\":\"9223372036854775808\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"turn\":\"1\"}}",
+        "{\"type\":\"image\"," ++ head[1..] ++ "}",
+        "{\"type\":\"text\",\"bytes\":\"07\",\"sha256\":\"" ++ digest ++ "\"}",
+        "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ digest[0..63] ++ "F\"}",
+        "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ digest[0..62] ++ "\"}",
+        std.fmt.comptimePrint("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"" ++ digest ++ "\"}}", .{protocol.max_sqlite_content_bytes + 1}),
+    }) |wire| {
+        if (std.json.parseFromSliceLeaky(JsonContentValue, arena.allocator(), wire, .{})) |_| {
+            std.debug.print("accepted {s}\n", .{wire});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+test "WIR-4 a public parts reply reads back as the Host writes it and refuses any other list" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "parts", .{ .read = true });
+    defer file.close(io);
+    const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const b = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+    const c = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"k7m2qx\"," ++
+        "\"value\":{\"type\":\"parts\",\"bytes\":\"120\",\"sha256\":\"" ++ a ++ "\",\"owner\":{\"action\":\"9\"}},\"parts\":[" ++
+        "{\"ordinal\":\"0\",\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ b ++ "\"}," ++
+        "{\"ordinal\":\"1\",\"type\":\"image\",\"mime\":\"image/png\",\"width\":\"1\",\"height\":\"4294967295\",\"name\":\"cat \\\"\\u96ea\\\".png\",\"bytes\":\"67\",\"sha256\":\"" ++ c ++ "\"}," ++
+        "{\"ordinal\":\"2\",\"type\":\"image\",\"mime\":\"image/jpeg\",\"width\":\"3\",\"height\":\"2\",\"name\":null,\"bytes\":\"5\",\"sha256\":\"" ++ b ++ "\"}]}";
+    var identity: content_value.Reference = .{ .length = 120, .digest = @splat(0xaa) };
+    const expected: PublicPartsReply.Expected = .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity };
+    try file.writePositionalAll(io, wire, 0);
+    const reply = try PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, expected);
+    try std.testing.expectEqual(@as(u32, 3), reply.list.count);
+    try std.testing.expect(std.meta.eql(content_value.Owner{ .action = 9 }, reply.list.value.owner));
+    const iterator = try std.testing.allocator.create(PartIterator);
+    defer std.testing.allocator.destroy(iterator);
+    // The iterator restarts from the file each time.
+    for (0..2) |_| {
+        try reply.list.iterator(iterator);
+        const text = (try iterator.next()).?;
+        try std.testing.expect(text.kind == .text and text.ordinal == 0 and text.reference.length == 0);
+        try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x0b)), &text.reference.digest);
+        const png = (try iterator.next()).?;
+        try std.testing.expectEqual(@as(u64, 67), png.reference.length);
+        try std.testing.expectEqual(@import("input_media.zig").Format.png, png.kind.image.media.format);
+        try std.testing.expectEqual(@as(u32, 1), png.kind.image.media.width);
+        try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), png.kind.image.media.height);
+        try std.testing.expectEqualStrings("cat \"雪\".png", png.kind.image.name.?.slice());
+        const jpeg = (try iterator.next()).?;
+        try std.testing.expect(jpeg.ordinal == 2 and jpeg.kind.image.media.format == .jpeg and jpeg.kind.image.name == null);
+        try std.testing.expectEqual(@as(?content_value.Part, null), try iterator.next());
+    }
+    // A Host refusal decodes as a read failure, not a list.
+    const refusal = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"parts_unavailable\",\"code\":\"ContentIsText\"}";
+    const failure = (try PublicPartsReply.decode(io, file, .{ .command = .{ .status = 409, .body = refusal } }, expected)).failure;
+    try std.testing.expectEqualStrings("ContentIsText", failure.diagnostic.code.slice());
+
+    const Mutation = struct { from: []const u8, to: []const u8 };
+    const mutations = [_]Mutation{
+        .{ .from = "\"session\":\"k7m2qx\"", .to = "\"session\":\"k7m2qy\"" },
+        .{ .from = "{\"action\":\"9\"}", .to = "{\"message\":\"9\"}" },
+        .{ .from = "{\"action\":\"9\"}", .to = "{\"action\":\"9\",\"message\":\"9\"}" },
+        .{ .from = "\"bytes\":\"120\"", .to = "\"bytes\":\"121\"" },
+        .{ .from = "\"type\":\"parts\"", .to = "\"type\":\"text\"" },
+        .{ .from = "\"type\":\"public_parts\"", .to = "\"type\":\"public_part\"" },
+        .{ .from = "\"version\":\"" ++ protocol.wire_version ++ "\"", .to = "\"version\":\"" ++ protocol.wire_version ++ "0\"" },
+        .{ .from = "\"ordinal\":\"1\"", .to = "\"ordinal\":\"3\"" },
+        .{ .from = "\"ordinal\":\"0\"", .to = "\"ordinal\":\"00\"" },
+        .{ .from = "\"type\":\"text\",\"bytes\":\"0\"", .to = "\"type\":\"text\",\"mime\":\"image/png\",\"bytes\":\"0\"" },
+        .{ .from = "\"type\":\"text\",\"bytes\":\"0\"", .to = "\"type\":\"audio\",\"bytes\":\"0\"" },
+        .{ .from = "image/png", .to = "image/gif" },
+        .{ .from = "\"width\":\"1\"", .to = "\"width\":\"0\"" },
+        .{ .from = "\"height\":\"4294967295\"", .to = "\"height\":\"4294967296\"" },
+        .{ .from = ",\"width\":\"3\"", .to = "" },
+        .{ .from = "\"name\":null", .to = "\"name\":\"\"" },
+        .{ .from = "\"name\":null,", .to = "\"name\":null,\"extra\":true," },
+        .{ .from = "\"sha256\":\"" ++ b ++ "\"}]", .to = "\"sha256\":\"" ++ b[0..62] ++ "\"}]" },
+        .{ .from = "\"sha256\":\"" ++ b ++ "\"}]", .to = "\"sha256\":\"" ++ b[0..62] ++ "AB\"}]" },
+        .{ .from = ",\"parts\":[", .to = ",\"parts\":[],\"later\":[" },
+        .{ .from = "\"parts\":[{\"ordinal\":\"0\"", .to = "\"parts\":[],\"x\":[{\"ordinal\":\"0\"" },
+        .{ .from = "}]}", .to = "}]}}" },
+    };
+    for (mutations) |mutation| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, wire, mutation.from, mutation.to);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expect(!std.mem.eql(u8, changed, wire));
+        try file.writePositionalAll(io, changed, 0);
+        if (PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = changed.len } }, expected)) |_| {
+            std.debug.print("accepted {s}\n", .{changed});
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.InvalidPartList, err);
+    }
+    // An empty list, a short byte count and trailing bytes past the count.
+    const empty = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"k7m2qx\",\"value\":{\"type\":\"parts\",\"bytes\":\"120\",\"sha256\":\"" ++ a ++ "\",\"owner\":{\"action\":\"9\"}},\"parts\":[]}";
+    try file.writePositionalAll(io, empty, 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = empty.len } }, expected));
+    try file.writePositionalAll(io, wire ++ "x", 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len - 1 } }, expected));
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len + 1 } }, expected));
+    // The requested identity binds the manifest.
+    identity.length = 119;
+    try file.writePositionalAll(io, wire, 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
 }

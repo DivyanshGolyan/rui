@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import type { components } from "./wire.ts";
 
-export const WIRE_VERSION = "21";
+export const WIRE_VERSION = "22";
 
 const MAX_REPLY_BYTES = 64 * 1024 * 1024;
 

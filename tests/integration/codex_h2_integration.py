@@ -85,14 +85,17 @@ def catalog_unusable_trust_run():
             assert listed and listed[0]["provider"] == "codex", listed
         fixture.stop_host(host)
         host = None
-        assert log.read_bytes() == b"", log.read_bytes()
+        # The default catalog refresh is asynchronous and may fail before shutdown.
+        # Its setup failure is reported even without a catalog URL override.
+        diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"
+        stderr = log.read_bytes()
+        assert stderr in (b"", diagnostic), stderr
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
             "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
         ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
-        diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"
         for _ in range(3):
             listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
             assert listed and listed[0]["provider"] == "codex", listed

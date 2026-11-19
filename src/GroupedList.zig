@@ -70,7 +70,7 @@ const Frame = struct {
         const segments = try widget_style.segments(arena, owner.caps, built.segments, if (selected) owner.selection_background else null);
         const regions = try arena.alloc(List.Region, built.regions.len);
         for (built.regions, regions) |region, *dest| {
-            dest.* = .{ .start = region.start +| RowInset.left, .end = region.end +| RowInset.left, .tint_start = region.start, .tint_end = region.end +| RowInset.left +| RowInset.right, .target = region.target, .selected = region.selected };
+            dest.* = .{ .start = region.start +| RowInset.left, .end = region.end +| RowInset.left, .target = region.target, .selected = region.selected };
         }
         const lines = try arena.dupe(List.Line, &.{segments});
         return .{ .lines = lines, .target = built.target, .alternate_target = built.alternate_target, .regions = regions };
@@ -169,7 +169,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .provider = .codex,
             .label = "Quiet row",
             .state = .{ .finished = .{ .since = 100 } },
-            .first = .{ .position = 1, .admission = 1, .sender = null },
+            .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (wrote) 100 else null,
             .last_line = .{ .position = 1, .text = "Last answer" },
         };

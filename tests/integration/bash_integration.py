@@ -14,10 +14,10 @@ import threading
 import time
 from collections import Counter
 
-from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background
+from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_background_action_values
 import model_fixture as fixture
 import host_process
-from host_process import HostDiagnostics, assert_caller_error, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
+from host_process import HostDiagnostics, assert_caller_error, PauseGate, canonical_fixture_root, dispose_all, retain_failure_state
 import os_semantics
 from bash_fixture import action_for, actions_for, add_exchange, allow, assert_cleanup_population, configure, execution_custody_idle, process_exists, process_resources, publish_pid, resolution, result_text, rows, source_revision, start_detached_shell
 
@@ -51,12 +51,18 @@ def execution_idle(store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
+def turn_ended(store, session):
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
+    return report if report["work"]["state"]["kind"] in ("finished", "stopped", "failed") else None
+
+
 def prove_spill_delivery_outcomes(state):
+    # EXR-49
     # Stop is accepted only after both complete captures have become spills.
     for mode in ("normal", "session-stop", "action-stop"):
         name = f"spill-delivery-{mode}"
         store = state / f"{name}-store"
-        gate = ReleaseGate(state / f"{name}-gate")
+        gate = PauseGate("action.result_ready")
         responses = []
         add_exchange(responses, name,
                      "head -c 24000 /dev/zero | tr '\\0' o; "
@@ -67,14 +73,12 @@ def prove_spill_delivery_outcomes(state):
         host = None
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                                      "--test-transition", "action-result-ready",
-                                      "--test-transition-gate-path", gate.path, "--test-phase-trace")
-            diagnostics = HostDiagnostics(host)
+                                      "--test-phase-trace", observations="recovery", pause=gate)
+            HostDiagnostics(host)
             session = configure(state, store, f"{name}-config", permission="bypass")
             fixture.message(state, store, f"{name}-message", session, "run")
             action = fixture.wait_for(lambda: action_for(store, session), f"{name} Action")["action"]
-            diagnostics.wait("action_result_ready", action=str(action))
-            gate.assert_held()
+            gate.wait(action=action)
             paths = set((store / "scratch").glob(f"bash-*-{action}-*.tmp"))
             assert len(paths) == 2, paths
             assert sorted(path.read_bytes() for path in paths) == [b"e" * 24000, b"o" * 24000]
@@ -90,9 +94,14 @@ def prove_spill_delivery_outcomes(state):
             gate.release()
             expected = "succeeded" if mode == "normal" else "cancelled"
             fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} resolution")
+            if mode != "session-stop":
+                fixture.wait_for(lambda: fixture.completed_observation(store, f"{name}-message"),
+                                 f"{name} continuation")
             fixture.wait_for(lambda: execution_custody_idle(store, session), f"{name} custody release")
             result = result_text(store, session)
-            report = fixture.command("session", "inspect", "--store", store, "--session", session)
+            # The normal result continues to the model, whose exchange holds its own
+            # scratch until the turn ends; measure the spills alone after that.
+            report = fixture.wait_for(lambda: turn_ended(store, session), f"{name} turn end")
             used = int(report["execution"]["scratch_used_bytes"])
             remaining = set((store / "scratch").glob(f"bash-*-{action}-*.tmp"))
             if mode == "normal":
@@ -111,7 +120,7 @@ def prove_spill_delivery_outcomes(state):
             host = None
             assert rows(store, "SELECT resolution_code FROM action_operation WHERE action_id=?", (action,)) == [(expected,)]
         finally:
-            gate.release()
+            gate.close()
             dispose_all((lambda: fixture.stop_host(host)) if host is not None else lambda: None,
                         endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
 
@@ -518,8 +527,10 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
-        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT, store=store, session=session, model="gpt-6-sol"), initial_request
+        prompt = fixture.model_instructions(fixture.ROOT, store=store, session=session, model="gpt-6-sol")
+        assert fixture.request_system_prompt(initial_request) == prompt, initial_request
         assert [item for item in initial_request["input"] if item.get("type") != "additional_tools"] == [
+            {"role": "developer", "content": [{"type": "input_text", "text": prompt}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
         second_request = json.loads(endpoint.requests[2])
@@ -872,6 +883,7 @@ def main():
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
     prove_native_background(state)
+    prove_background_action_values(state)
     prove_model_action_read(state)
     prove_automatic_background(state)
     prove_spill_delivery_outcomes(state)
@@ -1099,7 +1111,7 @@ def main():
     milestones = None
     detached_process = None
     observed_exit_gate = None
-    observed_exit_gate_keeper = None
+    prelaunch_stop_gate = None
     stopped_pipes_stop = None
     settlement_gate = None
     before_launch_gate = None
@@ -1268,7 +1280,7 @@ def main():
         domain = b"rui/content/v1"
         expected_digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected_bytes).hexdigest()
         assert metadata["code"] == "succeeded" and int(metadata["position"]) > 0, metadata
-        assert metadata["content"] == {"bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
+        assert metadata["content"] == {"type": "text", "bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
         page = first_read
         assembled = bytearray()
         while True:
@@ -1459,13 +1471,14 @@ def main():
             lambda: action_for(store, session), "pre-launch stoppable Action"
         )
         fixture.stop_host(host)
+        # EXR-56
+        prelaunch_stop_gate = PauseGate("action.before_handoff")
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-before-launch-delay-ms",
-            "1000",
             "--test-phase-trace",
             observations="recovery",
+            pause=prelaunch_stop_gate,
         )
         milestones = HostDiagnostics(host)
         allow(
@@ -1475,10 +1488,7 @@ def main():
             session,
             prelaunch_stop_action["action"],
         )
-        milestones.wait(
-            "prepared_before_handoff",
-            action=str(prelaunch_stop_action["action"]),
-        )
+        prelaunch_stop_gate.wait(action=prelaunch_stop_action["action"])
         fixture.command(
             "session", "stop",
             "--store",
@@ -1490,11 +1500,15 @@ def main():
             "--session",
             session,
         )
+        assert not prelaunch_stop_marker.exists()
+        prelaunch_stop_gate.release()
         fixture.wait_for(
             lambda: resolution(store, session) == "cancelled",
             "pre-launch stopped Action",
         )
         assert not prelaunch_stop_marker.exists()
+        prelaunch_stop_gate.close()
+        prelaunch_stop_gate = None
 
         session = configure(state, store, "before-launch-config")
         fixture.message(state, store, "before-launch-message", session, "execute")
@@ -1512,21 +1526,18 @@ def main():
             "SELECT authorized,attempt_ordinal FROM action_operation WHERE session_ref=?",
             (session,),
         ) == [(1, 0)]
-        before_launch_gate = ReleaseGate(state / "before-launch-gate")
+        # EXR-50
+        before_launch_gate = PauseGate("action.before_handoff")
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-transition",
-            "prepared-before-handoff",
-            "--test-transition-gate-path",
-            before_launch_gate.path,
             "--test-phase-trace",
             observations="recovery",
+            pause=before_launch_gate,
         )
         milestones = HostDiagnostics(host)
-        milestones.wait("prepared_before_handoff", action=str(pending["action"]))
+        before_launch_gate.wait(action=pending["action"])
         assert host.poll() is None
-        before_launch_gate.assert_held()
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
         assert {
             store / "scratch" / f"bash-{stream}-{pending['action']}-1.tmp"
@@ -1537,7 +1548,7 @@ def main():
         host = None
         milestones = None
         assert crash["returncode"] == -signal.SIGKILL
-        before_launch_gate.release()
+        before_launch_gate.close()
         before_launch_gate = None
         before_recovery = int(time.time())
         host = fixture.start_host(store, endpoint_url)
@@ -1635,18 +1646,17 @@ def main():
             ("cancelled",)
         ]
 
-        settlement_gate = ReleaseGate(state / "settlement-result-gate")
+        # EXR-51
+        settlement_gate = PauseGate("action.result_ready")
         settlement_cleanup_gate.touch()
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-transition",
-            "action-result-ready",
-            "--test-transition-gate-path",
-            settlement_gate.path,
             "--test-bash-cleanup-gate-path",
             settlement_cleanup_gate,
             "--test-phase-trace",
+            observations="recovery",
+            pause=settlement_gate,
         )
         milestones = HostDiagnostics(host)
         session = configure(state, store, "settlement-stop-config")
@@ -1668,10 +1678,7 @@ def main():
             session,
             settlement_stop_action["action"],
         )
-        milestones.wait(
-            "action_result_ready",
-            action=str(settlement_stop_action["action"]),
-        )
+        settlement_gate.wait(action=settlement_stop_action["action"])
         sealed_paths = list((store / "scratch").glob(f"bash-*-{settlement_stop_action['action']}-*.tmp"))
         assert len(sealed_paths) == 2 and sorted(path.stat().st_size for path in sealed_paths) == [24000, 24000], sealed_paths
         fixture.command(
@@ -1737,16 +1744,14 @@ def main():
         )
 
         fixture.stop_host(host)
-        observed_exit_gate = state / "stopped-pipes-observed-exit-gate"
-        os.mkfifo(observed_exit_gate, mode=0o600)
-        observed_exit_gate_keeper = os.open(observed_exit_gate, os.O_RDWR | os.O_NONBLOCK)
+        # EXR-55
+        observed_exit_gate = PauseGate("action.bash_exit_observed")
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-bash-observed-exit-gate-path",
-            observed_exit_gate,
             "--test-phase-trace",
             observations="bash_pipes",
+            pause=observed_exit_gate,
         )
         milestones = HostDiagnostics(host)
         session = configure(state, store, "stopped-pipes-config")
@@ -1768,10 +1773,7 @@ def main():
         stopped_child = int(stopped_pipes_child_pid.read_text())
         assert process_exists(stopped_child)
         stopped_pipes_leader_release.touch()
-        milestones.wait(
-            "bash_leader_observed_with_open_pipes",
-            action=str(stopped_pipes_action["action"]),
-        )
+        observed_exit_gate.wait(action=stopped_pipes_action["action"])
         stopped_pipes_stop = fixture.start_command(
             "session", "stop",
             "--store",
@@ -1787,11 +1789,9 @@ def main():
             subject_kind="command_key",
             subject="stopped-pipes-stop",
         )
-        os.write(observed_exit_gate_keeper, b"x")
+        observed_exit_gate.release()
         stopped = fixture.finish_command(stopped_pipes_stop)
-        os.close(observed_exit_gate_keeper)
-        observed_exit_gate.unlink()
-        observed_exit_gate_keeper = None
+        observed_exit_gate.close()
         observed_exit_gate = None
         stopped_pipes_stop = None
         assert stopped["answer"]["status"] == "accepted", stopped
@@ -2264,15 +2264,14 @@ def main():
         cleanups = []
         if stopped_pipes_stop is not None and stopped_pipes_stop.poll() is None:
             cleanups.extend((stopped_pipes_stop.kill, lambda: stopped_pipes_stop.wait(timeout=10)))
-        if observed_exit_gate_keeper is not None:
-            cleanups.extend((lambda: os.write(observed_exit_gate_keeper, b"x"),
-                             lambda: os.close(observed_exit_gate_keeper)))
         if observed_exit_gate is not None:
-            cleanups.append(lambda: observed_exit_gate.unlink(missing_ok=True))
+            cleanups.append(observed_exit_gate.close)
+        if prelaunch_stop_gate is not None:
+            cleanups.append(prelaunch_stop_gate.close)
         if before_launch_gate is not None:
-            cleanups.append(before_launch_gate.release)
+            cleanups.append(before_launch_gate.close)
         if settlement_gate is not None:
-            cleanups.append(settlement_gate.release)
+            cleanups.append(settlement_gate.close)
         cleanups.append(lambda: settlement_cleanup_gate.unlink(missing_ok=True))
         cleanups.append(sibling_release.touch)
         if host is not None:

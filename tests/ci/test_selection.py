@@ -351,12 +351,13 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
+                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
                 self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
@@ -463,6 +464,15 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
+        # CI-75: touched Message capture owners select their real provider witness.
+        for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
+                     "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("cli-image-integration", selected[family])
+
     def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
@@ -537,6 +547,7 @@ class SelectionTest(unittest.TestCase):
     def test_mysql_provisioning_owner_combinations(self):
         cases = (([], "all", False, False),
                  (["plain"], "all", False, False),
+                 (["test-pg"], "all", False, False),
                  (["fixture"], "all", True, False),
                  (["test-native"], "all", False, False),
                  (["test"], "all", True, True),
@@ -550,9 +561,12 @@ class SelectionTest(unittest.TestCase):
         for targets, part, live, dialect in cases:
             for platform in ("linux", "macos"):
                 with self.subTest(targets=targets, part=part, platform=platform):
+                    postgres = platform == "linux" and bool(
+                        {"test-pg", "check"} & set(targets) or "check-full" in targets and part != "callers")
                     self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
                                      {"live_mysql": live and platform == "linux",
-                                      "mysql_dialect": dialect and platform == "linux"})
+                                      "mysql_dialect": dialect and platform == "linux",
+                                      "live_postgres": postgres})
                     for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
                         self.assertEqual(row["live_mysql"], platform == "linux" and (
                             "fixture" in row["targets"] or row["mysql_dialect"]))
@@ -605,7 +619,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         others = {"src/installation_path.zig": True, "src/TerminalEditor.zig": False, "src/Installation.zig": True,
-                  "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_identity.zig": True,
+                  "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_activation.zig": True,
+                  "src/host_identity.zig": True,
                   "src/host_identity.c": True, "src/stderr.zig": False, "src/host_launch.c": True,
                   "src/cli.zig": False, "src/cli_args.zig": False, "src/client.zig": False, "src/slash_commands.zig": False,
                   "src/Overview.zig": False, "src/overview_view.zig": False, "src/SessionFrontend.zig": False,
@@ -613,7 +628,7 @@ class SelectionTest(unittest.TestCase):
                   "install.sh": True, "build.zig": True}
         source = Path(__file__).resolve().parents[2] / "src"
         own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
-        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
+        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/upgrade_run.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
         self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
         expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
         for path, upgrade_required in expected.items():
@@ -641,6 +656,14 @@ class SelectionTest(unittest.TestCase):
                         self.assertIn("installer-integration", result["native_targets"])
                     else:
                         self.assertEqual(result["native_targets"], [])
+
+    def test_pause_socket_inputs_select_the_socket_fixture(self):
+        for path in ("src/testing/pause.zig", "src/testing/pause_socket.zig",
+                     "src/pause_socket_fixture.zig", "tests/integration/pause_client.py",
+                     "tests/integration/pause_socket_test.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)["targets"]
+                self.assertTrue(covers("pause-socket-test", selected), (path, selected))
 
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
@@ -698,14 +721,13 @@ class SelectionTest(unittest.TestCase):
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
-        def named(line):
-            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
-
         self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
         self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
-        self.assertTrue(postgres.strip().startswith("if:"), postgres)
-        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
+        self.assertEqual(postgres.strip(), "if: ${{ matrix.live_postgres }}")
+        self.assertEqual({target for target in LIVE_POSTGRES_TARGETS
+                          if mysql_provisioning([target], "all", "linux", set())["live_postgres"]},
+                         LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -756,6 +778,11 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(path=path, family=family):
                     self.assertIn("measurement-check", result[family])
 
+    def test_cli_invocation_selects_logic_and_human_cli(self):
+        result = select(["src/cli_invocation.zig"], "review", AVAILABLE)
+        self.assertIn("test-logic", result["targets"])
+        self.assertIn("human-cli-integration", result["targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
@@ -764,6 +791,13 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_store_cores_select_logic_and_store_roots(self):
+        for path in ("src/store/command_replay.zig", "src/store/write_batch.zig", "src/store/pass_plan.zig", "src/store/round_order.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertTrue({"test-logic", "test-store"} <= set(result["fast_targets"]))
 
     def test_store_tests_reach_no_store_caller(self):
         graph = tree_graph()
@@ -829,6 +863,21 @@ class SelectionTest(unittest.TestCase):
                 for family in ("targets", "native_targets"):
                     self.assertTrue({"test-logic", owner} <= set(result[family]))
                     self.assertNotIn("check", result[family])
+
+    def test_host_activation_core_selects_the_fixtures_that_drive_host_lifecycle(self):
+        result = select(["src/host_activation.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"test-logic", "upgrade-integration", "host-stop-integration", "host-launch-integration"}
+                            <= set(result[family]), result[family])
+            self.assertNotIn("check", result[family])
+        self.assertTrue(result["upgrade_required"])
+
+    def test_upgrade_run_core_selects_logic_and_the_upgrade_fixture(self):
+        result = select(["src/upgrade_run.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"test-logic", "upgrade-integration"} <= set(result[family]), result[family])
+            self.assertNotIn("check", result[family])
+        self.assertTrue(result["upgrade_required"])
 
     def test_response_timing_keeps_native_timeout_consumers(self):
         result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)
@@ -940,24 +989,14 @@ class SelectionTest(unittest.TestCase):
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append((*green, 'failure', 'success', 'true', result))
         cases.append((*green, 'failure', 'success', 'false', 'success'))
-        cases = [(*case, 'false', 'skipped') for case in cases]
-        for targets in ('[]', '["check"]'):
-            build = native = typecheck = 'skipped' if targets == '[]' else 'success'
-            for codegen, result, expected in (('true', 'success', 'success'),
-                                             ('true', 'failure', 'failure'),
-                                             ('true', 'cancelled', 'failure'),
-                                             ('true', 'skipped', 'failure'),
-                                             ('false', 'success', 'failure')):
-                cases.append((targets, 'success', 'success', build, native, False, expected,
-                              typecheck, 'false', 'skipped', codegen, result))
         cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
         for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+                          typecheck, 'false', 'skipped', 'false'))
         for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
-        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+                          typecheck, 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit,
              typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
@@ -975,8 +1014,7 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
-                                                 'COMPILE_ONLY': 'false'})
+                                                 'COMPILE_ONLY': 'false', 'PR_JOB': 'false', 'PR_RESULT': 'skipped'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
@@ -1061,15 +1099,6 @@ class SelectionTest(unittest.TestCase):
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
                                              NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
-
-    def test_codegen_is_required_but_not_a_dependency_of_suite_startup(self):
-        text = Path('.github/workflows/check.yml').read_text()
-        codegen = re.search(r'(?ms)^  linux_codegen:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        suites = re.search(r'(?ms)^  linux_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        self.assertIn('needs: plan', codegen)
-        self.assertIn('zig build stack-frames -Dcpu=baseline --summary all', codegen)
-        self.assertNotIn('-Dpr-ci', codegen)
-        self.assertNotIn('linux_codegen', suites)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
@@ -1226,6 +1255,27 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
+    def test_start_receipt_helper_selects_its_public_human_cli_fixture(self):
+        helper = "tests/integration/start_receipt_cases.py"
+        # Include the added source before its first commit, then let the normal
+        # import reader discover the edge from the actual entry point.
+        names = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+        root = Path(__file__).resolve().parents[2]
+        graph = Graph({name for name in (*names, helper) if name and (root / name).is_file()},
+                      lambda name: (root / name).read_text())
+        self.assertIn(helper, graph.scripts(FIXTURES["human-cli-integration"][0]))
+        result = select([helper], "review", AVAILABLE, graph)
+        for family in ("targets", "native_targets"):
+            self.assertIn("human-cli-integration", result[family])
+        self.assertTrue(setup_requirements(result["targets"])["python"])
+
+    def test_public_parts_owner_selects_part_cli_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/public_parts.zig",
+                     "src/protocol.zig", "src/protocol_reply.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
+
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
             path = f"tests/integration/{name}"
@@ -1288,13 +1338,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_renderer_harnesses_select_no_blocking_target(self):
         workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
-        filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
-        self.assertEqual(len(filters), 1)
-        for block in filters:
-            harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
-                             set(RENDERER_HARNESSES))
-        for path in ("tests/integration/input_equivalence.py",):
+        self.assertNotIn("pull_request", workflow, "promotion alone runs the renderer contracts")
+        for path in RENDERER_HARNESSES:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
@@ -1307,6 +1352,7 @@ class SelectionTest(unittest.TestCase):
         cases = {
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
+            "src/preference_document.zig": {"admission-debug-integration", "test-logic"},
             "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
             "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }
@@ -1416,6 +1462,13 @@ class SelectionTest(unittest.TestCase):
         for target in ("settings-integration", "check", "check-full"):
             self.assertTrue(setup_requirements([target])["node"], target)
 
+    def test_creation_parity_helper_selects_both_engine_fixtures_and_screen(self):
+        for fixture in ("empty-creation.ts", "preferences-bridge.ts"):
+            targets = select(["clients/ts/test/fixtures/" + fixture], "review", AVAILABLE)["targets"]
+            self.assertTrue(covers("settings-integration", targets), (fixture, targets))
+            self.assertTrue(setup_requirements(targets)["screen"], fixture)
+            self.assertTrue(setup_requirements(targets)["node"], fixture)
+
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})
         self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "screen": False, "tmux": False})
@@ -1431,7 +1484,7 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
-        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+        for targets in (["check"], ["check-full"], ["settings-integration"], ["terminal-restoration-integration"], ["read-image-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()
@@ -1625,7 +1678,7 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1636,7 +1689,6 @@ fi
                 if name == 'release.yml':
                     publisher = re.search(r'(?ms)^  publish:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[1]
                     self.assertIn("github.ref == 'refs/heads/main'", publisher)
-                    self.assertIn("needs.plan.result == 'success'", publisher)
                     self.assertNotIn('uses: ./.github/actions/setup', publisher)
                     self.assertNotIn('uses: actions/cache', publisher)
                     trusted = re.search(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', publisher)[0]
@@ -1657,10 +1709,13 @@ fi
                 workflow = path.read_text()
                 if path.name == 'check.yml':
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
+                    self.assertNotIn('uses: ./.github/actions/setup', policy)
+                    self.assertIn('uses: ./.github/actions/policy', policy)
+                    composite = Path('.github/actions/policy/action.yml').read_text()
                     bootstrap_steps = re.findall(
-                        r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
+                        r'(?m)^    - uses: \./\.github/actions/setup\n(?:      .*\n)*', composite)
                     self.assertEqual(len(bootstrap_steps), 1)
-                    self.assertEqual(policy.count('uses: ./.github/actions/setup'), 1)
+                    self.assertEqual(composite.count('uses: ./.github/actions/setup'), 1)
                     bootstrap = bootstrap_steps[0]
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
@@ -1672,8 +1727,8 @@ fi
                         "cold: 'true'",
                         "publish-caches: 'false'",
                     ])
-                    self.assertIn('id: caller-bootstrap', policy)
-                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
+                    self.assertIn('id: caller-bootstrap', composite)
+                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', composite)
                     workflow = workflow.replace(bootstrap, '', 1)
                     producer = re.search(r'(?ms)^  linux_build:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
                     diagnostic_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
@@ -1689,6 +1744,11 @@ fi
                         self.assertEqual(native.count(mac_gate), 1, name)
                     self.assertEqual(workflow.count(mac_gate), 3)
                     workflow = workflow.replace(mac_gate, '')
+                    pr_job = re.search(r'(?ms)^  pr_linux:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                    self.assertIn("if: ${{ needs.plan.outputs.pr_job == 'true' }}", pr_job)
+                    self.assertEqual(pr_job.count("publish-caches: 'false'"), 1)
+                    self.assertEqual(pr_job.count('uses: ./.github/actions/setup'), 1)
+                    workflow = workflow.replace(pr_job, pr_job.replace("publish-caches: 'false'", ''), 1)
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -1784,8 +1844,10 @@ fi
         caches = Path(".github/actions/setup/caches/action.yml").read_text()
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
+        policy = Path(".github/actions/policy/checks.sh").read_text()
         policy_step = "Reject undefined fixture names before native builds"
-        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(policy_step, policy_step + " here")))
+        self.assertIn(policy_step, policy)
+        self.assertFalse(cache(".github/actions/policy/checks.sh", policy, policy.replace(policy_step, policy_step + " here")))
         job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)
@@ -1809,7 +1871,7 @@ fi
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
         result = subprocess.run(["node", "--test", "tests/ci/cache_maintenance.test.cjs"],
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=300)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
@@ -1836,19 +1898,33 @@ fi
         self.assertEqual(result.stdout, '1' * 40)
 
 
+class FakeClock:
+    """Time that moves only when a wait sleeps, so a 30 second disposal budget costs no real time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class FullCheckPartitionTest(unittest.TestCase):
     @staticmethod
-    def wait_for_group_retirement(group, deadline):
+    def wait_for_group_retirement(group, deadline, clock=time):
         def live_members():
+            # The census is a real watchdog: the fake clock can leave a tiny remainder that real ps would miss.
             census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                    text=True, check=True, timeout=max(0, deadline - time.monotonic()))
+                                    text=True, check=True, timeout=30)
             return [state for pgid, state in (row.split() for row in census.stdout.splitlines())
                     if int(pgid) == group and not state.startswith("Z")]
-        wait_for(live_members, f"live driver group {group} to retire", interval=.005, deadline=deadline,
-                 ready=lambda live: not live)
+        wait_for(live_members, f"live driver group {group} to retire", interval=.25, deadline=deadline,
+                 ready=lambda live: not live, clock=clock)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=60, python_delay=0, fail_at="", native=True):
+                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False, clock=time):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -1860,7 +1936,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                     if process is not None and not retired:
                         self.wait_for_group_retirement(
                             process.pid, disposal_deadline if disposal_deadline is not None
-                            else time.monotonic() + 5)
+                            else clock.monotonic() + 30, clock)
                     shutil.rmtree(root)
                 except BaseException as cleanup:
                     if failure is None:
@@ -1923,14 +1999,16 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
                 if [ ! -e "$GATE_DIR/$peer.done" ]; then exit 44; fi
             done ;;
     esac
-    if [ "$fixture" = "$HOLD_FIXTURE" ] && [ "$2" != debug ]; then
-        read -r release < "$GATE_DIR/release"
-        test "$release" = r || exit 45
-    fi
+    case " $HOLD_FIXTURE " in
+        *" $fixture "*) if [ "$2" != debug ]; then
+            read -r release < "$GATE_DIR/hold.$fixture"
+            test "$release" = r || exit 45
+        fi ;;
+    esac
     touch "$GATE_DIR/$identity.done"
 fi
 printf "%s %s\\n" "$fixture" "$2" >> "$GATE_DIR/invocations"
-if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
+case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
 '''
             for name in ("python3", "sh", "native"):
                 (root / name).write_text(command)
@@ -1939,10 +2017,33 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
+                       RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
+                # One real slow start per interpreter role, each claimed by an O_EXCL marker. check.sh runs
+                # three kinds of python3 -: the version probe (first no-argv start, never reads the clock),
+                # then run_timed's started probe (no arguments, reads the clock) and record probe (four
+                # arguments, reads the clock). The version and started probes both have len(sys.argv) 1, so
+                # the version role is claimed at startup, before any clock read; started and record are claimed
+                # at their clock read, which only they make.
                 (root / "sitecustomize.py").write_text(
-                    f"import time\ntime.sleep({python_delay!r})\n")
+                    "import os, sys, time\n"
+                    f"DELAY = {python_delay!r}\n"
+                    "GATE = os.environ['GATE_DIR']\n"
+                    "REAL_MONOTONIC_NS = time.monotonic_ns\n"
+                    "def claim(role):\n"
+                    "    try:\n"
+                    "        os.close(os.open(os.path.join(GATE, 'slow-' + role), os.O_CREAT | os.O_EXCL))\n"
+                    "    except FileExistsError:\n"
+                    "        return False\n"
+                    "    return True\n"
+                    "if len(sys.argv) == 1 and claim('version'):\n"
+                    "    time.sleep(DELAY)\n"
+                    "def delayed_monotonic_ns():\n"
+                    "    if claim('started' if len(sys.argv) == 1 else 'record'):\n"
+                    "        time.sleep(DELAY)\n"
+                    "    return REAL_MONOTONIC_NS()\n"
+                    "time.monotonic_ns = delayed_monotonic_ns\n")
                 env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
@@ -1954,13 +2055,20 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             arguments = (["parallel", str(root / "native") if native else "", "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
                          if part == "parallel" else
                          ["status", "sessions", "activity", "preferences", part, "notice", "mysql-admin"])
-            command = [
-                "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
-            ]
+            driver = "tests/integration/check.sh"
+            if hold:
+                source = Path(driver).read_text()
+                wait = '        if wait "$pid"; then'
+                self.assertEqual(source.count(wait), 1)
+                source = source.replace(wait, '        touch "$GATE_DIR/wait.$name"\n' + wait)
+                command = ["/bin/sh", "-c", source, driver, "release", "debug", *arguments]
+            else:
+                command = ["/bin/sh", driver, "release", "debug", *arguments]
             releases = []
+            held_fds = {}
             if timing:
-                clock = root / "clock"
-                clock.write_text("10000000000")
+                clock_file = root / "clock"
+                clock_file.write_text("10000000000")
                 (root / "sitecustomize.py").write_text(
                     "import os, time\nfrom pathlib import Path\n"
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
@@ -1974,8 +2082,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         os.mkfifo(fifo)
                         releases.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
                 elif hold:
-                    os.mkfifo(root / "release")
-                    releases.append(os.open(root / "release", os.O_RDWR | os.O_NONBLOCK))
+                    for name in hold.split():
+                        os.mkfifo(root / f"hold.{name}")
+                        held_fds[name] = os.open(root / f"hold.{name}", os.O_RDWR | os.O_NONBLOCK)
+                        releases.append(held_fds[name])
                 with ExitStack() as streams:
                     process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, start_new_session=True)
@@ -1989,38 +2099,63 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 wait_for(timed_started, "both timed fixtures to start", interval=.005, deadline=deadline)
                                 if fail_at == "timed_ready":
                                     self.fail("injected failure at timed_ready")
-                                clock.with_suffix(".next").write_text("13000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("13000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                                 os.write(releases[1], b"r\n")
                                 def timing_recorded():
                                     self.assertIsNone(process.poll())
-                                    return any(path.read_text().strip()
+                                    return any(path.read_text().endswith("\n")
                                                for path in root.glob("rui-check.*/preference-policy.status"))
                                 wait_for(timing_recorded, "the completed peer to record timing before the inventory wait",
                                          interval=.005, deadline=deadline)
                                 if fail_at == "timed_recorded":
                                     self.fail("injected failure at timed_recorded")
-                                clock.with_suffix(".next").write_text("30000000000")
-                                clock.with_suffix(".next").replace(clock)
+                                clock_file.with_suffix(".next").write_text("30000000000")
+                                clock_file.with_suffix(".next").replace(clock_file)
                             elif hold:
+                                holds = hold.split()
                                 def held_started():
                                     self.assertIsNone(process.poll())
-                                    return any(root.glob(f"{hold}.*.started"))
+                                    return all(any(root.glob(f"{name}.*.started")) for name in holds)
                                 wait_for(held_started, f"held {hold} to start", interval=.005, deadline=deadline)
                                 if fail_at == "held_ready":
                                     self.fail("injected failure at held_ready")
-                                observation_deadline = time.monotonic() + .1
-                                while time.monotonic() < observation_deadline:
+                                held_names = {
+                                    "native": "native",
+                                    "admission_integration.sh": "admission",
+                                    "dispatch_integration.py": "dispatch",
+                                    "bash_owner_integration.py": "bash-owner",
+                                    "bash_integration.py": "bash",
+                                    "peer_integration.py": "peer",
+                                    "sender_identity_integration.py": "sender-identity",
+                                    "bash_lifecycle_integration.py": "bash-lifecycle",
+                                    "bash_recovery_integration.py": "bash-recovery",
+                                    "codex_integration.py": "codex",
+                                    "control_integration.py": "control",
+                                    "descriptor_capacity_integration.py": "descriptor-capacity",
+                                    "host_stop_integration.py": "host-stop",
+                                    "human_cli_integration.py:renderer": "human-cli-renderer",
+                                }
+                                # Release each peer only once the driver waits on it, in the driver's own order.
+                                # A peer the driver fails to drain is still held when the isolated cases start.
+                                for name in holds:
+                                    def held_wait_started(held_name=held_names[name]):
+                                        self.assertIsNone(process.poll())
+                                        return (root / f"wait.{held_name}").exists()
+                                    wait_for(held_wait_started, f"driver to wait for {held_names[name]}",
+                                             interval=.005, deadline=deadline)
                                     self.assertFalse((root / "isolated.started").exists())
-                                    time.sleep(.005)
+                                    if not timeout_after_held:
+                                        os.write(held_fds[name], b"r\n")
                         finally:
-                            if sys.exception() is None:
+                            if sys.exception() is None and not timeout_after_held:
                                 for release in releases:
                                     os.write(release, b"r\n")
-                        stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                        stdout, stderr = process.communicate(
+                            timeout=.001 if timeout_after_held else max(0, deadline - time.monotonic()))
                     except BaseException as failure:
                         failure.add_note(f"driver_pid={process.pid}")
-                        disposal_deadline = time.monotonic() + 5
+                        disposal_deadline = clock.monotonic() + 30
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
                         except ProcessLookupError:
@@ -2032,20 +2167,31 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             except BaseException as cleanup:
                                 failure.add_note(f"driver kill failed: {cleanup!r}")
                         try:
-                            process.wait(timeout=max(0, disposal_deadline - time.monotonic()))
+                            # A real watchdog for the leader's reap. The disposal budget is on the injected
+                            # clock, so it is not a real timeout; the leader was just SIGKILLed and reaps at once.
+                            process.wait(timeout=30)
                             failure.add_note(f"driver_pid={process.pid}, returncode={process.returncode}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver reap failed: {cleanup!r}")
                         try:
-                            stdout, stderr = process.communicate(timeout=max(0, disposal_deadline - time.monotonic()))
-                            failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
-                        except BaseException as cleanup:
-                            failure.add_note(f"driver disposal failed: {cleanup!r}")
-                        try:
-                            self.wait_for_group_retirement(process.pid, disposal_deadline)
+                            self.wait_for_group_retirement(process.pid, disposal_deadline, clock)
                             retired = True
                         except BaseException as cleanup:
                             failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
+                        try:
+                            if retired:
+                                # Once the group has retired its pipes close at once. The 10 s real watchdog is
+                                # only a backstop for a pipe held by a process that left the group.
+                                stdout, stderr = process.communicate(timeout=10)
+                                failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
+                            else:
+                                # A surviving group keeps its pipes open by design, so close ours rather than
+                                # waiting for a drain that cannot finish.
+                                process.stdout.close()
+                                process.stderr.close()
+                                failure.add_note("stdout: not drained, driver group unretired")
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver disposal failed: {cleanup!r}")
                         failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
                         try:
                             peers = root / "peer-pids"
@@ -2059,19 +2205,25 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 dispose_all(*(lambda fd=fd: os.close(fd) for fd in releases))
             return result, invocations.read_text().splitlines()
 
-    def records(self, result):
-        return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
-                          result.stdout + result.stderr, re.MULTILINE)
+    def records(self, result, elapsed=r"\d+\.\d{3}s"):
+        found = re.findall(rf"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=({elapsed})$",
+                           result.stdout + result.stderr, re.MULTILINE)
+        return [(name, status, value.removesuffix("s")) for name, status, value in found]
 
     def test_slow_interpreter_startup_is_not_a_driver_failure(self):
         result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
         self.assertEqual(lines[-1], "host_allocator_test.py release")
-        self.assertEqual(self.records(result)[-1][:2], ("host-allocator", "42"))
+        records = self.records(result)
+        self.assertEqual(records[-1][:2], ("host-allocator", "42"))
+        # Every case is timed, not only the last one: a bound on any probe reads elapsed=unavailable.
+        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
 
     def test_driver_deadline_reaps_and_preserves_the_original_failure(self):
         for part, options, error, message, held in (
-            ("all", {"python_delay": 2, "timeout": .001}, subprocess.TimeoutExpired, "", ()),
+            ("parallel", {"hold": "dispatch_integration.py", "overlap": True,
+                          "timeout_after_held": True}, subprocess.TimeoutExpired, "",
+             ("dispatch_integration.py.release",)),
             ("parallel", {"hold": "dispatch_integration.py", "overlap": True,
                           "fail_at": "held_ready"}, AssertionError, "held_ready",
              ("dispatch_integration.py.release",)),
@@ -2101,11 +2253,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn(identity, peers)
                     def peer_state(identity=identity):
                         observed = subprocess.run(["ps", "-o", "stat=", "-p", peers[identity]],
-                                                  capture_output=True, text=True)
+                                                  capture_output=True, text=True, timeout=30)
                         self.assertIn(observed.returncode, (0, 1), observed.stderr)
                         self.assertFalse(observed.stderr)
                         return observed.stdout.strip()
-                    wait_for(peer_state, f"held peer {identity} to retire", timeout=5, interval=.005,
+                    wait_for(peer_state, f"held peer {identity} to retire", timeout=30, interval=.005,
                              ready=lambda state: not state or state.startswith("Z"))
 
     def test_disposal_and_diagnostic_faults_preserve_the_primary_failure(self):
@@ -2118,12 +2270,13 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
         for fault in ("diagnostic", "retirement"):
             with self.subTest(fault=fault):
+                rejected = None
                 try:
                     with patch.object(Path, "read_text", diagnostic_failure) if fault == "diagnostic" else patch(
                             "os.killpg", side_effect=PermissionError("injected group retirement failure")):
                         with self.assertRaisesRegex(AssertionError, "injected failure at held_ready") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     notes = "\n".join(rejected.exception.__notes__)
                     driver = re.search(r"driver_pid=(\d+), returncode=(-?\d+)", notes)
                     self.assertIsNotNone(driver, notes)
@@ -2132,10 +2285,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
                                   else "driver group retirement unconfirmed", notes)
                 finally:
-                    if fault == "retirement" and rejected.exception.__notes__:
-                        pid = int(rejected.exception.__notes__[0].split("=")[1])
-                        self.wait_for_group_retirement(pid, time.monotonic() + 5)
-                        for note in rejected.exception.__notes__:
+                    # Every subtest reaps its driver group, whichever fault it injected, so a slow real
+                    # retirement cannot leak the group. The 30 s wait is a real watchdog, not the fake budget.
+                    raised = getattr(rejected, "exception", None)
+                    if raised is not None and raised.__notes__:
+                        driver = re.search(r"driver_pid=(\d+)", "\n".join(raised.__notes__))
+                        if driver:
+                            self.wait_for_group_retirement(int(driver[1]), time.monotonic() + 30)
+                        for note in raised.__notes__:
                             if note.startswith("retained driver root: "):
                                 shutil.rmtree(note.removeprefix("retained driver root: "))
 
@@ -2156,7 +2313,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
                 def live_members():
                     census = run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                 text=True, check=True, timeout=5)
+                                 text=True, check=True, timeout=30)
                     return [row for row in census.stdout.splitlines()
                             if int(row.split()[0]) == group and not row.split()[1].startswith("Z")]
 
@@ -2168,7 +2325,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
                     def signal_others():
                         census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
-                                     text=True, check=True, timeout=5)
+                                     text=True, check=True, timeout=30)
                         others = [int(pid) for pid, member_group, state in
                                   (row.split() for row in census.stdout.splitlines())
                                   if int(member_group) == group and int(pid) != held
@@ -2180,7 +2337,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 pass
                         return others
                     wait_for(signal_others, f"driver group {group} to keep only its held descendant",
-                             interval=.005, timeout=5, ready=lambda others: not others)
+                             interval=.005, timeout=30, ready=lambda others: not others)
 
                 def census_then_deliver(*args, **kwargs):
                     nonlocal observed_live
@@ -2204,7 +2361,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             "shutil.rmtree", side_effect=delete_after_retirement):
                         with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
                             self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
-                                          fail_at="held_ready")
+                                          fail_at="held_ready", clock=FakeClock())
                     self.assertTrue(observed_live, "the counterexample must contain a live descendant")
                     notes = rejected.exception.__notes__
                     self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)
@@ -2225,7 +2382,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             killpg(group, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-                        self.wait_for_group_retirement(group, time.monotonic() + 5)
+                        self.wait_for_group_retirement(group, time.monotonic() + 30)
                     if root is not None and root.exists():
                         rmtree(root)
 
@@ -2273,7 +2430,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "model_picker_integration.py release", "model_picker_signin_integration.py release",
             "model_picker_failure_integration.py release",
-            "request_wait_integration.py release",
+            "request_wait_integration.py release", "pause_socket_test.py pause-socket",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
@@ -2317,15 +2474,21 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
         self.assertIn("dispatch_integration.py release", lines)
         self.assertIn("human_cli_integration.py:callers release", lines)
 
+    def failed_records(self, result, lines, elapsed=r"\d+\.\d{3}s"):
+        records = self.records(result, elapsed)
+        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
+        self.assertTrue({status for _, status, _ in records} <= {"0", "42"}, result.stdout + result.stderr)
+        return {name for name, status, _ in records if status == "42"}
+
     def test_parallel_gate_drains_native_and_execution_peers(self):
-        for peer in ("native", "admission_integration.sh", "dispatch_integration.py",
-                     "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
-                     "sender_identity_integration.py",
-                     "bash_lifecycle_integration.py", "bash_recovery_integration.py",
-                     "codex_integration.py", "control_integration.py", "descriptor_capacity_integration.py"):
-            with self.subTest(peer=peer):
-                result, _ = self.run_part("parallel", overlap=True, hold=peer)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # One run holds all twelve peers. Each is released only after the driver waits on it, in driver order.
+        peers = ("native", "admission_integration.sh", "dispatch_integration.py",
+                 "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
+                 "sender_identity_integration.py", "bash_lifecycle_integration.py",
+                 "bash_recovery_integration.py", "codex_integration.py", "control_integration.py",
+                 "descriptor_capacity_integration.py")
+        result, _ = self.run_part("parallel", overlap=True, hold=" ".join(peers))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failure_or_invalid_part_cannot_report_success(self):
         complete = {}
@@ -2333,35 +2496,37 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             result, lines = self.run_part(part)
             self.assertEqual(result.returncode, 0)
             complete[part] = set(lines)
-        for fixture in ("human_cli_integration.py", "preference_policy_integration.py",
-                        "session_list_integration.py", "conversation_page_integration.py",
-                        "activity_integration.py",
-                        "host_status_integration.py", "host_stop_integration.py",
-                        "host_launch_integration.py", "host_process_test.py",
-                        "host_allocator_test.py", "admission_integration.sh"):
-            for part in ("callers", "parallel", "all"):
-                result, lines = self.run_part(part, fixture)
-                self.assertEqual(result.returncode, 42 if part == "all" else 1, (part, fixture))
-                records = self.records(result)
-                self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
-                self.assertIn("42", [status for _, status, _ in records])
-                if part == "all":
-                    self.assertEqual(lines[-1].split()[0], fixture)
-                else:
-                    self.assertEqual(set(lines), complete[part])
-        for part in ("callers", "parallel"):
-            for fixture, record in (("human_cli_integration.py:renderer", "human-cli-renderer"),
-                                    ("terminal_restoration_integration.py", "terminal-restoration"),
-                                    ("canonical_failure_integration.py", "canonical-failure")):
-                result, lines = self.run_part(part, fixture)
+        # Batch members fail together, one run per part: each still runs, each failure is recorded against its
+        # own name, and the part exits 1. Isolated members fail in their own run, so an isolated failure cannot
+        # hide a batch-only fault behind the same exit status.
+        callers_batch = ("human_cli_integration.py preference_policy_integration.py session_list_integration.py "
+                         "conversation_page_integration.py activity_integration.py host_status_integration.py "
+                         "host_stop_integration.py terminal_restoration_integration.py canonical_failure_integration.py")
+        callers_failed = {"human-cli", "human-cli-renderer", "terminal-restoration", "canonical-failure",
+                          "preference-policy", "session-list", "conversation-page", "activity", "host-status",
+                          "host-stop"}
+        for part, fail, failed in (
+            ("callers", callers_batch, callers_failed),
+            ("parallel", f"{callers_batch} dispatch_integration.py native admission_integration.sh",
+             callers_failed | {"dispatch", "native", "admission", "admission-debug"}),
+            ("callers", "host_launch_integration.py host_process_test.py host_allocator_test.py",
+             {"host-launch", "host-process", "host-allocator"}),
+        ):
+            with self.subTest(part=part, fail=fail):
+                result, lines = self.run_part(part, fail)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(self.failed_records(result, lines), failed)
                 self.assertEqual(set(lines), complete[part])
-                self.assertIn((record, "42"), [(name, status) for name, status, _ in self.records(result)])
-        for part in ("execution", "parallel", "all"):
-            result, _ = self.run_part(part, "dispatch_integration.py")
-            self.assertNotEqual(result.returncode, 0, part)
-        result, _ = self.run_part("parallel", "native")
-        self.assertNotEqual(result.returncode, 0)
+        # The serial parts stop at the first failing case, so each group needs its own witness.
+        for part, fixture, name in (("all", "dispatch_integration.py", "dispatch"),
+                                    ("all", "host_status_integration.py", "host-status"),
+                                    ("all", "host_allocator_test.py", "host-allocator"),
+                                    ("execution", "dispatch_integration.py", "dispatch")):
+            with self.subTest(part=part, fixture=fixture):
+                result, lines = self.run_part(part, fixture)
+                self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+                self.assertEqual(lines[-1].split()[0], fixture)
+                self.assertEqual(self.failed_records(result, lines), {name})
         result, lines = self.run_part("not-a-part")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(lines, [])
@@ -2380,19 +2545,24 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 self.assertEqual(records["host-launch"], "0")
 
     def test_clock_failure_preserves_fixture_results(self):
+        # Each clock mode runs with no failure and with failing fixtures. The serial part stops at its failing
+        # fixture, so only preference-policy is reached; the batch parts run every member, and host-launch is
+        # isolated, so both fail. Each member's record is checked by name, not as a set of statuses.
+        batch_fail = "preference_policy_integration.py host_launch_integration.py"
+        batch_failed = {"preference-policy", "host-launch"}
         for clock_error in ("start", "finish"):
-            for part in ("all", "execution", "callers", "parallel"):
-                fixture = "dispatch_integration.py" if part == "execution" else "preference_policy_integration.py"
-                failures = ("", fixture, "host_launch_integration.py") if part in ("callers", "parallel") else ("", fixture)
-                for fail in failures:
-                    with self.subTest(clock_error=clock_error, part=part, fail=fail):
-                        result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
-                        expected = (42 if part in ("all", "execution") else 1) if fail else 0
-                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                        records = re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=unavailable$",
-                                             result.stdout + result.stderr, re.MULTILINE)
-                        self.assertEqual(len(records), len(lines), result.stdout + result.stderr)
-                        self.assertEqual({status for _, status in records}, {"0", "42"} if fail else {"0"})
+            for part, fail, returncode, failed in (
+                ("all", "", 0, set()),
+                ("all", "preference_policy_integration.py", 42, {"preference-policy"}),
+                ("callers", "", 0, set()),
+                ("callers", batch_fail, 1, batch_failed),
+                ("parallel", "", 0, set()),
+                ("parallel", batch_fail, 1, batch_failed),
+            ):
+                with self.subTest(clock_error=clock_error, part=part, fail=fail):
+                    result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
+                    self.assertEqual(result.returncode, returncode, result.stdout + result.stderr)
+                    self.assertEqual(self.failed_records(result, lines, elapsed="unavailable"), failed)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import time
 import model_fixture as fixture
 from session_list_fixture import session_values
 import host_process
-from product_defaults import start_effort
+from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from host_process import TestHTTPServer, assert_caller_error, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 
@@ -25,7 +25,7 @@ REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substi
 
 
 def address_of(request):
-    session = fixture.instructions_session(request["instructions"])
+    session = fixture.instructions_session(fixture.request_system_prompt(request))
     assert SESSION_ID.fullmatch(session), session
     return session
 
@@ -343,7 +343,7 @@ def main(report_source):
 
         a_requests = [request for request in endpoint.requests if address_of(request) == session_a]
         assert all(address_of(request) == session_a for request in a_requests)
-        assert a_requests[0]["instructions"] == model_instructions(workspace, session_a)
+        assert fixture.request_system_prompt(a_requests[0]) == model_instructions(workspace, session_a)
         b_first = next(request for request in endpoint.requests if address_of(request) == session_b)
         assert address_of(b_first) == session_b
         assert sender_of(b_first) == session_a
@@ -432,7 +432,7 @@ def main(report_source):
         assert B_LABEL not in json.dumps(b_requests), b_requests
         if report_source == "stdin":
             session_link_journey(installed, store, home, session_a)
-        assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
+        assert all(fixture.request_system_prompt(request) == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         (state / "leak-home").mkdir()
         controls = []
@@ -495,7 +495,7 @@ class CohortModel(TestHTTPServer):
 
     def respond(self, request):
         session = address_of(request)
-        assert request["instructions"] == model_instructions(self.workspace, session), request
+        assert fixture.request_system_prompt(request) == model_instructions(self.workspace, session), request
         if session != self.parent:
             assert sender_of(request) == self.parent, request
             assert last_user_text(request) == f"Report to parent ID {self.parent}", request
@@ -558,7 +558,7 @@ def stdin_start_contract():
 
         failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store_unavailable", status=6)
         host = fixture.start_host(store, None)
-        for args in (("send", "--to", "k7m2qx", "--text", "input"),
+        for args in (("send", "--to", "k7m2qx", "--texts", "input"),
                      ("send", "--to", "k7m2qx", "literal"),
                      ("configure", "--instructions", "input"),
                      ("start", "--instructions", "-")):
@@ -651,7 +651,7 @@ def stdin_start_contract():
             "--reasoning-effort", "high")
         assert defaults_reply.returncode == 0, defaults_reply
         for arguments, model, effort, source in (
-            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "model_default"),
+            (("--provider", "codex", "--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol"), "gpt-6.1-sol", "high", "saved"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "xhigh"), "gpt-6.1-sol", "xhigh", "flag"),
             (("--model", "gpt-6.1-sol", "--reasoning-effort", "default"), "gpt-6.1-sol", start_effort("gpt-6.1-sol"), "flag"),
@@ -665,13 +665,23 @@ def stdin_start_contract():
             assert list(start_receipt) == ["context", "configuration", "answer", "input", "queue"], start_receipt
             assert start_receipt["configuration"] == {"provider": "codex", "model": model,
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
+            tools = DEFAULTS.tools.split(",")
+            loaded = DEFAULTS.loaded_tools.split(",")
+            if not (os_semantics.PROC_FS or os_semantics.DARWIN):
+                tools.remove("read_image")
+                loaded.remove("read_image")
+            creation = {"provider": "codex", "model": model, "reasoning_effort": effort,
+                        "workspace": str(state.resolve()), "tools": tools, "loaded_tools": loaded,
+                        "permission_mode": DEFAULTS.permission_mode,
+                        "compaction_trigger": str(compaction_trigger("codex", model))}
+            assert start_receipt["answer"]["configuration"] == creation, start_receipt
             observed = fixture.command("session", "inspect", "--store", store, "--session", new_session)["session"]
             assert observed["model"] == model and observed["reasoning_effort"] == effort, observed
             handle = start_receipt["context"]["key"]
             assert f"request: {handle} (wait: rui request wait {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
             replay = json.loads(invoke("request", "recover", handle).stdout)
             assert replay["context"] == start_receipt["context"] and "configuration" not in replay, replay
-            assert replay["answer"]["replayed"] is True, replay
+            assert replay["answer"]["replayed"] is True and replay["answer"]["configuration"] == creation, replay
             assert fixture.command("session", "stop", "--store", store, "--session", new_session)["answer"]["status"] == "accepted"
         print("stdin/start: exact NUL/UTF-8/newline bytes, lost admission, four concurrent original replays, one allocated Session, "
               "queued-not-completed receipt, effective configuration and effort sources, cancellation/reopen, stdin-only grammar "

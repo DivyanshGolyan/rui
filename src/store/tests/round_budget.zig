@@ -69,11 +69,13 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_stop.zig"),
         @embedFile("../domain/action_read.zig"),
+        @embedFile("../domain/action_value.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
         @embedFile("../domain/content.zig"),
         @embedFile("../domain/content_parts.zig"),
+        @embedFile("../domain/public_parts.zig"),
         @embedFile("../domain/find_tools.zig"),
         @embedFile("../domain/historical.zig"),
         @embedFile("../domain/history_floor.zig"),
@@ -96,10 +98,15 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../mysql_literal.zig"),
         @embedFile("../mysql_row.zig"),
         @embedFile("../rsql.zig"),
+        @embedFile("../rsql_table.zig"),
         @embedFile("../schema.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
+        @embedFile("../command_replay.zig"),
+        @embedFile("../pass_plan.zig"),
         @embedFile("../queue.zig"),
+        @embedFile("../round_order.zig"),
+        @embedFile("../write_batch.zig"),
         @embedFile("../transition.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
@@ -173,6 +180,9 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            _ = try storage.publishRetryCrossings(0, 1);
+            meter.stop(.publishRetryCrossings);
             meter.start();
             try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
             meter.stop(.saveModelFacts);
@@ -273,6 +283,8 @@ test "each Store entry point takes its round budget on its common path" {
         fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSession(storage, "budget-compound");
             try store_testing.submitTestMessageParts(storage, tmp, "budget-compound-message", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            const observed = try store_testing.observeCommandForTesting(storage, "budget-compound-message");
+            const owner = observed.kind.message.?.content.parts.owner;
             const PressureRead = @import("../domain/model_admission.zig").PartsPressure.Read;
             const pressure_map = try @import("../../os/pages.zig").Mapped(PressureRead).map();
             defer pressure_map.unmap();
@@ -281,6 +293,14 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(!try storage.advancePartsPressure(pressure_map.value));
             meter.stop(.advancePartsPressure);
+            var public_reader = try @import("../domain/public_parts.zig").Reader.init(session, owner);
+            defer public_reader.deinit();
+            meter.start();
+            try std.testing.expect((try storage.readPublicParts(&public_reader)) == .pending);
+            meter.stop(.readPublicParts);
+            meter.start();
+            _ = try storage.openPublicPart(session.slice(), owner, 1, 0);
+            meter.stop(.openPublicPart);
             const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             var view: TestingPage = undefined;
             view.open(storage, binding);
@@ -357,7 +377,7 @@ test "each Store entry point takes its round budget on its common path" {
             try request.session.set(session.slice());
             var page: reads_domain.PublicConversationPage = undefined;
             meter.start();
-            try storage.publicConversationPage(&request, &page);
+            try storage.publicConversationPage(&request, &page, std.testing.allocator);
             meter.stop(.publicConversationPage);
             const answer = for (page.items[0..page.count]) |entry| {
                 if (entry.kind == .assistant) break entry.position;
@@ -664,6 +684,9 @@ test "each Store entry point takes its round budget on its common path" {
             try storage.readActionExecutionInput(.bash, action, &input);
             meter.stop(.readBashExecutionInput);
             meter.start();
+            try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "budget-value", "value")) == .accepted);
+            meter.stop(.publishActionValue);
+            meter.start();
             try storage.withActionDispatchHandoff(action, {}, Launch.run);
             meter.stop(.withActionDispatchHandoff);
             meter.start();
@@ -822,6 +845,70 @@ test "each Store entry point takes its round budget on its common path" {
             const rounds = ViewRounds.start(storage);
             try std.testing.expect((try view.coverage()).anchor != null);
             try std.testing.expectEqual(@as(u16, 0), rounds.taken().rounds);
+        }
+    }.run);
+}
+
+test "creating configuration with a receipt keeps the configure round budget" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const create = try completeConfiguration("budget-create-receipt", "", workspace, "model-a");
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            const reply = try storage.configureInto(&create, &receipt, .{});
+            meter.stop(.configure);
+            try std.testing.expect(reply == .accepted and reply.accepted.configuration != null);
+            const measured = meter.measured.get(.configure).?;
+            try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
+            if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
+        }
+    }.run);
+}
+
+test "creating Message with a receipt keeps the no-output creation rounds" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const settings = try completeConfiguration("budget-message-settings", "", workspace, "model-a");
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+            message.text = try shared_fixtures.testingBytesContent(&tmp, "budget-message-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            try message.key.set("budget-message-warmup");
+            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+            var meter: RoundMeter = .{ .storage = &storage };
+            try message.key.set("budget-message-no-receipt");
+            meter.start();
+            const without = storage.submitMessageWithModel(&message, null, .{});
+            meter.stop(.submitMessageWithModel);
+            try std.testing.expect(without == .accepted and without.accepted.configuration == null);
+            const baseline = meter.measured.get(.submitMessageWithModel).?;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            try message.key.set("budget-message-with-receipt");
+            var receipt_meter: RoundMeter = .{ .storage = &storage };
+            receipt_meter.start();
+            const with = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+            receipt_meter.stop(.submitMessageWithModel);
+            try std.testing.expect(with == .accepted and with.accepted.configuration != null);
+            const measured = receipt_meter.measured.get(.submitMessageWithModel).?;
+            try std.testing.expectEqual(baseline.rounds, measured.rounds);
+            try std.testing.expectEqual(baseline.content_rounds, measured.content_rounds);
+            if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
         }
     }.run);
 }

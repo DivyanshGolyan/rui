@@ -1,8 +1,10 @@
 const std = @import("std");
+const test_pause = @import("testing/pause.zig");
 const cli_grammar = @import("cli_grammar.zig");
 const serve_grammar = @import("serve_grammar.zig");
 const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
+const HostDiagnostics = @import("HostDiagnostics.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
@@ -45,7 +47,6 @@ pub const Hooks = struct {
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
     pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
-    transition: ?TransitionGate = null,
     bash_reclaim_gate_path: ?[]const u8 = null,
     retry_recovery_gate_path: ?[]const u8 = null,
     retention_removal: bool = false,
@@ -53,6 +54,7 @@ pub const Hooks = struct {
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
     phase_trace: bool = false,
+    pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
     observation_state_fd: ?c_int = null,
     observation_plan: ?TestObservation.Plan = null,
@@ -104,24 +106,12 @@ pub const Hooks = struct {
         model_launch: store_module.AttemptBinding,
         action_result: store_module.ActionAttemptBinding,
         model_result: store_module.AttemptBinding,
-        preparation_advanced,
-        bash_exit_observed,
-        shutdown_signalled,
     };
 
     pub const Hold = struct {
         delay_ms: i64 = 0,
         gate_path: ?[]const u8 = null,
     };
-
-    pub const Transition = enum {
-        action_attempt_admitted,
-        prepared_before_handoff,
-        action_result_ready,
-        action_result_committed,
-    };
-
-    pub const TransitionGate = struct { transition: Transition, path: []const u8 };
 
     pub const ControlGate = struct { keys: []const u8, path: []const u8 };
 
@@ -246,12 +236,12 @@ pub const Tuning = struct {
             hooks.pauses.getPtr(.action_result).delay_ms = delay;
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
-        hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
         limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
         if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
+        if (comptime test_pause.enabled) hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
         if (try parsed.number(c_int, "test-observation-fd")) |fd| {
             hooks.observation_fd = fd;
             hooks.phase_trace = true;
@@ -259,13 +249,6 @@ pub const Tuning = struct {
         if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
         if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
             return error.InvalidTestObservationPlan;
-        const transition: ?Hooks.Transition = if (parsed.get("test-transition")) |name|
-            Hooks.fromOptionName(Hooks.Transition, name) orelse return error.UnknownTestTransition
-        else
-            null;
-        const transition_gate_path = parsed.get("test-transition-gate-path");
-        hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
-        hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
         hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
         const control_gate_keys = parsed.get("test-control-gate-keys");
         const control_gate_path = parsed.get("test-control-gate-path");
@@ -276,11 +259,8 @@ pub const Tuning = struct {
         if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
         if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| limits.request_preparation_byte_allowance = allowance;
         if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
-        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
         if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
-        if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
         if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
-        if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
         return tuning;
     }
 };
@@ -321,16 +301,12 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.action_result).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.model_result).delay_ms);
-    try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
     try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }));
 
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }));
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }));
-    try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }));
-    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g", "--test-transition", "action-result-ready", "--test-transition-gate-path", "/t" });
+    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g" });
     try std.testing.expectEqualStrings("/g", gated.hooks.control_gate.?.path);
-    try std.testing.expectEqual(Hooks.Transition.action_result_ready, gated.hooks.transition.?.transition);
-    try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }));
 
     try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" })).hooks.phase_trace);
 }
@@ -349,6 +325,7 @@ pub const Host = struct {
     store: *store_module.Store,
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
+    pause_owner: if (test_pause.enabled) ?*test_pause.PauseController else void = if (test_pause.enabled) null else {},
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
     catalog_url: ?[]const u8 = null,
@@ -387,6 +364,8 @@ pub const Host = struct {
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
+    /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
+    diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
 
     pub fn launchAllowed(self: *const Host) bool {
@@ -407,6 +386,23 @@ pub const Host = struct {
         const previous = self.phase.load(.monotonic);
         if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
         return previous;
+    }
+
+    /// Advances like `advance`, and records the reason when this call made the transition.
+    pub fn fence(self: *Host, target: Phase, phase: []const u8, err: anyerror) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) <= @backingInt(previous)) return previous;
+        self.phase.store(target, .release);
+        if (self.diagnostics) |writer| writer.recordAs(@tagName(target), phase, @errorName(err));
+        return previous;
+    }
+
+    pub fn attachDiagnostics(self: *Host, writer: *HostDiagnostics) void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        self.diagnostics = writer;
     }
 
     pub fn stopAsked(self: *Host) bool {
@@ -582,7 +578,7 @@ pub const BashWork = union {
 };
 
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.advance(.stopping) == .stopping) return;
+    if (host.fence(.stopping, phase, err) == .stopping) return;
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
@@ -592,7 +588,7 @@ pub fn wakeListener(host: *Host) void {
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
-    _ = host.advance(.fenced);
+    _ = host.fence(.fenced, phase, err);
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
@@ -605,7 +601,7 @@ pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8
     return writer.begin(phase, subject);
 }
 
-pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
+pub fn writeTestTrace(host: *Host, trace: *protocol.DiagnosticBuffer, publication: *?TestObservation.Publication) void {
     if (!host.hooks.phase_trace) return;
     if (publication.*) |*value| value.record(trace.slice());
     if (!stderr.tryAcquire()) {
@@ -637,7 +633,7 @@ pub inline fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const
 noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     var publication = beginTestObservation(host, phase, subject);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host)}) catch return;
@@ -655,7 +651,7 @@ pub inline fn traceCommandObservation(host: *Host, key: []const u8, phase: []con
 noinline fn writeCommandObservationTrace(host: *Host, key: []const u8, phase: []const u8) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.append(",\"command_key\":") catch return;
@@ -671,7 +667,7 @@ pub inline fn traceRequest(host: *Host, phase: []const u8, request_number: u64, 
 noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
@@ -699,7 +695,7 @@ pub inline fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait
 noinline fn writeServiceBoundaryTrace(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_boundary", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
         .{ end_ns, start_ns, wait_ns },
@@ -714,7 +710,7 @@ pub inline fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
 noinline fn writeLifecycleServiceTrace(host: *Host, maximum_gap_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_service_observation", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
         .{ nowNs(host), maximum_gap_ns },
@@ -729,7 +725,7 @@ pub inline fn traceOperation(host: *Host, phase: []const u8, binding: store_modu
 noinline fn writeOperationTrace(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
@@ -758,7 +754,7 @@ noinline fn writePreparationAdvanceTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
@@ -787,7 +783,7 @@ noinline fn writePreparationAdvanceErrorTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host)}) catch return;
@@ -806,7 +802,7 @@ pub inline fn traceCompletionQueue(host: *Host, queued_after: usize, binding: st
 noinline fn writeCompletionQueueTrace(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, "provider_completion_removed", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
@@ -821,7 +817,7 @@ pub inline fn traceAction(host: *Host, phase: []const u8, binding: store_module.
 noinline fn writeActionTrace(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
@@ -850,7 +846,7 @@ noinline fn writeOperationControlTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -880,7 +876,7 @@ noinline fn writeActionControlTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -914,7 +910,7 @@ noinline fn writeActionControlOutcomeTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -948,7 +944,7 @@ noinline fn writeActionDeadlineTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
@@ -962,24 +958,15 @@ noinline fn writeActionDeadlineTrace(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn testTransition(host: *Host, transition: Hooks.Transition, binding: store_module.ActionAttemptBinding) void {
-    const gate = host.hooks.transition orelse return;
-    if (gate.transition != transition) return;
-    traceAction(host, @tagName(transition), binding);
-    waitAtTestGate(host, gate.path);
-}
-
 pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
-    if (hold.delay_ms == 0 and hold.gate_path == null) return;
+    if (hold.delay_ms == 0) return;
     switch (point) {
         .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
         .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
         .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
         .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-        .preparation_advanced, .bash_exit_observed, .shutdown_signalled => {},
     }
-    if (hold.gate_path) |path| waitAtTestGate(host, path);
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
 
@@ -1005,32 +992,6 @@ pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, 
     return false;
 }
 
-pub fn waitAtTestGate(host: *Host, path: []const u8) void {
-    // Release is a byte or persistent EOF after unlink/sole-writer close.
-    // macOS does not broadcast EOF to all already-blocked FIFO reads. Keep
-    // reads nonblocking so every waiter observes the shared release fact,
-    // including an opener that resolved the name before it was unlinked.
-    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return;
-    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-    defer gate.close(host.io);
-    var release: [1]u8 = undefined;
-    var waiting_traced = false;
-    while (true) {
-        _ = std.posix.read(fd, &release) catch |err| switch (err) {
-            error.WouldBlock => {
-                if (!waiting_traced) {
-                    traceSubject(host, "test_gate_waiting", "path", path);
-                    waiting_traced = true;
-                }
-                std.Io.sleep(host.io, .fromMilliseconds(10), .awake) catch return;
-                continue;
-            },
-            else => return,
-        };
-        return;
-    }
-}
-
 pub fn testGateActive(host: *Host, path: []const u8) bool {
     _ = host;
     // Presence gates may be FIFOs; opening must not wait for a writer during
@@ -1052,7 +1013,7 @@ pub inline fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reac
 noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
     var publication = beginTestObservation(host, "native_completions_unprocessed", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
         .{ nowNs(host), count },
@@ -1061,7 +1022,7 @@ noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
 }
 
 fn appendOptionalUnsigned(
-    trace: *protocol.ResponseBuffer,
+    trace: *protocol.DiagnosticBuffer,
     name: []const u8,
     value: ?u64,
 ) !void {
@@ -1073,7 +1034,7 @@ fn appendOptionalUnsigned(
 }
 
 fn appendOptionalSigned(
-    trace: *protocol.ResponseBuffer,
+    trace: *protocol.DiagnosticBuffer,
     name: []const u8,
     value: ?i64,
 ) !void {
@@ -1095,7 +1056,7 @@ noinline fn writeTransferTrace(host: *Host, transfer: *provider.Transfer, bindin
     const correlation = transfer.requestId();
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
         binding.operation_id,
         observation.new_connections,
@@ -1117,7 +1078,7 @@ noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
         .sqlite => |value| value,
         .mysql => return,
     };
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;
     trace.append("\",\"subject\":") catch return;
@@ -1206,7 +1167,6 @@ test "every --fault name reaches its own hook and nothing else" {
     var hooks: Hooks = .{};
     for ([_][]const u8{ "bash-none", "none", "retention-removal", "content_acquire", "content-acquire-", "" }) |name|
         try std.testing.expectError(error.UnknownFault, hooks.inject(name));
-    try std.testing.expectEqual(Hooks.Transition.action_result_committed, Hooks.fromOptionName(Hooks.Transition, "action-result-committed").?);
 }
 
 test "inspection counts held custody, not an in-flight admission reservation" {

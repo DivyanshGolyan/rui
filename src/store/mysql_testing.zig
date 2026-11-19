@@ -9,7 +9,7 @@ const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
-const os = @import("../os/os.zig");
+const os = @import("os");
 const change_ring = @import("../change_ring.zig");
 const dialect = @import("mysql_dialect_check.zig");
 var mutex: std.Io.Mutex = .init;
@@ -169,10 +169,7 @@ fn send(comptime sql: []const u8, fixture_args: anytype) !void {
     inline for (fixture_args, 0..) |value, index| {
         args[index] = if (@TypeOf(value) == testing.Blob) .{ .bytes = value.bytes } else value;
     }
-    const template = comptime switch (rsql.mysqlRendering(sql)) {
-        .rendered => |value| value,
-        .refused => |message| @compileError(message),
-    };
+    const template = comptime rsql.sentTemplate(sql);
     const Args = @TypeOf(args);
     const served = protocol.routesAll(.endpoint);
     const bound: literal.Bound = .{ .now = 0, .served = &served };
@@ -1801,7 +1798,7 @@ const LinuxMemory = struct {
     }
 
     fn read() !LinuxMemory {
-        const file = try std.Io.Dir.cwd().openFile(std.testing.io, "/proc/self/smaps_rollup", .{});
+        const file = try std.Io.Dir.cwd().openFile(std.testing.io, os.memory_rollup_path, .{});
         defer file.close(std.testing.io);
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;

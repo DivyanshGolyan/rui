@@ -1,23 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const round_order = @import("round_order.zig");
 const store_core = @import("Store.zig");
 const store_access = @import("access.zig");
 const Store = store_core.Store;
 const Faults = store_core.Faults;
 const rsql = @import("rsql.zig");
 
-pub const Kind = enum {
-    always,
-    branch,
-    paged,
-    raw,
-};
-
-pub const Commit = enum {
-    none,
-    transaction,
-    single,
-};
+pub const Kind = round_order.Kind;
+pub const Commit = round_order.Commit;
 
 pub const Pass = enum {
     ordinary,
@@ -27,25 +18,27 @@ pub const Pass = enum {
 pub fn rounds(comptime spec: anytype) type {
     const names = @typeInfo(@TypeOf(spec)).@"struct".field_names;
     var values: [names.len]u8 = undefined;
-    var always_count = 0;
+    var declared_kinds: [names.len]Kind = undefined;
     var Named: type = error{};
     for (&values, names, 0..) |*value, name, i| {
         value.* = i;
         const round = @field(spec, name);
         const declared: Kind = round[0];
-        always_count += @intFromBool(declared == .always);
+        declared_kinds[i] = declared;
         if (round.len >= 2) Named = Named || @TypeOf(round[1]);
         if (round.len == 3) for (round[2]) |pair| {
             Named = Named || @TypeOf(pair[1]);
         };
     }
     const Tags = @Enum(u8, .exhaustive, names, &values);
-    const always_rounds = always_count;
+    const always_rounds = round_order.budget(&declared_kinds, .none);
+    const all_kinds = declared_kinds;
     const FailedError = Named;
     return struct {
         pub const At = Tags;
         pub const Error = FailedError;
         pub const always = always_rounds;
+        pub const kinds = all_kinds;
 
         pub fn kind(at: At) Kind {
             return switch (at) {
@@ -64,9 +57,7 @@ pub fn rounds(comptime spec: anytype) type {
         }
 
         pub fn follows(last: ?At, next: At) bool {
-            const before = last orelse return true;
-            if (next == before) return kind(next) == .paged or kind(next) == .raw;
-            return @backingInt(next) > @backingInt(before);
+            return round_order.follows(&kinds, if (last) |before| @backingInt(before) else null, @backingInt(next));
         }
     };
 }
@@ -233,22 +224,18 @@ fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, compti
         raw: ?struct { content_id: u64, offset: u64, destination: []u8 } = null,
 
         fn opened(core: *const Self) bool {
-            const first = begin orelse return false;
-            const next = if (core.last) |last| @backingInt(last) + 1 else 0;
-            return next >= first;
+            return round_order.opened(begin, if (core.last) |last| @backingInt(last) else null);
         }
 
         inline fn inside(core: *const Self) bool {
-            if (commit == .none) return false;
-            if (!reads_outside) return true;
-            return core.opened();
+            return round_order.inside(commit, begin, if (core.last) |last| @backingInt(last) else null);
         }
     };
 }
 
 fn check(comptime T: type) void {
     const commits: comptime_int = @intFromBool(T.commit != .none);
-    if (T.round_budget != T.rounds.always + commits) @compileError(std.fmt.comptimePrint(
+    if (T.round_budget != round_order.budget(&T.rounds.kinds, T.commit)) @compileError(std.fmt.comptimePrint(
         "{s}.round_budget is {d}, but it declares {d} .always rounds and {d} commit",
         .{ @typeName(T), T.round_budget, T.rounds.always, commits },
     ));
@@ -288,9 +275,12 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
     var round: Round(T) = .{ .core = core };
     while (true) switch (try T.step(t, &round, core.last)) {
         .round => |at| try runRound(T, core, at),
-        .commit => if (T.commit == .none) unreachable else return commitRun(T, t, core),
+        .commit => if (T.commit == .none) unreachable else switch (round_order.ending(T.commit, .commit, .none)) {
+            .commit => return commitRun(T, t, core),
+            else => unreachable,
+        },
         .done => |result| {
-            if (T.commit != .none) try abandon(T, core);
+            if (comptime round_order.ending(T.commit, .done, .none) == .abandon_then_answer) try abandon(T, core);
             return result;
         },
     };
@@ -328,11 +318,18 @@ noinline fn commitRun(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
     std.debug.assert(core.raw == null);
     const committing = if (comptime @hasDecl(T, "follow")) core.writer.commitFollowed(T.follow(t)) else core.writer.commit();
     committing catch |err| {
-        if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
-            try core.writer.abandon(core.faults);
-            return T.declined(t, declined);
-        };
-        return err;
+        const declined: ?T.Declined = if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0)
+            declinedBy(T, err)
+        else
+            null;
+        switch (round_order.ending(T.commit, .commit, if (declined != null) .declined else .other)) {
+            .declined_abandon_then_answer => if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) {
+                try core.writer.abandon(core.faults);
+                return T.declined(t, declined.?);
+            } else unreachable,
+            .fail => return err,
+            else => unreachable,
+        }
     };
     if (comptime @hasDecl(T, "announced")) if (T.announced(t)) |announcement| store_core.announce(core.writer.store, announcement);
     return T.committed(t);

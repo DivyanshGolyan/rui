@@ -189,7 +189,8 @@ def measure(rui, admin, socket, password, label):
         host_process.wait_for(window_closed, "the idle window", timeout=IDLE_AFTER + IDLE_SECONDS + 5)
         measured["idle_round_trips"] = counts["end"] - counts["start"]
 
-        configured = post("configure", key="config", session="", preset="rounds", configuration={"label": None})
+        configured = post("configure", key="config", session="", preset="rounds",
+                          configuration={"label": None, "workspace": str(root)})
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
 

@@ -82,7 +82,7 @@ pub const Resolved = struct {
     call_ordinal: u64,
     code: []const u8,
     acceptance_position: u64,
-    result: Content,
+    result: @import("content_value.zig").Value,
     presentation: tool_presentation.ToolPresentation,
 };
 
@@ -115,6 +115,10 @@ pub const FullList = enum {
 };
 
 pub const Text = struct { id: u64, length: u64, digest: [32]u8 };
+
+/// A stored Message or Action value in the Full report: text is inlined, and a parts
+/// value names the owner that addresses its parts.
+pub const Stored = union(enum) { text: Text, parts: @import("content_value.zig").Value.Parts };
 
 pub const RevisionField = enum { instructions, output_schema };
 
@@ -159,7 +163,7 @@ pub const Application = enum { applied, pending, excluded };
 pub const Message = struct {
     admission: u64,
     command_key: []const u8,
-    content: Text,
+    content: Stored,
     application: union(Application) {
         applied: struct { turn: u64, outcome: ?Outcome },
         pending,
@@ -179,7 +183,7 @@ pub const Conversation = struct {
     source_catalog_position: ?u64,
     source_skill_position: ?u64,
     source_operation: ?u64,
-    content: Content,
+    content: @import("content_value.zig").Value,
 };
 
 pub const Turn = struct {
@@ -226,7 +230,7 @@ pub const Action = struct {
     permission_revision: u64,
     permission: Permission,
     resolution: ?[]const u8,
-    result: ?Text,
+    result: ?Stored,
     acceptance_position: ?u64,
 };
 
@@ -260,5 +264,5 @@ pub const Result = struct {
     acceptance_position: u64,
     call_id: Text,
     code: []const u8,
-    result: Text,
+    result: Stored,
 };

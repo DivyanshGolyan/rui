@@ -13,6 +13,7 @@ const tool_presentation = @import("tool_presentation.zig");
 const turn_ending = @import("turn_ending.zig");
 const workspace_path = @import("workspace_path.zig");
 const model_capability = @import("model_capability.zig");
+const content_value = @import("content_value.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -30,15 +31,15 @@ pub const Item = struct {
     ordinal: u64 = 0,
     at: u64,
     value: Value,
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: content_value.Value, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
     pub const Kind = std.meta.Tag(Value);
-    pub const Content = struct { length: u64, digest: [32]u8 };
-    pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
+    pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: content_value.Value, admitted_at: u64, sender: ?NamedPeer = null, source_action: ?u64 = null };
     pub const Call = activity_read.ProposalMetadata;
-    pub const Assistant = struct { content: Content, final: bool = false };
-    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?Content };
+    /// Model text, never parts.
+    pub const Assistant = struct { content: content_value.Reference, final: bool = false };
+    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference };
     pub const Stop = struct { key: Bounded(idempotency_key.max_bytes), turn: ?u64, cutoff: u64, completion: mutation_answer.SessionStopCompletion };
-    pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
+    pub const Sent = struct { admission: u64, target: NamedPeer, content: content_value.Value, admitted_at: u64 };
     pub const SendFailed = struct {
         key: Bounded(idempotency_key.max_bytes),
         target: ?NamedPeer,
@@ -80,6 +81,8 @@ pub const Queued = struct {
     oldest_position: u64 = 0,
     newest_admission: u64 = 0,
     newest_position: u64 = 0,
+    /// The newest queued Message's value, for its first-line hint; null when none is queued.
+    newest_content: ?content_value.Value = null,
 };
 
 pub const PageWork = struct {
@@ -113,6 +116,8 @@ pub const Search = struct {
         snippet: Bounded(160) = .{},
         offset: usize,
         length: usize,
+        /// The Text part the hit lies in, for an entry whose value has parts.
+        part: ?u32 = null,
     };
     pub const Cursor = struct { position: u64, ordinal: u64 };
     pub const Match = struct {

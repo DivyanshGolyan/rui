@@ -1,5 +1,8 @@
 name: Release
-# Only a green promotion (promote.yml) calls this, with the main SHA it qualified.
+# Only a green promotion (promote.yml) calls this, with the main SHA it qualified
+# and the version Release build (release-build.yml) planned and built for it,
+# in that promotion's run or in the Qualify main run that qualified the SHA.
+# It publishes the archives that build recorded and the tiers tested; it never rebuilds.
 # Recover a failed publication by rerunning that promotion's failed jobs.
 on:
   workflow_call:
@@ -8,161 +11,30 @@ on:
         description: Qualified main commit SHA (not a branch or PR ref)
         type: string
         required: true
+      version:
+        description: Version Release build planned and built; empty repairs stable for an already published release
+        type: string
+        required: true
+      artifact-run:
+        description: The run holding Release build's archives; empty is this run
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
-# Released bytes come from cold builds; the release publishes no caches.
+# Publication builds nothing and restores no caches.
 cache-mode: read
 
 concurrency:
-  # Serialize numbering and publication.
+  # Serialize publication.
   group: release
   cancel-in-progress: false
 
 jobs:
-  plan:
-    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      # Draft reservations are visible only with push access. This job never writes.
-      contents: write
-    outputs:
-      version: ${{ steps.plan.outputs.version }}
-      sha: ${{ steps.plan.outputs.sha }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ inputs.sha }}
-        run: |
-          set -euo pipefail
-          python3 -B tests/ci/release.py plan "$SHA" >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
-  build:
-    needs: plan
-    if: ${{ needs.plan.outputs.version != '' }}
-    name: build (${{ matrix.platform }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          # Portable targets: baseline CPUs and the oldest libc each build links.
-          # host_launch.c needs closefrom from glibc 2.34; Zig's macOS minimum is 15.
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-            target: x86_64-linux-gnu.2.34
-          - os: ubuntu-24.04-arm
-            platform: linux-arm64
-            target: aarch64-linux-gnu.2.34
-          - os: macos-15
-            platform: darwin-arm64
-            target: aarch64-macos
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          publish-caches: 'false'
-          # Released bytes never come from shared build caches.
-          cold: 'true'
-      - name: Build and check the tagged release
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          SHA: ${{ needs.plan.outputs.sha }}
-          PLATFORM: ${{ matrix.platform }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          # build.zig reads the version from this local tag.
-          if git rev-parse --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
-            test "$(git rev-parse "v$VERSION^{commit}")" = "$SHA"
-          else
-            git tag "v$VERSION" "$SHA"
-          fi
-          name="rui-$VERSION-$PLATFORM"
-          zig build -Doptimize=ReleaseSafe "-Dtarget=$TARGET" --prefix "$RUNNER_TEMP/$name" --summary all
-          mkdir dist
-          if [ "$(uname -s)" = Linux ]; then
-            # Debug info is most of a Linux executable, so it ships as a separate archive.
-            # Extracted beside the executable, Zig crash traces find it through .gnu_debuglink.
-            mkdir -p "$RUNNER_TEMP/debug/$name/bin"
-            debug_file="$RUNNER_TEMP/debug/$name/bin/rui.debug"
-            objcopy --only-keep-debug "$RUNNER_TEMP/$name/bin/rui" "$debug_file"
-            objcopy --strip-all "--add-gnu-debuglink=$debug_file" "$RUNNER_TEMP/$name/bin/rui"
-            tar -czf "dist/$name-debug.tar.gz" -C "$RUNNER_TEMP/debug" "$name"
-          fi
-          test "$("$RUNNER_TEMP/$name/bin/rui" --version)" = "rui $VERSION ($SHA)"
-          if [ "$(uname -s)" = Darwin ]; then otool -L "$RUNNER_TEMP/$name/bin/rui"; else ldd "$RUNNER_TEMP/$name/bin/rui"; fi
-          COPYFILE_DISABLE=1 tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rui-${{ matrix.platform }}
-          path: dist/*.tar.gz
-          retention-days: 3
-          if-no-files-found: error
-  npm:
-    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. npm_publish publishes them.
-    needs: [plan, build]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-      - name: Pack the tarballs from the built executables
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          for delay in 10 30 ''; do
-            rm -rf "$RUNNER_TEMP/artifacts"
-            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
-            test -n "$delay" || exit 1
-            echo "::warning::Artifact download failed; retrying in ${delay}s"
-            sleep "$delay"
-          done
-          executables=()
-          for platform in linux-x86_64 linux-arm64 darwin-arm64; do
-            name="rui-$VERSION-$platform"
-            mkdir -p "$RUNNER_TEMP/unpacked"
-            tar -xzf "$(find "$RUNNER_TEMP/artifacts" -name "$name.tar.gz")" -C "$RUNNER_TEMP/unpacked"
-            executables+=("$platform=$RUNNER_TEMP/unpacked/$name/bin/rui")
-          done
-          cd clients/ts
-          npm ci --ignore-scripts --no-audit --no-fund
-          node scripts/pack.mjs "$VERSION" "$RUNNER_TEMP/npm" "${executables[@]}"
-          ls -l "$RUNNER_TEMP/npm"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rui-npm
-          path: ${{ runner.temp }}/npm/*.tgz
-          retention-days: 3
-          if-no-files-found: error
   publish:
-    needs: [plan, build, npm]
-    if: >-
-      ${{ always() && github.ref == 'refs/heads/main' && needs.plan.result == 'success' &&
-          (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-          (needs.npm.result == 'success' || needs.npm.result == 'skipped') }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     # Ten for publication, seven for fetching and measuring Host memory.
     timeout-minutes: 17
@@ -176,33 +48,34 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - name: Repair the compatibility pointer for an already published release
-        if: ${{ needs.plan.outputs.version == '' }}
+        if: ${{ inputs.version == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ needs.plan.outputs.sha }}
+          SHA: ${{ inputs.sha }}
         run: python3 -B tests/ci/release.py repair "$SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ needs.plan.outputs.version != '' }}
+        if: ${{ inputs.version != '' }}
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.sha }}
           path: .release-source
           persist-credentials: false
       - name: Fetch the released Linux executable to measure
         id: memory_fetch
-        if: ${{ needs.plan.outputs.version != '' }}
+        if: ${{ inputs.version != '' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
+        run: gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
       - name: Measure the released Linux executable's Host memory
         # Never holds back the release: the notes say "not measured" when this step does not finish.
         # No token here: this step installs packages and runs fixture and product code.
-        if: ${{ needs.plan.outputs.version != '' && steps.memory_fetch.outcome == 'success' }}
+        if: ${{ inputs.version != '' && steps.memory_fetch.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           tar -xzf "$RUNNER_TEMP/memory/rui-$VERSION-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/memory"
@@ -212,16 +85,17 @@ jobs:
           "$RUNNER_TEMP/memory-python/bin/python" -B .release-source/tests/ci/host_memory.py \
             "$RUNNER_TEMP/memory/rui-$VERSION-linux-x86_64/bin/rui" > "$RUNNER_TEMP/host-memory.md"
       - name: Resume and publish archives, digests and installer
-        if: ${{ needs.plan.outputs.version != '' }}
+        if: ${{ inputs.version != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.plan.outputs.version }}
-          SHA: ${{ needs.plan.outputs.sha }}
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           for delay in 10 30 ''; do
             rm -rf "$RUNNER_TEMP/artifacts"
-            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
+            gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
             test -n "$delay" || exit 1
             echo "::warning::Artifact download failed; retrying in ${delay}s"
             sleep "$delay"
@@ -229,7 +103,11 @@ jobs:
           mkdir dist
           find "$RUNNER_TEMP/artifacts" -name "rui-$VERSION-*.tar.gz" -exec mv {} dist/ \;
           find "$RUNNER_TEMP/artifacts" -name "rui-*$VERSION.tgz" -exec mv {} dist/ \;
-          (cd dist && sha256sum rui-*.tar.gz rui-*.tgz > SHA256SUMS && cat SHA256SUMS)
+          # Publish only the bytes Release build recorded, which the promotion's tiers tested.
+          mv "$(find "$RUNNER_TEMP/artifacts" -path '*/rui-digests/SHA256SUMS')" dist/SHA256SUMS
+          cat dist/SHA256SUMS
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          test "$(wc -l < dist/SHA256SUMS)" = "$(find dist -name 'rui-*' | wc -l)"
           python3 -B tests/ci/release.py installer "$VERSION" dist/SHA256SUMS dist/install.sh --source-root .release-source
           schema=$(echo "$VERSION" | cut -d . -f 2)
           {
@@ -261,8 +139,8 @@ jobs:
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
   recheck_wire_prs:
-    needs: [plan, publish]
-    if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
+    needs: publish
+    if: ${{ inputs.version != '' && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     # The script owns a shared 90-minute deadline, including API calls. Leave
     # checkout slack so its named timeout reaches the log before job teardown.
@@ -281,7 +159,7 @@ jobs:
       - name: Recheck wire-changing PRs against the published release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.plan.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           # The tag exists from publication: a policy check started since then reads it.
@@ -293,8 +171,8 @@ jobs:
     # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package
     # trusts this repository's promote.yml, the workflow that calls this one. No token is stored.
     # A rerun skips versions npm already has.
-    needs: [plan, npm, publish]
-    if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
+    needs: publish
+    if: ${{ inputs.version != '' && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -304,7 +182,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -313,12 +191,13 @@ jobs:
       - name: Publish to npm
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
         run: |
           set -euo pipefail
           npm install -g npm@11.15.0 --no-audit --no-fund
           for delay in 10 30 ''; do
             rm -rf "$RUNNER_TEMP/npm"
-            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
+            gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
             test -n "$delay" || exit 1
             echo "::warning::Artifact download failed; retrying in ${delay}s"
             sleep "$delay"

@@ -9,7 +9,7 @@ const H = protocol.Hole;
 const writeShape = protocol.writeShape;
 const shapeBytes = protocol.shapeBytes;
 const jsonListBytes = protocol.jsonListBytes;
-const ContentJson = protocol.ContentJson;
+const ContentValueJson = protocol.ContentValueJson;
 const NamedPeerJson = protocol.NamedPeerJson;
 const ToolPresentationJson = protocol.ToolPresentationJson;
 const Item = activity_facts.Item;
@@ -34,17 +34,17 @@ pub const ItemJson = struct {
     pub const tail = .{"}}"};
     const call_details = .{ ",\"description\":", H{ .optional_string = activity_read.CallText.max_description_bytes }, ",\"tool\":", H{ .optional_string = activity_read.CallText.max_tool_bytes }, ",\"server\":", H{ .optional_string = activity_read.CallText.max_server_bytes } };
     pub const value_shapes = struct {
-        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"source_action\":", H.optional_id, ",\"content\":", H{ .json = ContentJson }, "}" };
+        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"source_action\":", H.optional_id, ",\"content\":", H{ .json = ContentValueJson }, "}" };
         pub const admission = message;
         pub const user = message;
         pub const received = message;
-        pub const assistant = .{ "{\"content\":", H{ .json = ContentJson }, ",\"final\":", H.boolean, "}" };
-        pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, "]" } ++ call_details ++ .{"}"};
-        pub const tool_result = .{ "{\"content\":", H{ .json = ContentJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
+        pub const assistant = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"final\":", H.boolean, "}" };
+        pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, "]" } ++ call_details ++ .{"}"};
+        pub const tool_result = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
         pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
-        pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentJson }, "}" };
+        pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentValueJson }, "}" };
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
-        pub const sent = .{ "{\"admission\":\"", H.decimal, "\",\"admitted_at\":\"", H.decimal, "\",\"target\":", H{ .json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };
+        pub const sent = .{ "{\"admission\":\"", H.decimal, "\",\"admitted_at\":\"", H.decimal, "\",\"target\":", H{ .json = NamedPeerJson }, ",\"content\":", H{ .json = ContentValueJson }, "}" };
         pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
@@ -71,25 +71,25 @@ pub const ItemJson = struct {
                 const name = @tagName(tag);
                 try writeShape(out, @field(value_shapes, name), .{
                     message.admission,   message.key.slice(),                    message.turn,          message.state,
-                    message.admitted_at, NamedPeerJson.optional(message.sender), message.source_action, ContentJson{ .value = message.content },
+                    message.admitted_at, NamedPeerJson.optional(message.sender), message.source_action, ContentValueJson{ .value = message.content },
                 });
             },
-            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentJson{ .value = sent.content } }),
+            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentValueJson{ .value = sent.content } }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
-            .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentJson{ .value = assistant.content }, assistant.final }),
-            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ ContentJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } }),
+            .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentValueJson.text(assistant.content), assistant.final }),
+            .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ ContentValueJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),
             .call => |call| {
                 comptime std.debug.assert(call.fields.len == 3);
-                var fields: [3]ContentJson = undefined;
-                for (call.fields, &fields) |field, *content| content.* = .{ .value = .{ .length = field.length, .digest = field.digest } };
+                var fields: [3]ContentValueJson = undefined;
+                for (call.fields, &fields) |field, *content| content.* = .text(.{ .length = field.length, .digest = field.digest });
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2], optionalText(&call.description), optionalText(&call.tool), optionalText(&call.server) });
             },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ContentJson.optional(ended.content) }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ContentValueJson.optionalText(ended.content) }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});
@@ -120,12 +120,12 @@ pub const QueuedJson = struct {
     value: *const activity_facts.Queued,
 
     pub const openapi_name = "Queued";
-    pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"oldest_position\":\"", H.decimal, "\",\"newest_admission\":\"", H.decimal, "\",\"newest_position\":\"", H.decimal, "\"}" };
+    pub const json_shape = .{ "{\"count\":\"", H.decimal, "\",\"oldest_position\":\"", H.decimal, "\",\"newest_admission\":\"", H.decimal, "\",\"newest_position\":\"", H.decimal, "\",\"newest_content\":", H{ .optional_json = protocol.ContentValueJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const QueuedJson, out: *std.Io.Writer) !void {
         const queued = self.value;
-        try writeShape(out, json_shape, .{ queued.count, queued.oldest_position, queued.newest_admission, queued.newest_position });
+        try writeShape(out, json_shape, .{ queued.count, queued.oldest_position, queued.newest_admission, queued.newest_position, if (queued.newest_content) |value| protocol.ContentValueJson{ .value = value } else null });
     }
 };
 
@@ -170,11 +170,11 @@ pub const SearchHitJson = struct {
     value: *const Search.Hit,
 
     pub const openapi_name = "ActivitySearchFactsHit";
-    pub const json_shape = .{ "{\"snippet\":", H{ .string = 160 }, ",\"offset\":\"", H.decimal, "\",\"length\":\"", H.decimal, "\"}" };
+    pub const json_shape = .{ "{\"snippet\":", H{ .string = 160 }, ",\"offset\":\"", H.decimal, "\",\"length\":\"", H.decimal, "\",\"part\":", H.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const SearchHitJson, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.value.snippet.slice(), self.value.offset, self.value.length });
+        try writeShape(out, json_shape, .{ self.value.snippet.slice(), self.value.offset, self.value.length, if (self.value.part) |part| @as(?u64, part) else null });
     }
 };
 
@@ -232,7 +232,7 @@ test "activity search reply bounds preserve snippets and nullable continuation" 
     var buffer: [max_search_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     try writeSearch(&out, &facts);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\"}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\",\"part\":null}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
     facts.count = 0;
     facts.next = null;
     out = std.Io.Writer.fixed(&buffer);

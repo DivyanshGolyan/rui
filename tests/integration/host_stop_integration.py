@@ -17,7 +17,7 @@ import time
 import bash_fixture
 import model_fixture as fixture
 import host_process
-from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
+from host_process import HostDiagnostics, PauseGate, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
 from host_status_fixture import socket_path, status
 import os_semantics
 from host_status_fixture import finish
@@ -120,12 +120,13 @@ def mixed_effect_drain(provider_first):
         thread.start()
         host = None
         diagnostics = None
-        signalled = ReleaseGate(state / "shutdown-signalled")
+        # SH-52
+        signalled = PauseGate("host.shutdown_signalled", occurrence=1)
         try:
             host = fixture.start_host(
                 store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                "--test-phase-trace", "--test-shutdown-signalled-gate-path", signalled.path,
-                active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
+                "--test-phase-trace",
+                active_capacity=3, observations="stop", stderr_pipe=stderr_pipe, pause=signalled,
             )
             diagnostics = HostDiagnostics(host)
             bash_session = bash_fixture.configure(state, store, "configure-bash")
@@ -155,10 +156,13 @@ def mixed_effect_drain(provider_first):
             assert actor("stop", store, instance(store)) == "acknowledged"
             fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held provider")
 
-            diagnostics.wait("test_gate_waiting", subject=str(signalled.path), timeout=3)
+            signalled.wait()
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
                              f"{order}: Bash TERM with provider held", timeout=2)
-            signalled.release()
+            if provider_first:
+                signalled.release()
+            else:
+                signalled.close()  # EOF must also release shutdown.
             diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
             assert host.wait(timeout=10) == 1, host.returncode
             assert events.read_text().count("TERM\n") == 1, "Bash was not signalled exactly once"
@@ -181,7 +185,7 @@ def mixed_effect_drain(provider_first):
                 diagnostics.snapshot_failure(lambda: {"case": "mixed_effect_drain", "order": order,
                     "provider_released": provider_release.is_set()})
             errors = []
-            for dispose in (signalled.release, lambda: stop_process(host) if host is not None else None,
+            for dispose in (signalled.close, lambda: stop_process(host) if host is not None else None,
                             provider_release.set, endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
                 try:
                     dispose()
@@ -274,7 +278,7 @@ def main():
             inspector = fixture.start_command("session", "inspect", "--store", store, "--session", session)
             exchange_phase(diagnostics, "test_gate_waiting", began, time.monotonic() + 5,
                            subject=str(reply_gate))
-            held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if os_semantics.PROC_FS else None
+            held_fds = len(os_semantics.descriptor_links(host.pid)) if os_semantics.PROC_FS else None
 
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
@@ -343,7 +347,7 @@ def main():
             diagnostics.wait("cleanup_completed", action=str(action["action"]))
             assert host.poll() is None, "owned report must retain lease"
             assert status(store) == "owned_unavailable"
-            drained_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if held_fds is not None else None
+            drained_fds = len(os_semantics.descriptor_links(host.pid)) if held_fds is not None else None
             if held_fds is not None:
                 assert drained_fds < held_fds, (held_fds, drained_fds)
             assert transferred.recv(1) == b"", "unhanded read survived the intake fence"

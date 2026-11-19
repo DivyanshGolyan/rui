@@ -11,16 +11,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
         "Compile pinned libyaml as strict C99 for Linux x86-64 and ARM64 without running it",
     );
     for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
-        const yaml_linux = b.addLibrary(.{
-            .name = b.fmt("yaml-linux-{s}", .{@tagName(arch)}),
-            .linkage = .static,
-            .root_module = b.createModule(.{
-                .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu }),
-                .optimize = .ReleaseSafe,
-                .link_libc = true,
-            }),
-        });
-        product.configureYaml(b, yaml_linux);
+        const yaml_linux = product.yamlLibrary(b, b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu }), .ReleaseSafe);
         yaml_linux_step.dependOn(&yaml_linux.step);
     }
     const macos_cross_step = b.step(
@@ -50,6 +41,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
         });
         product.configureUnitRoot(b, apple_tests, apple, null);
         macos_types_step.dependOn(&apple_tests.step);
+        macos_types_step.dependOn(&b.addTest(.{ .name = "test-typecheck-macos-os", .root_module = product.addOsRoot(b, apple) }).step);
     }
     const targets = [_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .macos },

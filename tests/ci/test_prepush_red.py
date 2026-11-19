@@ -121,11 +121,53 @@ AssertionError
     def test_compile_jobs_use_known_commands(self):
         for name, command in (("linux_build_unit", prepush.unit_compile()),
                               ("linux_build", [*build_artifact.compile_command(["request-wait-integration"], jobs=1), "--summary", "line"]),
-                              ("macos_typecheck", ["zig", "build", "-j1", "typecheck-macos", "--summary", "line"]),
-                              ("linux_codegen", prepush.STACK_FRAMES)):
+                              ("macos_typecheck", ["zig", "build", "-j1", "typecheck-macos", "--summary", "line"])):
             with self.subTest(job=name):
                 self.configure(run=dict(RUN, run_attempt=len(name)), jobs=[job(name)], log="src/foo.zig:1: error: no field\nzig build ci-build -Dci-targets=request-wait-integration -Dci-part=rest failed with exit 1; no gates executed.\n")
                 self.assertEqual(self.plan()[1][0][1], command)
+
+    def test_single_pr_job_reruns_the_failed_phase_with_its_logged_targets(self):
+        def pr_job(step):
+            failed = job("linux pr")
+            failed["steps"] = [dict(name="Policy checks", conclusion="success"),
+                               dict(name="Compile only the binaries the selected targets need",
+                                    conclusion="failure" if step == "compile" else "success"),
+                               dict(name="Run selected targets on SQLite, stopping at the first failure",
+                                    conclusion="failure" if step == "run" else "skipped" if step == "compile" else "success"),
+                               dict(name="Fail for the policy or format checks that failed above",
+                                    conclusion="failure" if step == "policy" else "skipped")]
+            return failed
+
+        compile_env = 'env:\n  TARGETS: ["test-store","request-wait-integration","test-logic"]\n'
+        run_env = 'env:\n  TARGETS: ["test-store","request-wait-integration"]\n  QUARANTINE: admission\n'
+        cases = (
+            ("compile", compile_env + "src/foo.zig:1: error: no field\n"
+             "zig build ci-build -Dci-targets=test-store,request-wait-integration,test-logic -Dci-part=all failed "
+             "with exit 1; no gates executed.\n",
+             [*build_artifact.compile_command(["test-store", "request-wait-integration", "test-logic"], jobs=1),
+              "--summary", "line"]),
+            ("run", compile_env + run_env + "error: 'store.tests.test.queued input is pending' failed\n",
+             ["zig", "build", "-j1", "test-store", "-Dtest-filter=store.tests.test.queued input is pending",
+              "--summary", "line"]),
+            ("run", compile_env + run_env + '''request-wait failed: exit=1
+Traceback (most recent call last):
+  File "/repo/tests/integration/request_wait_integration.py", line 23, in main
+    assert done
+AssertionError
+''', ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]),
+        )
+        for attempt, (step, log, expected) in enumerate(cases, 1):
+            with self.subTest(step=step, expected=expected):
+                self.configure(run=dict(RUN, run_attempt=attempt), jobs=[pr_job(step)], log=log)
+                command = self.plan()[1][0][1]
+                if isinstance(command, prepush.NeedsMySQL):
+                    command = command.command
+                self.assertNotIsInstance(command, prepush.Skipped)
+                self.assertEqual(command[command.index("zig"):], expected)
+        self.configure(run=dict(RUN, run_attempt=9), jobs=[pr_job("policy")],
+                       log=compile_env + run_env + "error: 'store.tests.test.queued input is pending' failed\n")
+        self.assertIsInstance(self.plan()[1][0][1], prepush.Skipped,
+                              "a unit failure outside the run step cannot borrow the run step's targets")
 
     def test_policy_unittest_uses_module_and_test_filter(self):
         self.configure(jobs=[job("policy")], log="FAIL: test_empty_diff_runs_nothing (test_prepush.PrepushTest.test_empty_diff_runs_nothing)\n"
@@ -316,6 +358,24 @@ AssertionError
             cause = report_issue.Cause("a red", zig_test=test, zig_binary=binary)
             self.assertIsInstance(prepush.red_command(job("linux suites (full-callers)"), cause, AVAILABLE), prepush.Skipped)
 
+    def test_ci_40_logic_core_replay_uses_its_owner_for_each_reporting_binary(self):
+        graph = prepush.tree_graph()
+        cases = (
+            ("src/host_reply.zig", "host_reply.test.every reply renders its exact worst-case bound from the shape it writes",
+             ("test-logic_tests", "unit-native-tests", ""), "test-logic-only"),
+            ("src/ActivityBlock.zig", "ActivityBlock.test.a narrow or short activity tail keeps the clock and the oldest calls",
+             ("unit-native-tests", ""), "test-native"),
+        )
+        pr = job("linux pr")
+        pr["steps"] = [dict(name=prepush.PR_RUN_STEP, conclusion="failure")]
+        for path, test, binaries, target in cases:
+            for binary in binaries:
+                with self.subTest(path=path, binary=binary):
+                    cause = report_issue.Cause("failure", [path], zig_test=test, zig_binary=binary)
+                    self.assertEqual(prepush.red_command(pr, cause, AVAILABLE, graph=graph,
+                                                       compile_targets=("test-logic", "test-native")),
+                                     ["zig", "build", "-j1", target, f"-Dtest-filter={test}", "--summary", "line"])
+
     def test_mysql_only_and_conformance_rounds_are_explicit_in_every_unit_target(self):
         mixed = report_issue.Cause("mixed", ["src/store/tests/activity.zig"], zig_test="store.tests.activity.test.queued input")
         mysql_only = report_issue.Cause("mysql only", ["src/store/mysql_dialect_check.zig"], zig_test="store.mysql_dialect_check.test.migration")
@@ -352,7 +412,7 @@ AssertionError
                 self.assertIsInstance(unavailable[0][1], prepush.Skipped)
 
     def test_native_conformance_and_unknown_source_cannot_omit_live_obligations(self):
-        graph = type("Graph", (), {"live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
+        graph = type("Graph", (), {"cores": set(), "live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
         cause = report_issue.Cause("native mixed", ["src/session_view_store_tests.zig"], zig_test="session_view_store_tests.test.view", zig_binary="unit-native-tests")
         command = prepush.red_command(job("linux suites (test-native)"), cause, AVAILABLE, graph=graph)
         self.assertIsInstance(command, prepush.NeedsMySQL)
