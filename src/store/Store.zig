@@ -873,15 +873,18 @@ pub const Store = struct {
     }
 
     pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
-        return self.queue().run(publicConversationPageHeld, .{ self, request, out, row_allocator });
+        // Allocated before entry: a failed allocation must not fence the Store.
+        const reads = try row_allocator.create([PublicConversationPage.capacity]reads_domain.PublicRowRead);
+        defer row_allocator.destroy(reads);
+        return self.queue().run(publicConversationPageHeld, .{ self, request, out, reads });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, reads: *[PublicConversationPage.capacity]reads_domain.PublicRowRead) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, row_allocator));
+        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, reads));
     }
 
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
