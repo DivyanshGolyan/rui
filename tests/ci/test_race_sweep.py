@@ -51,25 +51,51 @@ class CommandTest(unittest.TestCase):
             race_sweep.main(["stall", "[]"])
 
 
+class FileTest(unittest.TestCase):
+    def test_a_failure_comments_on_the_open_race_sweep_issue(self):
+        calls = []
+        def call(*args):
+            calls.append(args)
+            return "41\n" if args[:2] == ("issue", "list") else ""
+        self.assertEqual(race_sweep.file("https://run/9", "abc", call=call), "41")
+        self.assertIn("race-sweep", calls[0])
+        self.assertEqual(calls[1][:3], ("issue", "comment", "41"))
+        self.assertIn("https://run/9", calls[1][-1])
+        self.assertEqual(len(calls), 2)
+
+    def test_with_none_open_it_opens_one_and_never_uses_ci_red(self):
+        calls = []
+        def call(*args):
+            calls.append(args)
+            return "https://issue/42\n" if args[:2] == ("issue", "create") else ""
+        self.assertEqual(race_sweep.file("https://run/9", "abc", call=call), "https://issue/42")
+        self.assertEqual([args[:2] for args in calls], [("issue", "list"), ("label", "create"), ("issue", "create")])
+        self.assertNotIn("ci-red", repr(calls))
+
+
 class WorkflowTest(unittest.TestCase):
-    def test_only_promotes_daily_run_calls_the_sweep(self):
+    def test_only_promotes_daily_run_starts_the_sweep_as_its_own_run(self):
         workflows = {path.name: path.read_text() for path in Path(".github/workflows").glob("*.yml")}
         sweep = workflows["race-sweep.yml"].split("\npermissions:", 1)[0]
-        self.assertIn("  workflow_call:", sweep)
+        self.assertIn("  workflow_dispatch:", sweep)
+        self.assertNotIn("workflow_call:", sweep)
         self.assertNotIn("schedule:", sweep)
+        self.assertFalse([name for name, body in workflows.items() if "uses: ./.github/workflows/race-sweep.yml" in body])
         self.assertEqual([name for name, body in sorted(workflows.items())
-                          if "uses: ./.github/workflows/race-sweep.yml" in body], ["promote.yml"])
+                          if "gh workflow run race-sweep.yml" in body], ["promote.yml"])
         caller = re.search(r"(?ms)^  race_sweep:\n(.*?)(?=^  [\w-]+:\n|\Z)", workflows["promote.yml"]).group(1)
         self.assertIn("if: ${{ needs.batch.outputs.daily == 'true' }}", caller)
+        self.assertIn("gh workflow run race-sweep.yml", caller)
         self.assertIn('echo "daily=$daily" >> "$GITHUB_OUTPUT"', workflows["promote.yml"])
 
-    def test_both_shakers_run_and_either_failure_fails_the_sweep(self):
+    def test_both_shakers_run_and_either_failure_files_its_own_issue(self):
         text = Path(".github/workflows/race-sweep.yml").read_text()
         self.assertIn('race_sweep.py starve "$STARVE"', text)
         self.assertIn('race_sweep.py stall "$STALL" --seed "$SEED"', text)
         self.assertEqual(text.count("continue-on-error: true"), 2)
         self.assertIn("steps.starve.outcome != 'success' || steps.stall.outcome != 'success'", text)
-        self.assertIn("--label race-sweep", text)
+        self.assertIn('race_sweep.py file --run-url "$RUN_URL" --sha "$GITHUB_SHA"', text)
+        self.assertNotIn("report_issue.py", text)
 
 
 if __name__ == "__main__":

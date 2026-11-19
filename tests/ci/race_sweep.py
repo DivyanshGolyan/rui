@@ -11,7 +11,8 @@ runs before another. Two shakers, chosen after replaying five known races
   from a seed, through strace's fault injection. No code changes; it reaches Zig
   binaries, Python fixtures and their children alike (#1892's class).
 
-Every failure prints the command that reproduces it. A stall run under strace
+Every failure prints the command that reproduces it, and `file` keeps one open
+issue labelled race-sweep current, apart from main's ci-red issues. A stall run under strace
 is slower than an untraced one, so confirm a failure on the fixed code and with
 a deterministic replay before calling it a race.
 """
@@ -34,6 +35,7 @@ MAX_CALL = 160
 DELAY_MS = 250
 HOGS = 8
 CORES = "0,1"
+LABEL = "race-sweep"
 
 
 class Stall(NamedTuple):
@@ -99,13 +101,39 @@ def stall(targets: str, seed: int, runs: int, run=execute, say=report) -> int:
     return 1 if failed else 0
 
 
+def gh(*args: str) -> str:
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+
+def file(run_url: str, sha: str, call=gh) -> str:
+    """Records a failed sweep on the one open race-sweep issue, opening it if none is open."""
+    body = (f"Race sweep failed on `{sha}`: {run_url}\n\n"
+            "The run's step summary gives each failure's reproduction command. "
+            "See docs/verification/gates.md#race-sweep before calling one a race.")
+    found = call("issue", "list", "--label", LABEL, "--state", "open", "--json", "number", "--jq", ".[0].number").strip()
+    if found:
+        call("issue", "comment", found, "--body", body)
+        return found
+    call("label", "create", LABEL, "--force", "--color", "fbca04",
+         "--description", "A nightly race sweep found a latent scheduling race")
+    return call("issue", "create", "--title", "Race sweep found a latent race", "--label", LABEL, "--body", body).strip()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("starve", "stall"))
-    parser.add_argument("targets", help="JSON array of selector targets")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--runs", type=int, default=2)
+    modes = parser.add_subparsers(dest="mode", required=True)
+    for mode in ("starve", "stall"):
+        shaker = modes.add_parser(mode)
+        shaker.add_argument("targets", help="JSON array of selector targets")
+        shaker.add_argument("--seed", type=int, default=0)
+        shaker.add_argument("--runs", type=int, default=2)
+    filer = modes.add_parser("file")
+    filer.add_argument("--run-url", required=True)
+    filer.add_argument("--sha", required=True)
     args = parser.parse_args(argv)
+    if args.mode == "file":
+        print(file(args.run_url, args.sha))
+        return 0
     if not json.loads(args.targets):
         raise SystemExit("race_sweep: no targets")
     if args.mode == "starve":

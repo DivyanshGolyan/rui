@@ -344,14 +344,14 @@ Run `bash tests/ci/mac-runner/uninstall.sh` as the signed-in administrator to st
 ## Race sweep
 
 [race-sweep.yml](../../.github/workflows/race-sweep.yml) shakes main for latent scheduling races: tests that pass only because one thread or process usually runs before another.
-Promote calls it on its 18:45 UTC run, once a day. It also runs by hand with a seed.
+Promote's 18:45 UTC run starts it once a day as its own run, so its result and duration never become Promote's. It also runs by hand with a seed.
 One Linux runner compiles the swept targets and runs two shakers through [race_sweep.py](../../tests/ci/race_sweep.py):
 
 - **starve:** `test-native`, `pause-socket-test`, `request-wait-integration` and `human-cli-integration` run on two cores beside eight busy loops, so any wait that is really a deadline runs out.
 - **stall:** two runs of `test-native` and `pause-socket-test`. Each run uses strace to stall one seeded syscall site (`sendmsg`, `write`, `futex` or `read`, on entry or exit, call 1 to 160 of each thread) by 250 ms.
 
 These shakers were chosen by replaying five known races (#1815, #1892, #1784, #1721, #1706). Starvation found the deadline class every time. The stall sweep found the split-write class at 4 of 160 sites, and it also found PAU-13 (#1937). Single stalls missed a race that needs two coordinated delays (#1784), and one caused by the kernel reusing a device number (#1721).
-A failure files a `race-sweep` issue through [report_issue.py](../../tests/ci/report_issue.py), and the step summary gives each reproduction command.
+A failure comments on the one open `race-sweep` issue, or opens it, apart from main's `ci-red` issues; the step summary gives each reproduction command.
 strace slows every traced thread, so before calling a failure a race, confirm it on the fixed code and with a deterministic replay ([Test seam: named pause points](https://github.com/DivyanshGolyan/rui/issues/1733)).
 The sweep gates nothing: Promote publishes without it.
 

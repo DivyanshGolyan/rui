@@ -136,11 +136,16 @@ jobs:
       issues: write
     uses: ./.github/workflows/dependency-lag.yml
   race_sweep:
-    # Shakes main for latent scheduling races once a day; a skipped job uses no runner.
+    # Starts the daily race sweep as its own run, so its result, issues and duration
+    # stay apart from Promote's; a skipped job uses no runner.
     needs: batch
     if: ${{ needs.batch.outputs.daily == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
-      contents: read
-      actions: read
-      issues: write
-    uses: ./.github/workflows/race-sweep.yml
+      actions: write
+    steps:
+      - name: Start the race sweep on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run race-sweep.yml --repo "$GITHUB_REPOSITORY" --ref main

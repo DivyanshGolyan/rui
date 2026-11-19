@@ -1,6 +1,6 @@
 name: Race sweep
 # Shakes main for latent scheduling races (docs/verification/gates.md#race-sweep).
-# Promote calls it on its first run of each day; also runnable by hand. One Linux
+# Promote's daily run starts it as its own run; also runnable by hand. One Linux
 # runner: starve the targets on two cores, then a few seeded syscall stalls.
 on:
   workflow_dispatch:
@@ -10,7 +10,6 @@ on:
         type: string
         required: false
         default: ''
-  workflow_call:
 permissions:
   contents: read
 concurrency:
@@ -63,21 +62,20 @@ jobs:
           echo "::error::starve: $STARVED; stall: $STALLED. The step summary gives each reproduction command."
           exit 1
   report:
-    # One issue per failure signature, labelled race-sweep.
+    # Keeps one open race-sweep issue current. Apart from ci-red, so it never marks main red.
     needs: sweep
     if: ${{ failure() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     permissions:
       contents: read
-      actions: read
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: File each failure under its cause
+      - name: Record the failed run on the race-sweep issue
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKFLOW: ${{ github.workflow }}
-        run: python3 -B tests/ci/report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --label race-sweep
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 -B tests/ci/race_sweep.py file --run-url "$RUN_URL" --sha "$GITHUB_SHA"
