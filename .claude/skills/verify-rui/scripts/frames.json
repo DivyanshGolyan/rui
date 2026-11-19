@@ -6326,6 +6326,16 @@
           "serve": [
             "openai"
           ]
+        },
+        {
+          "send": {
+            "to": "Unserved night witness",
+            "text": "Unserved send witness",
+            "wait": false
+          }
+        },
+        {
+          "wait": "isn't served by this Host"
         }
       ],
       "expect": [
