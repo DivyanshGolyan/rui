@@ -73,9 +73,9 @@ print(value if isinstance(value, str) else json.dumps(value))
             self.data[f"repos/owner/repo/actions/jobs/{item['id']}/logs"] = log
         self.responses.write_text(json.dumps(self.data))
 
-    def plan(self):
+    def plan(self, euid=1000):
         with redirect_stderr(io.StringIO()) as warning:
-            identity, checks = prepush.previous_red(AVAILABLE)
+            identity, checks = prepush.previous_red(AVAILABLE, euid)
         return identity, checks, warning.getvalue()
 
     def test_green_and_cancelled_before_steps_have_no_checks(self):
@@ -116,7 +116,11 @@ AssertionError
 ''')
         _, checks, _ = self.plan()
         self.assertEqual(len(checks), 1)
-        self.assertEqual(checks[0][1], ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"])
+        command = ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]
+        self.assertEqual(checks[0][1], command)
+        _, checks, _ = self.plan(euid=0)
+        self.assertEqual(checks[0][1], [str(ROOT / ".agents/as-fixture-user"), "prepush", "--ref", "HEAD", "--", *command],
+                         "a root push replays the red fixture as the lane user")
 
     def test_replayed_fixtures_run_as_the_lane_user_only_under_root(self):
         fixture = ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]
