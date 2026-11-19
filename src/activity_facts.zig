@@ -81,6 +81,8 @@ pub const Queued = struct {
     oldest_position: u64 = 0,
     newest_admission: u64 = 0,
     newest_position: u64 = 0,
+    /// The newest queued Message's value, for its first-line hint; null when none is queued.
+    newest_content: ?content_value.Value = null,
 };
 
 pub const PageWork = struct {
@@ -114,6 +116,8 @@ pub const Search = struct {
         snippet: Bounded(160) = .{},
         offset: usize,
         length: usize,
+        /// The Text part the hit lies in, for an entry whose value has parts.
+        part: ?u32 = null,
     };
     pub const Cursor = struct { position: u64, ordinal: u64 };
     pub const Match = struct {

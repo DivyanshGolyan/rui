@@ -248,7 +248,7 @@ The fixture uses native public readers and actual provider inputs, not direct St
 Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
-It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
+It reuses `yamlLibrary`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
 The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
 
 Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.

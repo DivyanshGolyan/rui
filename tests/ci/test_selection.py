@@ -778,6 +778,11 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(path=path, family=family):
                     self.assertIn("measurement-check", result[family])
 
+    def test_cli_invocation_selects_logic_and_human_cli(self):
+        result = select(["src/cli_invocation.zig"], "review", AVAILABLE)
+        self.assertIn("test-logic", result["targets"])
+        self.assertIn("human-cli-integration", result["targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
@@ -786,6 +791,13 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_store_cores_select_logic_and_store_roots(self):
+        for path in ("src/store/command_replay.zig", "src/store/write_batch.zig", "src/store/pass_plan.zig", "src/store/round_order.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertTrue({"test-logic", "test-store"} <= set(result["fast_targets"]))
 
     def test_store_tests_reach_no_store_caller(self):
         graph = tree_graph()
@@ -1452,7 +1464,7 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
-        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["read-image-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()

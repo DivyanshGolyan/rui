@@ -381,7 +381,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.semantics = os_semantics
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
-        original = Path(sys.executable).resolve(strict=True)
+        original = self.semantics.process_executable(os.getpid()).resolve(strict=True)
         marker = b"ready\n"
         program = "import os; os.write(1, b'ready\\n'); os.read(0, 1)"
         with tempfile.TemporaryDirectory() as directory:

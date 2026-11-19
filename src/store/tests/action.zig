@@ -1919,11 +1919,13 @@ test "interrupt regression: Message promotion watches running calls and ignores 
     }.run);
 }
 
-test "compound Action Resolution read verifies the whole value before declining parts" {
+test "EXR-10 an Action read projects a compound Resolution as its owned parts value without walking it" {
+    // The read does no manifest work: damage behind the manifest identity is the parts list's
+    // to certify (INS-9), so every case projects the same value and the Store stays serving.
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Damage = enum { none, missing_last, extra_part, wrong_identity, nested_value, private_part, manifest_bytes };
-            inline for ([_]bool{ false, true }) |model_tool| for (std.enums.values(Damage)) |damage| {
+            for (std.enums.values(Damage)) |damage| {
                 errdefer std.debug.print("compound Resolution damage {s} failed\n", .{@tagName(damage)});
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -1935,6 +1937,12 @@ test "compound Action Resolution read verifies the whole value before declining 
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleTwoActionsForTesting(&storage, &tmp, model, "resolution-corruption-calls");
                 const binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30_000, .{})).?.permit.binding;
+                if (damage == .none) {
+                    var input: action_domain.ActionExecutionInput = undefined;
+                    try storage.readActionExecutionInput(.bash, binding, &input);
+                    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "first", "starting")) == .accepted);
+                    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "second", "雪")) == .accepted);
+                }
                 // The final row is beyond the Cursor's first relational page.
                 var text: [17][24]u8 = undefined;
                 var parts: [17]store_testing.MessagePart = undefined;
@@ -1961,16 +1969,31 @@ test "compound Action Resolution read verifies the whole value before declining 
                     },
                     .manifest_bytes => try store_testing.zeroContent(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code IS NOT NULL"),
                 }
+                const length = try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{value});
                 var result: @import("../../action_read.zig").Read = undefined;
-                const request: @import("../../action_read.zig").Request = .{ .session = session, .action_id = binding.action_id };
-                if (model_tool) {
-                    if (damage == .none) {
-                        try storage.readActionForTool(&request, &result);
-                        try std.testing.expect(result.status == .resolved_parts);
-                    } else try std.testing.expectError(error.CorruptStore, storage.readActionForTool(&request, &result));
-                } else try std.testing.expectError(if (damage == .none) error.InputPartsNotSupported else error.CorruptStore, storage.readAction(&request, &result));
-                try std.testing.expectEqual(damage != .none, storage.isFenced());
-            };
+                var request: @import("../../action_read.zig").Request = .{
+                    .session = session,
+                    .action_id = binding.action_id,
+                    .after = if (damage == .none) 1 else 0,
+                };
+                try storage.readAction(&request, &result);
+                try std.testing.expect(result.status == .resolved_parts);
+                const projected = result.status.resolved_parts.content;
+                try std.testing.expectEqual(@import("../../content_value.zig").Owner{ .action = binding.action_id }, projected.parts.owner);
+                try std.testing.expectEqual(length, projected.parts.identity.length);
+                if (damage == .none) {
+                    try std.testing.expectEqual(@as(usize, 1), result.values.count);
+                    try std.testing.expectEqual(@as(u64, 2), result.values.next);
+                    try std.testing.expect(!result.values.more);
+                    const item = result.values.items[0];
+                    try std.testing.expectEqual(@as(u64, 2), item.ordinal);
+                    try std.testing.expectEqualStrings("second", item.key.slice());
+                    try std.testing.expectEqualStrings("雪", result.values.bytes[item.start..][0..item.length]);
+                }
+                request.offset = 1;
+                try std.testing.expectError(error.InvalidCursor, storage.readAction(&request, &result));
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }
@@ -2229,6 +2252,89 @@ test "APV-9 resolved Actions reject fresh publications" {
             try std.testing.expect((try storage.publishActionValue(handle, "fresh", "resolved payload")).refused == .resolved);
             try std.testing.expectEqual(resolved_counts, try ValueRowCounts.read(&storage));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+        }
+    }.run);
+}
+
+test "action value pages preserve delivery state" {
+    // ARD-1
+    const action_read = @import("../../action_read.zig");
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "page-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                for (0..20) |index| {
+                    var key: [32]u8 = undefined;
+                    var text: [32]u8 = undefined;
+                    const k = try std.fmt.bufPrint(&key, "key-{d}", .{index});
+                    const t = try std.fmt.bufPrint(&text, "value-{d}", .{index});
+                    try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), k, t)) == .accepted);
+                }
+                const before = try ValueRowCounts.read(&storage);
+                const pending = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value v JOIN message_admission m ON m.admission_id=v.admission_id WHERE v.action_id=?1 AND m.turn_id IS NULL", .{action_id});
+                try std.testing.expectEqual(@as(u64, if (background) 20 else 0), pending);
+                const result = try std.testing.allocator.create(action_read.Read);
+                defer std.testing.allocator.destroy(result);
+                var after: u64 = 0;
+                for (0..2) |page| {
+                    try storage.readAction(&.{ .session = session, .action_id = action_id, .after = after }, result);
+                    try std.testing.expectEqual(@as(usize, if (page == 0) 16 else 4), result.values.count);
+                    try std.testing.expectEqual(page == 0, result.values.more);
+                    for (result.values.items[0..result.values.count], 0..) |item, index| {
+                        const ordinal = page * 16 + index + 1;
+                        var expected_key: [32]u8 = undefined;
+                        var expected_text: [32]u8 = undefined;
+                        try std.testing.expectEqual(@as(u64, @intCast(ordinal)), item.ordinal);
+                        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_key, "key-{d}", .{ordinal - 1}), item.key.slice());
+                        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_text, "value-{d}", .{ordinal - 1}), result.values.bytes[item.start..][0..item.length]);
+                    }
+                    after = result.values.next;
+                }
+                try std.testing.expectEqual(@as(u64, 20), after);
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .after = after }, result);
+                try std.testing.expectEqual(@as(usize, 0), result.values.count);
+                try std.testing.expectEqual(after, result.values.next);
+                try std.testing.expect(!result.values.more);
+                try std.testing.expectEqual(before, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(pending, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value v JOIN message_admission m ON m.admission_id=v.admission_id WHERE v.action_id=?1 AND m.turn_id IS NULL", .{action_id}));
+                const big = try std.testing.allocator.alloc(u8, action_read.page_bytes);
+                defer std.testing.allocator.free(big);
+                @memset(big, 'x');
+                try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "large", big)) == .accepted);
+                try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "unicode", "雪")) == .accepted);
+                try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "empty", "")) == .accepted);
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .after = 20 }, result);
+                try std.testing.expectEqual(@as(usize, 1), result.values.count);
+                try std.testing.expect(result.values.more);
+                try std.testing.expectEqual(@as(u64, 21), result.values.next);
+                try std.testing.expectEqualSlices(u8, big, result.values.bytes[0..result.values.length]);
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .after = 21 }, result);
+                try std.testing.expectEqual(@as(usize, 2), result.values.count);
+                try std.testing.expectEqualStrings("雪", result.values.bytes[0..result.values.items[0].length]);
+                try std.testing.expectEqual(@as(usize, 0), result.values.items[1].length);
+                try std.testing.expect(!result.values.more);
+                _ = try storage.settleActionAttempt(binding, .succeeded, "final", .{});
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .offset = 2, .after = 21 }, result);
+                try std.testing.expect(result.status == .resolved);
+                try std.testing.expectEqualStrings("nal", result.status.resolved.window.text.slice());
+                try std.testing.expectEqual(@as(usize, 2), result.values.count);
+                var stop = try completeSessionStop("page-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try storage.readAction(&.{ .session = session, .action_id = action_id, .after = 21 }, result);
+                try std.testing.expectEqual(@as(usize, 2), result.values.count);
+                try store_testing.zeroContent(&storage, "SELECT content_id FROM action_value WHERE publication_key='unicode'");
+                try std.testing.expectError(error.CorruptStore, storage.readAction(&.{ .session = session, .action_id = action_id, .after = 21 }, result));
+                try std.testing.expect(storage.isFenced());
+            }
         }
     }.run);
 }

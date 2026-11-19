@@ -38,7 +38,6 @@ const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
-const ContentMetadata = content_domain.ContentMetadata;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -307,11 +306,12 @@ pub const activity_sequence_guard = rsql.Read(.{
 pub const queued = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.admission_position," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
-        "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS taken " ++
-        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND " ++ sourced_input.personSql("m") ++ " " ++
+        "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS taken," ++
+        "c.byte_length,c.digest,c.private,c.form " ++
+        "FROM message_admission m @index(message_admission_person) LEFT JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND " ++ sourced_input.personSql("m") ++ " " ++
         "AND m.admission_position<=?2 ORDER BY m.admission_position DESC",
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { admission_id: rsql.Positive, admission_position: rsql.Positive, taken: bool },
+    .Row = struct { admission_id: rsql.Positive, admission_position: rsql.Positive, taken: bool, byte_length: ?u64, digest: ?[32]u8, private: ?bool, form: ?u8 },
     .cardinality = .each,
 });
 
@@ -511,7 +511,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
         }
     }
     if (items.len != 0 or lower <= upper or cursor != null) try runRows(a);
-    if (cursor) |read| try read.takeMetadata(a);
+    if (cursor) |read| try read.takeMetadata();
     var contents = false;
     for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
         .hosted => |*hosted| try hosted.found(),
@@ -539,8 +539,8 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     for (items, reads[0..items.len]) |*item, *read| switch (read.reads) {
         .hosted => {},
         .content => |*content| {
-            try content.takeMetadata(a);
-            item.content = .{ .text = .{ .length = content.content.metadata.length, .digest = content.content.metadata.digest } };
+            try content.takeMetadata();
+            item.content = content.content.value;
             if (item.sender != null) try read.label.found();
             if (content.content.tool_operation != null) {
                 try read.presentation.checkCall();
@@ -560,8 +560,12 @@ pub fn openPublicConversationContent(a: *ReadAccess, request: *const conversatio
     if (request.position == 0 or request.position > std.math.maxInt(i64) or
         request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
     const content = try publicConversationContent(a, request.session.slice(), request.position, request.ordinal);
-    if (request.start > content.metadata.length) return error.RangeOutOfBounds;
-    return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
+    const reference = switch (content.value) {
+        .text => |reference| reference,
+        .parts => return error.ContentIsParts,
+    };
+    if (request.start > reference.length) return error.RangeOutOfBounds;
+    return .{ .store = a.store, .content_id = content.id, .reference = reference };
 }
 
 const answer_entry = blk: {
@@ -619,11 +623,19 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 
 const public_entry = rsql.Read(.{
     .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
-        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3) AND " ++ visibleEntrySql("e")),
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender," ++
+        "CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action," ++
+        "CASE WHEN e.entry_kind=1 THEN e.source_admission_id END AS admission,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3) AND " ++ visibleEntrySql("e")),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, admission: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
+
+/// The Action whose saved Resolution a tool result row shows: the owner of a parts result.
+/// A rejection or a background notice has none.
+fn resolutionActionSql(comptime call: []const u8, comptime action: []const u8) []const u8 {
+    return "CASE WHEN " ++ call ++ ".rejection_content_id IS NULL AND " ++ action ++ ".background_content_id IS NULL THEN " ++ action ++ ".action_id END";
+}
 
 const public_tool_result = rsql.Read(.{
     .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
@@ -637,7 +649,8 @@ const public_tool_result = rsql.Read(.{
         "AND item.attempt_ordinal=op.attempt_ordinal AND " ++
         "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) AS consistent,op.operation_id," ++
         "(SELECT " ++ tool_fulfillment.timeSql("a", "op") ++ " FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
-        "WHERE c.operation_id=op.operation_id ORDER BY " ++ tool_fulfillment.positionSql("c", "a") ++ " DESC LIMIT 1) AS at " ++
+        "WHERE c.operation_id=op.operation_id ORDER BY " ++ tool_fulfillment.positionSql("c", "a") ++ " DESC LIMIT 1) AS at," ++
+        resolutionActionSql("tool_call", "action") ++ " AS resolution_action " ++
         "FROM last CROSS JOIN model_operation op ON op.operation_id=last.operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -650,12 +663,13 @@ const public_tool_result = rsql.Read(.{
         "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
         "AND (" ++ tool_fulfillment.positionSql("c", "a") ++ " IS NULL OR " ++ tool_fulfillment.contentSql("c", "a") ++ " IS NULL))",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { content_id: rsql.Positive, consistent: bool, operation_id: rsql.Positive, at: rsql.Positive },
+    .Row = struct { content_id: rsql.Positive, consistent: bool, operation_id: rsql.Positive, at: rsql.Positive, resolution_action: ?rsql.Positive },
     .cardinality = .each,
     .compound = true,
 });
 
-pub const PublicContent = struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, at: u64, source_action: ?u64 = null };
+/// `owner` is the Message admission or the resolved Action that may hold a parts value; null for model text.
+pub const PublicContent = struct { id: i64, value: content_value.Value, tool_operation: ?u64, admitted_at: ?u64, at: u64, source_action: ?u64 = null, owner: ?content_value.Owner = null };
 
 const PublicContentRead = struct {
     position: u64,
@@ -682,10 +696,10 @@ const PublicContentRead = struct {
     fn keep(read: *PublicContentRead, row: anytype) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row) {
-            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null };
+            read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get(), .source_action = if (row.source_action) |action| action.get() else null, .owner = if (row.admission) |admission| .{ .message = admission.get() } else null };
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
-            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get() };
+            read.content = .{ .id = @intCast(row.content_id.get()), .value = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get(), .owner = if (row.resolution_action) |action| .{ .action = action.get() } else null };
         }
     }
 
@@ -699,9 +713,9 @@ const PublicContentRead = struct {
         a.read(content_metadata, .{ .content_id = @intCast(read.content.id) }, &read.metadata);
     }
 
-    fn takeMetadata(read: *PublicContentRead, a: *ReadAccess) !void {
+    fn takeMetadata(read: *PublicContentRead) !void {
         if (read.content.tool_operation != null) try read.outcome.finish();
-        read.content.metadata = try content_parts.publicMetadata(a, @intCast(read.content.id), &read.metadata);
+        read.content.value = try content_parts.publicValue(&read.metadata, read.content.owner);
     }
 };
 
@@ -712,7 +726,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     try read.found();
     read.queueMetadata(a);
     try runRows(a);
-    try read.takeMetadata(a);
+    try read.takeMetadata();
     return read.content;
 }
 
@@ -919,6 +933,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
+    if (waiting.queued.count != 0) page.queued.newest_content = try content_parts.publicValue(&(waiting.newest orelse return error.CorruptStore), .{ .message = waiting.queued.newest_admission });
     try last_line.finish(&page.work.last_line);
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
@@ -930,6 +945,10 @@ pub const activity_search_budget = 8 * 1024 * 1024;
 const SearchScratch = struct {
     window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
     matcher: word_search.Matcher = undefined,
+    /// The hits of the current entry, from one text value or from each of its Text parts in order.
+    hits: [3]activity_facts.Search.Hit = undefined,
+    hit_count: usize = 0,
+    cursor: content_parts.Cursor = undefined,
     item: activity_facts.Item = undefined,
     workspace: Bounded(workspace_path.max_bytes) = undefined,
 };
@@ -973,6 +992,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
             const at: ItemAt = .{ .position = row.position.get(), .ordinal = row.ordinal };
             var located: ?Located = null;
             try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
+            scratch.hit_count = 0;
             scratch.matcher.init(request.query.slice());
             if (scratch.item.value == .call) {
                 const fields = scratch.item.value.call.fields;
@@ -981,21 +1001,32 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
                     scratch.matcher.feed("\n");
                     try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.arguments)], &budget);
                 }
-            } else if (located) |content| {
-                try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } }, &budget);
-            }
-            scratch.matcher.finish();
-            if (scratch.matcher.count != 0) {
+                collectHits(scratch, null);
+            } else if (located) |content| switch (content.value) {
+                .text => |reference| {
+                    try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = reference }, &budget);
+                    collectHits(scratch, null);
+                },
+                .parts => |value| {
+                    // The manifest is read before any part, so a value whose manifest does not
+                    // fit the remaining budget waits for the continuation, which starts after
+                    // the last entry scanned. A first entry always fits the whole budget.
+                    if (value.identity.length > budget) {
+                        lower = position;
+                        out.next = .{ .position = position, .ordinal = ordinal };
+                        break :scan;
+                    }
+                    budget -= @intCast(value.identity.length);
+                    try searchParts(a, scratch, request.query.slice(), .{ .content_id = @intCast(content.id), .reference = .{ .parts = value.identity } }, &budget);
+                },
+            };
+            if (scratch.hit_count != 0) {
                 const item = &out.items[out.count];
                 item.position = at.position;
                 item.ordinal = at.ordinal;
                 item.kind = std.meta.stringToEnum(activity_facts.Item.Kind, @tagName(scratch.item.value)).?;
-                item.count = scratch.matcher.count;
-                for (scratch.matcher.hits[0..scratch.matcher.count], item.hits[0..item.count]) |*hit, *dest| {
-                    dest.snippet = hit.snippet;
-                    dest.offset = hit.offset;
-                    dest.length = hit.length;
-                }
+                item.count = scratch.hit_count;
+                @memcpy(item.hits[0..item.count], scratch.hits[0..item.count]);
                 out.count += 1;
             }
             position = at.position;
@@ -1026,6 +1057,28 @@ fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.Pro
         else => return err,
     };
     try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+}
+
+fn collectHits(scratch: *SearchScratch, part: ?u32) void {
+    scratch.matcher.finish();
+    for (scratch.matcher.hits[0..scratch.matcher.count]) |*hit| {
+        if (scratch.hit_count == scratch.hits.len) return;
+        scratch.hits[scratch.hit_count] = .{ .snippet = hit.snippet, .offset = hit.offset, .length = hit.length, .part = part };
+        scratch.hit_count += 1;
+    }
+}
+
+/// Searches each Text part of a parts value on its own, so no match spans two parts;
+/// hits name their part. The cursor certifies the manifest before the first part.
+fn searchParts(a: *ReadAccess, scratch: *SearchScratch, query: []const u8, value: content_domain.Value, budget: *usize) !void {
+    scratch.cursor.init(value);
+    while (try scratch.cursor.next(a)) |part| {
+        if (part.kind != .text) continue;
+        if (budget.* == 0 or scratch.hit_count == scratch.hits.len) return;
+        scratch.matcher.init(query);
+        try searchContent(a, scratch, .{ .store = a.store, .content_id = @intCast(part.content_id), .reference = part.reference }, budget);
+        collectHits(scratch, part.ordinal);
+    }
 }
 
 fn searchContent(a: *ReadAccess, scratch: *SearchScratch, location: ContentLocation, budget: *usize) !void {
@@ -1132,12 +1185,17 @@ const CallRows = struct {
 
 pub const QueuedMessages = struct {
     queued: activity_facts.Queued = .{},
+    newest: ?content_metadata.Row = null,
 
     pub fn visit(messages: *QueuedMessages, row: *const queued.Row) bool {
         if (row.taken) return false;
         if (messages.queued.count == 0) {
             messages.queued.newest_admission = row.admission_id.get();
             messages.queued.newest_position = row.admission_position.get();
+            messages.newest = if (row.byte_length != null and row.digest != null and row.private != null and row.form != null)
+                .{ .byte_length = row.byte_length.?, .digest = row.digest.?, .private = row.private.?, .form = row.form.? }
+            else
+                null;
         }
         messages.queued.count += 1;
         messages.queued.oldest_position = row.admission_position.get();
@@ -1484,7 +1542,7 @@ const ItemRead = struct {
     position: u64,
     ordinal: u64,
     item: *activity_facts.Item,
-    content: ?struct { id: u64, value: content_value.Reference } = null,
+    content: ?struct { id: u64, value: content_value.Value } = null,
     round: u8 = 0,
     done: bool = false,
     kind: u8 = 0,
@@ -1599,7 +1657,7 @@ const ItemRead = struct {
         }
     }
 
-    fn take(read: *ItemRead, a: *ReadAccess) !void {
+    fn take(read: *ItemRead) !void {
         defer read.round += 1;
         const item = read.item;
         if (read.round == 0) return read.takeRow();
@@ -1612,36 +1670,35 @@ const ItemRead = struct {
                     if (kind == 2) try message.entry.found();
                     return;
                 }
-                const content = try content_parts.publicMetadata(a, message.read.content_id, &message.metadata);
-                message.read.message.content = .{ .text = .{ .length = content.length, .digest = content.digest } };
+                message.read.message.content = try content_parts.publicValue(&message.metadata, .{ .message = message.read.message.admission });
                 if (message.read.message.sender != null) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
                     if (message.read.message.state != .applied) return error.CorruptStore;
-                    try message.entry.takeMetadata(a);
+                    try message.entry.takeMetadata();
                     if (message.entry.content.id != message.read.content_id) return error.CorruptStore;
                     item.at = message.entry.content.at;
                 }
-                read.exposes(message.read.content_id, message.read.message.content.text);
+                read.exposes(message.read.content_id, message.read.message.content);
             },
             3, 5 => {
                 const content = &read.state.content;
                 switch (read.round) {
                     1 => return content.read.found(),
                     2 => {
-                        try content.read.takeMetadata(a);
+                        try content.read.takeMetadata();
                         const found = content.read.content;
                         item.at = found.at;
-                        const value: content_value.Reference = .{ .length = found.metadata.length, .digest = found.metadata.digest };
                         if (read.kind == 3) {
-                            item.value = .{ .assistant = .{ .content = value, .final = content.answer != null } };
-                            read.exposes(@intCast(found.id), value);
+                            // An assistant entry has no owner, so its projection is text or fenced.
+                            item.value = .{ .assistant = .{ .content = found.value.text, .final = content.answer != null } };
+                            read.exposes(@intCast(found.id), found.value);
                             read.done = true;
                             return;
                         }
                         if (found.tool_operation == null) return error.CorruptStore;
-                        item.value.tool_result.content = .{ .text = value };
-                        read.exposes(@intCast(found.id), value);
+                        item.value.tool_result.content = found.value;
+                        read.exposes(@intCast(found.id), found.value);
                         return content.presentation.checkCall();
                     },
                     else => try content.presentation.finish(),
@@ -1651,7 +1708,7 @@ const ItemRead = struct {
                 const call = &read.state.call;
                 if (read.round == 1) {
                     try call.proposal.found();
-                    read.exposes(call.proposal.arguments_content_id, call.proposal.arguments);
+                    read.exposes(call.proposal.arguments_content_id, .{ .text = call.proposal.arguments });
                     return;
                 }
                 if (!call.found.get()) return error.CorruptStore;
@@ -1669,10 +1726,9 @@ const ItemRead = struct {
                     item.at = item.value.sent.admitted_at;
                     return;
                 }
-                const content = try content_parts.publicMetadata(a, sent.read.content_id, &sent.metadata);
-                item.value.sent.content = .{ .text = .{ .length = content.length, .digest = content.digest } };
+                item.value.sent.content = try content_parts.publicValue(&sent.metadata, .{ .message = item.value.sent.admission });
                 try sent.label.found();
-                read.exposes(sent.read.content_id, item.value.sent.content.text);
+                read.exposes(sent.read.content_id, item.value.sent.content);
             },
             9 => {
                 const failure = &read.state.failure;
@@ -1690,9 +1746,10 @@ const ItemRead = struct {
                     item.at = outcome.read.at;
                     if (outcome.read.content_id != null) return;
                 } else {
-                    const content = try content_parts.publicMetadata(a, outcome.read.content_id.?, &outcome.metadata);
-                    item.value.turn_ended.content = .{ .length = content.length, .digest = content.digest };
-                    read.exposes(outcome.read.content_id.?, item.value.turn_ended.content.?);
+                    // An outcome has no owner, so its projection is text or fenced.
+                    const content = try content_parts.publicValue(&outcome.metadata, null);
+                    item.value.turn_ended.content = content.text;
+                    read.exposes(outcome.read.content_id.?, content);
                 }
             },
             7 => {
@@ -1714,7 +1771,7 @@ const ItemRead = struct {
                 if (read.round == 2) {
                     try approval.proposal.found();
                     if (approval.metadata.action != request.action or approval.metadata.operation != request.operation or approval.metadata.call_ordinal != request.call_ordinal) return error.CorruptStore;
-                    read.exposes(approval.proposal.arguments_content_id, approval.proposal.arguments);
+                    read.exposes(approval.proposal.arguments_content_id, .{ .text = approval.proposal.arguments });
                     return;
                 }
                 if (!approval.found.get()) return error.CorruptStore;
@@ -1804,17 +1861,17 @@ const ItemRead = struct {
         }
     }
 
-    fn exposes(read: *ItemRead, id: u64, value: content_value.Reference) void {
+    fn exposes(read: *ItemRead, id: u64, value: content_value.Value) void {
         read.content = .{ .id = id, .value = value };
     }
 
     fn located(read: *const ItemRead) ?Located {
         const content = read.content orelse return null;
-        return .{ .id = @intCast(content.id), .metadata = .{ .length = content.value.length, .digest = content.value.digest, .private = false } };
+        return .{ .id = @intCast(content.id), .value = content.value };
     }
 };
 
-const Located = struct { id: i64, metadata: ContentMetadata };
+const Located = struct { id: i64, value: content_value.Value };
 
 const ActivityItemReads = struct {
     items: [activity_read.ActivityPage.items]ItemRead = undefined,
@@ -1838,7 +1895,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
         };
         if (!busy) break;
         try runRows(a);
-        for (reads[0..at.len]) |*read| if (!read.done) try read.take(a);
+        for (reads[0..at.len]) |*read| if (!read.done) try read.take();
         if (calls) |activity| try activity.take(round);
     }
     if (located) |first| first.* = reads[0].located();
@@ -1852,11 +1909,14 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
     var item: activity_facts.Item = undefined;
     var located: ?Located = null;
     readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located) catch |err| switch (err) {
-        error.ContentNotFound, error.InputPartsNotSupported => return err,
+        error.ContentNotFound => return err,
         else => return store_core.fence(a.store, err),
     };
     const content = located orelse return error.ContentNotFound;
-    return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
+    return .{ .store = a.store, .content_id = content.id, .reference = switch (content.value) {
+        .text => |reference| reference,
+        .parts => return error.ContentIsParts,
+    } };
 }
 
 pub const ActivityTool = struct {

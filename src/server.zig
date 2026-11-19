@@ -1946,7 +1946,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.ContentNotFound, error.ContentIsParts => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => return refuseRead(host, fd, "activity content", err),
             };
             try deliverPublicContent(host, fd, location, 0, true);
@@ -2108,7 +2108,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+        error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
         else => return refuseRead(host, fd, "conversation content", err),
     };
     return deliverPublicContent(host, fd, location, command.start, command.stream);
@@ -2279,7 +2279,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = content.length, .digest = content.digest, .creates_session = true } };
@@ -2295,7 +2295,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
@@ -2306,7 +2306,7 @@ fn renderActionValueReceipt(out: protocol.JsonOut, receipt: anytype) !void {
 }
 
 /// The Store owns which read failures are fatal: it fences itself for those and returns the
-/// rest, such as InputPartsNotSupported, as ordinary refusals. Dispatch fences only after it.
+/// rest as ordinary refusals. Dispatch fences only after it.
 fn refuseRead(host: *Host, reply: *Reply, phase: []const u8, err: anyerror) void {
     if (host.store.isFenced()) {
         fenceDispatch(host, phase, err);
@@ -2962,7 +2962,7 @@ test "message observation renders Host state binding live work and persistent re
     const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
     const bound = store_module.AttemptBinding{ .turn_id = 2, .operation_id = 3, .attempt_ordinal = 4 };
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .content = content,
+        .content = .{ .text = content },
         .queue = .{ .admission_id = 1, .state = .queued },
         .admitted_at = 11,
         .work = .{ .state = .{ .pending = .{ .since = 10 } } },
@@ -3100,8 +3100,10 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .form = .parts,
-        .content = .{ .length = max, .digest = @splat(0xff) },
+        .content = .{ .parts = .{
+            .identity = .{ .length = max, .digest = @splat(0xff) },
+            .owner = .{ .message = max },
+        } },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
         .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
@@ -4587,7 +4589,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const accepted = try submitMessage(&host, &command, &retry_offer);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
-    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
+    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.text.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
     var reload: wire_request.ConfigureCommand = .{ .session = configured.accepted.session, .reload_skills = true };
     try reload.key.set("pressure-reload");
@@ -4659,9 +4661,10 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
-test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
+test "SH-51 a route that cannot serve a parts value refuses it as ordinary and leaves the Host serving" {
     // A Session holds both parts producers: a compound Message and a read_image Resolution.
-    // Every public read that meets them gets the Store's ordinary refusal; none may fence the Host.
+    // Readers project them; every text-only route refuses a parts value and both parts routes
+    // refuse a text value as ordinary 409s. Only a Store that fenced itself fences dispatch.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -4690,29 +4693,52 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     const effect = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
     try store_module.testing.settleTestActionParts(&storage, &tmp, effect, &.{.{ .bytes = png, .kind = .{ .image = .{} } }});
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleAnswerItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"parts-answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
     try store_module.testing.submitTestMessagePartsWithSkills(&storage, &tmp, "parts-message", session.slice(), &.{
         .{ .bytes = "before" }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "after" },
     }, null);
+    _ = (try storage.admitNextModelAttempt(.{})).?;
     try std.testing.expect(!storage.isFenced());
 
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
     const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
-    const Read = struct { path: []const u8, body: []const u8 };
+    // Each row expects a status and can require a substring in its response body.
+    const Read = struct { path: []const u8, body: []const u8, status: []const u8 = "200", has: ?[]const u8 = null };
+    const result_position = try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id});
+    const text_admission = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-task"});
+    const action_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"action\":\"{d}\"}}", .{selected.action_id});
+    const parts_admission = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-message"});
+    const admission_position = try store_module.testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE admission_id=?1", .{parts_admission});
+    const message_position = try store_module.testing.queryU64(&storage, "SELECT session_position FROM conversation_entry WHERE source_admission_id=?1", .{parts_admission});
+    const message_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"message\":\"{d}\"}}", .{parts_admission});
     const reads = [_]Read{
-        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
-        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}) },
-        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}) },
-        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = message_owner },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = message_owner },
+        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .has = "\"type\":\"parts\"" },
         .{ .path = "inspect-session", .body = try std.fmt.allocPrint(arena, head ++ "inspect_session\",\"store\":\"s\",\"session\":\"{s}\"}}", .{session.slice()}) },
-        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id}) }) },
-        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}) },
-        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1", .{session.slice()}) }) },
+        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}), .has = "\"part\":\"2\"" },
         .{ .path = "list-sessions", .body = try std.fmt.allocPrint(arena, head ++ "list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}}", .{}) },
-        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
         .{ .path = "read-action-arguments", .body = try std.fmt.allocPrint(arena, head ++ "read_action_arguments\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
         .{ .path = "read-action-call-id", .body = try std.fmt.allocPrint(arena, head ++ "read_action_call_id\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .status = "409", .has = "result_not_ready" },
+        // Text-only routes on a parts Message and a parts Action Resolution.
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), admission_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\",\"stream\":true}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\",\"start\":\"0\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\",\"offset\":\"1\"}}", .{ session.slice(), selected.action_id }), .status = "400", .has = "invalid_cursor" },
+        // Both parts routes on a text value.
+        .{ .path = "public-parts", .body = try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
+        .{ .path = "public-part-content", .body = try std.fmt.allocPrint(arena, head ++ "public_part_content\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}},\"part\":\"0\",\"start\":\"0\"}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
+        // A completed text result still streams after the ordinary refusals.
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-task\"}}", .{}), .has = "Done." },
     };
     const Answer = struct { status: []const u8, body: []const u8 };
     const exchangeRead = struct {
@@ -4735,24 +4761,25 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
                 .status = try allocator.dupe(u8, reply.header[0..reply.header_length]),
                 .body = try allocator.dupe(u8, switch (reply.body) {
                     .json => |bytes| bytes,
+                    .content => content: {
+                        try reply.fill();
+                        break :content reply.window[0..reply.window_length];
+                    },
                     else => "",
                 }),
             };
         }
     }.run;
 
-    var refused: usize = 0;
     for (reads) |read| {
         const answer = try exchangeRead(&host, arena, read);
-        if (std.mem.indexOf(u8, answer.body, "canonical_store_failure") != null or storage.isFenced() or !host.launchAllowed()) {
-            std.debug.print("{s} fenced the Host: {s}{s}\n", .{ read.path, answer.status, answer.body });
+        const status = std.mem.startsWith(u8, answer.status, "HTTP/1.1 ") and std.mem.startsWith(u8, answer.status["HTTP/1.1 ".len..], read.status);
+        const carries = if (read.has) |member| std.mem.indexOf(u8, answer.body, member) != null else true;
+        if (!status or !carries or storage.isFenced() or !host.launchAllowed()) {
+            std.debug.print("{s}: expected {s} with {?s}, got {s}{s}\n", .{ read.path, read.status, read.has, answer.status, answer.body });
             return error.TestUnexpectedResult;
         }
-        if (std.mem.indexOf(u8, answer.body, "\"code\":\"InputPartsNotSupported\"") != null) refused += 1;
     }
-    // Guards against a fixture that never reaches a refusal: store.md says byte readers refuse
-    // parts, so at least the read_image Action read and the compound Message observation do.
-    try std.testing.expect(refused >= 2);
 
     // A Store that fails its own read fences, and so does the Host.
     try store_module.testingFailReadsOf(&storage, "action_operation");
@@ -5196,6 +5223,7 @@ const MutationWitness = struct {
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = .{ 0xc8, 0x84, 0x92, 0x9e, 0xdd, 0xc9, 0x45, 0x02, 0xb8, 0x37, 0x7e, 0x33, 0x3d, 0xcd, 0x72, 0x80, 0x64, 0xdc, 0xb2, 0xc4, 0x57, 0xe1, 0x0c, 0x4a, 0x3c, 0xc9, 0x82, 0xde, 0xde, 0xfd, 0xcb, 0xcd } };
     const Hash = std.crypto.hash.sha2.Sha256;
+    const frozen_wire_version = "20";
 
     fn named() protocol.Bounded(protocol.max_session_bytes) {
         var value: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -5229,7 +5257,7 @@ const MutationWitness = struct {
     fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[2].? {
         return .{ .accepted = switch (kind) {
             .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
-            .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
+            .message => .{ .replayed = false, .admission_id = 17, .content = .{ .text = content }, .session = named() },
             .session_stop => .{ .replayed = false, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending },
             .session_archive => .{ .replayed = false, .archived = true, .completion = .pending },
             .session_pin => .{ .replayed = false, .pinned = false },
@@ -5244,7 +5272,7 @@ const MutationWitness = struct {
     fn hashResponse(hash: *Hash, body: []const u8) !void {
         const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
         try std.testing.expect(std.mem.startsWith(u8, body, current));
-        hash.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",");
+        hash.update("{\"version\":\"" ++ frozen_wire_version ++ "\",");
         hash.update(body[current.len..]);
     }
 
@@ -5262,9 +5290,18 @@ const MutationWitness = struct {
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            // The frozen witness predates input forms; base replies are text-form.
-            if (answer.input) |value| try std.testing.expect(value.form == .text);
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, if (answer.input) |value| value.content else null, .{});
+            // The frozen witness hashes the original text receipt fields.
+            const receipt: ?@import("mutation_answer.zig").ContentReference = if (answer.input) |value| switch (value) {
+                .accepted => |accepted_input| blk: {
+                    try std.testing.expect(accepted_input == .text);
+                    break :blk .{ .bytes = accepted_input.text.length, .digest = accepted_input.text.digest };
+                },
+                .rejected => |rejected_input| blk: {
+                    try std.testing.expectEqual(.text, rejected_input.form);
+                    break :blk rejected_input.content;
+                },
+            } else null;
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, receipt, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
@@ -5328,7 +5365,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
     try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
     try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
     var frozen_probe = MutationWitness.Hash.init(.{});
-    frozen_probe.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    frozen_probe.update("{\"version\":\"" ++ MutationWitness.frozen_wire_version ++ "\",\"type\":\"configuration_reply\"}");
     try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
@@ -5665,7 +5702,7 @@ const ReplyDomainWitness = struct {
         return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
     }
 
-    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
+    noinline fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
         const line = lines.next() orelse return error.MissingDomainBaseline;
         const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
         try std.testing.expectEqualStrings(label, line[0..split]);
@@ -5679,8 +5716,13 @@ const ReplyDomainWitness = struct {
             // An old successful or binding-mismatch Message work reply now needs
             // the three required Host-derived members before it can be decoded.
             const missing_work = if (legacy_work) |missing| missing[index] else false;
+            // Adding an input receipt to a rejected Message observation now invalidates the reply.
+            const rejected_message_input = std.mem.eql(u8, label, "observation/message/rejected") and edit == 0 and
+                field != null and field.?.path.len == 2 and std.mem.eql(u8, field.?.path[0], "observation") and
+                std.mem.eql(u8, field.?.path[1], "input");
+            if (rejected_message_input) try std.testing.expectEqual(@as(u8, 'r'), base);
             const want: u8 = if (tighten_pinned and field != null and edit == 0 and
-                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (missing_work and (base == 'a' or base == 'b')) 'o' else base;
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (rejected_message_input or (missing_work and (base == 'a' or base == 'b'))) 'o' else base;
             if (want != got) {
                 std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
                     label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
@@ -5694,6 +5736,45 @@ const ReplyDomainWitness = struct {
                     got,
                 });
                 return error.ReplyDomainChanged;
+            }
+        }
+    }
+
+    // Keep the runtime edit sweeps out of the per-command inline expansions.
+    noinline fn checkMutation(
+        lines: *std.mem.SplitIterator(u8, .scalar),
+        body: []const u8,
+        status: u16,
+        binding: reply.MutationTarget,
+        command_name: []const u8,
+        result_name: []const u8,
+        replayed: bool,
+        tighten_pinned: bool,
+    ) !void {
+        var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
+        actual[0] = mutation(body, status, binding);
+        for (MutationWitness.fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, binding);
+            }
+        }
+        var label_buffer: [128]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ command_name, result_name, @intFromBool(replayed) });
+        try check(lines, label, &actual, &MutationWitness.fields, tighten_pinned, null);
+    }
+
+    noinline fn collectObservationEdits(body: []const u8, fields: []const Field, actual: []u8, legacy: []bool) !void {
+        actual[0] = observation(body);
+        legacy[0] = try legacyWork(body);
+        for (fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const edited = try editField(&parsed, field, edit);
+                actual[1 + index * 3 + edit] = observation(edited);
+                legacy[1 + index * 3 + edit] = try legacyWork(edited);
             }
         }
     }
@@ -5724,18 +5805,16 @@ const ReplyDomainWitness = struct {
                         .conflict => 409,
                         .infrastructure_failure => 500,
                     };
-                    var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
-                    actual[0] = mutation(response.slice(), status, MutationWitness.target(kind, false));
-                    for (MutationWitness.fields, 0..) |field, index| {
-                        for (0..3) |edit| {
-                            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.slice(), .{});
-                            defer parsed.deinit();
-                            actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, MutationWitness.target(kind, false));
-                        }
-                    }
-                    var label_buffer: [128]u8 = undefined;
-                    const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
-                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict), null);
+                    try checkMutation(
+                        &lines,
+                        response.slice(),
+                        status,
+                        MutationWitness.target(kind, false),
+                        @tagName(kind),
+                        @tagName(result),
+                        replayed,
+                        kind == .session_pin and (result == .rejected or result == .conflict),
+                    );
                 }
             }
             inline for (.{ false, true }) |accepted| {
@@ -5759,17 +5838,7 @@ const ReplyDomainWitness = struct {
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
                 var actual: [1 + observation_fields.len * 3]u8 = undefined;
                 var legacy: [actual.len]bool = undefined;
-                actual[0] = observation(body);
-                legacy[0] = try legacyWork(body);
-                for (observation_fields, 0..) |field, index| {
-                    for (0..3) |edit| {
-                        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                        defer parsed.deinit();
-                        const edited = try editField(&parsed, field, edit);
-                        actual[1 + index * 3 + edit] = observation(edited);
-                        legacy[1 + index * 3 + edit] = try legacyWork(edited);
-                    }
-                }
+                try collectObservationEdits(body, &observation_fields, &actual, &legacy);
                 try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false, &legacy);
             }
         }
@@ -5779,17 +5848,7 @@ const ReplyDomainWitness = struct {
             defer std.testing.allocator.free(body);
             var actual: [1 + message_fields.len * 3]u8 = undefined;
             var legacy: [actual.len]bool = undefined;
-            actual[0] = observation(body);
-            legacy[0] = try legacyWork(body);
-            for (message_fields, 0..) |field, index| {
-                for (0..3) |edit| {
-                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                    defer parsed.deinit();
-                    const edited = try editField(&parsed, field, edit);
-                    actual[1 + index * 3 + edit] = observation(edited);
-                    legacy[1 + index * 3 + edit] = try legacyWork(edited);
-                }
-            }
+            try collectObservationEdits(body, &message_fields, &actual, &legacy);
             const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
             defer std.testing.allocator.free(label);
             try check(&lines, label, &actual, &message_fields, false, &legacy);
@@ -5891,11 +5950,13 @@ test "SH-61 Host submits a sealed ordered input through Message admission" {
     var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const result = try submitMessageInput(&host, &command, &offer, loan);
     try std.testing.expect(result == .accepted);
-    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, result.accepted.form);
-    try std.testing.expectEqualSlices(u8, &loan.digest, &result.accepted.content.digest);
+    const content = result.accepted.content;
+    try std.testing.expect(content == .parts);
+    try std.testing.expectEqualSlices(u8, &loan.digest, &content.parts.identity.digest);
+    try std.testing.expectEqualDeep(@import("content_value.zig").Owner{ .message = result.accepted.admission_id }, content.parts.owner);
     var observed: store_module.Observed = undefined;
     try storage.observeCommand(command.key.slice(), null, &observed);
-    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, observed.full.observation.kind.message.?.form);
+    try std.testing.expectEqualDeep(content, observed.full.observation.kind.message.?.content);
 }
 
 test "SH-65 Host wire admits image bytes in order and preserves refusal identity" {

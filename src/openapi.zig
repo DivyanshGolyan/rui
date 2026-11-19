@@ -129,8 +129,8 @@ pub const routes = [_]Route{
         .path = "/v1/read-action",
         .kind = .read_action,
         .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
-        .variants = &.{variant(protocol.read_action_request.head ++ .{Optional(protocol.read_action_request.offset)} ++ protocol.read_action_request.tail, .{})},
-        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final, protocol.action_read_reply.head ++ protocol.action_read_reply.parts }),
+        .variants = &.{variant(protocol.read_action_request.head ++ .{ Optional(protocol.read_action_request.offset), Optional(protocol.read_action_request.after) } ++ protocol.read_action_request.tail, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending ++ actionValuesShape(), protocol.action_read_reply.head ++ protocol.action_read_reply.final ++ actionValuesShape(), protocol.action_read_reply.head ++ protocol.action_read_reply.parts ++ actionValuesShape() }),
     },
     .{
         .path = "/v1/observe-command",
@@ -285,6 +285,10 @@ fn Optional(comptime shape: anytype) type {
 
 fn isOptional(comptime part: anytype) bool {
     return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
+}
+
+fn actionValuesShape() @TypeOf(.{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail) {
+    return .{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail;
 }
 
 const SenderSchema = struct {
@@ -486,6 +490,20 @@ fn observationSchema(d: *Document) anyerror!Value {
     kinds[0] = try d.shapeSchema(o.absent);
     kinds[kinds.len - 1] = try d.shapeSchema(o.not_modified);
     inline for (comptime std.meta.tags(protocol.CommandKind), 1..) |kind, index| {
+        if (comptime kind == .message) {
+            const observation = command_spec.spec(kind).Observation;
+            const accepted = observation.accepted(protocol).values;
+            const rejected = observation.rejected(protocol).values;
+            var variants: [accepted.len + rejected.len]Value = undefined;
+            inline for (accepted, 0..) |body, at| {
+                variants[at] = try d.shapeSchema(tuple(o.statusHead(kind, .accepted)) ++ body ++ o.tail);
+            }
+            inline for (rejected, accepted.len..) |body, at| {
+                variants[at] = try d.shapeSchema(tuple(o.statusHead(kind, .rejected)) ++ o.code ++ body ++ o.tail);
+            }
+            kinds[index] = try d.anyOf(&variants);
+            continue;
+        }
         const bodies = command_spec.spec(kind).Observation.shapes(protocol).values;
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
@@ -1665,6 +1683,57 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
+test "action read replies conform to the published schema" {
+    // ARD-5
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var document: Document = .init(a);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ReadActionReply").?;
+    var out: std.Io.Writer.Allocating = .init(a);
+    const action_read = @import("action_read.zig");
+    const host_reply = @import("host_reply.zig");
+    const action = try a.create(action_read.Read);
+    action.* = .{ .session = .{}, .action_id = 1, .status = .{ .pending = .queued } };
+    try action.session.set("k7m2qx");
+    for ([_]bool{ false, true }) |populated| {
+        action.values.count = if (populated) 1 else 0;
+        action.values.next = if (populated) 17 else 0;
+        action.values.more = populated;
+        if (populated) {
+            action.values.items[0] = .{ .ordinal = 17, .key = .{}, .start = 0, .length = 3 };
+            try action.values.items[0].key.set("key");
+            @memcpy(action.values.bytes[0..3], "雪");
+            action.values.length = 3;
+        }
+        for (std.enums.values(action_read.PendingState)) |state| {
+            action.status = .{ .pending = state };
+            try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+            const json = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+            try std.testing.expect(conforms(schemas, schema, json));
+            out.clearRetainingCapacity();
+        }
+        action.status = .{ .resolved = .{
+            .resolution = .{ .position = 2, .code = .{}, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } },
+            .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
+        } };
+        try action.status.resolved.resolution.code.set("succeeded");
+        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+        const json = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+        try std.testing.expect(conforms(schemas, schema, json));
+        out.clearRetainingCapacity();
+        var resolution = action.status.resolved.resolution;
+        resolution.content = .{ .parts = .{ .identity = .{ .length = 0, .digest = protocol.contentDigest("") }, .owner = .{ .action = 1 } } };
+        action.status = .{ .resolved_parts = resolution };
+        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+        const parts_json = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+        try std.testing.expect(conforms(schemas, schema, parts_json));
+        out.clearRetainingCapacity();
+    }
+}
+
 fn publishedReplyExamples() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1726,12 +1795,29 @@ fn publishedReplyExamples() !void {
     try message_session.set("k7m2qx");
     const message_content: reply.ContentReference = .{ .length = 4, .digest = protocol.contentDigest("task") };
     for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        const content: protocol.content_value.Value = switch (form) {
+            .bytes => .{ .text = message_content },
+            .parts => .{ .parts = .{ .identity = message_content, .owner = .{ .message = 1 } } },
+        };
         for ([_]reply.MessageReply{
-            .{ .accepted = .{ .form = form, .replayed = false, .session = message_session, .admission_id = 1, .content = message_content } },
+            .{ .accepted = .{ .replayed = false, .session = message_session, .admission_id = 1, .content = content } },
             .{ .rejected = .{ .form = form, .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = message_content } },
         }) |message| {
             try host_reply.renderMessageReply(.{ .writer = &out.writer }, message_session.slice(), message);
             try Case.check(schemas, "MessageReply", out.written(), a);
+            var wire = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+            const input = &wire.object.getPtr("input").?.object;
+            if (message == .accepted and form == .parts) {
+                const owner = &input.getPtr("owner").?.object;
+                const admission = owner.fetchOrderedRemove("message").?.value;
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+                try owner.put(a, "action", admission);
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+            } else {
+                const owner = try std.json.parseFromSliceLeaky(Value, a, "{\"message\":\"1\"}", .{});
+                try input.put(a, "owner", owner);
+                try std.testing.expect(!conforms(schemas, schemas.get("MessageReply").?, wire));
+            }
             out.clearRetainingCapacity();
         }
     }
@@ -1867,6 +1953,21 @@ test "Message observation schema requires Host state and bounds recovery" {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
         try std.testing.expect(conforms(schemas, schema, value));
     }
+    var queued = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
+    const queued_facts = &queued.object.getPtr("observation").?.object;
+    const queued_input = &queued_facts.getPtr("input").?.object;
+    try queued_input.put(allocator, "type", .{ .string = "parts" });
+    try std.testing.expect(!conforms(schemas, schema, queued));
+    try queued_input.put(allocator, "owner", try std.json.parseFromSliceLeaky(Value, allocator, "{\"action\":\"1\"}", .{}));
+    try std.testing.expect(!conforms(schemas, schema, queued));
+    try queued_input.put(allocator, "owner", try std.json.parseFromSliceLeaky(Value, allocator, "{\"message\":\"1\"}", .{}));
+    try std.testing.expect(conforms(schemas, schema, queued));
+    var rejected = try std.json.parseFromSliceLeaky(Value, allocator, cases[0], .{});
+    try rejected.object.getPtr("observation").?.object.put(allocator, "input", queued_facts.get("input").?);
+    try std.testing.expect(!conforms(schemas, schema, rejected));
+    try queued_facts.put(allocator, "status", .{ .string = "rejected" });
+    try std.testing.expect(!conforms(schemas, schema, queued));
+
     for ([_][]const u8{ "attention", "group", "actions" }) |name| {
         var missing = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
         const work = &missing.object.getPtr("observation").?.object.getPtr("work").?.object;

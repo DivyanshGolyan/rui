@@ -9,6 +9,7 @@ const tool_presentation = @import("tool_presentation.zig");
 const session_id = @import("session_id.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const cli_value = @import("cli_value.zig");
+const content_value = @import("content_value.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const session_work = @import("session_work.zig");
 const change_ring = @import("change_ring.zig");
@@ -38,10 +39,9 @@ pub const ConfigureReply = union(enum) {
 };
 
 pub const AcceptedMessage = struct {
-    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     admission_id: u64,
-    content: ContentReference,
+    content: content_value.Value,
     session: Bounded(session_id.max_reference_bytes),
 };
 
@@ -159,7 +159,7 @@ pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64,
     kind: conversation_read.ConversationItemKind,
-    content: @import("content_value.zig").Value,
+    content: content_value.Value,
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null,
     sender: ?protocol.NamedPeer = null,
@@ -175,8 +175,7 @@ pub const PublicConversationPage = struct {
 };
 
 pub const MessageObservation = struct {
-    form: @import("input_parts.zig").Form = .bytes,
-    content: ContentReference,
+    content: content_value.Value,
     queue: ?AcceptedMessageQueue = null,
     admitted_at: u64 = 0,
     work: ?session_work.Work = null,
@@ -422,10 +421,17 @@ fn ShapeTree(comptime capacity: usize) type {
     };
 }
 
-fn shapeTree(comptime shape: anytype) ShapeTree(shapeText(shape).len) {
+fn shapeNodeCapacity(comptime text: []const u8) usize {
+    @setEvalBranchQuota(100_000);
+    // There is one root, and each child consumes its own member colon.
+    // Colons inside strings can only increase this bound.
+    return 1 + std.mem.countScalar(u8, text, ':');
+}
+
+fn shapeTree(comptime shape: anytype) ShapeTree(shapeNodeCapacity(shapeText(shape))) {
     @setEvalBranchQuota(100_000);
     const text = shapeText(shape);
-    var tree: ShapeTree(text.len) = .{};
+    var tree: ShapeTree(shapeNodeCapacity(text)) = .{};
     _ = tree.value(text, shapeHoles(shape), "", "");
     if (tree.cursor != text.len) @compileError("trailing command reply shape data");
     return tree;
@@ -569,9 +575,15 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
     }
     if (try source.next() != .object_begin) return error.UnexpectedToken;
     const fields = comptime children(tree, index);
-    const known = comptime knownNames(universe, node.path);
+    const foreign_names = comptime blk: {
+        var names: []const []const u8 = &.{};
+        for (knownNames(universe, node.path)) |name| {
+            if (!@hasField(T, name)) names = names ++ [_][]const u8{name};
+        }
+        break :blk names;
+    };
     var seen: [fields.len]bool = @splat(false);
-    var seen_foreign: [known.len]bool = @splat(false);
+    var seen_foreign: [foreign_names.len]bool = @splat(false);
     var value: T = undefined;
     while (true) {
         const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
@@ -591,7 +603,7 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
             }
         } else {
             var consumed = false;
-            inline for (known, 0..) |field, i| {
+            inline for (foreign_names, 0..) |field, i| {
                 if (std.mem.eql(u8, name, field)) {
                     if (comptime !ignored(Policy, node.path ++ "." ++ field)) {
                         if (seen_foreign[i]) return error.DuplicateField;

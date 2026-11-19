@@ -42,6 +42,8 @@ const session_list_read = @import("domain/session_list_read.zig");
 const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
+const write_batch = @import("write_batch.zig");
+const pass_plan = @import("pass_plan.zig");
 const transition = @import("transition.zig");
 const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
@@ -101,7 +103,7 @@ pub const Store = struct {
     instance: [16]u8 = undefined,
     served: provider_route.Routes = provider_route.all(.unserved),
     scratch_use: ScratchUse = .none,
-    batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
+    batch: write_batch.Phase = .none,
     savepoint: bool = false,
     release_bulk_memory: bool = false,
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
@@ -642,13 +644,7 @@ pub const Store = struct {
         faults: Faults,
     ) !MessageReply {
         var saving = try content_parts.Saving.init(.{ .captured = loan });
-        var reply = self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
-        switch (reply) {
-            .accepted => |*value| value.form = std.meta.activeTag(saving.reference),
-            .rejected => |*value| value.form = std.meta.activeTag(saving.reference),
-            else => {},
-        }
-        return reply;
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
     }
 
     /// Fixture adapter for a compound Message and its captured skills.
@@ -831,17 +827,10 @@ pub const Store = struct {
             out.* = .{ .not_modified = token };
             return;
         }
-        var pending: ?content_domain.Value = null;
-        try self.queue().run(observeCommandHeld, .{ self, key, since, out, &pending });
-        if (pending) |value| {
-            const mapped = try @import("../os/pages.zig").Mapped(content_parts.Cursor).map();
-            defer mapped.unmap();
-            mapped.value.init(value);
-            while (try self.observeCommandPart(mapped.value)) {}
-        }
+        return self.queue().run(observeCommandHeld, .{ self, key, since, out });
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed, pending: *?content_domain.Value) !void {
+    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         const generation = self.commitGeneration();
@@ -852,38 +841,11 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation, pending));
+        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
-    }
-
-    pub fn observeCommandPart(self: *Store, cursor: *content_parts.Cursor) !bool {
-        return self.queue().run(observeCommandPartHeld, .{ self, cursor });
-    }
-
-    fn observeCommandPartHeld(self: *Store, cursor: *content_parts.Cursor) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.none, observeCommandPartStep(&access, cursor));
-    }
-
-    fn observeCommandPartStep(access: *ReadAccess, cursor: *content_parts.Cursor) !bool {
-        const progress = try cursor.step(access);
-        // The first pass certifies the complete manifest and index. The cursor's
-        // second pass is for callers that export each part, not observation.
-        if (cursor.certified) return false;
-        return switch (progress) {
-            .raw, .part => true,
-            .rows => blk: {
-                try store_access.runAs(access, error.CorruptStore);
-                break :blk true;
-            },
-            .certified, .done => false,
-        };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -988,7 +950,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
+        return entry.finish(Ordinary.activity_content, reads_domain.openActivityContent(&access, request));
     }
 
     pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
@@ -1108,19 +1070,15 @@ pub const Store = struct {
     }
 
     pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.bytes, out });
+        return self.queue().run(readActionHeld, .{ self, request, out });
     }
 
-    pub fn readActionForTool(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.model_tool, out });
-    }
-
-    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, projection: action_read_domain.Projection, out: *@import("../action_read.zig").Read) !void {
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, projection, out));
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1971,13 +1929,15 @@ fn destroyRing(ring: *change_ring.Ring) void {
 
 pub const Ordinary = struct {
     pub const none = error{};
-    const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
-    const content = error{ ContentNotFound, InputPartsNotSupported };
-    const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
+    const page = error{ SessionNotFound, InvalidCursor };
+    const content = error{ContentNotFound};
+    const activity_content = content || error{ContentIsParts};
+    /// A text route on a parts value refuses it as ordinary: the parts routes serve it.
+    const public_content = error{ ContentNotFound, RangeOutOfBounds, ContentIsParts };
     const public_parts = error{ ContentNotFound, ContentIsText };
     const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};
-    pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{ HistoricalPending, InputPartsNotSupported };
@@ -2064,7 +2024,7 @@ pub const Entry = struct {
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (ordinary or err == error.InputPartsNotSupported) return err;
+            if (ordinary) return err;
             return fence(self.store, err);
         };
     }
@@ -2105,7 +2065,7 @@ pub const Entry = struct {
 };
 
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
-    if (self.isFenced() or self.batch == .lost) return error.StoreFenced;
+    if (self.isFenced() or !write_batch.admits(batchState(self))) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
         const off = !self.queue().owned();
         if (off) self.queue().borrow();
@@ -2122,48 +2082,85 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     return entry;
 }
 
-pub fn begin(self: *Store) !void {
-    switch (self.batch) {
-        .none => {
-            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
-            try self.engine.control(.begin);
-            return;
-        },
-        .ready => {
-            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
-            try self.engine.control(.begin);
-            self.batch = .first;
-            return;
-        },
-        .open => {},
-        .first, .saved, .lost => unreachable,
+fn batchState(self: *const Store) write_batch.State {
+    return .{ .phase = self.batch, .savepoint = self.savepoint };
+}
+
+fn batchControl(self: *Store, control: write_batch.Control) !void {
+    switch (control) {
+        inline else => |which| try self.engine.control(which),
     }
-    std.debug.assert(!self.savepoint);
-    try self.engine.control(.savepoint);
-    self.savepoint = true;
+}
+
+const BatchExecutor = struct {
+    store: *Store,
+
+    pub fn currentState(executor: *BatchExecutor) write_batch.State {
+        return batchState(executor.store);
+    }
+
+    pub fn apply(executor: *BatchExecutor, state: write_batch.State) void {
+        write_batch.apply(&executor.store.batch, &executor.store.savepoint, state);
+    }
+
+    pub fn verifyIdentities(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        std.debug.assert(values.taken.count() == 0 and values.second == 0);
+    }
+
+    pub fn resetIdentities(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        values.taken = .empty;
+        values.second = 0;
+    }
+
+    pub fn control(executor: *BatchExecutor, which: write_batch.Control) !void {
+        try batchControl(executor.store, which);
+    }
+
+    pub fn inTransaction(executor: *BatchExecutor) bool {
+        return executor.store.engine.inTransaction();
+    }
+
+    pub fn resetSecond(executor: *BatchExecutor) void {
+        executor.store.identities().second = 0;
+    }
+
+    pub fn reload(executor: *BatchExecutor) !void {
+        const store = executor.store;
+        try loadIdentities(store, store.identities().taken);
+    }
+
+    pub fn finishCommit(executor: *BatchExecutor) !void {
+        try executor.store.engine.control(.commit);
+    }
+
+    pub fn finishFailure(executor: *BatchExecutor, err: anyerror) void {
+        _ = @errorName(fence(executor.store, err));
+        stderr.print("rui: Store batch commit failed: {s}\n", .{@errorName(err)});
+    }
+
+    pub fn announce(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
+    }
+};
+
+pub fn begin(self: *Store) !void {
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeBegin(&executor, batchState(self));
 }
 
 pub fn commit(self: *Store) !void {
-    switch (self.batch) {
-        .first => {
-            self.batch = if (self.engine.inTransaction()) .open else .saved;
-            return;
-        },
-        .open => {
-            try self.engine.control(.release);
-            self.savepoint = false;
-            return;
-        },
-        .none => {},
-        .ready, .saved, .lost => unreachable,
-    }
-    try self.engine.control(.commit);
-    self.identities().taken = .empty;
-    self.identities().second = 0;
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeCommit(&executor, batchState(self));
 }
 
 pub fn commitsWithWrites(self: *Store) bool {
-    return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+    const state = batchState(self);
+    const armed = self.engine.commitArmed();
+    if (!write_batch.commitsWithWrites(state, armed, false)) return false;
+    return write_batch.commitsWithWrites(state, armed, self.queue().writeWaiting());
 }
 
 pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype) void {
@@ -2204,20 +2201,20 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
 
 fn batchClosed(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
-    return self.batch == .saved;
+    return write_batch.closed(batchState(self));
 }
 
 fn startBatch(context: *anyopaque) void {
     const self: *Store = @ptrCast(@alignCast(context));
-    std.debug.assert(self.batch == .none and !self.savepoint);
-    self.batch = .ready;
+    var executor: BatchExecutor = .{ .store = self };
+    write_batch.executeStart(&executor, batchState(self)) catch unreachable;
 }
 
 fn finishBatch(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
     std.debug.assert(!self.savepoint);
+    const plan = write_batch.finish(batchState(self));
     defer {
-        self.batch = .none;
         self.identities().taken = .empty;
         self.identities().second = 0;
         self.identities().admitted_len = 0;
@@ -2226,17 +2223,12 @@ fn finishBatch(context: *anyopaque) bool {
             self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
         }
     }
-    commitBatch(self) catch |err| {
-        stderr.print("rui: Store batch commit failed: {s}\n", .{@errorName(err)});
-        return false;
-    };
-    const values = self.identities();
-    for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
-    return true;
+    var executor: BatchExecutor = .{ .store = self };
+    return write_batch.executeFinish(&executor, plan);
 }
 
 pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store.MessageAdmission) void {
-    if (self.batch == .none) return callback.call(callback.context, admission);
+    if (!write_batch.defersAnnouncement(batchState(self))) return callback.call(callback.context, admission);
     const values = self.identities();
     values.admitted[values.admitted_len] = .{
         .callback = .{ .message = callback },
@@ -2248,7 +2240,7 @@ pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store
 }
 
 pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const u8) void {
-    if (self.batch == .none) return callback.call(callback.context, session);
+    if (!write_batch.defersAnnouncement(batchState(self))) return callback.call(callback.context, session);
     const values = self.identities();
     values.admitted[values.admitted_len] = .{
         .callback = .{ .creation = callback },
@@ -2289,19 +2281,10 @@ fn recoverRerun(context: *anyopaque) bool {
         };
         return true;
     }
-    if (mysql.state.failure) |err| if (err == error.StoreConnectionLost or err == error.OwnershipLost or err == error.CommitOutcomeUnknown) {
+    if (mysql.state.failure) |err| if (pass_plan.fences(err)) {
         _ = @errorName(fence(self, err));
     };
     return false;
-}
-
-fn commitBatch(self: *Store) !void {
-    switch (self.batch) {
-        .ready, .saved => {},
-        .open => self.engine.control(.commit) catch |err| return fence(self, err),
-        .lost => return fence(self, error.CanonicalRollbackFailed),
-        .none, .first => unreachable,
-    }
 }
 
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
@@ -2487,42 +2470,8 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     self.touched.everything = true;
-    switch (self.batch) {
-        .open => {
-            // Back to the write's savepoint; the batch's earlier writes
-            // stay. A transaction SQLite rolled back whole took them with
-            // it, so the batch is lost.
-            const savepoint = self.savepoint;
-            self.savepoint = false;
-            errdefer self.batch = .lost;
-            if (!self.engine.inTransaction()) return error.CanonicalRollbackFailed;
-            if (savepoint) {
-                if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-                self.engine.control(.rollback_to) catch return error.CanonicalRollbackFailed;
-                self.engine.control(.release) catch return error.CanonicalRollbackFailed;
-            }
-            loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
-            return;
-        },
-        .first => {
-            errdefer self.batch = .lost;
-            try rollbackTransaction(self, faults);
-            self.batch = .ready;
-            return;
-        },
-        .none, .ready, .saved => return rollbackTransaction(self, faults),
-        .lost => return error.CanonicalRollbackFailed,
-    }
-}
-
-fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFailed}!void {
-    if (self.engine.inTransaction()) {
-        if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-        self.engine.control(.rollback) catch return error.CanonicalRollbackFailed;
-        if (self.engine.inTransaction()) return error.CanonicalRollbackFailed;
-    }
-    self.identities().second = 0;
-    loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeRollback(&executor, batchState(self), faults.rollback_failure);
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {

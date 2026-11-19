@@ -6,14 +6,9 @@ const Store = store_core.Store;
 const rsql = @import("rsql.zig");
 const engine = @import("engine.zig");
 const sqlite = @import("sqlite.zig");
+const pass_plan = @import("pass_plan.zig");
 
-pub const Mode = enum {
-    read,
-    survey,
-    write,
-    settlement,
-    single,
-};
+pub const Mode = pass_plan.Mode;
 
 pub const Failure = engine.Failure;
 
@@ -131,8 +126,9 @@ const Unfollowed = struct {
     pub fn followed(_: *Unfollowed) void {}
 };
 
-fn fences(err: anyerror) bool {
-    return err == error.StoreConnectionLost or err == error.CommitOutcomeUnknown or err == error.OwnershipLost;
+fn failureClass(err: ?anyerror) pass_plan.Class {
+    const failure = err orelse return .none;
+    return if (pass_plan.fences(failure)) .fencing else .ordinary;
 }
 
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
@@ -141,12 +137,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         pub const Error = Guards || Failure;
         const reads_only = mode == .read or mode == .survey;
         const transacts = mode == .write or mode == .settlement;
-        const max_queued = switch (mode) {
-            .survey => 24,
-            .settlement => 20,
-            .write => 12,
-            else => 8,
-        };
+        const max_queued = pass_plan.capacity(mode);
         const Guarded = if (max_queued > 16) u32 else u16;
 
         store: *Store,
@@ -256,12 +247,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             }
             const tail_failed = if (tail) |reads| a.failure == null and !reads.step(reads.context) else false;
             if (a.queued != 0) a.store.engine.finishPass() catch |err| {
-                if (fences(err) or (a.failure == null and !tail_failed)) a.failure = err;
+                if (pass_plan.surviving(failureClass(a.failure), tail_failed, failureClass(err), .none) == .finish) a.failure = err;
             };
             a.resetQueued() catch |err| {
-                if (a.failure == null or err == error.StoreConnectionLost or
-                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
-                    a.failure = err;
+                if (pass_plan.surviving(failureClass(a.failure), false, .none, failureClass(err)) == .reset) a.failure = err;
             };
         }
 
@@ -575,7 +564,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return false;
             };
-            if (statement != null) for (a.queue[0..a.queued]) |entry| if (entry.statement == statement) {
+            // Full queues are sent by reserve, after the time and fit checks.
+            // Check the other reasons separately to preserve that ordering.
+            if (statement != null) for (a.queue[0..a.queued]) |entry| if (pass_plan.flushBefore(0, max_queued, entry.statement == statement, true)) {
                 a.pass();
                 break;
             };
@@ -587,7 +578,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return false;
             };
-            if (!fits) a.pass();
+            if (pass_plan.flushBefore(0, max_queued, false, fits)) a.pass();
             const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
             a.store.engine.bind(statement, S, args, now) catch |err| {
@@ -610,7 +601,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         fn reserve(a: *Self) ?*Queued {
-            if (a.failure == null and a.queued == a.queue.len) a.pass();
+            if (a.failure == null and pass_plan.flushBefore(a.queued, max_queued, false, true)) a.pass();
             if (a.failure != null) return null;
             return &a.queue[a.queued];
         }
@@ -716,10 +707,20 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             return named(S, struct {
                 fn run(a: *Self, entry: *const Queued) Error!void {
                     const changed = try a.store.engine.stepWrite(entry.statement);
-                    switch (S.expect) {
-                        .exact => |guard| if (changed != guard.rows) return comptime @as(Error, @errorCast(guard.otherwise)),
-                        .at_most => |rows| if (changed > rows) return error.CorruptStore,
-                        .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
+                    const expected: pass_plan.Expect = switch (S.expect) {
+                        .exact => |guard| .{ .exact = guard.rows },
+                        .at_most => |rows| .{ .at_most = rows },
+                        .counted => .counted,
+                    };
+                    const stated = if (S.expect == .counted) entry.target.counted else 0;
+                    switch (pass_plan.verdict(expected, changed, stated)) {
+                        .ok => {},
+                        .corrupt => return error.CorruptStore,
+                        .otherwise => switch (S.expect) {
+                            .exact => |guard| return comptime @as(Error, @errorCast(guard.otherwise)),
+                            .counted => |guard| return comptime @as(Error, @errorCast(guard.otherwise)),
+                            .at_most => unreachable,
+                        },
                     }
                     const slot = entry - @as([*]const Queued, &a.queue);
                     if (a.guarded >> @intCast(slot) & 1 != 0) _ = try a.store.engine.stepWrite(entry.statement);

@@ -797,7 +797,7 @@ test "inline skills keep the typed text once and project each bound skill as its
             } };
             const reply = storage.submitMessageCapturedSkills(&command, null, null, &capture, .{});
             try std.testing.expect(reply == .accepted);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &reply.accepted.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &reply.accepted.content.text.digest);
             const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.text.digest);
             try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(DISTINCT content_id) FROM message_skill", .{}));

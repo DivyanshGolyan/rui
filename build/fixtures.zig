@@ -11,7 +11,7 @@ pub const Fixture = struct {
 };
 
 pub const fixtures = [_]Fixture{
-    .{ .step = "read-image-integration", .description = "Run image Action authorization, explicit input failures and pending lifecycle", .script = "tests/integration/read_image_integration.py" },
+    .{ .step = "read-image-integration", .description = "Run image Action authorization, explicit input failures and pending lifecycle", .script = "tests/integration/read_image_integration.py", .screen = true },
     .{ .step = "dispatch-integration", .description = "Run the targeted model dispatch, output, retry, and recovery shortcut", .script = "tests/integration/dispatch_integration.py", .rui = .pause },
     .{ .step = "skills-integration", .description = "Run isolated native skills capture, replay and creation cases", .script = "tests/integration/skills_integration.py", .screen = true },
     .{ .step = "login-signal-integration", .description = "Run the Linux-only one-shot login signal loader witness", .script = "tests/integration/login_signal_integration.py" },
