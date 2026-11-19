@@ -59,6 +59,159 @@ test "a creating Message with require_model creates nothing without a model" {
     }.run);
 }
 
+test "a Message to an existing Session with require_model is refused only while its provider is unserved" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try store_testing.configureTestSession(&storage, "existing-provider");
+            const cases = [_]struct { served: bool, require_model: bool, key: []const u8, file: []const u8 }{
+                .{ .served = true, .require_model = false, .key = "existing-served", .file = "existing-served" },
+                .{ .served = true, .require_model = true, .key = "existing-served-required", .file = "existing-served-required" },
+                .{ .served = false, .require_model = false, .key = "existing-unserved", .file = "existing-unserved" },
+                .{ .served = false, .require_model = true, .key = "existing-unserved-required", .file = "existing-unserved-required" },
+            };
+            for (cases) |item| {
+                storage.served = protocol.routesAll(if (item.served) .endpoint else .unserved);
+                var message: wire_request.MessageCommand = .{ .require_model = item.require_model };
+                try message.key.set(item.key);
+                try message.session.set(session.slice());
+                message.text = try testingBytesContent(&tmp, item.file, "hello again");
+                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                const reply = storage.submitMessageWithModel(&message, null, .{});
+                if (!item.served and item.require_model) {
+                    try std.testing.expect(reply == .rejected);
+                    try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, reply.rejected.code);
+                } else {
+                    try std.testing.expect(reply == .accepted);
+                }
+            }
+            var changed_condition = wire_request.MessageCommand{ .require_model = true };
+            try changed_condition.key.set("existing-served");
+            try changed_condition.session.set(session.slice());
+            changed_condition.text = try testingBytesContent(&tmp, "existing-changed", "hello again");
+            defer changed_condition.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&changed_condition, null, .{}) == .conflict);
+
+            // Stored with the flag, retried without it: also a conflict.
+            var dropped_condition = wire_request.MessageCommand{};
+            try dropped_condition.key.set("existing-served-required");
+            try dropped_condition.session.set(session.slice());
+            dropped_condition.text = try testingBytesContent(&tmp, "existing-dropped", "hello again");
+            defer dropped_condition.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&dropped_condition, null, .{}) == .conflict);
+
+            // A refused key stays refused after the provider is served again; the person sends a new Message.
+            storage.served = protocol.routesAll(.endpoint);
+            var replay = wire_request.MessageCommand{ .require_model = true };
+            try replay.key.set("existing-unserved-required");
+            try replay.session.set(session.slice());
+            replay.text = try testingBytesContent(&tmp, "existing-replay", "hello again");
+            defer replay.removeTemporaryContent(std.testing.io) catch unreachable;
+            const replayed = storage.submitMessageWithModel(&replay, null, .{});
+            try std.testing.expect(replayed == .rejected);
+            try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, replayed.rejected.code);
+        }
+    }.run);
+}
+
+const AdmissionRow = struct {
+    name: []const u8,
+    setup: enum { active, archived, archiving },
+    served_first: bool,
+    state: protocol.SessionArchiveState,
+    served_replay: bool,
+    refused: ?protocol.MessageRejection,
+};
+
+fn runningBashSession(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try shared_fixtures.configureTestSessionWithMode(storage, key, "bypass");
+    var message_key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const message_key = try std.fmt.bufPrint(&message_key_buffer, "{s}-message", .{key});
+    try submitTestMessage(storage, tmp, message_key, message_key, session.slice(), "run Bash");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]shared_fixtures.TestingCall{.{
+        .item_id = "bash-item",
+        .name = "bash",
+        .encoded_call_id = "bash-call",
+        .decoded_call_id = "bash-call",
+        .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+        .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}",
+    }};
+    try shared_fixtures.settleCallsForTesting(storage, tmp, model, key, &calls);
+    _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+    return session;
+}
+
+test "a Message with require_model follows the Session's archive state and provider service" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Rows run in this order: the Message-producing archiving setup comes before the accepted row,
+            // so that row's pending model work cannot be admitted by another row's setup.
+            const rows = [_]AdmissionRow{
+                .{ .name = "archived", .setup = .archived, .served_first = false, .state = .archived, .served_replay = true, .refused = .model_capability_unavailable },
+                .{ .name = "archiving", .setup = .archiving, .served_first = false, .state = .archiving, .served_replay = true, .refused = .session_archiving },
+                .{ .name = "unserved", .setup = .active, .served_first = false, .state = .active, .served_replay = true, .refused = .model_capability_unavailable },
+                .{ .name = "served", .setup = .active, .served_first = true, .state = .active, .served_replay = false, .refused = null },
+            };
+            inline for (rows) |row| {
+                var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
+                switch (row.setup) {
+                    .active => session = try store_testing.configureTestSession(&storage, row.name),
+                    .archived => {
+                        session = try store_testing.configureTestSession(&storage, row.name);
+                        var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+                        try archive.key.set(row.name ++ "-archive");
+                        try archive.session.set(session.slice());
+                        try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                    },
+                    .archiving => {
+                        session = try runningBashSession(&storage, &tmp, row.name);
+                        var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+                        try archive.key.set(row.name ++ "-archive");
+                        try archive.session.set(session.slice());
+                        try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                    },
+                }
+                var message: wire_request.MessageCommand = .{ .require_model = true };
+                try message.key.set(row.name ++ "-msg");
+                try message.session.set(session.slice());
+                message.text = try testingBytesContent(&tmp, row.name ++ "-msg", "hello again");
+                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+                storage.served = protocol.routesAll(if (row.served_first) .endpoint else .unserved);
+                const first = storage.submitMessageWithModel(&message, null, .{});
+                if (row.refused) |code| {
+                    try std.testing.expect(first == .rejected and !first.rejected.replayed);
+                    try std.testing.expectEqual(code, first.rejected.code);
+                } else {
+                    try std.testing.expect(first == .accepted and !first.accepted.replayed);
+                }
+                const observation = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expect(observation.found);
+                try std.testing.expectEqual(row.state, observation.archive_state);
+
+                storage.served = protocol.routesAll(if (row.served_replay) .endpoint else .unserved);
+                const replay = storage.submitMessageWithModel(&message, null, .{});
+                if (row.refused) |code| {
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                    try std.testing.expectEqual(code, replay.rejected.code);
+                } else {
+                    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                }
+            }
+        }
+    }.run);
+}
+
 fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configuration, actual: @import("../../creation_receipt.zig").Configuration) !void {
     try std.testing.expectEqual(expected.provider, actual.provider);
     try std.testing.expectEqualStrings(expected.model.slice(), actual.model.slice());

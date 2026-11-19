@@ -836,7 +836,7 @@ test "initial Message ingress streams the plain spec and transfers all three con
     }
 }
 
-test "only a creating Message carries require_model, and it binds the digest" {
+test "a Message carries require_model whether it creates or addresses a Session, and it binds the digest" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -851,8 +851,8 @@ test "only a creating Message carries require_model, and it binds the digest" {
         .{ .bytes = creating ++ ",\"require_model\":1}", .failure = error.InvalidJsonShape },
         .{ .bytes = creating ++ ",\"required_model\":true}", .failure = error.UnexpectedField },
         .{ .bytes = addressed ++ "}" },
-        .{ .bytes = addressed ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
-        .{ .bytes = addressed ++ ",\"require_model\":false}", .failure = error.InvalidMessage },
+        .{ .bytes = addressed ++ ",\"require_model\":true}", .require_model = true },
+        .{ .bytes = addressed ++ ",\"require_model\":false}" },
     };
     var digests: [cases.len][32]u8 = undefined;
     for (cases, 0..) |case, index| {
@@ -882,6 +882,8 @@ test "only a creating Message carries require_model, and it binds the digest" {
     }
     try std.testing.expectEqualSlices(u8, &digests[0], &digests[1]);
     try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[2]));
+    try std.testing.expectEqualSlices(u8, &digests[5], &digests[7]);
+    try std.testing.expect(!std.mem.eql(u8, &digests[5], &digests[6]));
     try std.testing.expect(!std.mem.eql(u8, &digests[0], &digests[5]));
 }
 

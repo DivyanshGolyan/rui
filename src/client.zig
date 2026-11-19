@@ -493,6 +493,8 @@ pub const MessageInput = struct {
     /// Borrowed stdin source for ordered operands; null selects process stdin.
     operand_stdin: ?std.Io.File = null,
     configuration: ?ConfigureInput = null,
+    /// Refuse the Message unless the Session's provider is served (the Host checks it at admission).
+    require_model: bool = false,
     sender: ?Address = null,
     sender_handle: ?[]const u8 = null,
 };
@@ -2250,7 +2252,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         } },
     };
     if ((kind != .configure and kind != .message and fields.configuration != null) or
-        (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
+        (fields.require_model != null and kind != .configure and kind != .message) or
         (kind != .configure and (fields.reload_skills != null or fields.preset != null)) or
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.parts != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
@@ -2382,6 +2384,11 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     return runCapture(io, paths, &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store_identity.slice(), location.key, input });
 }
 
+/// A creating Message's Configure condition and an addressed Message's own condition both name the same wire field.
+fn messageRequireModel(input: MessageInput) bool {
+    return input.require_model or if (input.configuration) |configuration| configuration.require_model else false;
+}
+
 fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, input: MessageInput) !void {
     try capture.writeRequest(protocol.message_request.head, .{ store, key, input.session });
     if (input.sender) |sender| {
@@ -2394,7 +2401,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
     }
     if (input.operands.len != 0) {
         try capture.writeMessageOperands(input.operands, input.operand_stdin);
-        if (input.configuration != null and input.configuration.?.require_model)
+        if (messageRequireModel(input))
             try capture.writeRequest(protocol.message_request.require_model, .{});
         try capture.writeRequest(protocol.message_request.tail, .{});
         return;
@@ -2407,7 +2414,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
     try capture.writeRequest(protocol.message_request.text_tail, .{});
-    if (input.configuration != null and input.configuration.?.require_model)
+    if (messageRequireModel(input))
         try capture.writeRequest(protocol.message_request.require_model, .{});
     try capture.writeRequest(protocol.message_request.tail, .{});
 }
@@ -4078,6 +4085,35 @@ fn checkCreatingMessageCapture() !void {
         try std.testing.expect(object.get("sender").? == .null);
         try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.string);
         try std.testing.expectEqualStrings("hello", object.get("text").?.object.get("value").?.string);
+        try std.testing.expectEqual(require_model, object.contains("require_model"));
+        if (require_model) try std.testing.expect(object.get("require_model").?.bool);
+    }
+}
+
+fn checkAddressedMessageCapture() !void {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ false, true }) |require_model| {
+        var captured = try captureMessage(io, .{
+            .store = root,
+            .session = "k7m2qx",
+            .text_path = "",
+            .text = "hello",
+            .require_model = require_model,
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        const binding = try readCapturedBinding(io, &captured.file);
+        try std.testing.expectEqualStrings("k7m2qx", binding.saved.session.slice());
+        var bytes: [4096]u8 = undefined;
+        const length = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        try std.testing.expect(!object.contains("configuration"));
         try std.testing.expectEqual(require_model, object.contains("require_model"));
         if (require_model) try std.testing.expect(object.get("require_model").?.bool);
     }
@@ -6936,6 +6972,7 @@ fn checkPreferencesCapture() !void {
 
 test "CLI-4 configuration_intent" {
     try checkCreatingMessageCapture();
+    try checkAddressedMessageCapture();
     try checkCreatingConfigureCapture();
     try checkSemanticToolsCapture();
     try checkParentCapture();

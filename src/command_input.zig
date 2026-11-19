@@ -338,7 +338,7 @@ fn MessageCommandOf(comptime Custody: type) type {
             if (self.configuration) |*configuration| {
                 hashField(&hash, "initial-configuration");
                 hash.update(&configureDigest("", configuration, self.require_model));
-            }
+            } else if (self.require_model) hashField(&hash, "require-model");
             return hash.finalResult();
         }
     };
