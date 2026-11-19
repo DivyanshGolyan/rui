@@ -162,7 +162,7 @@ def store_boundary(root):
                 raise ValueError(f"{source} imports {target}; a wire client imports only wire/")
             if target.startswith(STORE_WIRE):
                 continue
-            if source == "src/logic_tests.zig" and target in ("src/store/engine/mysql_refusal.zig", "src/store/pass_plan.zig",
+            if source == "src/logic_tests.zig" and target in ("src/store/command_replay.zig", "src/store/engine/mysql_refusal.zig", "src/store/pass_plan.zig",
                                                                  "src/store/round_order.zig", "src/store/write_batch.zig"):
                 continue
             if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
