@@ -872,13 +872,28 @@ def served_providers(body):
     return {name for name, value in providers.items() if value != "unserved"}
 
 
-def holds_store(run, pid):
-    """Whether process `pid` has this run's Store open."""
-    held = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True).stdout
-    return any(line[1:].startswith(str(run.store)) for line in held.splitlines())
+class HostProcesses:
+    """Process and clock probes for Host launches; tests pass a fake with the same four methods."""
+
+    def spawn(self, argv, **kwargs):
+        return subprocess.Popen(argv, **kwargs)
+
+    def holds_store(self, run, pid):
+        """Whether process `pid` has this run's Store open."""
+        held = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True).stdout
+        return any(line[1:].startswith(str(run.store)) for line in held.splitlines())
+
+    def clock(self):
+        return time.monotonic()
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
 
 
-def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_SERVE):
+PROCESSES = HostProcesses()
+
+
+def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_SERVE, processes=PROCESSES):
     """Start this run's Host serving exactly `serve`; return its ready status.
 
     Success needs this child alive, holding the Store, and serving exactly the requested providers.
@@ -902,19 +917,19 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
     if without_preload:
         host_env.pop("LD_PRELOAD", None)
     for attempt in range(1, LAUNCH_ATTEMPTS + 1):
-        stop_host(run)
-        host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
+        stop_host(run, processes=processes)
+        host = processes.spawn(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
                                 stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
                                 start_new_session=True)
         run.own("host", host.pid, argv=host_argv)
         verdict = None
-        deadline = time.monotonic() + 30
+        deadline = processes.clock() + 30
         while verdict is None:
             if host.poll() is not None:
                 verdict = f"child exited rc={host.poll()}"
             else:
                 result, ready, body = host_status(run)
-                if ready and not holds_store(run, host.pid):
+                if ready and not processes.holds_store(run, host.pid):
                     verdict = "another Host serves this Store"
                 elif ready and served_providers(body) != expected:
                     verdict = f"serves {sorted(served_providers(body))}, expected {sorted(expected)}"
@@ -923,10 +938,10 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
                                                                       "instance": body.get("instance"),
                                                                       "served": sorted(served_providers(body))})
                     return result
-                elif time.monotonic() > deadline:
+                elif processes.clock() > deadline:
                     verdict = "not ready within 30 s"
                 else:
-                    time.sleep(0.1)
+                    processes.sleep(0.1)
         if host.poll() is None:
             host.terminate()
             try:
@@ -938,7 +953,7 @@ def launch_host(run, *, restartable=False, without_preload=False, serve=DEFAULT_
         f"see {run.evidence / 'host-launch.jsonl'}")
 
 
-def stop_host(run):
+def stop_host(run, processes=PROCESSES):
     """Pause whatever Host serves this run's Store and confirm none is ready; return the owned records stopped."""
     stopped = [r for r in run.owned() if r["kind"] == "host" and process_start(r["pid"])
                and process_start(r["pid"])[0] == r["lstart"]]
@@ -949,11 +964,11 @@ def stop_host(run):
         pause = run.rui_cmd("host", "pause", "--store", run.store)
         if pause.returncode != 0:
             die(f"host pause failed: {pause.stderr}")
-        deadline = time.monotonic() + 15
+        deadline = processes.clock() + 15
         while host_status(run)[1]:
-            if time.monotonic() > deadline:
+            if processes.clock() > deadline:
                 die("a Host still serves this Store after host pause")
-            time.sleep(0.1)
+            processes.sleep(0.1)
     die("a Host kept serving this Store after repeated pauses")
 
 
@@ -2968,7 +2983,7 @@ def frame_resume_settled_shot(run):
             run._shot_suspended = None
 
 
-def frame_steps(run, terminal, steps, exiting=False):
+def frame_steps(run, terminal, steps, exiting=False, processes=PROCESSES):
     for step in steps:
         if "text" in step:
             terminal.write(step["text"].encode())
@@ -3022,31 +3037,31 @@ def frame_steps(run, terminal, steps, exiting=False):
                 raise FrameFailure(f"Host serves {sorted(served) if ready else 'nothing'}, expected {sorted(step['serve'])}")
         elif step["host"] == "restart":
             serve = tuple(step.get("serve", DEFAULT_SERVE))
-            frame_restart_host(run, serve)
+            frame_restart_host(run, serve, processes=processes)
             append_jsonl(run.evidence / "frames-host-restart.jsonl", {"t_ns": now_ns(), "wall": wall(), "serve": list(serve)})
         else:
-            launch_host(run)
+            launch_host(run, processes=processes)
             run.frame_served = None
         if not exiting and terminal.status is not None:
             raise FrameFailure(f"Rui exited with status {terminal.status} before the state was reached")
     return exiting
 
 
-def frame_restart_host(run, serve):
+def frame_restart_host(run, serve, processes=PROCESSES):
     """Restart the run's Host serving exactly `serve`."""
     # Set before stopping: a failed restart still gets restored by frame_restore_served.
     run.frame_served = tuple(serve)
-    stop_host(run)
-    launch_host(run, serve=tuple(serve))
+    stop_host(run, processes=processes)
+    launch_host(run, serve=tuple(serve), processes=processes)
 
 
-def frame_restore_served(run):
+def frame_restore_served(run, processes=PROCESSES):
     """Stop a Host that a state restarted with another provider set and start the default set."""
     if getattr(run, "frame_served", None) is None:
         return
     run.frame_served = None
-    stop_host(run)
-    launch_host(run)
+    stop_host(run, processes=processes)
+    launch_host(run, processes=processes)
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):

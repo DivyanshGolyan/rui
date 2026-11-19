@@ -38,6 +38,17 @@ def host_cli(state):
     return rui_cmd
 
 
+def real_spawn(argv, **kwargs):
+    """The production spawn, so the existing subprocess.Popen double still sees each launch."""
+    return subprocess.Popen(argv, **kwargs)
+
+
+def host_processes(spawn):
+    """Process probes for launch_host: the given spawn, a Store always held by the child, no real waits."""
+    return types.SimpleNamespace(spawn=spawn, holds_store=lambda _run, _pid: True,
+                                 clock=lambda: 0.0, sleep=lambda _seconds: None)
+
+
 def committed(text, columns=100, lines=20):
     rows = tuple(tuple(Cell(char, None, False) for char in row) for row in text.rstrip("\n").split("\n"))
     return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
@@ -112,10 +123,9 @@ class VerifyRuiTest(unittest.TestCase):
                 return types.SimpleNamespace(pid=123, poll=lambda: None)
 
             for restartable in (False, True):
-                with self.subTest(restartable=restartable), patch("subprocess.Popen", start), \
-                     patch.dict(launch.__globals__, {"holds_store": lambda _run, _pid: True}):
+                with self.subTest(restartable=restartable), patch("subprocess.Popen", start):
                     state["serving"] = False
-                    launch(run, restartable=restartable)
+                    launch(run, restartable=restartable, processes=host_processes(real_spawn))
                 expected = ["/candidate/rui", "host", "serve", "--store", str(run.store),
                             "--set", "execution.activeCapacity=8", "--set", "providers={}",
                             "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
@@ -3548,9 +3558,8 @@ class UpgradeFramesTest(unittest.TestCase):
                     kwargs["stderr"].close()
                     state["serving"] = True
                     return types.SimpleNamespace(pid=123, poll=lambda: None)
-                with patch("subprocess.Popen", side_effect=spawn), \
-                     patch.dict(launch.__globals__, {"holds_store": lambda _run, _pid: True}):
-                    launch(run, restartable=True, without_preload=clean)
+                with patch("subprocess.Popen", side_effect=spawn):
+                    launch(run, restartable=True, without_preload=clean, processes=host_processes(real_spawn))
                 self.assertEqual("LD_PRELOAD" in seen[0], not clean)
                 self.assertEqual(seen[0]["FAKETIME_TIMESTAMP_FILE"], "/clock")
                 self.assertEqual(env["LD_PRELOAD"], "/fixture.so")
