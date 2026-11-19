@@ -54,10 +54,13 @@ Obtain independent opinions on material design questions.
 
 ### Goal
 
-Every PR body has a visible `Goal: #123 <how this change serves the issue>` line, using an issue number or full GitHub issue URL and at least three explanation words.
+Every PR body has a visible goal line naming an issue by number or full GitHub issue URL, with at least three explanation words.
+Use `Fixes #123 <how this change finishes the issue>` when merging the PR completes the issue, so GitHub closes it on merge; nobody closes it by hand afterwards.
+Use `Goal: #123 <how this change serves the issue>` for an issue that stays open, such as a workstream, a parent or a multi-PR issue.
+A PR can carry both, and one line per finished issue.
 For housekeeping, red-main reverts, model trials or similar work without an issue, use `No issue: <reason>` instead.
 The plan checks the text, not whether the issue exists.
-[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
+[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its goal-line issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
 ### Shape before code
 

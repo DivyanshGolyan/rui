@@ -169,10 +169,22 @@ def red_record(name, command):
     return {"name": name, "command": command}
 
 
-def local_red_checks(planned, mysql):
+# Rui fixtures refuse root (tests/integration/host_process.py), and cloud machines push as root, so a
+# replayed fixture runs at HEAD as the non-root lane user .agents/as-fixture-user creates.
+FIXTURE_LANE = "prepush"
+
+
+def as_fixture_user(command, euid=None):
+    euid = os.geteuid() if euid is None else euid
+    if euid != 0 or command[:3] != ["zig", "build", "-j1"] or command[3] not in FIXTURES:
+        return command
+    return [str(ROOT / fixture_user.COMMAND), FIXTURE_LANE, "--ref", "HEAD", "--", *command]
+
+
+def local_red_checks(planned, mysql, euid=None):
     for name, command in planned:
         if not isinstance(command, NeedsMySQL):
-            yield name, command
+            yield name, command if isinstance(command, Skipped) else as_fixture_user(command, euid)
         elif mysql:
             yield name, ["env", f"{live_engines.REQUIRE}=mysql", *command.command]
         else:
@@ -303,7 +315,7 @@ def red_revision():
     return digest.hexdigest()
 
 
-def previous_red(available):
+def previous_red(available, euid=None):
     try:
         repository = repo_from_remote(os.environ.get(REMOTE_URL) or git("remote", "get-url", "origin"))
         refs = os.environ.get(REMOTE_REFS, "").split()
@@ -327,10 +339,11 @@ def previous_red(available):
                 continue
             identities.append(identity)
             planned.extend(derived)
-        if any(isinstance(command, NeedsMySQL) for _, command in planned):
+        needs_mysql = any(isinstance(command, NeedsMySQL) for _, command in planned)
+        if needs_mysql:
             environment = [os.environ.get(variable) for variable in live_engines.VARIABLES]
             identities.append(hashlib.sha256(json.dumps(environment).encode()).hexdigest())
-            planned = list(local_red_checks(planned, mysql_reachable(os.environ)))
+        planned = list(local_red_checks(planned, needs_mysql and mysql_reachable(os.environ), euid))
         return identities if any(identity is not None for identity in identities) else None, planned
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
         red_warning(error)

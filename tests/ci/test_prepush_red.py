@@ -89,9 +89,9 @@ print(value if isinstance(value, str) else json.dumps(value))
             self.data[f"repos/owner/repo/actions/jobs/{item['id']}/logs"] = log
         self.responses.write_text(json.dumps(self.data))
 
-    def plan(self):
+    def plan(self, euid=1000):
         with redirect_stderr(io.StringIO()) as warning:
-            identity, checks = prepush.previous_red(AVAILABLE)
+            identity, checks = prepush.previous_red(AVAILABLE, euid)
         return identity, checks, warning.getvalue()
 
     def test_green_and_cancelled_before_steps_have_no_checks(self):
@@ -132,7 +132,27 @@ AssertionError
 ''')
         _, checks, _ = self.plan()
         self.assertEqual(len(checks), 1)
-        self.assertEqual(checks[0][1], ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"])
+        command = ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]
+        self.assertEqual(checks[0][1], command)
+        _, checks, _ = self.plan(euid=0)
+        self.assertEqual(checks[0][1], [str(ROOT / ".agents/as-fixture-user"), "prepush", "--ref", "HEAD", "--", *command],
+                         "a root push replays the red fixture as the lane user")
+
+    def test_replayed_fixtures_run_as_the_lane_user_only_under_root(self):
+        fixture = ["zig", "build", "-j1", "request-wait-integration", "--summary", "line"]
+        unit = ["zig", "build", "-j1", "test-store", "-Dtest-filter=x", "--summary", "line"]
+        policy = ["env", "PYTHONPATH=x", sys.executable, "-B", "-m", "unittest"]
+        wrapped = [str(ROOT / ".agents/as-fixture-user"), "prepush", "--ref", "HEAD", "--", *fixture]
+        for euid, command, expected in ((0, fixture, wrapped), (1000, fixture, fixture), (0, unit, unit),
+                                        (1000, unit, unit), (0, policy, policy)):
+            with self.subTest(euid=euid, command=command[3]):
+                self.assertEqual(prepush.as_fixture_user(command, euid), expected)
+        skipped = prepush.Skipped("macOS")
+        mysql = prepush.NeedsMySQL(unit, True)
+        checks = list(prepush.local_red_checks([("fixture", fixture), ("skip", skipped), ("store", mysql)], False, euid=0))
+        self.assertEqual(checks[0], ("fixture", wrapped))
+        self.assertIs(checks[1][1], skipped)
+        self.assertEqual(checks[2][1][-len(unit):], unit)
 
     def test_compile_jobs_use_known_commands(self):
         for name, command in (("linux_build_unit", prepush.unit_compile()),
