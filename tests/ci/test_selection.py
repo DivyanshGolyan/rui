@@ -28,6 +28,36 @@ from host_process import dispose_all, wait_for
 AVAILABLE = set(build_files.steps())
 
 
+POLICY_UNITS = {
+    "driver": "test_selection.FullCheckPartitionTest", "admission": "test_admission",
+    "publication": "test_release_publication", "artifact": "test_build_artifact",
+    "locality": "test_client_locality", "formal": "test_formal_models",
+    "host_settings": "test_host_settings_locality", "promotion": "test_promotion", "coverage": "test_coverage",
+    "store": "test_store_engine_boundary", "flake": "test_flake_sources",
+    "verify_build": "test_verify_rui_build_here", "verify": "test_verify_rui",
+    "imports": "test_import_architecture", "harness": "test_harness_contracts",
+}
+# Declared in the table after the original six; each reads its inputs and therefore carries the CI globs.
+NEW_POLICY_UNITS = ("host_settings", "promotion", "coverage", "store", "flake", "verify_build", "verify", "imports", "harness")
+# One path per unit that the unit's own inputs cover, so a change to that input runs the unit.
+POLICY_PROBES = {
+    "driver": "tests/integration/check.sh", "admission": "build.zig", "publication": "tests/ci/release_publication.py",
+    "artifact": "tests/ci/build_artifact.py", "locality": "src/cli.zig", "formal": "tests/formal/mysql_ownership/MysqlOwnership.tla",
+    "host_settings": "clients/ts/src/client.ts", "promotion": "tests/ci/promotion.py", "coverage": "build/unit.zig",
+    "store": "src/store/schema.zig", "flake": "src/cli.zig", "verify_build": ".claude/skills/verify-rui/scripts/verify-rui",
+    "verify": "tests/integration/terminal_screen.py", "imports": "tests/integration/mysql_wire_test.zig",
+    "harness": "research/README.md",
+}
+# Repo paths in a module's source: the string literals that name a file or directory of the repository.
+REPO_PATH = re.compile(r"(?:src|release|docs|tests|research|clients|screen-emulator|\.github|\.claude)/\S+"
+                       r"|build(?:\.zig\S*|/\S*)|install\.sh|openapi\.json|README\.md")
+
+
+def short_names(units):
+    by_unit = {unit: short for short, unit in POLICY_UNITS.items()}
+    return [by_unit[unit] for unit in units]
+
+
 def named_paths(patterns):
     tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split()
     included = [pattern for pattern in patterns if not pattern.startswith("!")]
@@ -1303,30 +1333,32 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("current-facts-integration", combined[family])
 
     def test_policy_self_checks_run_only_when_their_inputs_change(self):
-        driver, admission, publication, artifact, locality, formal = (unit for unit, _ in POLICY_SELF_CHECKS)
+        every = set(POLICY_UNITS)
         for paths, run in (
                 (["src/cli.zig", "src/store/Store.zig", "tests/integration/human_cli_integration.py",
-                  "README.md", "clients/ts/src/wire.ts"], {locality}),
-                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
-                (["tests/formal/mysql_ownership/MysqlOwnership.tla"], {formal}),
-                (["tests/ci/test_formal_models.py"], {driver, admission, publication, artifact, formal}),
-                (["build.zig"], {driver, admission}),
-                ([".github/workflows/release.yml"], {admission}),
-                (["src/wire_version.zig"], {driver, locality}),
-                (["tests/integration/check.sh"], {driver}),
-                (["tests/integration/host_process.py", "src/cli.zig"], {driver, locality}),
-                (["clients/ts/src/nested/client.ts"], {locality}),
-                (["tests/ci/client_locality.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/test_client_locality.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/caller_errors.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/import_architecture.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/host_settings_locality.py"], {driver, admission, publication, artifact, locality}),
-                (["tests/ci/stack_frames.json"], {driver, admission, publication, artifact, locality})):
+                  "README.md", "clients/ts/src/wire.ts"],
+                 {"locality", "host_settings", "store", "flake", "imports", "harness", "verify"}),
+                (["tests/ci/select_tests.py"], every - {"formal"}),
+                (["tests/ci/requirements.txt"], every - {"locality", "formal"}),
+                (["tests/formal/mysql_ownership/MysqlOwnership.tla"], {"formal", "harness"}),
+                (["tests/ci/test_formal_models.py"], every - {"locality"}),
+                (["build.zig"], {"driver", "admission", "coverage", "imports", "flake", "harness"}),
+                ([".github/workflows/release.yml"], every - {"driver", "publication", "artifact", "locality", "formal"}),
+                (["src/wire_version.zig"], {"driver", "locality", "host_settings", "flake", "imports", "harness", "verify"}),
+                (["tests/integration/check.sh"], {"driver", "harness", "verify"}),
+                (["tests/integration/host_process.py", "src/cli.zig"],
+                 {"driver", "locality", "host_settings", "flake", "imports", "harness", "verify"}),
+                (["clients/ts/src/nested/client.ts"], {"locality", "host_settings", "flake"}),
+                (["tests/ci/client_locality.py"], every - {"formal"}),
+                (["tests/ci/test_client_locality.py"], every - {"formal"}),
+                (["tests/ci/caller_errors.py"], every - {"formal"}),
+                (["tests/ci/import_architecture.py"], every - {"formal"}),
+                (["tests/ci/host_settings_locality.py"], every - {"formal"}),
+                (["tests/ci/stack_frames.json"], every - {"formal"})):
             for phase in ("development", "review"):
                 with self.subTest(paths=paths, phase=phase):
                     skips = select(paths, phase, AVAILABLE)["policy_skips"]
-                    self.assertEqual(set(skips), {driver, admission, publication, artifact, locality, formal} - run)
+                    self.assertEqual(set(short_names(skips)), every - run)
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
@@ -2565,6 +2597,70 @@ case " $FAIL_FIXTURE " in *" $fixture "*|*" $base_fixture "*) exit 42 ;; esac
                     result, lines = self.run_part(part, fail=fail, clock_error=clock_error)
                     self.assertEqual(result.returncode, returncode, result.stdout + result.stderr)
                     self.assertEqual(self.failed_records(result, lines, elapsed="unavailable"), failed)
+
+
+class PolicySelfCheckTableTest(unittest.TestCase):
+    """The POLICY_SELF_CHECKS table is the only owner of which policy modules a change skips."""
+
+    def skipped(self, paths, phase="development"):
+        return set(short_names(select(paths, phase, AVAILABLE)["policy_skips"]))
+
+    def test_table_names_the_declared_units(self):
+        self.assertEqual({unit for unit, _ in POLICY_SELF_CHECKS}, set(POLICY_UNITS.values()))
+
+    def test_new_entries_carry_the_ci_code_globs(self):
+        table = dict(POLICY_SELF_CHECKS)
+        for short in NEW_POLICY_UNITS:
+            with self.subTest(unit=short):
+                self.assertTrue({"tests/ci/*", ".github/*"} <= set(table[POLICY_UNITS[short]]))
+
+    def test_source_only_change_skips_the_modules_that_do_not_read_src(self):
+        run = {"locality", "host_settings", "flake", "imports", "harness", "verify"}
+        for phase in ("development", "review"):
+            with self.subTest(phase=phase):
+                self.assertEqual(self.skipped(["src/session.zig"], phase), set(POLICY_UNITS) - run)
+
+    def test_each_declared_module_runs_for_a_change_to_its_own_input(self):
+        table = dict(POLICY_SELF_CHECKS)
+        for short, path in POLICY_PROBES.items():
+            with self.subTest(unit=short, path=path):
+                self.assertTrue(matches(path, table[POLICY_UNITS[short]]))
+                self.assertNotIn(short, self.skipped([path]))
+
+    def test_undeclared_modules_always_run(self):
+        declared = {unit.split(".")[0] for unit in POLICY_UNITS.values()}
+        undeclared = {path.stem for path in Path(__file__).parent.glob("test_*.py")} - declared
+        self.assertIn("test_release", undeclared)
+        self.assertIn("test_platform_boundary", undeclared)
+        self.assertIn("test_pr_shape", undeclared)
+        for paths in ([], ["src/session.zig"], ["tests/ci/policy.py"], ["build.zig"], [".github/workflows/check.yml"],
+                      ["docs/contracts/store.md"]):
+            with self.subTest(paths=paths):
+                skipped_units = select(paths, "development", AVAILABLE)["policy_skips"]
+                self.assertFalse(undeclared & {unit.split(".")[0] for unit in skipped_units})
+
+    def test_no_change_skips_every_declared_unit(self):
+        self.assertEqual(self.skipped([]), set(POLICY_UNITS))
+
+    def test_repo_paths_read_by_each_module_match_its_inputs(self):
+        table = dict(POLICY_SELF_CHECKS)
+        for short in NEW_POLICY_UNITS:
+            unit = POLICY_UNITS[short]
+            with self.subTest(unit=unit):
+                source = (Path(__file__).parent / f"{unit}.py").read_text()
+                literals = {node.value for node in ast.walk(ast.parse(source))
+                            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+                # A directory literal is covered when a file under it is an input.
+                unnamed = sorted(value for value in literals if REPO_PATH.fullmatch(value)
+                                 and not (matches(value, table[unit]) or matches(f"{value}/x", table[unit])))
+                self.assertEqual(unnamed, [], f"{unit} names paths none of its declared inputs match")
+
+
+class PolicyPrepushTest(unittest.TestCase):
+    def test_prepush_takes_its_policy_skips_from_the_same_select(self):
+        source = (Path(__file__).parent / "prepush.py").read_text()
+        self.assertIn("from select_tests import", source)
+        self.assertIn('select(paths, "development", available)["policy_skips"]', source)
 
 
 if __name__ == "__main__":
