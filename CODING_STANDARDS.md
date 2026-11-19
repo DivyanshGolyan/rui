@@ -59,6 +59,20 @@ For housekeeping, red-main reverts, model trials or similar work without an issu
 The plan checks the text, not whether the issue exists.
 [PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
+### Bug fixes
+
+A bug fix starts by asking why the bug was possible, not where the symptom is.
+Name the design cause and fix that, using the [codebase-design](https://github.com/mattpocock/skills) vocabulary (deep module, seam, one owner):
+
+- **Two owners for one rule:** merge them into one owner every path calls.
+- **A rule applied beyond its case:** make the case a value the owner decides on, not a guess from scattered signals.
+- **A check that only one path runs:** move it to the owner every path crosses.
+- **A shallow interface:** callers that must call helpers in order, or know a policy, get one deep function instead.
+- **A test that pinned the bug:** rewrite it to the invariant the person needs ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
+
+The PR Summary states the cause in one line (`Why possible: ...`) beside its [shape](#shape-before-code), and how the fix removes that class rather than this instance.
+When the root fix is larger than the bug (a new owner, a contract change), land the instance fix, file the root fix as an issue under the same workstream, and link it.
+
 ### Shape before code
 
 Before writing code for a change to `src/`, show the changed structure in a fenced diagram, diff-sketch or tree in the PR's `## Summary`.
