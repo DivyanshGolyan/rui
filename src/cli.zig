@@ -20,6 +20,7 @@ fn recordExit(status: caller_exit.Status) void {
 }
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
+const cli_invocation = @import("cli_invocation.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -106,86 +107,86 @@ fn run(init: std.process.Init) !void {
     const args = try allocator.alloc([]const u8, raw_args.len);
     defer allocator.free(args);
     for (raw_args, args) |raw, *arg| arg.* = raw;
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--host-coordinator")) {
-        return @import("host_coordinator.zig").run(init, allocator);
-    }
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
-    }
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "upgrade")) return runUpgrade(init, args[2..]);
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "--publish-install")) return publishInstall(init, args[2..]);
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var output: std.Io.Writer.Allocating = .init(allocator);
-        defer output.deinit();
-        try advice.write(&output.writer, &observed, home);
-        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var line: [16]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
-        const schema = @import("store.zig");
-        var output: [128]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
-    }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (cli_args.retired(args[1])) |replacement| {
-        const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.InvalidInvocation;
-    }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
-        return printHelp(init.io, .{ .resource = resource });
-    }
-    const command = cli_args.find(resource, args[2]) orelse {
-        var operation: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
-            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.InvalidInvocation;
-        };
-        stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.InvalidInvocation;
-    };
-    const definition = command.definition();
-    failure_held.resource = @tagName(resource);
-    failure_held.operation = definition.name;
-    var problem: cli_args.Refusal = undefined;
-    const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch {
-        reportParseProblem(problem, @tagName(resource), definition.name, null);
-        return error.InvalidInvocation;
-    };
-    if (parsed.help) return printHelp(init.io, .{ .command = definition });
-    if (parsed.missing()) |group| {
-        reportMissing(resource, definition, group) catch {};
-        return error.InvalidInvocation;
-    }
-    validateFreshInvocation(init.io, &parsed, &problem) catch |err| {
-        switch (err) {
-            error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => {
-                reportParseProblem(problem, @tagName(resource), definition.name, null);
-                return error.InvalidInvocation;
+    var facts: cli_invocation.Facts = .{ .args = args };
+    while (true) switch (cli_invocation.next(facts, init.arena.allocator())) {
+        .host_coordinator => return @import("host_coordinator.zig").run(init, allocator),
+        .root_help => return std.Io.File.stdout().writeStreamingAll(init.io, usage_text),
+        .version => return std.Io.File.stdout().writeStreamingAll(init.io, version_text),
+        .upgrade => |tail| return runUpgrade(init, tail),
+        .publish_install => |tail| return publishInstall(init, tail),
+        .installation => |kind| switch (kind) {
+            .path => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var output: std.Io.Writer.Allocating = .init(allocator);
+                defer output.deinit();
+                try advice.write(&output.writer, &observed, home);
+                return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
             },
-            else => return err,
-        }
+            .state => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var line: [16]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
+            },
+            .facts => {
+                const schema = @import("store.zig");
+                var output: [128]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
+            },
+        },
+        .new_session => |tail| return @call(.never_inline, newSession, .{ init, tail }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err,
+        .resource_help => |resource| return printHelp(init.io, .{ .resource = resource }),
+        .command_help => |definition| {
+            failure_held.resource = @tagName(definition.resource);
+            failure_held.operation = definition.name;
+            return printHelp(init.io, .{ .command = definition });
+        },
+        .refused => |refused| {
+            switch (refused) {
+                .syntax => |syntax| {
+                    failure_held.resource = @tagName(syntax.resource);
+                    failure_held.operation = syntax.operation;
+                },
+                .missing => |missing| {
+                    failure_held.resource = @tagName(missing.resource);
+                    failure_held.operation = missing.definition.name;
+                },
+                else => {},
+            }
+            var buffer: [4096]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            cli_invocation.writeRefusal(&writer, refused) catch unreachable;
+            stderr.diagnosticBytes(writer.buffered());
+            return error.InvalidInvocation;
+        },
+        .stat_record => |record| {
+            failure_held.resource = @tagName(record.resource);
+            failure_held.operation = record.operation;
+            _ = std.Io.Dir.cwd().statFile(init.io, record.path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    facts.record_exists = false;
+                    continue;
+                },
+                else => return err,
+            };
+            facts.record_exists = true;
+        },
+        .dispatch => |route| {
+            failure_held.resource = @tagName(route.parsed.definition.resource);
+            failure_held.operation = route.parsed.definition.name;
+            dispatch(init, route.command, &route.parsed, args) catch |err| {
+                if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
+                return err;
+            };
+            try postCommandHold(init);
+            return;
+        },
     };
-    dispatch(init, command, &parsed, args) catch |err| {
-        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        return err;
-    };
-    try postCommandHold(init);
 }
 
 fn reportedByOwner(err: anyerror) bool {
@@ -226,32 +227,8 @@ fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
 noinline fn reportParseProblem(problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    var held = problem.held(resource, operation);
-    held.unchanged = unchanged;
-    caller_error.writeLine(&writer, problem.code, held) catch unreachable;
+    cli_invocation.writeParseProblem(&writer, problem, resource, operation, unchanged) catch unreachable;
     stderr.diagnosticBytes(writer.buffered());
-}
-
-noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
-    var buffer: [1024]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-    try definition.writeGroup(&writer, group);
-    reportParseProblem(.{ .code = .option_required, .token = writer.buffered(), .option = false, .accepted = .{ .grammar = writer.buffered() } }, @tagName(resource), definition.name, null);
-    return error.InvalidArguments;
-}
-
-fn validateFreshInvocation(io: std.Io, parsed: *const cli_args.Parsed, refusal: *cli_args.Refusal) !void {
-    if (!try existingCapture(io, parsed)) try parsed.validateValues(refusal);
-}
-
-fn existingCapture(io: std.Io, parsed: *const cli_args.Parsed) !bool {
-    if (!parsed.definition.mutation or std.mem.eql(u8, parsed.definition.name, "recover")) return false;
-    const record = parsed.get("record") orelse return false;
-    _ = std.Io.Dir.cwd().statFile(io, record, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
@@ -295,6 +272,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
         .action_stop => try requestActionStop(init, parsed),
+        .action_publish => try publishAction(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -930,11 +908,18 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     try upgrade.writeCheck(&output.interface, &checked);
     try output.flush();
-    if (checking) return;
-    if (!upgrade.canInstall(&checked)) {
-        recordExit(.environment);
-        return error.Reported;
-    }
+    const upgrade_run = @import("upgrade_run.zig");
+    var resumed = checked.facts(if (checking) .check else .install);
+    resumed.resumed = true;
+    if (upgrade_run.next(resumed) == .end) switch (upgrade_run.exit(resumed)) {
+        .done => return,
+        .not_installable => {
+            recordExit(.environment);
+            return error.Reported;
+        },
+        // A failed check or install returns its error before this point.
+        .check_failed, .install_failed, .restart_failed => unreachable,
+    };
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
@@ -954,7 +939,12 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     defer result.deinit(allocator);
     try upgrade.writeResult(&output.interface, &result);
     try output.flush();
-    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
+    switch (upgrade_run.exit(result.facts(&checked))) {
+        .done => {},
+        .restart_failed => return error.HostRestartFailed,
+        // A failed check or install returns its error before publication.
+        .check_failed, .not_installable, .install_failed => unreachable,
+    }
 }
 
 noinline fn upgradeDownload(err: anyerror, download: *const @import("upgrade.zig").Download) void {
@@ -2625,7 +2615,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2675,7 +2665,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     };
     taken.tools = settings.tools.names;
     taken.loaded_tools = settings.loaded_tools.names;
-    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.instructions = settings.instructions.value.identity().length != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
     taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
@@ -3218,13 +3208,50 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     try writeMutationReply(io, reply, presentation, replay);
 }
 
+fn publishAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
+    const store = init.environ_map.get("RUI_STORE") orelse return error.InvalidRuiAddress;
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
+    if (handle.len != 32) return error.InvalidRuiAddress;
+    try client.validatePeer(store, address, handle);
+    var bytes: [protocol.max_action_value_bytes + 1]u8 = undefined;
+    var len: usize = 0;
+    while (len < bytes.len) {
+        const n = std.Io.File.stdin().readStreaming(init.io, &.{bytes[len..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        len += n;
+    }
+    if (len > protocol.max_action_value_bytes) {
+        stderr.diagnostic("rui: action publish refused: too_large\n", .{});
+        return error.CallerFailure;
+    }
+    if (!std.unicode.utf8ValidateSlice(bytes[0..len])) return error.InvalidUtf8;
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = (client.Requests{ .io = init.io }).publishAction(store, handle, parsed.get("key").?, bytes[0..len], &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, store, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |failure| {
+            try writeCommandReply(init.io, failure, .stderr);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
 fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     var output: JsonOutput = undefined;
     var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
-    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
+    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, (try parsed.number(u64, "after")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
     switch (reply) {
         .report => {
             try sink.writer.writeByte('\n');
@@ -3944,10 +3971,12 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .conflict => try writer.writeAll(",\"code\":\"idempotency_key_conflict\""),
     }
     try writer.writeByte('}');
-    if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.InputReference{ .form = reply.target.message.form, .content = .{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest } };
+    if (answer.input) |input| {
         try writer.writeAll(",\"input\":");
-        try input.writeJson(writer);
+        switch (input) {
+            .accepted => |value| try (protocol.MessageInputJson{ .value = value }).writeJson(writer),
+            .rejected => |receipt| try receipt.writeJson(writer),
+        }
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
@@ -4044,6 +4073,32 @@ test "CLI-6 start_receipt_configuration" {
     try std.testing.expectEqualStrings("gpt-5.5", receipt.get("model").?.string);
     try std.testing.expectEqualStrings("high", receipt.get("reasoning_effort").?.string);
     try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
+}
+
+test "Message mutation JSON preserves accepted parts owners and rejected receipts" {
+    const wire_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\"";
+    const accepted = ",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
+    const rejected = ",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
+    const input = ",\"input\":{\"type\":\"parts\",\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"";
+    const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 12, .digest = @splat(0xaa), .form = .parts } };
+    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"receipt\",\"kind\":\"message\"}";
+    for ([_][]const u8{
+        accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue,
+        rejected ++ input ++ "}",
+    }) |expected| {
+        var body: [1024]u8 = undefined;
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"execution\":{{\"status\":\"queued\"}}}}", .{ wire_prefix, expected });
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", target);
+        try reply.context.store.set("/store");
+        try reply.context.key.set("receipt");
+        reply.context.kind = .message;
+        var output: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try writeMutationJson(&writer, reply, null);
+        const expected_json = try std.fmt.bufPrint(&body, "{s}{s}}}", .{ context, expected });
+        try std.testing.expectEqualStrings(expected_json, writer.buffered());
+    }
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -4517,43 +4572,6 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
-}
-
-test "existing explicit captures bypass fresh option choices while new captures refuse" {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
-    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const record = try std.fmt.bufPrint(&record_buffer, "{s}/saved.json", .{directory});
-    var refusal: cli_args.Refusal = undefined;
-    const parsed = try cli_args.Command.session_configure.definition().parseSyntax(&.{ "--record", record, "--key", "k", "--permission-mode", "historical-mode" }, std.testing.allocator, &refusal);
-    try std.testing.expectError(error.InvalidOptionValue, validateFreshInvocation(io, &parsed, &refusal));
-    try std.testing.expectEqual(.choice_unsupported, refusal.code);
-    const file = try tmp.dir.createFile(io, "saved.json", .{});
-    defer file.close(io);
-    try file.writeStreamingAll(io, "capture-owner-validates-this");
-    try validateFreshInvocation(io, &parsed, &refusal);
-    try std.testing.expectEqualStrings("historical-mode", parsed.get("permission-mode").?);
-}
-
-test "fresh instruction validation renders both source and stdin conflict refusals" {
-    const Case = struct { args: []const []const u8, code: caller_error.Code, expected: []const u8 };
-    const cases = [_]Case{
-        .{ .args = &.{ "--instructions", "file" }, .code = .instructions_source, .expected = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
-        .{ .args = &.{ "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .expected = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
-    };
-    for (cases) |case| {
-        var refusal: cli_args.Refusal = undefined;
-        const parsed = try cli_args.Command.session_configure.definition().parseSyntax(case.args, std.testing.allocator, &refusal);
-        if (validateFreshInvocation(std.Io.Threaded.global_single_threaded.io(), &parsed, &refusal)) |_| return error.ExpectedRefusal else |_| {}
-        try std.testing.expectEqual(case.code, refusal.code);
-        var storage: [1024]u8 = undefined;
-        var out = std.Io.Writer.fixed(&storage);
-        try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
-        try std.testing.expectEqualStrings(case.expected, out.buffered());
-    }
 }
 
 const LaunchFixture = struct {

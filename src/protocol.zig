@@ -132,6 +132,7 @@ pub const Kind = enum {
     permission_decision,
     action_background,
     action_stop,
+    action_publish,
     observe_command,
     read_result,
     read_action,
@@ -339,21 +340,6 @@ pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;
 
-pub const ContentJson = struct {
-    value: ActivityItem.Content,
-
-    pub const openapi_name = "ActivityItemContent";
-    pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn optional(value: ?ActivityItem.Content) ?ContentJson {
-        return if (value) |content| .{ .value = content } else null;
-    }
-
-    pub fn writeJson(self: *const ContentJson, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.value.length, self.value.digest });
-    }
-};
 pub const ReadActivityContent = activity_read.ReadActivityContent;
 pub const ReadSkillSuggestions = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -485,9 +471,9 @@ pub const FirstMessage = struct {
     admission: u64,
     admitted_at: u64,
     sender: ?Peer,
-    content: ActivityItem.Content,
+    content: content_value.Value,
 
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentJson }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentValueJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
@@ -496,12 +482,12 @@ pub const FirstMessage = struct {
             .admission = first.admission,
             .admitted_at = first.admitted_at,
             .sender = if (first.sender) |sender| .{ .session = sender } else null,
-            .content = .{ .length = first.length, .digest = first.digest },
+            .content = first.content,
         };
     }
 
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentJson{ .value = self.content } });
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentValueJson{ .value = self.content } });
     }
 };
 
@@ -649,6 +635,7 @@ pub const session_list_reply = struct {
 pub const ActivityFacts = activity_facts.Page;
 
 fn RequestOf(comptime Custody: type) type {
+    const ContentField = Requests(Custody).ContentField;
     const ConfigureCommand = Requests(Custody).ConfigureCommand;
     const MessageCommand = Requests(Custody).MessageCommand;
     return union(Kind) {
@@ -666,6 +653,7 @@ fn RequestOf(comptime Custody: type) type {
         permission_decision: PermissionDecisionCommand,
         action_background: command_input.ActionBackgroundCommand,
         action_stop: command_input.ActionStopCommand,
+        action_publish: struct { store: Bounded(max_store_bytes) = .{}, handle: Bounded(32) = .{}, key: Bounded(max_key_bytes) = .{}, text: ContentField = .{} },
         observe_command: ObserveCommand,
         read_result: ReadResult,
         read_action: @import("action_read.zig").Request,
@@ -687,6 +675,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
+                .action_publish => |*command| try command.text.removeTemporaryContent(io),
                 .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list => {},
             }
         }
@@ -808,6 +797,10 @@ fn ParserOf(comptime Custody: type) type {
                     out.* = .{ .action_stop = .{ .store = store } };
                     try self.parseActionStop(&out.action_stop, &members);
                 },
+                .action_publish => {
+                    out.* = .{ .action_publish = .{ .store = store } };
+                    try self.parseActionPublish(&out.action_publish, &members);
+                },
                 .read_action => {
                     out.* = .{ .read_action = .{ .store = store } };
                     try self.parseReadAction(&out.read_action, &members);
@@ -892,7 +885,7 @@ fn ParserOf(comptime Custody: type) type {
         const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
         fn scanHeader(self: *Parser) !Header {
-            const Field = enum { version, kind, store, text, parts, configuration };
+            const Field = enum { version, kind, store, text, value, parts, configuration };
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -926,6 +919,12 @@ fn ParserOf(comptime Custody: type) type {
                         if (kind) |named| if (named != .message) return error.UnexpectedField;
                         try self.scanContentEnvelope(true);
                     },
+                    .value => {
+                        if (self.expected_kind) |expected| if (expected != .action_publish) return error.UnexpectedField;
+                        if (kind) |named| if (named != .action_publish) return error.UnexpectedField;
+                        var counted: ContentField = .{};
+                        try self.readContentString(&counted);
+                    },
                     .parts => {
                         if (kind) |named| if (named != .message) return error.UnexpectedField;
                         try self.scanParts();
@@ -937,7 +936,9 @@ fn ParserOf(comptime Custody: type) type {
                 }
             }
             if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
-            return .{ .kind = kind orelse return error.MissingField, .store = store };
+            const selected = kind orelse return error.MissingField;
+            if (seen.contains(.value) and selected != .action_publish) return error.UnexpectedField;
+            return .{ .kind = selected, .store = store };
         }
 
         fn scanParts(self: *Parser) !void {
@@ -1371,6 +1372,21 @@ fn ParserOf(comptime Custody: type) type {
             try require(Field, seen, &.{ .key, .session, .action });
         }
 
+        fn parseActionPublish(self: *Parser, out: anytype, members: *Members) !void {
+            const Field = enum { handle, key, value };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .handle => try self.readSmallString(&out.handle),
+                .key => try self.readSmallString(&out.key),
+                .value => {
+                    try self.readContentString(&out.text);
+                    out.text.state = .value;
+                },
+            };
+            try require(Field, seen, &.{ .handle, .key, .value });
+            if (out.key.len == 0) return error.InvalidKey;
+        }
+
         fn parsePublicParts(self: *Parser, out: *PublicParts, members: *Members) !void {
             const Field = enum { session, owner };
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -1414,12 +1430,13 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
-            const Field = enum { session, action, offset };
+            const Field = enum { session, action, offset, after };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .action => out.action_id = try self.readCanonicalU64(),
                 .offset => out.offset = try self.readCanonicalU64(),
+                .after => out.after = try self.readCanonicalU64(),
             };
             try require(Field, seen, &.{ .session, .action });
         }
@@ -2098,6 +2115,9 @@ pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 pub const action_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const max_action_value_bytes = @import("action_value_limits.zig").max_value_bytes;
+pub const action_publish_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_publish\",\"store\":", store_hole, ",\"handle\":", Hole{ .string = 32 }, ",\"key\":", key_hole, ",\"value\":", Hole{ .string = max_action_value_bytes }, "}" };
+pub const action_publish_reply = .{ "{\"action_id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"admission_id\":", Hole.optional_id, ",\"replayed\":", Hole.boolean, "}" };
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
@@ -2139,7 +2159,8 @@ pub const read_action_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
     pub const offset = .{ ",\"offset\":\"", Hole.decimal, "\"" };
     pub const tail = .{"}"};
-    pub const all = head ++ offset ++ tail;
+    pub const after = .{ ",\"after\":\"", Hole.decimal, "\"" };
+    pub const all = head ++ offset ++ after ++ tail;
 };
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
@@ -2190,16 +2211,42 @@ pub const ContentValueJson = struct {
     value: content_value.Value,
 
     pub const openapi_name = "ContentValue";
-    pub const text_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-    pub const parts_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":", Hole{ .json = OwnerJson }, "}" };
+    pub const text_shape = content_reference_shape;
+    const parts_head = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":" };
+    pub const parts_shape = parts_head ++ .{ Hole{ .json = OwnerJson }, "}" };
     pub const openapi_shapes = .{ text_shape, parts_shape };
     pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    /// Model text, which is never parts: an answer, an outcome, a call field.
+    pub fn text(reference: content_value.Reference) ContentValueJson {
+        return .{ .value = .{ .text = reference } };
+    }
+
+    pub fn optionalText(reference: ?content_value.Reference) ?ContentValueJson {
+        return if (reference) |value| text(value) else null;
+    }
 
     pub fn writeJson(self: *const ContentValueJson, out: *std.Io.Writer) !void {
         switch (self.value) {
             .text => |reference| try writeShape(out, text_shape, .{ reference.length, reference.digest }),
             .parts => |parts| try writeShape(out, parts_shape, .{ parts.identity.length, parts.identity.digest, OwnerJson{ .owner = parts.owner } }),
         }
+    }
+};
+
+/// The stored input of an accepted Message, whose parts are owned by its admission.
+pub const MessageInputJson = struct {
+    value: content_value.Value,
+
+    pub const openapi_name = "MessageInput";
+    pub const openapi_shapes = .{
+        ContentValueJson.text_shape,
+        ContentValueJson.parts_head ++ OwnerJson.message_shape ++ .{"}"},
+    };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const MessageInputJson, out: *std.Io.Writer) !void {
+        try (ContentValueJson{ .value = self.value }).writeJson(out);
     }
 };
 
@@ -2340,20 +2387,14 @@ pub const configuration_reply = struct {
 pub const message_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.message).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
-    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
-        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":", Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
     pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"" } ++ creation_configuration_shape ++ .{"},\"input\":"} ++
-        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const accepted_parts = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
-        parts_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
-        content_reference_shape ++ .{execution};
-    pub const rejected_parts = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
-        parts_reference_shape ++ .{execution};
+        .{ Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    const rejection = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" };
+    pub const rejected = rejection ++ content_reference_shape ++ .{execution};
+    pub const rejected_parts = rejection ++ parts_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
-    pub const accepted_parts_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"" } ++ creation_configuration_shape ++ .{"},\"input\":"} ++
-        parts_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, accepted_parts, accepted_parts_create, rejected, rejected_parts, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, rejected, rejected_parts, conflict });
 };
 
 pub const session_stop_reply = struct {
@@ -2421,10 +2462,14 @@ pub const action_stop_reply = struct {
 
 pub const action_read_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
-    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
-    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
-    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":null}}" };
-    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts });
+    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null" };
+    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}" };
+    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":null}" };
+    pub const item = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = 128 }, ",\"text\":", Hole{ .string = @import("action_read.zig").page_bytes }, "}" };
+    pub const values_head = ",\"values\":{\"items\":";
+    pub const values_tail = .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
+    // The total text budget is shared by all items, rather than repeated per item.
+    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts }) + values_head.len + 2 + jsonListBytes(@import("action_read.zig").page_items, shapeBytes(item) - 6 * @import("action_read.zig").page_bytes) + 6 * @import("action_read.zig").page_bytes + shapeBytes(values_tail);
 };
 
 pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
@@ -2456,10 +2501,13 @@ pub const command_observation_reply = struct {
     pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         return .{ prefix, .{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":", .{ .optional_string = change_ring.SessionToken.max_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
     }
+    pub fn statusHead(comptime kind: CommandKind, comptime status: CommandObservationStatus) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
+        const shape = head(kind);
+        return .{ shape[0], shape[1], shape[2], shape[3], shape[4] ++ @tagName(status) ++ shape[6], shape[7] };
+    }
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
-    pub const input = .{",\"input\":"} ++ content_reference_shape;
-    pub const input_parts = .{",\"input\":"} ++ parts_reference_shape;
+    pub const input = .{ ",\"input\":", Hole{ .json = MessageInputJson } };
     pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
     pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
     pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
@@ -2474,15 +2522,12 @@ pub const command_observation_reply = struct {
     const queued_state = .{",\"state\":\"queued\""};
     const processing_state = .{",\"state\":\"processing\""};
     const permission_state = .{",\"state\":\"waiting_for_permission\""};
-    const rejected_state = .{",\"state\":\"rejected\""};
+    pub const message_rejected = .{",\"state\":\"rejected\""};
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
     pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id } ++ SessionWork.extra_fields ++ .{"}"};
-    pub const message_variants = .{
-        rejected_state,
-        rejected_state ++ input,
-        rejected_state ++ input_parts,
+    pub const message_accepted = .{
         queued_state ++ input ++ queue ++ work,
         processing_state ++ input ++ queue ++ binding ++ work,
         processing_state ++ input ++ queue ++ binding ++ work ++ recovery,
@@ -2496,20 +2541,6 @@ pub const command_observation_reply = struct {
         cancelled_state ++ input ++ queue ++ binding ++ cancelled ++ recovery,
         failed_state ++ input ++ queue ++ binding ++ failed,
         failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
-    } ++ .{
-        queued_state ++ input_parts ++ queue ++ work,
-        processing_state ++ input_parts ++ queue ++ binding ++ work,
-        processing_state ++ input_parts ++ queue ++ binding ++ work ++ recovery,
-        permission_state ++ input_parts ++ queue ++ permission_work,
-        permission_state ++ input_parts ++ queue ++ binding ++ permission_work,
-        permission_state ++ input_parts ++ queue ++ binding ++ permission_work ++ recovery,
-        cancelled_state ++ input_parts ++ queue ++ cancelled,
-        completed_state ++ input_parts ++ queue ++ binding ++ completed,
-        completed_state ++ input_parts ++ queue ++ binding ++ completed ++ recovery,
-        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled,
-        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled ++ recovery,
-        failed_state ++ input_parts ++ queue ++ binding ++ failed,
-        failed_state ++ input_parts ++ queue ++ binding ++ failed ++ recovery,
     };
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     pub const session_pin = .{ ",\"pinned\":", Hole.boolean };
@@ -2584,9 +2615,9 @@ pub const max_diagnostic_buffer_bytes = blk: {
 
 pub const conversation_page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         comptime std.debug.assert(kind != .hosted_call);
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":", .{ .json = ContentValueJson } };
     }
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };
@@ -3600,6 +3631,7 @@ test "session pin parser requires an explicit desired value and binds semantic r
 }
 
 test "Action read request preserves canonical identity and optional cursor" {
+    // ARD-2
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
     inline for (.{ "}", ",\"offset\":\"0\"}", ",\"offset\":\"16383\"}" }, .{ 0, 0, 16383 }) |tail, offset| {
         var source: MetadataSource = .{ .input = head ++ tail };
@@ -3607,7 +3639,27 @@ test "Action read request preserves canonical identity and optional cursor" {
         const request = (try parseForTest(&parser)).read_action;
         try std.testing.expectEqual(@as(u64, 42), request.action_id);
         try std.testing.expectEqual(@as(u64, offset), request.offset);
+        try std.testing.expectEqual(@as(u64, 0), request.after);
         try std.testing.expectEqualStrings("k7m2qx", request.session.slice());
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"offset\":\"9\",\"after\":\"16\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(@as(u64, 9), request.offset);
+        try std.testing.expectEqual(@as(u64, 16), request.after);
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"after\":\"18446744073709551615\",\"offset\":\"0\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(std.math.maxInt(u64), request.after);
+        try std.testing.expectEqual(@as(u64, 0), request.offset);
+    }
+    inline for (.{ ",\"after\":\"01\"}", ",\"after\":\"-1\"}", ",\"after\":\"18446744073709551616\"}" }) |tail| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
     }
     inline for (.{ ",\"offset\":\"01\"}", ",\"offset\":\"-1\"}", ",\"offset\":\"18446744073709551616\"}" }) |tail| {
         var source: MetadataSource = .{ .input = head ++ tail };

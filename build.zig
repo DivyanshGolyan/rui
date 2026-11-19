@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    const units = unit_module.add(b, ci, target, pinned_transport, test_filters);
+    const units = unit_module.add(b, ci, target, pinned_transport, test_filters, pr_ci);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
@@ -359,7 +359,7 @@ pub fn build(b: *std.Build) void {
     host_status_step.dependOn(&host_status_integration.step);
 
     const upgrade_release = product.addIntegrationRui(b, target, "rui-upgrade-release-fixture", pinned_transport, pr_ci, .{
-        .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
+        .version = b.fmt("0.{d}.10000", .{product.schemaVersion(b)}),
         .revision = product.buildIdentity(b).revision,
     });
     // Keep PR archive work representative of stripped Linux release payloads.

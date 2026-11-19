@@ -19,6 +19,8 @@ const configure_input = @import("configure_input.zig");
 const process_memory = @import("process_memory.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const content_value = @import("content_value.zig");
+const value_reads = @import("value_reads.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
@@ -126,7 +128,7 @@ pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
-    first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
+    first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
@@ -626,14 +628,14 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
         try self.initScreen(screen);
     }
     self.screen_fresh = false;
-    var opened: [6]std.Io.File = undefined;
+    var opened: [7]std.Io.File = undefined;
     var count: usize = 0;
     errdefer for (opened[0..count]) |file| file.close(self.init.io);
     for (&opened) |*file| {
         file.* = try self.hooks.scratch(self.init);
         count += 1;
     }
-    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].* };
+    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].*, .parts = opened[6] };
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
@@ -772,7 +774,7 @@ fn keepUpgrade(self: *Self) !void {
 
 fn disposeSession(self: *Self, left: Left) void {
     if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "details" }) |name| @field(files, name).close(self.init.io);
+        inline for (.{ "scratch", "action", "inspection", "details", "parts" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
     if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
@@ -1331,7 +1333,7 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
-            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
+            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, read.content, &line.bytes)) {
                 .line => |text| {
                     line.result = .line;
                     line.len = text.len;
@@ -1850,8 +1852,9 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     return null;
 }
 
-fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
-    return requests.readActivityPrefix(self.options.store, session, position, buffer);
+/// A parts value reads its part list into the scratch, which no other job holds while this one runs.
+fn firstLine(self: *Self, requests: client.Requests, session: []const u8, position: u64, value: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    return value_reads.firstLine(requests, self.options.store, session, position, value, self.scratch.?, buffer);
 }
 
 fn createSession(self: *Self, requests: client.Requests, input: configure_input.ConfigureInput, reply: *Reply) !void {
@@ -1987,14 +1990,14 @@ const fake_operations: Operations = .{
                 row.reference.set(reference) catch unreachable;
                 row.workspace.set("/work") catch unreachable;
                 row.model.set("gpt-5.5") catch unreachable;
-                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .length = 27, .digest = @splat(0) } };
+                row.first_message = .{ .position = 1, .admission = 4, .admitted_at = since, .sender = null, .content = .{ .text = .{ .length = 27, .digest = @splat(0) } } };
                 row.peers.from_person_at = since;
             }
             return null;
         }
     }.list,
     .first_line = struct {
-        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        fn firstLine(_: *Self, _: client.Requests, session: []const u8, position: u64, _: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
             Seen.now.line = .{ .session = session[0..6].*, .position = position };
             const text = "Fix the flaky test\nand more";
             @memcpy(buffer[0..text.len], text);
@@ -2813,7 +2816,7 @@ test "a canonical Store failure in a listing ends the overview" {
 test "a refused first line answers its row, and a canonical Store failure ends the overview" {
     const Refuse = struct {
         var code: []const u8 = "";
-        fn firstLine(_: *Self, _: client.Requests, _: []const u8, _: u64, _: []u8) !protocol_reply.ActivityPrefixReply {
+        fn firstLine(_: *Self, _: client.Requests, _: []const u8, _: u64, _: content_value.Value, _: []u8) !protocol_reply.ActivityPrefixReply {
             return .{ .failure = readFailure(code) };
         }
     };
@@ -7003,9 +7006,10 @@ const EmptySessionOwner = struct {
         return null;
     }
 
-    fn firstMessageLine(_: *Self, _: client.Requests, reference: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+    fn firstMessageLine(_: *Self, _: client.Requests, reference: []const u8, position: u64, value: content_value.Value, buffer: []u8) !protocol_reply.ActivityPrefixReply {
         const row = canonical(reference);
         try std.testing.expectEqual(row.first_message.?.position, position);
+        try std.testing.expectEqualDeep(row.first_message.?.content, value);
         @memcpy(buffer[0..message.len], message);
         return .{ .line = buffer[0..message.len] };
     }
@@ -7358,7 +7362,7 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
     try fixture.expectSelectedName(reference, "New chat");
     const row = EmptySessionOwner.canonical(&reference);
-    row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+    row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } } };
     row.end = 2;
     row.revision += 1;
     row.peers.from_person_at = test_now_s;
@@ -7552,7 +7556,7 @@ test "App list selection consumes the core projection through arrivals covered S
 
     const second = try fixture.openNew();
     for (EmptySessionOwner.rows[0..EmptySessionOwner.count]) |*row| {
-        row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+        row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } } };
         row.end = 1;
         row.revision += 1;
         row.peers.from_person_at = test_now_s;
@@ -8344,7 +8348,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
                 row.model.set("gpt-5.5") catch unreachable;
             }
             page.rows[2].archive_state = .archived;
-            for (page.rows[3..5]) |*row| row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s, .sender = null, .content = .{ .length = 1, .digest = @splat(0) } };
+            for (page.rows[3..5]) |*row| row.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 1, .digest = @splat(0) } } };
             return null;
         }
     };

@@ -14,7 +14,7 @@ import threading
 import time
 from collections import Counter
 
-from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background
+from background_action_cases import prove_native_background, prove_model_action_read, prove_automatic_background, prove_background_action_values
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, assert_caller_error, PauseGate, canonical_fixture_root, dispose_all, retain_failure_state
@@ -883,6 +883,7 @@ def main():
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
     prove_native_background(state)
+    prove_background_action_values(state)
     prove_model_action_read(state)
     prove_automatic_background(state)
     prove_spill_delivery_outcomes(state)
@@ -1279,7 +1280,7 @@ def main():
         domain = b"rui/content/v1"
         expected_digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected_bytes).hexdigest()
         assert metadata["code"] == "succeeded" and int(metadata["position"]) > 0, metadata
-        assert metadata["content"] == {"bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
+        assert metadata["content"] == {"type": "text", "bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
         page = first_read
         assembled = bytearray()
         while True:

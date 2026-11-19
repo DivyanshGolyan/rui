@@ -1,5 +1,7 @@
 
 import type { InterruptTarget, Link, ServedWork } from "./sessions.ts";
+import { ContentIsPartsError, RuiRequestError } from "./errors.ts";
+import { listParts, readPartBytes, type ContentValue, type Part } from "./parts.ts";
 import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -78,8 +80,10 @@ type EntryText = {
 	text?: string;
 	/** Text exceeds 16 KiB: use `session.readContent(entry)`. */
 	truncated?: boolean;
-	/** The text's length in bytes, when this kind carries text. */
+	/** The value's length in bytes when this kind carries one: the text's length, or the manifest's for a parts value. */
 	contentBytes?: string;
+	/** Certified parts, in order, when the content is a parts value. */
+	parts?: Part[];
 };
 
 type EntryFromRow<R extends Row> = R extends Row ? {
@@ -114,13 +118,15 @@ function camelCase(row: Record<string, unknown>): Record<string, unknown> {
 	return Object.fromEntries(Object.entries(row).map(([name, value]) => [camel(name), value]));
 }
 
-function isReference(value: unknown): value is Schemas["ActivityItemContent"] {
-	return typeof value === "object" && value !== null && "bytes" in value && "sha256" in value;
+function contentOf(payload: Record<string, unknown>): ContentValue | undefined {
+	const value = payload.content;
+	if (typeof value !== "object" || value === null || !("type" in value)) return undefined;
+	return value.type === "text" || value.type === "parts" ? value as ContentValue : undefined;
 }
 
-function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ActivityItemContent"] | undefined } {
+function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ContentValue"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
-	const reference = isReference(payload.content) ? payload.content : undefined;
+	const reference = contentOf(payload);
 	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));
 	const entry = {
 		kind,
@@ -163,8 +169,14 @@ function contentBody(store: string, session: string, entry: { position: string; 
 
 const MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
 
-export function readContentBytes(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<Buffer> {
-	return link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
+/** The Host owns the rule: its text route refuses a parts value as `ContentIsParts`. */
+export async function readContentBytes(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<Buffer> {
+	try {
+		return await link.exchange("/v1/activity-content", (store) => contentBody(store, session, entry), undefined, { max: MAX_CONTENT_BYTES });
+	} catch (error) {
+		if (error instanceof RuiRequestError && error.code === "ContentIsParts") throw new ContentIsPartsError();
+		throw error;
+	}
 }
 
 export async function readContent(link: Link, session: string, entry: { position: string; ordinal: string }): Promise<string> {
@@ -215,7 +227,22 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 					if (signal?.aborted) return;
 					const { entry, reference } = entryOf(row);
 					if (reference && "content" in entry) {
-						if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
+						if (reference.type === "parts") {
+							entry.parts = await listParts(link, session, reference.owner);
+							// One entry inlines at most INLINE_TEXT_BYTES across its Text parts, as a text entry does.
+							let inline = INLINE_TEXT_BYTES;
+							for (const part of entry.parts) {
+								if (part.type !== "text") continue;
+								if (signal?.aborted) return;
+								const bytes = Number(part.bytes);
+								if (bytes > inline) {
+									part.truncated = true;
+									continue;
+								}
+								inline -= bytes;
+								part.text = (await readPartBytes(link, session, reference.owner, part.ordinal, { prefix: INLINE_TEXT_BYTES })).toString("utf8");
+							}
+						} else if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
 							entry.truncated = true;
 						} else {
 							const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });

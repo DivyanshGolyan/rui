@@ -1098,7 +1098,7 @@ pub const TestingAttempt = struct {
         try submitTestMessage(storage, tmp, "attempt-input", "attempt-message", session.slice(), "work");
         return .{
             .binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding,
-            .content = (try store_testing.observeCommandForTesting(storage, "attempt-message")).kind.message.?.content,
+            .content = (try store_testing.observeCommandForTesting(storage, "attempt-message")).kind.message.?.content.text,
         };
     }
 
@@ -1127,7 +1127,6 @@ pub const EntryPoint = enum {
     decidePermission,
     declineForMessage,
     observeCommand,
-    observeCommandPart,
     commandResult,
     inspectSession,
     publicConversationPage,
@@ -1143,6 +1142,7 @@ pub const EntryPoint = enum {
     actionContent,
     readAction,
     backgroundAction,
+    publishActionValue,
     stopAction,
     admitModelAttempt,
     advancePartsPressure,
@@ -1206,7 +1206,6 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .decidePermission = 2,
     .declineForMessage = 2,
     .observeCommand = 3,
-    .observeCommandPart = 1,
     .commandResult = 1,
     .inspectSession = 3,
     .publicConversationPage = 4,
@@ -1222,6 +1221,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .actionContent = 2,
     .readAction = 1,
     .backgroundAction = 2,
+    .publishActionValue = 3,
     .stopAction = 3,
     .admitModelAttempt = 2,
     .advancePartsPressure = 1,

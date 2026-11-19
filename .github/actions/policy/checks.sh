@@ -1,25 +1,49 @@
 #!/usr/bin/env bash
 # The policy checks, in one owner for both callers: the policy job runs them in the
 # foreground through action.yml; check.yml's single PR job runs them beside its compile.
-# Every check runs even after another fails, so one run reports every policy failure.
+# Every check runs, concurrently, even after another fails, so one run reports every policy failure.
 # Input: SKIPS, the JSON list of policy self-checks whose inputs are unchanged.
 # Needs the job's infrastructure steps first: pinned packages, Node, the pinned workflow linter.
 set -uo pipefail
-failed=()
+logs=$(mktemp -d "${RUNNER_TEMP:-/tmp}/policy-checks.XXXXXX")
+names=()
+pids=()
 
+# Starts one check in the background with its own log; report waits for every check and
+# prints the logs in the order the checks were started.
 check() {
-  local name=$1
+  local index=${#names[@]}
+  names+=("$1")
   shift
-  echo "::group::$name"
-  local started=$SECONDS
-  "$@"
-  local status=$?
-  echo "::endgroup::"
-  if [ "$status" -ne 0 ]; then
-    echo "::error::$name failed (exit $status)"
-    failed+=("$name")
+  (
+    started=$SECONDS
+    "$@"
+    status=$?
+    echo "$((SECONDS - started))" > "$logs/$index.seconds"
+    exit "$status"
+  ) > "$logs/$index" 2>&1 &
+  pids+=("$!")
+}
+
+report() {
+  local failed=() index status
+  for index in "${!names[@]}"; do
+    wait "${pids[$index]}"
+    status=$?
+    echo "::group::${names[$index]}"
+    cat "$logs/$index"
+    echo "::endgroup::"
+    if [ "$status" -ne 0 ]; then
+      echo "::error::${names[$index]} failed (exit $status)"
+      failed+=("${names[$index]}")
+    fi
+    echo "${names[$index]}: exit $status after $(cat "$logs/$index.seconds" 2>/dev/null || echo '?') s"
+  done
+  rm -rf "$logs"
+  if [ "${#failed[@]}" -ne 0 ]; then
+    printf 'Policy checks failed: %s\n' "${failed[@]}"
+    exit 1
   fi
-  echo "$name: exit $status after $((SECONDS - started)) s"
 }
 
 typescript_client() (
@@ -59,7 +83,4 @@ check "Reject undefined fixture names before native builds" python3 -m ruff chec
 check "Check the TypeScript client's generated wire types and type-check it" typescript_client
 check "Validate workflows with pinned-linter compatibility exceptions" workflows
 
-if [ "${#failed[@]}" -ne 0 ]; then
-  printf 'Policy checks failed: %s\n' "${failed[@]}"
-  exit 1
-fi
+report

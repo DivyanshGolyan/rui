@@ -93,6 +93,8 @@ test "tool picker replacement retains explicit empty singleton none and unreacha
         .{ .allowed = &.{ "bash", "none" }, .loaded = &.{ "bash", "none" }, .selected = .empty, .want_allowed = "none", .want_loaded = "none" },
         .{ .allowed = &.{ "bash", "find_tools", "lookup" }, .loaded = &.{ "find_tools", "lookup" }, .selected = .initOne(.find_tools), .want_allowed = "find_tools lookup", .want_loaded = "find_tools lookup" },
         .{ .allowed = &.{ "find_tools", "lookup" }, .loaded = &.{"lookup"}, .selected = .empty, .want_allowed = "lookup", .want_loaded = "lookup" },
+        .{ .allowed = &.{ "bash", "find_tools", "lookup" }, .loaded = &.{ "bash", "find_tools" }, .selected = .initOne(.bash), .want_allowed = "bash lookup", .want_loaded = "bash" },
+        .{ .allowed = &.{"bash"}, .loaded = &.{"bash"}, .selected = .initMany(&.{ .bash, .message_agent }), .want_allowed = "bash message_agent", .want_loaded = "bash" },
         .{ .allowed = &.{"bash"}, .loaded = &.{}, .selected = .initOne(.bash), .want_allowed = "bash", .want_loaded = "" },
     };
     for (cases) |case| {

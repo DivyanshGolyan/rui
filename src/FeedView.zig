@@ -644,7 +644,7 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     try prepared.prepare();
     const first_mark = prepared.collapsed(0, prepared.text().len).last.?;
     const first = std.mem.indexOf(u8, prepared.text(), "┄").?;
-    const a: View.Collapsed = .{ .source = .activity, .position = 11, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) }, .row = true };
+    const a: View.Collapsed = .{ .source = .activity, .position = 11, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
     var b = a;
     b.position = 12;
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{ .{ .offset = first, .target = a }, .{ .offset = first_mark, .target = b } } }});
@@ -863,7 +863,7 @@ test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earli
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\n");
     try prepared.prepare();
     const aggregate = prepared.collapsed(0, prepared.length).last.?;
-    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = target }} }});
     var anchor: Feed = .{};
     var view: Self = .{ .window = window, .anchor = &anchor };
@@ -1010,7 +1010,7 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
     var prepared: viewport.Sized(1024, true) = .{};
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\nplain " ++ Text.link_open ++ Text.session_link ++ "k7m2qx" ++ Text.link_end ++ "Review this plan" ++ Text.link_close ++ " end\n");
     try prepared.prepare();
-    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = message }} }});
     var anchor: Feed = .{};
     var actions: Actions = .{};

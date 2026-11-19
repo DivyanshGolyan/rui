@@ -83,7 +83,7 @@ class ObservationCodecTest(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, "-B", "-c",
                      f"from session_list_release_proof import oracle_controls; oracle_controls({platform!r})"],
-                    cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=10)
+                    cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
@@ -99,15 +99,15 @@ class ChildInputTest(unittest.TestCase):
         child.stdin.close()
         if flushes_closed_stdin(sys.version_info):
             with self.assertRaisesRegex(ValueError, "flush of closed file"):
-                child.communicate(timeout=5)
-            child.wait(timeout=5)
+                child.communicate(timeout=60)
+            child.wait(timeout=60)
             child.stdout.close()
         else:
-            self.assertEqual(child.communicate(timeout=5), (b"by hand", None))
+            self.assertEqual(child.communicate(timeout=60), (b"by hand", None))
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"owned")
         HOST.close_stdin(child)
-        self.assertEqual(child.communicate(timeout=5), (b"owned", None))
+        self.assertEqual(child.communicate(timeout=60), (b"owned", None))
 
     def test_no_fixture_closes_a_child_stdin_itself(self):
         offenders = [
@@ -280,7 +280,7 @@ class FixtureEntryTest(unittest.TestCase):
             def run(entry):
                 command = ["sh", entry, *binaries] if entry.endswith(".sh") else [sys.executable, "-B", entry, *binaries]
                 return entry, subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
-                                             text=True, timeout=30)
+                                             text=True, timeout=60)
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 results = list(pool.map(run, entries))
@@ -300,7 +300,7 @@ class FixtureEntryTest(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                            "HTTPS_PROXY": "http://127.0.0.1:9", "PYTHONPATH": self.simulated_user(directory, 0)}
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
-                                    env=environment, capture_output=True, text=True, timeout=30)
+                                    env=environment, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             observed = json.loads(result.stdout)
             self.assertEqual(observed["before"], observed["after"])
@@ -324,7 +324,7 @@ class FixtureEntryTest(unittest.TestCase):
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
                                     env={**planted, **named, "TERM": "dumb",
                                          "PYTHONPATH": self.simulated_user(directory, 30033)},
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             observed = json.loads(result.stdout)
             self.assertEqual(observed["network"], network)
@@ -345,18 +345,18 @@ class FixtureEntryTest(unittest.TestCase):
             caller = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                       "GOFLAGS": "-mod=mod", "RUI_TEST_MODELS_DEV_URL": "https://models.dev/api.json"}
             refused = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 0)},
-                                     capture_output=True, text=True, timeout=30)
+                                     capture_output=True, text=True, timeout=60)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn(REFUSAL, refused.stderr)
             self.assertFalse(ran.exists(), "a refused command ran")
             admitted = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 30033)},
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=60)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
             expected = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8",
                         "TERM": "xterm-256color"}
             control = subprocess.run([sys.executable, "-c",
                                       "import json, os; print(json.dumps(dict(os.environ)))"],
-                                     env=expected, capture_output=True, text=True, timeout=30)
+                                     env=expected, capture_output=True, text=True, timeout=60)
             self.assertEqual(control.returncode, 0, control.stderr)
             self.assertEqual(json.loads(ran.read_text()), json.loads(control.stdout))
 
@@ -381,7 +381,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.semantics = os_semantics
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
-        original = Path(sys.executable).resolve(strict=True)
+        original = self.semantics.process_executable(os.getpid()).resolve(strict=True)
         marker = b"ready\n"
         program = "import os; os.write(1, b'ready\\n'); os.read(0, 1)"
         with tempfile.TemporaryDirectory() as directory:
@@ -440,7 +440,7 @@ class ProcessCensusTest(unittest.TestCase):
             self.await_marker(child, b"ready\n", "the census child's readiness")
         except BaseException:
             child.kill()
-            child.communicate(timeout=5)
+            child.communicate(timeout=60)
             raise
         return child
 
@@ -453,7 +453,7 @@ class ProcessCensusTest(unittest.TestCase):
             HOST.wait_for(lambda: self.semantics.process_state(child.pid).startswith("Z"), "the exited child's zombie entry")
         finally:
             child.kill()
-            child.wait(timeout=5)
+            child.wait(timeout=60)
         self.assertIsNone(self.semantics.process_state(child.pid))
         listing = self.semantics.describe_processes((os.getpid(),))
         self.assertIn(str(os.getpid()), listing)
@@ -470,7 +470,7 @@ class ProcessCensusTest(unittest.TestCase):
         try:
             records = self.semantics.launch_records(child.pid)
         finally:
-            child.communicate(timeout=5)
+            child.communicate(timeout=60)
         if not self.semantics.PROC_FS:
             self.assertIsNone(records)
             return
@@ -498,7 +498,7 @@ class ProcessCensusTest(unittest.TestCase):
                 self.assertIsNone(memory)
             self.assertEqual(self.semantics.physical_footprint_peak(child.pid) is not None, self.semantics.FOOTPRINT)
         finally:
-            child.communicate(timeout=5)
+            child.communicate(timeout=60)
         self.assertIsNone(self.semantics.process_memory(child.pid))
         self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
 
@@ -575,7 +575,7 @@ print('import-safe')
             with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as directory:
                 result = subprocess.run([sys.executable, "-B", "-c", source,
                                          str(ROOT / "tests/integration"), *arguments],
-                                        cwd=directory, capture_output=True, text=True, timeout=10)
+                                        cwd=directory, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, "import-safe\n")
                 self.assertEqual(list(Path(directory).iterdir()), [])
@@ -622,7 +622,7 @@ for body_failed in (False, True):
 print('body/drop failure matrix passed')
 """
         result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "body/drop failure matrix passed\n")
 

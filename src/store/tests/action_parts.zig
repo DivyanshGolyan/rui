@@ -177,7 +177,8 @@ fn exercise(case: *testing.Case, background: bool) !void {
                 var read: action_read.Read = undefined;
                 const request: action_read.Request = .{ .session = session, .action_id = selected.action_id };
                 if (compound) {
-                    try std.testing.expectError(error.InputPartsNotSupported, storage.readAction(&request, &read));
+                    try storage.readAction(&request, &read);
+                    try std.testing.expectEqual(@import("../../content_value.zig").Owner{ .action = selected.action_id }, read.status.resolved_parts.content.parts.owner);
                 } else {
                     try storage.readAction(&request, &read);
                     try std.testing.expectEqualStrings(parts[0].bytes, read.status.resolved.window.text.slice());

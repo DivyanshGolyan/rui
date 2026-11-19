@@ -102,7 +102,7 @@ pub const Batch = struct {
 
     /// Every entry placed against `store` (none when null) and folded by
     /// `host_activation`; an entry still only observed counts as failed there.
-    fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
+    pub fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
         var tally: activation.Tally = .{};
         for (self.entries) |entry| tally.add(.{
             .place = if (entry.directory orelse entry.store) |path|
@@ -205,6 +205,7 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
     for (batch.entries) |*entry| {
         if (entry.state != .observed) continue;
         const facts = entry.state.observed;
+        // #1791: an error `activate` returns, even before the stop, is reported as an unconfirmed start.
         entry.state = .{ .outcome = outcome: {
             process.check(options.cancellation) catch break :outcome .cancelled;
             var observation = HostLifecycle.observe(allocator, init.io, options.home, facts.directory(), options.cancellation) catch |err| {
@@ -226,9 +227,9 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
             }
             const target = options.target orelse &selected.?;
             const current = observation.managed.observed;
-            if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
-                !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) break :outcome .replacement_observed;
-            break :outcome HostLifecycle.activate(init, allocator, &observation, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
+            const census: @FieldType(activation.Facts, "census") = if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
+                !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) .replaced else .same;
+            break :outcome HostLifecycle.activate(init, allocator, &observation, census, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
         } };
     }
     return batch;

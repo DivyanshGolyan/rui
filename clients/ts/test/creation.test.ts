@@ -106,7 +106,7 @@ async function checkEmptyPreferences() {
 	await sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", preferences: {} }, { idempotencyKey: "chosen:preferences" });
 }
 
-test("TS-7 creation_intent", async () => {
+test("TS-8 creation_intent", async () => {
 	await checkCreationCombinations();
 	await checkEmptyAndNull();
 	await checkPresetOverrides();

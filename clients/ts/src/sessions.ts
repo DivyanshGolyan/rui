@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -232,6 +233,12 @@ export class Session {
 		return readContentBytes(this.#link, this.id, entry);
 	}
 
+	/** The exact bytes of one part of a parts entry; rejects with `TypeError` for an entry whose content is not parts. */
+	async readPart(entry: { content: ContentValue | null }, ordinal: number): Promise<Buffer> {
+		if (entry.content?.type !== "parts") throw new TypeError("entry content is not parts");
+		return readPartBytes(this.#link, this.id, entry.content.owner, ordinal);
+	}
+
 	/** A Current report's summary (D12). A separate ending is not reported. */
 	async status(): Promise<SessionStatus> {
 		const reply = parse<Extract<Schemas["InspectSessionReply"], { profile: "current" }>>(
@@ -397,9 +404,9 @@ export class Session {
 	}
 
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
-	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+	async readAction(action: string, offset = "0", after = "0"): Promise<ActionStatus> {
 		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
-			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset, after,
 		} satisfies Schemas["ReadActionRequest"])));
 	}
 

@@ -2012,7 +2012,7 @@ test "Chat info contains only chat settings and never an app Memory row" {
 }
 
 test "Chat info allowed picker retains MCP names on no-op cancellation and built-in edits" {
-    for ([_]enum { noop, cancel, remove_bash }{ .noop, .cancel, .remove_bash }) |mode| {
+    for ([_]u16{ 140, 46 }) |width| for ([_]enum { noop, cancel, remove_bash, add_message_agent }{ .noop, .cancel, .remove_bash, .add_message_agent }) |mode| {
         var fixture: Fixture = .{};
         fixture.init();
         fixture.session.tools = try .of(&.{ "bash", "find_tools", "lookup", "none" });
@@ -2022,11 +2022,15 @@ test "Chat info allowed picker retains MCP names on no-op cancellation and built
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 30 }, .cell_size = .{} });
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("Allowed tools", page.fields[2].label);
-        try std.testing.expectEqualStrings("bash, find_tools, lookup, none", page.fields[2].value);
+        try std.testing.expectEqualStrings(if (width == 140) "bash, find_tools, lookup, none" else "bash, find_tools, lookup…", page.fields[2].value);
         page.panel.selected = 2;
         try press(&page, &ctx, vaxis.Key.enter);
+        if (mode == .add_message_agent) {
+            try press(&page, &ctx, vaxis.Key.down);
+            try press(&page, &ctx, vaxis.Key.down);
+        }
         if (mode != .noop) try press(&page, &ctx, ' ');
         try press(&page, &ctx, if (mode == .cancel) vaxis.Key.escape else vaxis.Key.enter);
         try std.testing.expectEqualStrings("bash find_tools lookup none", page.session.tools.names.slice());
@@ -2034,10 +2038,16 @@ test "Chat info allowed picker retains MCP names on no-op cancellation and built
         if (mode == .cancel) {
             try std.testing.expect(fixture.edit == null);
         } else {
-            try std.testing.expectEqualStrings(if (mode == .noop) "bash find_tools lookup none" else "find_tools lookup none", fixture.edit.?.tools.allowed.names.slice());
+            const expected = switch (mode) {
+                .noop => "bash find_tools lookup none",
+                .remove_bash => "find_tools lookup none",
+                .add_message_agent => "bash find_tools lookup message_agent none",
+                .cancel => unreachable,
+            };
+            try std.testing.expectEqualStrings(expected, fixture.edit.?.tools.allowed.names.slice());
             try std.testing.expectEqualStrings("find_tools none", fixture.edit.?.tools.loaded.names.slice());
         }
-    }
+    };
 }
 
 test "Chat info distinguishes empty allowed intent from an MCP tool named none" {
@@ -2069,4 +2079,113 @@ test "Chat info explains invalid loaded membership on the allowed tools row" {
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings(" · loaded tools aren't allowed", page.failures[2].?);
     try std.testing.expect(fixture.edit == null);
+}
+
+test "SUI-4 Chat info tools rejection reopens saved intent and accepts retry at both widths" {
+    const cases = [_]struct {
+        allowed: []const []const u8,
+        loaded: []const []const u8,
+        down: usize,
+        rejected_allowed: []const u8,
+        rejected_loaded: []const u8,
+        saved_allowed: []const u8,
+        saved_loaded: []const u8,
+    }{
+        .{ .allowed = &.{ "bash", "find_tools", "lookup" }, .loaded = &.{ "bash", "find_tools" }, .down = 1, .rejected_allowed = "bash lookup", .rejected_loaded = "bash", .saved_allowed = "bash find_tools lookup", .saved_loaded = "bash find_tools" },
+        .{ .allowed = &.{"bash"}, .loaded = &.{"bash"}, .down = 2, .rejected_allowed = "bash message_agent", .rejected_loaded = "bash", .saved_allowed = "bash", .saved_loaded = "bash" },
+        .{ .allowed = &.{}, .loaded = &.{}, .down = 0, .rejected_allowed = "bash", .rejected_loaded = "", .saved_allowed = "", .saved_loaded = "" },
+    };
+    for ([_]u16{ 140, 46 }) |width| for (cases) |case| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(case.allowed);
+        fixture.session.loaded_tools = try .of(case.loaded);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try dump(&page, arena.allocator(), width, 30);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        for (0..case.down) |_| try press(&page, &ctx, vaxis.Key.down);
+        try press(&page, &ctx, ' ');
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.rejected_allowed, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.rejected_loaded, fixture.edit.?.tools.loaded.names.slice());
+        try std.testing.expectEqual(@as(?usize, 2), page.pending);
+        fixture.state_value = .failed;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, null), page.pending);
+        try std.testing.expectEqual(@as(usize, 2), page.panel.selected);
+        try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+        const failed = try dump(&page, arena.allocator(), width, 30);
+        try std.testing.expect(std.mem.indexOf(u8, failed, "couldn't save") != null);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.hasChoice());
+        try std.testing.expectEqualStrings(case.saved_allowed, page.session.tools.names.slice());
+        try std.testing.expectEqualStrings(case.saved_loaded, page.session.loaded_tools.names.slice());
+        const saved_selection = fixture.session.builtInTools();
+        for (std.enums.values(tools.BuiltInTool)) |tool| {
+            try std.testing.expectEqual(saved_selection.contains(tool), page.tool_draft.?.contains(tool));
+        }
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 2), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.saved_allowed, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.saved_loaded, fixture.edit.?.tools.loaded.names.slice());
+        fixture.state_value = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, null), page.pending);
+        try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+    };
+}
+
+test "SUI-4 Chat info saves explicit empty restricted and singleton MCP tools" {
+    const cases = [_]struct { allowed: []const []const u8, loaded: []const []const u8, remove_bash: bool, expected: []const u8 }{
+        .{ .allowed = &.{}, .loaded = &.{}, .remove_bash = false, .expected = "" },
+        .{ .allowed = &.{"bash"}, .loaded = &.{"bash"}, .remove_bash = false, .expected = "bash" },
+        .{ .allowed = &.{ "bash", "none" }, .loaded = &.{ "bash", "none" }, .remove_bash = true, .expected = "none" },
+    };
+    for ([_]u16{ 140, 46 }) |width| for (cases) |case| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(case.allowed);
+        fixture.session.loaded_tools = try .of(case.loaded);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try dump(&page, arena.allocator(), width, 30);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        if (case.remove_bash) try press(&page, &ctx, ' ');
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 1), fixture.save_calls);
+        try std.testing.expectEqualStrings(case.expected, fixture.edit.?.tools.allowed.names.slice());
+        try std.testing.expectEqualStrings(case.expected, fixture.edit.?.tools.loaded.names.slice());
+    };
+}
+
+test "SUI-4 Chat info permission wording follows mode across tool sets" {
+    const sets = [_][]const []const u8{ &.{}, &.{"bash"}, &.{"web_search"}, &.{ "bash", "web_search" } };
+    for ([_]u16{ 140, 46 }) |width| for ([_]@FieldType(status.Session, "permission"){ .ask, .bypass }) |mode| for (sets) |set| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.permission = mode;
+        fixture.session.tools = try .of(set);
+        fixture.session.loaded_tools = try .of(set);
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try dump(&page, arena.allocator(), width, 30);
+        try std.testing.expectEqualStrings(if (mode == .ask) "ask first" else "run without asking", page.fields[1].value);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Permissions") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (mode == .ask) "ask first" else "run without asking") != null);
+        if (mode == .ask) try std.testing.expect(std.mem.indexOf(u8, text, "without asking") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Bash runs without") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Bash commands can run without asking you") == null);
+    };
 }

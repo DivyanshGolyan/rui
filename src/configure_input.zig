@@ -201,7 +201,7 @@ fn checkImageToolIntent() !void {
     }
 }
 
-test "CLI-23 saved creation intent" {
+test "CLI-29 saved creation intent" {
     try checkCreationCombinations();
     try checkSavedEffort();
     try checkCreationReads();

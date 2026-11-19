@@ -49,13 +49,7 @@ pub fn renderMessageReply(
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
-        .accepted => |value| if (value.configuration) |config| switch (value.form) {
-            .bytes => response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, value.content.length, value.content.digest, value.admission_id }),
-            .parts => response.appendShape(shapes.accepted_parts_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, value.content.length, value.content.digest, value.admission_id }),
-        } else switch (value.form) {
-            .bytes => response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-            .parts => response.appendShape(shapes.accepted_parts, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-        },
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, protocol.MessageInputJson{ .value = value.content }, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, protocol.MessageInputJson{ .value = value.content }, value.admission_id }),
         .rejected => |value| switch (value.form) {
             .bytes => renderToolRejection(response, session, value, shapes.rejected),
             .parts => renderToolRejection(response, session, value, shapes.rejected_parts),
@@ -84,7 +78,7 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
         if (index != 0) try response.append(",");
         switch (item.kind) {
             .hosted_call => try response.appendShape(shapes.hosted_call, .{ item.position, item.ordinal }),
-            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
+            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, protocol.ContentValueJson{ .value = item.content } }),
         }
         switch (item.kind) {
             .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender), item.source_action }),
@@ -181,9 +175,17 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
     try response.appendShape(shapes.head, .{ value.session.slice(), value.action_id });
     switch (value.status) {
         .pending => |state| try response.appendShape(shapes.pending, .{state}),
-        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
-        .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), final.content.length, final.content.digest }),
+        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), protocol.ContentValueJson{ .value = final.resolution.content }, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
+        .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), protocol.ContentValueJson{ .value = final.content } }),
     }
+    try response.writer.writeAll(shapes.values_head);
+    try response.writer.writeByte('[');
+    for (value.values.items[0..value.values.count], 0..) |item, index| {
+        if (index != 0) try response.writer.writeByte(',');
+        try response.appendShape(shapes.item, .{ item.ordinal, item.key.slice(), value.values.bytes[item.start..][0..item.length] });
+    }
+    try response.writer.writeByte(']');
+    try response.appendShape(shapes.values_tail, .{ value.values.next, value.values.more });
 }
 
 pub fn commandObservationBytes(observed: *const command_reply.Observed) usize {
@@ -219,37 +221,34 @@ pub fn renderFullCommandObservation(
     if (observation.kind == .message) try response.appendShape(shapes.state, .{observation.requestState() orelse return error.InvalidCommandObservation});
     switch (observation.kind) {
         .configure => |configured| if (observation.status == .accepted) try response.appendShape(shapes.revision, .{ configured.revision, configured.created }),
-        .message => |*maybe_message| if (maybe_message.*) |*message| {
-            switch (message.form) {
-                .bytes => try response.appendShape(shapes.input, .{ message.content.length, message.content.digest }),
-                .parts => try response.appendShape(shapes.input_parts, .{ message.content.length, message.content.digest }),
+        .message => |*maybe_message| if (observation.status == .accepted) {
+            const message = if (maybe_message.*) |*value| value else return error.InvalidCommandObservation;
+            const accepted = message.queue orelse return error.InvalidCommandObservation;
+            try response.appendShape(shapes.input, .{protocol.MessageInputJson{ .value = message.content }});
+            try response.appendShape(shapes.queue, .{ accepted.admission_id, message.admitted_at });
+            const binding: ?AttemptBinding = switch (accepted.state) {
+                .processing => |value| value,
+                .completed => |value| value.binding,
+                .cancelled => |value| value.binding,
+                .failed => |value| value.binding,
+                .queued, .excluded => null,
+            };
+            if (binding) |bound| try response.appendShape(shapes.binding, .{ bound.turn_id, bound.operation_id, bound.attempt_ordinal });
+            switch (accepted.state) {
+                .completed => |value| try response.appendShape(shapes.completed, .{ value.answer.length, value.answer.digest }),
+                .cancelled => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
+                .excluded => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
+                .failed => |value| try response.appendShape(shapes.failed, .{value.code.slice()}),
+                .queued, .processing => {
+                    const work = message.work orelse return error.InvalidCommandObservation;
+                    const wire: protocol.SessionWork = .fromCore(work);
+                    try response.appendShape(shapes.work, .{ protocol.WorkStateJson{ .state = work.state }, work.first_action } ++ wire.extraArgs());
+                },
             }
-            if (message.queue) |accepted| {
-                try response.appendShape(shapes.queue, .{ accepted.admission_id, message.admitted_at });
-                const binding: ?AttemptBinding = switch (accepted.state) {
-                    .processing => |value| value,
-                    .completed => |value| value.binding,
-                    .cancelled => |value| value.binding,
-                    .failed => |value| value.binding,
-                    .queued, .excluded => null,
-                };
-                if (binding) |bound| try response.appendShape(shapes.binding, .{ bound.turn_id, bound.operation_id, bound.attempt_ordinal });
-                switch (accepted.state) {
-                    .completed => |value| try response.appendShape(shapes.completed, .{ value.answer.length, value.answer.digest }),
-                    .cancelled => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
-                    .excluded => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
-                    .failed => |value| try response.appendShape(shapes.failed, .{value.code.slice()}),
-                    .queued, .processing => {
-                        const work = message.work orelse return error.InvalidCommandObservation;
-                        const wire: protocol.SessionWork = .fromCore(work);
-                        try response.appendShape(shapes.work, .{ protocol.WorkStateJson{ .state = work.state }, work.first_action } ++ wire.extraArgs());
-                    },
-                }
-                if (message.recovery.count != 0) try response.appendShape(shapes.recovery, .{protocol.MessageRecoveryJson{
-                    .calls = message.recovery.calls[0..message.recovery.count],
-                    .more = message.recovery.more,
-                }});
-            }
+            if (message.recovery.count != 0) try response.appendShape(shapes.recovery, .{protocol.MessageRecoveryJson{
+                .calls = message.recovery.calls[0..message.recovery.count],
+                .more = message.recovery.more,
+            }});
         },
         .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
         .session_pin => |pin| if (pin) |value| try response.appendShape(shapes.session_pin, .{value.pinned}),
@@ -327,6 +326,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const escaped_code = @as([protocol.max_code_bytes]u8, @splat(1));
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const content: command_reply.ContentReference = .{ .length = max, .digest = @splat(0xff) };
+    const parts: protocol.content_value.Value = .{ .parts = .{ .identity = content, .owner = .{ .message = max } } };
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set(&escaped_session);
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -387,10 +387,10 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     try std.testing.expectEqual(protocol.message_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
-            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session, .configuration = &config } },
-            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
-            command_reply.MessageReply{ .accepted = .{ .form = .parts, .replayed = false, .admission_id = max, .content = content, .session = session } },
-            command_reply.MessageReply{ .accepted = .{ .form = .parts, .replayed = false, .admission_id = max, .content = content, .session = session, .configuration = &config } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = .{ .text = content }, .session = session } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = parts, .session = session } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = .{ .text = content }, .session = session, .configuration = &config } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = parts, .session = session, .configuration = &config } },
             command_reply.MessageReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
@@ -400,7 +400,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     ));
 
     try std.testing.expectEqual(protocol.shapeBytes(protocol.configuration_reply.accepted_create), protocol.configuration_reply.max_bytes);
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.message_reply.accepted_parts_create), protocol.message_reply.max_bytes);
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.message_reply.accepted_create), protocol.message_reply.max_bytes);
 
     try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderMutationReply(.session_stop), @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },
@@ -458,6 +458,18 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
+    const message: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{
+        .content = parts,
+        .queue = .{ .admission_id = max, .state = .queued },
+        .admitted_at = max,
+        .work = .{ .state = .{ .pending = .{ .since = max } } },
+    } } };
+    try std.testing.expect(try Worst.observation(&escaped_key, message) <= observations.maxBytes(.message));
+    var input_storage: [protocol.MessageInputJson.max_json_bytes]u8 = undefined;
+    var input_writer = std.Io.Writer.fixed(&input_storage);
+    try (protocol.MessageInputJson{ .value = parts }).writeJson(&input_writer);
+    try std.testing.expectEqual(input_storage.len, input_writer.buffered().len);
+
     var configured = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .configure = .{ .revision = max, .created = false } } };
     try configured.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.configure), try Worst.observation(&escaped_key, configured));
@@ -509,7 +521,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .position = max,
             .ordinal = max,
             .kind = kind,
-            .content = content,
+            .content = .{ .parts = .{ .identity = content, .owner = .{ .message = max } } },
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
             .sender = if (kind == .user) .{ .session = session, .label = label } else null,
@@ -524,16 +536,17 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
     const peer: protocol.NamedPeer = .{ .session = session, .label = label };
-    const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
+    const text: @import("content_value.zig").Reference = .{ .length = max, .digest = content.digest };
+    const reference: @import("content_value.zig").Value = .{ .parts = .{ .identity = text, .owner = .{ .message = max } } };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
-        .{ .assistant = .{ .content = reference, .final = false } },
+        .{ .assistant = .{ .content = text, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
+        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = text } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
@@ -561,7 +574,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max };
+    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max, .newest_content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } };
     var longest_state: protocol.WorkState = undefined;
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
@@ -607,6 +620,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 }
 
 test "Action read JSON reaches its exact bound with an escaped final window" {
+    // ARD-3
     const Read = @import("action_read.zig").Read;
     const value = try std.testing.allocator.create(Read);
     defer std.testing.allocator.destroy(value);
@@ -615,10 +629,17 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
         .session = .{ .bytes = @splat(1), .len = protocol.max_session_bytes },
         .action_id = max,
         .status = .{ .resolved = .{
-            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .length = max, .digest = @splat(0xff) } },
+            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } },
             .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
         } },
     };
+    value.values.count = @import("action_read.zig").page_items;
+    value.values.length = @import("action_read.zig").page_bytes;
+    value.values.next = max;
+    @memset(&value.values.bytes, 1);
+    for (&value.values.items, 0..) |*item, i| {
+        item.* = .{ .ordinal = max, .key = .{ .bytes = @splat(1), .len = 128 }, .start = 0, .length = if (i == 0) value.values.length else 0 };
+    }
     const bytes = try std.testing.allocator.alloc(u8, protocol.action_read_reply.max_bytes);
     defer std.testing.allocator.free(bytes);
     var writer = std.Io.Writer.fixed(bytes);
@@ -629,29 +650,61 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer decoded.deinit();
     try std.testing.expectEqualStrings("resolved", decoded.value.object.get("state").?.string);
+    const values = decoded.value.object.get("values").?.object;
+    try std.testing.expectEqual(@as(usize, 16), values.get("items").?.array.items.len);
+    try std.testing.expectEqualStrings("18446744073709551615", values.get("next").?.string);
+    try std.testing.expect(!values.get("more").?.bool);
+    const first = values.get("items").?.array.items[0].object;
+    try std.testing.expectEqual(@as(usize, 16384), first.get("text").?.string.len);
+    try std.testing.expectEqualSlices(u8, value.values.bytes[0..value.values.length], first.get("text").?.string);
     value.status = .{ .pending = .queued };
     writer = .fixed(bytes);
     try renderActionRead(.{ .writer = &writer }, value);
-    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"final\":null,\"values\":") != null);
 }
 
 test "SH-60 Message replies and observations preserve the input form" {
-    const content: command_reply.ContentReference = .{ .length = 41, .digest = @splat(0xab) };
+    const identity: command_reply.ContentReference = .{ .length = 41, .digest = @splat(0xab) };
+    const admission = 73;
+    const digest = "abababababababababababababababababababababababababababababababab";
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");
-    for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
-        const expected = if (form == .bytes) "\"input\":{\"type\":\"text\",\"bytes\":\"41\"" else "\"input\":{\"type\":\"parts\",\"bytes\":\"41\"";
-        for ([_]command_reply.MessageReply{
-            .{ .accepted = .{ .form = form, .replayed = false, .admission_id = 1, .content = content, .session = session } },
-            .{ .rejected = .{ .form = form, .replayed = false, .code = .unknown_session, .content = content } },
-        }) |reply| {
-            var response: protocol.ResponseBuffer = .{};
-            try response.render(renderMessageReply, .{ session.slice(), reply });
-            try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
-        }
-        var observation: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{ .form = form, .content = content, .queue = .{ .admission_id = 1, .state = .queued }, .work = .{ .state = .{ .pending = .{ .since = 10 } } } } } };
+    const cases = .{
+        .{ .form = .bytes, .content = @as(protocol.content_value.Value, .{ .text = identity }), .receipt = "\"input\":{\"type\":\"text\",\"bytes\":\"41\",\"sha256\":\"" ++ digest ++ "\"}", .suffix = "}" },
+        .{ .form = .parts, .content = @as(protocol.content_value.Value, .{ .parts = .{ .identity = identity, .owner = .{ .message = admission } } }), .receipt = "\"input\":{\"type\":\"parts\",\"bytes\":\"41\",\"sha256\":\"" ++ digest ++ "\"}", .suffix = ",\"owner\":{\"message\":\"73\"}}" },
+    };
+    inline for (cases) |case| {
+        var reply: protocol.ResponseBuffer = .{};
+        try reply.render(renderMessageReply, .{ session.slice(), command_reply.MessageReply{ .accepted = .{
+            .replayed = false,
+            .admission_id = admission,
+            .content = case.content,
+            .session = session,
+        } } });
+        const accepted_input = case.receipt[0 .. case.receipt.len - 1] ++ case.suffix;
+        try std.testing.expect(std.mem.indexOf(u8, reply.slice(), accepted_input ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"73\"}") != null);
+
+        reply.len = 0;
+        try reply.render(renderMessageReply, .{ session.slice(), command_reply.MessageReply{ .rejected = .{
+            .form = case.form,
+            .replayed = false,
+            .code = .unknown_session,
+            .content = identity,
+        } } });
+        try std.testing.expect(std.mem.indexOf(u8, reply.slice(), case.receipt) != null);
+
+        const observation: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{
+            .content = case.content,
+            .queue = .{ .admission_id = admission, .state = .queued },
+            .work = .{ .state = .{ .pending = .{ .since = 10 } } },
+        } } };
         var response: protocol.CommandObservationBuffer = .{};
         try response.render(renderFullCommandObservation, .{ "key", &observation, null });
-        try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
+        try std.testing.expect(std.mem.indexOf(u8, response.slice(), accepted_input ++ ",\"queue\":{\"admission\":\"73\"") != null);
     }
+    var rejected: command_reply.CommandObservation = .{ .status = .rejected, .target = session, .kind = .{ .message = null } };
+    try rejected.code.set("unknown_session");
+    var response: protocol.CommandObservationBuffer = .{};
+    try response.render(renderFullCommandObservation, .{ "key", &rejected, null });
+    try std.testing.expect(std.mem.endsWith(u8, response.slice(), "\"code\":\"unknown_session\",\"state\":\"rejected\"}}"));
 }

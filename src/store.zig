@@ -128,6 +128,7 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 test {
     _ = @import("store/Store.zig");
     _ = @import("store/domain/action.zig");
+    _ = @import("store/domain/action_read.zig");
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
     _ = @import("store/tests/access.zig");

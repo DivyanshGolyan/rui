@@ -25,6 +25,7 @@ const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
 const history_floor_domain = @import("history_floor.zig");
 const reads_domain = @import("reads.zig");
+const sourced_input = @import("sourced_input.zig");
 const rsql = @import("../rsql.zig");
 const tool_fulfillment = @import("tool_fulfillment.zig");
 const tool_set = @import("tool_set.zig");
@@ -96,13 +97,23 @@ pub const HistoricalInputPart = struct {
     content: HistoricalContent,
 };
 
+pub const SourceAction = struct {
+    id: u64,
+    session: [session_id.bytes]u8,
+    ordinal_or_zero: u64,
+
+    pub fn ordinal(source: SourceAction) ?u64 {
+        return if (source.ordinal_or_zero == 0) null else source.ordinal_or_zero;
+    }
+};
+
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
     input: ?HistoricalInput = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
-    source_action: ?struct { id: u64, session: Bounded(session_id.bytes) } = null,
+    source_action: ?SourceAction = null,
     sender: ?Bounded(session_id.max_reference_bytes) = null,
     effort: ?model_capability.ReasoningEffort = null,
     tool_set_id: u64 = 0,
@@ -1303,23 +1314,25 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
         if (group.position < ordinary.position) return activateHistoricalToolGroup(view);
     }
     if (ordinary.source_action) |source| {
-        const final = try action_read_domain.readResolution(a, source.session.slice(), source.id);
-        if (ordinary.input) |input| {
-            if (!std.meta.eql(input.value, final.value)) return error.CorruptStore;
-        } else {
-            const reference = if (ordinary.content) |*value| value else return error.CorruptStore;
-            if (final.value.reference != .bytes or reference.content_id != final.location.content_id or
-                reference.length != final.location.reference.length or
-                !std.mem.eql(u8, &reference.digest, &final.location.reference.digest)) return error.CorruptStore;
+        if (source.ordinal() == null) {
+            const final = try action_read_domain.readResolution(a, &source.session, source.id);
+            if (ordinary.input) |input| {
+                if (!std.meta.eql(input.value, final.value)) return error.CorruptStore;
+            } else {
+                const reference = if (ordinary.content) |*value| value else return error.CorruptStore;
+                if (final.value.reference != .bytes or reference.content_id != final.location.content_id or
+                    reference.length != final.location.reference.length or
+                    !std.mem.eql(u8, &reference.digest, &final.location.reference.digest)) return error.CorruptStore;
+            }
         }
     }
     return ordinary;
 }
 
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
-        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT m.source_action_id FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
-        "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR EXISTS(SELECT 1 FROM message_admission m WHERE m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref AND m.content_id=e.content_id AND " ++ sourced_input.actionConsistentSql("m") ++ ")) AS consistent," ++
+        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT " ++ sourced_input.actionIdSql("m") ++ " FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
+        "(SELECT v.ordinal FROM action_value v WHERE v.admission_id=e.source_admission_id) AS source_ordinal,NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
@@ -1331,14 +1344,14 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL,NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
         "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",NULL,earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1363,6 +1376,7 @@ const historical_entries = rsql.Read(.{
         source_action: ?rsql.Positive,
         source_session: ?Bounded(session_id.bytes),
         effort: ?model_capability.ReasoningEffort,
+        source_ordinal: ?rsql.Positive,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
         bytes: ?Page.Bytes,
@@ -1970,7 +1984,11 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .kind = kind,
         .requested_model = requested_model,
         .sender = row.sender,
-        .source_action = if (row.source_action) |action| .{ .id = action.get(), .session = row.source_session orelse return error.CorruptStore } else null,
+        .source_action = if (row.source_action) |action| source: {
+            const session = row.source_session orelse return error.CorruptStore;
+            if (!session_id.valid(session.slice())) return error.CorruptStore;
+            break :source .{ .id = action.get(), .session = session.bytes, .ordinal_or_zero = if (row.source_ordinal) |ordinal| ordinal.get() else 0 };
+        } else null,
         .content = content,
         .input = input,
     };

@@ -104,7 +104,7 @@ fn checkReceiptNamesLimit() !void {
     }
 }
 
-test "CLI-22 receipt tool list grammar" {
+test "CLI-28 receipt tool list grammar" {
     try checkReceiptNamesRoundTrip();
     try checkReceiptNamesLimit();
 }

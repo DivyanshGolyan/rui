@@ -67,7 +67,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expectEqual(@as(u64, 41), first.items[0].position);
             try std.testing.expectEqual(@as(u64, 26), first.items[15].position);
             for (first.items[0..first.count]) |item| try std.testing.expect(item.kind == .user);
-            try std.testing.expectEqual(@as(u64, 5), first.items[0].content.length);
+            try std.testing.expectEqual(@as(u64, 5), first.items[0].content.text.length);
             try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{
                 .session = request.session,
                 .end = first.end,
@@ -108,7 +108,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
             try std.testing.expect(!older.more);
             try std.testing.expectEqual(@as(u64, 25), older.items[0].position);
             try std.testing.expectEqual(@as(u64, 22), older.items[3].position);
-            try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.length);
+            try std.testing.expectEqual(@as(u64, 1024 * 1024), older.items[3].content.text.length);
             const fresh = try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session });
             try std.testing.expectEqual(@as(usize, 16), fresh.count);
             try std.testing.expect(fresh.items[0].position > first.end);

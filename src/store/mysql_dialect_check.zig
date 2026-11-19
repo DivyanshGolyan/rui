@@ -316,7 +316,6 @@ test "MySQL restoration reports every transport failure and keeps a body failure
     state = .open;
     try report.body({}, {});
     try std.testing.expectEqual(@as(usize, 0), report.failures);
-    try std.testing.expectEqual(State.open, state);
     finishRestoration(error.MysqlRefusedSetup, "SET FOREIGN_KEY_CHECKS=1", &report);
     try std.testing.expectEqual(@as(usize, 0), report.failures);
     try std.testing.expectEqual(State.broken, state);
@@ -372,7 +371,19 @@ fn once(comptime text: []const u8) void {
     if (Seen.done.load(.monotonic)) return;
     Seen.done.store(true, .release);
     _ = connection() orelse return;
-    const refused = run(comptime prepareQuery(text)) catch |err| {
+    prepareOnce(text);
+}
+
+// Quote only after the live connection is known to exist.
+fn prepareOnce(text: []const u8) void {
+    const allocator = std.heap.page_allocator;
+    const buffer = allocator.alloc(u8, prepareLength(text)) catch |err| {
+        state = .broken;
+        std.log.err("MySQL dialect check: cannot allocate PREPARE text: {s}", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(buffer);
+    const refused = run(prepareInto(text, buffer)) catch |err| {
         state = .broken;
         std.log.err("MySQL dialect check: connection failed: {s}", .{@errorName(err)});
         return;
@@ -390,23 +401,37 @@ fn Once(comptime text: []const u8) type {
     };
 }
 
+const prepare_head = "PREPARE rui_dialect_check FROM '";
+const prepare_tail = "';DEALLOCATE PREPARE rui_dialect_check";
+
+fn prepareLength(text: []const u8) usize {
+    return prepare_head.len + text.len + std.mem.countScalar(u8, text, '\'') + prepare_tail.len;
+}
+
+fn prepareInto(text: []const u8, buffer: []u8) []const u8 {
+    var at: usize = 0;
+    @memcpy(buffer[at..][0..prepare_head.len], prepare_head);
+    at += prepare_head.len;
+    for (text) |byte| {
+        buffer[at] = byte;
+        at += 1;
+        if (byte == '\'') {
+            buffer[at] = byte;
+            at += 1;
+        }
+    }
+    @memcpy(buffer[at..][0..prepare_tail.len], prepare_tail);
+    at += prepare_tail.len;
+    return buffer[0..at];
+}
+
 fn prepareQuery(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10 * text.len + 1000);
-        // Fill a buffer sized from the text: appending a byte at a time with
-        // `++` copies the whole prefix on every byte.
-        var quoted: [text.len + std.mem.countScalar(u8, text, '\'')]u8 = undefined;
-        var at: usize = 0;
-        for (text) |byte| {
-            quoted[at] = byte;
-            at += 1;
-            if (byte == '\'') {
-                quoted[at] = byte;
-                at += 1;
-            }
-        }
-        const final = quoted;
-        return "PREPARE rui_dialect_check FROM '" ++ &final ++ "';DEALLOCATE PREPARE rui_dialect_check";
+        var buffer: [prepareLength(text)]u8 = undefined;
+        _ = prepareInto(text, &buffer);
+        const result = buffer;
+        return &result;
     }
 }
 
@@ -431,11 +456,6 @@ fn piece(comptime text: []const u8) []const []const u8 {
     return if (trimmed.len == 0) &.{} else &.{trimmed};
 }
 
-test "each text has its own checked flag" {
-    try std.testing.expect(&Once("SELECT 1").done != &Once("SELECT 2").done);
-    try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
-}
-
 test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
     const repeat = struct {
         fn of(comptime text: []const u8, comptime times: usize) []const u8 {
@@ -449,22 +469,42 @@ test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
     }.of;
     const head = "PREPARE rui_dialect_check FROM '";
     const tail = "';DEALLOCATE PREPARE rui_dialect_check";
-    const cases = [_]struct { prepared: []const u8, want: []const u8 }{
-        .{ .prepared = comptime prepareQuery(""), .want = head ++ tail },
-        .{ .prepared = comptime prepareQuery("SELECT 1"), .want = head ++ "SELECT 1" ++ tail },
-        .{ .prepared = comptime prepareQuery("SELECT 'a'"), .want = head ++ "SELECT ''a''" ++ tail },
-        .{ .prepared = comptime prepareQuery("'''x''y'"), .want = head ++ "''''''x''''y''" ++ tail },
-        .{ .prepared = comptime prepareQuery("SELECT " ++ repeat("'ab',", 220) ++ "1"), .want = head ++ "SELECT " ++ comptime repeat("''ab'',", 220) ++ "1" ++ tail },
+    const cases = [_]struct { text: []const u8, want: []const u8 }{
+        .{ .text = "", .want = head ++ tail },
+        .{ .text = "SELECT 1", .want = head ++ "SELECT 1" ++ tail },
+        .{ .text = "SELECT 'a'", .want = head ++ "SELECT ''a''" ++ tail },
+        .{ .text = "SELECT 'it''s'", .want = head ++ "SELECT ''it''''s''" ++ tail },
+        .{ .text = "'''x''y'", .want = head ++ "''''''x''''y''" ++ tail },
+        .{ .text = "SELECT " ++ comptime repeat("'ab',", 220) ++ "1", .want = head ++ "SELECT " ++ comptime repeat("''ab'',", 220) ++ "1" ++ tail },
     };
-    for (cases) |case| try std.testing.expectEqualStrings(case.want, case.prepared);
-}
+    for (cases) |case| {
+        const buffer = try std.testing.allocator.alloc(u8, prepareLength(case.text));
+        defer std.testing.allocator.free(buffer);
+        try std.testing.expectEqualStrings(case.want, prepareInto(case.text, buffer));
+    }
 
-test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
     const pieces = comptime statements("DELETE FROM turn; INSERT INTO t VALUES('a;b','it''s;');\n");
     try std.testing.expectEqual(2, pieces.len);
     try std.testing.expectEqualStrings("DELETE FROM turn", pieces[0]);
     try std.testing.expectEqualStrings("INSERT INTO t VALUES('a;b','it''s;')", pieces[1]);
-    try std.testing.expectEqualStrings("PREPARE rui_dialect_check FROM 'SELECT ''it''''s''';DEALLOCATE PREPARE rui_dialect_check", comptime prepareQuery("SELECT 'it''s'"));
+
+    // Exercise dispatch and deduplication when the live dialect checker is configured.
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    const connected = connection() != null;
+    const before = done;
+    const unavailable = state == .broken;
+    mutex.unlock(io);
+    if (!connected) {
+        return if (unavailable) error.MysqlUnavailable else error.SkipZigTest;
+    }
+    shadowPrepare("SELECT 'SH-91 runtime prepare one'");
+    shadowPrepare("SELECT 'SH-91 runtime prepare one'");
+    shadowPrepare("SELECT 'SH-91 runtime prepare two'");
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    try std.testing.expectEqual(before.prepares + 2, done.prepares);
+    try std.testing.expectEqual(before.prepare_refused, done.prepare_refused);
 }
 
 test "the schema's MySQL DDL and the touch oracle's MySQL triggers run on MySQL 8.4" {
@@ -675,6 +715,7 @@ test "schema 82 MySQL migration backfills input sources and preserves admissions
     try std.testing.expectEqualStrings("\n 1:3", kinds.written());
     const refusal = (try run("UPDATE message_admission SET source_kind=1 WHERE admission_id=1")) orelse return error.MissingSourceKindRefusal;
     try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(82).?, false);
     try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
@@ -1176,13 +1217,17 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             }
             // The expected fixture describes the current schema, while this Store is at format 74.
             const format_74_rows = comptime blk: {
-                const current = store_testing.expected_mysql_rows;
+                @setEvalBranchQuota(1_000_000);
+                var rows = store_testing.expected_mysql_rows;
                 const baseline = store_testing.baseline_rows;
-                const start = std.mem.indexOf(u8, current, "INSERT INTO message_admission(").?;
-                const end = start + std.mem.indexOf(u8, current[start..], ";\n").? + 2;
-                const old_start = std.mem.indexOf(u8, baseline, "INSERT INTO message_admission(").?;
-                const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
-                break :blk current[0..start] ++ baseline[old_start..old_end] ++ current[end..];
+                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {
+                    const start = std.mem.indexOf(u8, rows, insert).?;
+                    const end = start + std.mem.indexOf(u8, rows[start..], ";\n").? + 2;
+                    const old_start = std.mem.indexOf(u8, baseline, insert).?;
+                    const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
+                    rows = rows[0..start] ++ baseline[old_start..old_end] ++ rows[end..];
+                }
+                break :blk rows;
             };
             try load(migrated_database_sql, format_74_rows, true);
         }

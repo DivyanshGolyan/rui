@@ -133,7 +133,7 @@ pub const Units = struct {
     run_os_tests: *std.Build.Step.Run,
 };
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, pr_ci: bool) Units {
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -164,7 +164,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         const compile = b.addTest(.{
             .name = definition.name,
             .max_rss = darwin.unitMaxRss(test_filters.len, target),
-            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+            // Zig 0.17.1's x86-64 backend crashes (SIGSEGV) on the Store root of a collect build,
+            // so that one compile takes the default backend; rsql_table.py reads only its exports.
+            .use_llvm = if (target.result.cpu.arch == .x86_64 and !(identity == .store and product.rsqlCollect(b))) false else null,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(definition.source),
                 .target = target,
@@ -194,6 +196,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
     // Compile the same owner with the product option off as a separate root.
     const pause_product = b.addTest(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = "pause-product-compile-out",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/pause.zig"),
@@ -302,6 +305,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     });
     _ = product.useOs(b, signal_stack_probe_root);
     const signal_stack_probe = ci.run(b.addExecutable(.{
+        // The handler's stack behaviour depends on codegen, so outside the PR tier the probe is
+        // built with LLVM like the shipped binaries.
+        .use_llvm = if (pr_ci) false else null,
         .name = "rui-signal-stack-probe",
         .root_module = signal_stack_probe_root,
     }));

@@ -10,6 +10,7 @@ const cores = .{
     .{ "action_read.zig", @import("action_read.zig") },
     .{ "action_receipt.zig", @import("action_receipt.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
+    .{ "action_value_limits.zig", @import("action_value_limits.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
@@ -31,6 +32,7 @@ const cores = .{
     .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
+    .{ "cli_invocation.zig", @import("cli_invocation.zig") },
     .{ "cli_option_names.zig", @import("cli_option_names.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
@@ -114,6 +116,7 @@ const cores = .{
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "part_text.zig", @import("part_text.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
+    .{ "preference_document.zig", @import("preference_document.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
     .{ "process_memory.zig", @import("process_memory.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
@@ -155,13 +158,17 @@ const cores = .{
     .{ "start_report.zig", @import("start_report.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
+    .{ "store/pass_plan.zig", @import("store/pass_plan.zig") },
+    .{ "store/round_order.zig", @import("store/round_order.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
+    .{ "store/write_batch.zig", @import("store/write_batch.zig") },
     .{ "store_id.zig", @import("store_id.zig") },
     .{ "store_path.zig", @import("store_path.zig") },
     .{ "store_target.zig", @import("store_target.zig") },
     .{ "submission_state.zig", @import("submission_state.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
+    .{ "tool_digests_generated.zig", @import("tool_digests_generated.zig") },
     .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
@@ -171,6 +178,7 @@ const cores = .{
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "unit_test_partition.zig", @import("unit_test_partition.zig") },
+    .{ "upgrade_run.zig", @import("upgrade_run.zig") },
     .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "url.zig", @import("url") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
@@ -297,11 +305,11 @@ test "the overview core reads session list pages as the client decodes them" {
     try page.rows[0].workspace.set("/home/d/code/rui");
     page.rows[0].label = .{};
     try page.rows[0].label.?.set("Review PR 412");
-    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .length = 5, .digest = @splat(0xaa) } };
+    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } };
     page.rows[1] = .{ .read_version = page.since, .work = .{ .state = .{ .stopped = .{ .since = 1_792_925_400, .cause = .stop } } } };
     try page.rows[1].reference.set("r4t9vw");
     try page.rows[1].workspace.set("/srv/work");
-    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .length = 3, .digest = @splat(0xbb) } };
+    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .text = .{ .length = 3, .digest = @splat(0xbb) } } };
     try page.rows[1].first_message.?.sender.?.session.set("k7m2qx");
 
     var traversal = protocol_reply.SessionTraversal.init(.{ .instance = @splat(7), .generation = 40 });
@@ -316,7 +324,7 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqualStrings("/home/d/code/rui", started.workspace);
     try std.testing.expectEqualStrings("Review PR 412", started.label.?);
     try std.testing.expectEqual(page.rows[0].work.state, started.state);
-    try std.testing.expectEqual(overview_view.First{ .position = 1, .admission = 4, .sender = null }, started.first.?);
+    try std.testing.expectEqualDeep(overview_view.First{ .position = 1, .admission = 4, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } }, started.first.?);
     try std.testing.expectEqual(@as(?u64, 1_792_925_001), started.from_person_at);
     const delegated = read.rows[1];
     try std.testing.expectEqual(@as(?[]const u8, null), delegated.label);
@@ -415,7 +423,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .provider = .codex,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
-            .first = .{ .position = 1, .admission = at + 1, .sender = null },
+            .first = .{ .position = 1, .admission = at + 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (at % 10 == 0) since else null,
         };
     }

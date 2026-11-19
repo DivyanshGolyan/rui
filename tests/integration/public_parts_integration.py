@@ -62,8 +62,13 @@ def INS_10_public_part_cli(store, seed, values):
     text = ["--store", str(store), "--session", seed["session"], "--admission", seed["text_admission"]]
     refused("session", "list-parts", *text)
     refused("session", "read-part", *text, "--part", "0")
-    # The text-only readers keep refusing values with parts.
-    refused("action", "read", "--store", str(store), "--session", seed["session"], "--action", seed["action"])
+    # An Action read projects the parts value with its owner instead of refusing it.
+    read = fixture.command("action", "read", "--store", str(store), "--session", seed["session"], "--action", seed["action"])
+    content = read["final"]["content"]
+    assert content["type"] == "parts" and content["owner"] == {"action": seed["action"]}, read
+    assert (content["bytes"], content["sha256"]) in identities, read
+    # An offset into a parts value has no text to window.
+    refused("action", "read", "--store", str(store), "--session", seed["session"], "--action", seed["action"], "--offset", "1")
     # Keyed observation of a compound Message reports its parts form (CLI-19 owns identity agreement);
     # the Host keeps serving.
     observation = fixture.command("request", "inspect", "--store", str(store),

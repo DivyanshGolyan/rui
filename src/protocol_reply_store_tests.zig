@@ -146,8 +146,8 @@ test "Session settings Current report and typed Settings round trip every settin
     try std.testing.expectEqualStrings("low", @tagName(current.reasoning_effort.?.value));
     try std.testing.expectEqualStrings("low", @tagName(current.reasoning_effort_override.?.value));
     try std.testing.expectEqualStrings("Every setting", current.label.?.slice());
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), current.instructions.sha256.slice());
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), current.output_schema.?.sha256.slice());
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), &std.fmt.bytesToHex(current.instructions.value.text.digest, .lower));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), &std.fmt.bytesToHex(current.output_schema.?.value.text.digest, .lower));
 }
 
 const PromotedApproval = struct {
@@ -263,8 +263,7 @@ const PromotedAction = struct {
                         try std.testing.expectEqual(self_.action, row.action.value);
                         try std.testing.expectEqualStrings(final.code.slice(), row.code.slice());
                         try std.testing.expectEqual(final.position, row.acceptance_position.value);
-                        try std.testing.expectEqual(final.content.length, row.result.bytes.value);
-                        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(final.content.digest, .lower), row.result.sha256.slice());
+                        try std.testing.expectEqualDeep(final.content, row.result.value);
                         try std.testing.expect(row.presentation.value.publication_position == null);
                         self_.resolved += 1;
                     },
@@ -287,8 +286,8 @@ const PromotedAction = struct {
         const message = page.facts.items[0].value.received;
         try std.testing.expectEqual(@as(?u64, self.action), message.source_action);
         try std.testing.expect(message.sender == null);
-        try std.testing.expectEqual(@as(u64, text.len), message.content.length);
-        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.digest);
+        try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
 
         const produced = try std.testing.allocator.create(@import("command_reply.zig").PublicConversationPage);
         defer std.testing.allocator.destroy(produced);
@@ -301,14 +300,14 @@ const PromotedAction = struct {
         for (parsed.items[0..parsed.count]) |item| if (item.source_action) |source| {
             try std.testing.expectEqual(self.action, source);
             try std.testing.expect(item.sender == null);
-            try std.testing.expectEqual(@as(u64, text.len), item.content.bytes);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+            try std.testing.expectEqual(@as(u64, text.len), item.content.text.length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.text.digest);
             sources += 1;
         };
         try std.testing.expectEqual(@as(usize, 1), sources);
     }
 
-    fn receipt(self: PromotedAction, storage: *store.Store) !@import("activity_facts.zig").Item.Content {
+    fn receipt(self: PromotedAction, storage: *store.Store) !@import("content_value.zig").Value {
         var request: protocol.ActivityPage = .{ .kinds = .initOne(.tool_result) };
         try request.session.set(self.session.slice());
         const page = try std.testing.allocator.create(protocol_reply.ActivityPage);

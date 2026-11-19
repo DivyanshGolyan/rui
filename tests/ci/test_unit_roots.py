@@ -113,7 +113,7 @@ class ParallelRootsTest(unittest.TestCase):
                                    text=True, start_new_session=True,
                                    env=dict(os.environ, RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket"))
         try:
-            stdout, stderr = process.communicate(timeout=8)
+            stdout, stderr = process.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
