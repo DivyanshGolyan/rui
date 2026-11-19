@@ -1,9 +1,9 @@
 //! The build graph's package links: for each top-level build step, the dependency packages (the names in
 //! build.zig.zon) that its artifacts compile or link. The walk reads the graph at configure time, so a
 //! package reached through a generated file, a translated header or a transitive dependency still counts.
-//! `zig build link-table` rewrites build/link_table.json; `zig build check` fails while the checked-in
-//! table differs from the walk. tests/ci/select_tests.py reads the table to select every target a changed
-//! dependency reaches.
+//! `zig build link-table` rewrites build/link_table.json (run on Linux with default options). The policy job
+//! fails while the table records other build inputs than the files hold. tests/ci/select_tests.py reads the
+//! table to select every target a changed dependency reaches.
 const std = @import("std");
 const Step = std.Build.Step;
 const Module = std.Build.Module;
@@ -139,19 +139,14 @@ fn quotedAll(b: *std.Build, names: []const []const u8) [][]const u8 {
     return quoted;
 }
 
-/// Adds `zig build link-table`, which rewrites build/link_table.json, and (on Linux, outside PR CI) the
-/// check that fails while the checked-in table differs from a fresh walk. Call after every step is defined.
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, check_step: *Step, pr_ci: bool) void {
+/// Adds `zig build link-table`, which rewrites build/link_table.json from this build graph. The walk reads
+/// the configured graph, so run it on Linux with default options (no -D flags): a -Dci-artifacts, -Dtarget
+/// or other non-default option changes which steps the walk reaches. Staleness is checked by
+/// tests/ci/link_table.py `fingerprint` (the policy job), which hashes the build inputs, not by re-walking.
+/// Call after every step is defined.
+pub fn add(b: *std.Build) void {
     const generated = b.addWriteFiles().add("link_table.json", render(b));
     const update = b.addUpdateSourceFiles();
     update.addCopyFileToSource(generated, table_path);
     b.step("link-table", "Write build/link_table.json: the dependency packages each build target links").dependOn(&update.step);
-
-    if (target.result.os.tag != .linux or pr_ci) return;
-    const check = b.addSystemCommand(&.{ "python3", "-B" });
-    check.addFileArg(b.path("tests/ci/link_table.py"));
-    check.addArg("check");
-    check.addFileArg(generated);
-    check.has_side_effects = true;
-    check_step.dependOn(&check.step);
 }

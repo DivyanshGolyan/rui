@@ -73,8 +73,40 @@ def retire(store, directory=None):
     socket and hint go before the Store is deleted. An accepting socket is a
     live Host (or a successor on the same path) and stays.
     """
-    directory = directory or runtime()
     named = str(store)
+    return _retire(lambda hinted: hinted == named, directory)
+
+
+def hinted(store, directory=None):
+    """Whether any socket's hint still names `store`."""
+    named = str(store)
+    return _matching(lambda value: value == named, directory)
+
+
+def retire_under(root, directory=None):
+    """Like retire, for every Store under the directory `root` (a shell fixture's state)."""
+    prefix = str(root).rstrip("/") + "/"
+    return _retire(lambda hinted: hinted.startswith(prefix), directory)
+
+
+def _matching(names, directory):
+    """Whether a socket hinted to a matching Store still exists."""
+    directory = directory or runtime()
+    try:
+        candidates = sorted(directory.glob("*.sock"))
+    except FileNotFoundError:
+        return False
+    for path in candidates:
+        try:
+            if names(path.with_suffix(".store").read_text()):
+                return True
+        except (FileNotFoundError, UnicodeDecodeError):
+            continue
+    return False
+
+
+def _retire(names, directory):
+    directory = directory or runtime()
     found = []
     try:
         candidates = sorted(directory.glob("*.sock"))
@@ -85,7 +117,7 @@ def retire(store, directory=None):
             hinted = path.with_suffix(".store").read_text()
         except (FileNotFoundError, UnicodeDecodeError):
             continue
-        if hinted == named and not answers(path):
+        if names(hinted) and not answers(path):
             found.append((path, hinted))
     remove(found)
     return found

@@ -22,6 +22,7 @@ const provider_name = @import("../../provider_name.zig");
 const provider_route = @import("../../provider_route.zig");
 const session_pin = @import("../../session_pin.zig");
 const session_archive = @import("../../session_archive.zig");
+const archive_membership = @import("archive_membership.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
 const command_input = @import("../../command_input.zig");
@@ -511,7 +512,7 @@ pub const SubmitMessage = struct {
             .failed => |failure| return t.refuse(r, failure.rejection(), failure.bytes),
             .bound => |bound| message.bound = bound,
         };
-        if (target.?.archive_state == .archived) r.write(clear_archive, .{ .session = target.?.session });
+        if (target.?.archive_state == .archived) archive_membership.restore(r, target.?.session);
         t.head = target.?.session;
         return t.admit(r, null);
     }
@@ -810,7 +811,7 @@ pub const DeliverAgentMessage = struct {
                 if (r.faults().content_import) return error.InjectedContentImportFailure;
                 if (!t.delivered) return t.resolve(r);
                 const receiver = &t.receiver.?;
-                if (receiver.archive_state == .archived) r.write(clear_archive, .{ .session = receiver.session });
+                if (receiver.archive_state == .archived) archive_membership.restore(r, receiver.session);
                 const text_id = try content_parts.Saving.saveBytes(r, &t.message, t.input.text, r.faults());
                 const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(t.input.text));
                 const admission_id = try admitFromSession(r, &t.facts.?.session, &receiver.session, t.key, text_id, &digest, null, &.{ .accepted = true });
@@ -1681,7 +1682,6 @@ pub const StopSession = struct {
     saved: saved_command.Result = undefined,
     target: stop_target.Result = null,
     turn: stop_turn.Result = null,
-    archive_existing: archive_record.Result = null,
     archive_endings: archive_ending_count.Row = .{ .count = 0 },
     selection: stop_selection.Result = undefined,
     interrupted: stop_interrupted.Result = undefined,
@@ -1699,10 +1699,7 @@ pub const StopSession = struct {
             if (session_id.valid(session)) {
                 r.read(stop_target, .{ .session = session }, &t.target);
                 r.read(stop_turn, .{ .session = session }, &t.turn);
-                if (t.input.archive) {
-                    r.read(archive_record, .{ .session = session }, &t.archive_existing);
-                    r.read(archive_ending_count, .{ .parent = session }, &t.archive_endings);
-                }
+                if (t.input.archive) r.read(archive_ending_count, .{ .parent = session }, &t.archive_endings);
             }
             return .{ .round = .facts };
         };
@@ -1756,14 +1753,14 @@ pub const StopSession = struct {
         const head = &found.session;
         const positions = try r.positions(head.*);
         t.answer = .{ .accepted = true };
-        try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
+        const seq = try queueCommandWithSeq(r, key, kind, session, &t.input.digest, null, null, &t.answer);
         const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
         const stop_position = try positions.take(1);
         r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null, .action_cutoff = found.action_cutoff });
         if (t.input.archive) {
             r.write(clear_pin, .{ .session = head.* });
             r.write(insert_archive_command, .{ .key = key, .archived = true });
-            if (t.archive_existing != null) r.write(update_archive, .{ .session = head.*, .key = key }) else r.write(insert_archive, .{ .session = head.*, .key = key });
+            archive_membership.archive(r, head.*, seq);
             if (t.archive_endings.count != 0) r.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, t.archive_endings.count);
         }
         if (found.owed_cause != null) r.write(settle_owed_stop, .{ .session = &head.ref });
@@ -1854,39 +1851,9 @@ const suppress_archive_endings = rsql.Write(.{
     .expect = .{ .counted = .{ .otherwise = error.StopSelectionChanged } },
 });
 
-pub const archive_state_sql =
-    "CASE WHEN EXISTS(SELECT 1 FROM session_archive ar JOIN session_stop astop ON astop.command_key=ar.command_key " ++
-    "LEFT JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND NOT (" ++ action_domain.stopCompletedSql("astop", "aturn", "NULL") ++ ")) THEN 'archiving' " ++
-    "WHEN EXISTS(SELECT 1 FROM session_archive ar WHERE ar.session_ref=session.session_ref AND ar.command_key IS NOT NULL) THEN 'archived' ELSE 'active' END";
-
 const insert_archive_command = rsql.Write(.{
     .sql = "INSERT INTO session_archive_command(command_key,archived) VALUES(?1,?2)",
     .Args = struct { key: []const u8, archived: bool },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
-const insert_archive = rsql.Write(.{
-    .sql = "INSERT INTO session_archive(session_ref,command_key) VALUES(@session(?1),?2)",
-    .Args = struct { session: rsql.SessionHead, key: []const u8 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-
-const clear_archive = rsql.Write(.{
-    .sql = "UPDATE session_archive SET command_key=NULL WHERE session_ref=@session(?1) AND command_key IS NOT NULL",
-    .Args = struct { session: rsql.SessionHead },
-    .expect = .{ .at_most = 1 },
-});
-
-const archive_record = rsql.Read(.{
-    .sql = "SELECT 1 AS present FROM session_archive WHERE session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { present: bool },
-    .cardinality = .optional,
-});
-
-const update_archive = rsql.Write(.{
-    .sql = "UPDATE session_archive SET command_key=?2 WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, key: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1978,7 +1945,7 @@ pub const ArchiveSession = struct {
             if (t.rejection == null) {
                 r.write(insert_archive_command, .{ .key = key, .archived = false });
                 const head = t.target.?.session;
-                r.write(clear_archive, .{ .session = head });
+                archive_membership.restore(r, head);
                 _ = try (try r.positions(head)).take(1);
             }
             if (r.faults().before_commit) return error.InjectedCommitFailure;
@@ -2100,7 +2067,7 @@ pub const PinSession = struct {
 };
 
 const target_session = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_state_sql ++ " AS archive_state FROM session WHERE session_ref=?1",
+    .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_membership.stateSql("session") ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { session: rsql.SessionHead, provider: provider_name.Provider, archive_state: session_archive.State },
     .cardinality = .optional,
@@ -2536,6 +2503,22 @@ pub noinline fn queueCommand(
     secondary_content_id: ?u64,
     answer: *const StoredAnswer,
 ) !void {
+    _ = try queueCommandWithSeq(a, key, kind, target, digest, primary_content_id, secondary_content_id, answer);
+}
+
+/// Queues the Command row and returns its `command_seq`, the request's rank. The identity is taken
+/// in Zig, so the caller can write facts that name the request in the same round.
+pub noinline fn queueCommandWithSeq(
+    a: anytype,
+    key: []const u8,
+    kind: cli_value.CommandKind,
+    target: []const u8,
+    digest: *const [32]u8,
+    primary_content_id: ?u64,
+    secondary_content_id: ?u64,
+    answer: *const StoredAnswer,
+) !u64 {
+    const seq = try a.identity(.command_seq);
     a.write(insert_command, .{
         .key = key,
         .kind = command_replay.codeOf(kind),
@@ -2547,8 +2530,9 @@ pub noinline fn queueCommand(
         .code = answer.code.slice(),
         .revision = answer.revision,
         .created = answer.created,
-        .command_seq = try a.identity(.command_seq),
+        .command_seq = seq,
     });
+    return seq;
 }
 
 const recovery_range_sql =

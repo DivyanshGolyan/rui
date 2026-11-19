@@ -105,12 +105,21 @@ class PinParsingTest(unittest.TestCase):
     def test_real_manifest_pins_and_sources(self):
         real = {pin.name: pin for pin in pins(MANIFEST.read_text())}
         self.assertEqual(set(real), {"yaml", "translate_c", "sqlite", "nghttp2", "openssl", "vaxis"})
-        self.assertEqual(tracked(real["yaml"]), Source("tags", "yaml/libyaml", "0.2.5"))
-        self.assertEqual(tracked(real["sqlite"]), Source("sqlite", None, "3530400"))
-        self.assertEqual(tracked(real["nghttp2"]), Source("releases", "nghttp2/nghttp2", "v1.71.0"))
-        self.assertEqual(tracked(real["openssl"]), Source("releases", "openssl/openssl", "openssl-3.6.5"))
-        self.assertIsNone(tracked(real["translate_c"]))
-        self.assertIsNone(tracked(real["vaxis"]))
+        sources = {name: tracked(pin) for name, pin in real.items()}
+        self.assertEqual((sources["yaml"].kind, sources["yaml"].repo), ("tags", "yaml/libyaml"))
+        self.assertIsNotNone(numbers(sources["yaml"].current))
+        self.assertEqual((sources["sqlite"].kind, sources["sqlite"].repo), ("sqlite", None))
+        self.assertRegex(sources["sqlite"].current, r"^\d{7}$")
+        self.assertEqual((sources["nghttp2"].kind, sources["nghttp2"].repo), ("releases", "nghttp2/nghttp2"))
+        self.assertTrue(sources["nghttp2"].current.startswith("v"))
+        self.assertIsNotNone(numbers(sources["nghttp2"].current))
+        self.assertEqual((sources["openssl"].kind, sources["openssl"].repo), ("releases", "openssl/openssl"))
+        self.assertTrue(sources["openssl"].current.startswith("openssl-3."))
+        self.assertIsNotNone(numbers(sources["openssl"].current))
+        for name in ("yaml", "sqlite", "nghttp2", "openssl"):
+            self.assertIn(sources[name].current, real[name].url)
+        self.assertIsNone(sources["translate_c"])
+        self.assertIsNone(sources["vaxis"])
 
     def test_only_dependency_entries_are_pins(self):
         self.assertEqual([pin.name for pin in pins(SMALL)], ["nghttp2", "openssl", "vaxis"])

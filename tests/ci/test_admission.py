@@ -635,6 +635,7 @@ class CandidatePlanTest(unittest.TestCase):
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
         'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic', 'test-native', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),

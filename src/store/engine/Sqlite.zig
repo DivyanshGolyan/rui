@@ -92,7 +92,8 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
         break :blk @as(c_int, @intCast(widest));
     };
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, column_limit);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, @import("../../json_limits.zig").max_depth);
+    // Since 3.54, SQLite also counts a statement's cursors against this limit; the Store's widest statement opens about 140.
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, 256);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, rsql.max_parameters);
@@ -102,6 +103,8 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
     try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
     try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
+    // Plans never depend on bound values, so a cached statement stays valid across binds; sqlite.resetCached asserts it.
+    try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_ENABLE_QPSG, 1);
     try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
     if (existing) {
         if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");

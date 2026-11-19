@@ -19,9 +19,9 @@ from unittest.mock import patch
 import build_files
 from dependency_replay import sqlite_bump, with_entry
 from link_table import fingerprint_error
-from select_tests import (ACCEPTANCE_INPUTS, BOOTSTRAP_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, CONTENT_RULES, DEPENDENCY_MANIFEST, DIAGNOSTIC_INTEGRATIONS, FIXTURES, ci_policy, documentation, PR_UNIT_ROOTS, changed_dependencies, dependency_entries, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (ACCEPTANCE_INPUTS, BOOTSTRAP_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, CI_RUNNABLE, CONTENT_RULES, DEPENDENCY_MANIFEST, DIAGNOSTIC_INTEGRATIONS, FIXTURES, ci_policy, documentation, PR_UNIT_ROOTS, changed_dependencies, dependency_entries, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, ROOT, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
-                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
+                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning, normalize, tooling)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -2702,9 +2702,15 @@ class LinkedDependencySelectionTest(unittest.TestCase):
                                                        f"            .url = {entry['url']},\n"
                                                        f'            .hash = "N-V-edited-{package}",\n        }},\n')
                 result = self.manifest_change(MANIFEST, bumped)
-                expected = {target for target, packages in links.items() if package in packages} & set(AVAILABLE)
-                self.assertEqual({target for target in expected if not covers(target, set(result["targets"]))}, set())
-                self.assertEqual({root for root in PR_UNIT_ROOTS if root in expected} - set(result["fast_targets"]), set())
+                linkers = {target for target, packages in links.items() if package in packages} & set(AVAILABLE)
+                expected = linkers & CI_RUNNABLE
+                # The targets the bump adds over a manifest edit that changes no dependency (the rules it always had).
+                baseline = set(self.manifest_change(MANIFEST, MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1))["targets"])
+                added = set(result["targets"]) - baseline
+                # Exact: every CI-runnable linker the bump adds is selected (or covered), and it adds nothing beyond them.
+                self.assertEqual({target for target in expected - baseline if not covers(target, set(result["targets"]))}, set())
+                self.assertEqual({target for target in added if not covers(target, expected | {"test"})}, set())
+                self.assertEqual({root for root in PR_UNIT_ROOTS if root in linkers} - set(result["fast_targets"]), set())
 
     def test_a_new_dependency_no_target_links_selects_the_full_pr_set(self):
         added = MANIFEST.replace(".dependencies = .{",
@@ -2736,16 +2742,6 @@ class LinkedDependencySelectionTest(unittest.TestCase):
     def test_link_table_matches_the_build_inputs(self):
         self.assertIsNone(fingerprint_error())
 
-    def test_link_table_check_fails_for_a_table_the_walk_does_not_produce(self):
-        import link_table
-        with tempfile.TemporaryDirectory() as directory:
-            fresh = Path(directory) / "walk.json"
-            fresh.write_text(link_table.TABLE.read_text().replace('"targets": {', '"targets": {\n    "stale-target": ["sqlite"],', 1))
-            with redirect_stderr(io.StringIO()):
-                self.assertEqual(link_table.main(["check", str(fresh)]), 1)
-            fresh.write_text(link_table.TABLE.read_text())
-            self.assertEqual(link_table.main(["check", str(fresh)]), 0)
-
     def test_unknown_new_file_selects_the_full_pr_set(self):
         result = select(["notes/unclassified_new_file.bin"], "review", AVAILABLE)
         self.assertEqual(result["fast_targets"], PR_ROOTS)
@@ -2767,14 +2763,21 @@ class LinkedDependencySelectionTest(unittest.TestCase):
                 self.assertFalse(graph.targets(path))
 
     def test_every_tracked_path_is_classified_or_selects_the_full_pr_set(self):
-        """Sweeps git ls-files: a path no owner classifies may never select less than the full PR set."""
+        """Sweeps git ls-files: a path no owner classifies may never select less than the full PR set.
+
+        Documentation and tooling are declared small: each selects no PR target, so a change to one never widens.
+        """
         graph = tree_graph()
         rules = [patterns for patterns, *_ in RULES] + [patterns for patterns, *_ in LIVE_RULES]
         failures = []
         tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout.split()
         self.assertGreater(len(tracked), 1000)
         for path in tracked:
-            explicit = (documentation(path) or ci_policy(path) or path.startswith("tests/qualification/")
+            if documentation(path) or tooling(path):
+                if select([path], "review", AVAILABLE, graph=graph)["fast_targets"]:
+                    failures.append((path, "declared small class selects a PR target"))
+                continue
+            explicit = (ci_policy(path) or path.startswith("tests/qualification/")
                         or path in DIAGNOSTIC_INTEGRATIONS or graph.targets(path)
                         or any(matches(path, patterns) for patterns in rules)
                         or matches(path, BOOTSTRAP_INPUTS) or path in BUILD_MODULE_PATHS

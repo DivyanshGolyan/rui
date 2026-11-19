@@ -721,6 +721,11 @@ def normalize(targets: set) -> set:
 # including every whole-suite gate and live-server suite, runs on main and in promotion.
 WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
 PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
+
+# The targets a changed dependency may add: the PR unit roots and the targets the whole-suite gates run
+# (CHECK_COVERS, FIXTURE_COVERS). A link to any other target (measurement, cross, typecheck, upgrade ...) is not added.
+CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIXTURE_COVERS.values() for covered in cases}
+                        | set(FIXTURE_COVERS))
 # Store unit tests run on a PR only for a change to the Store itself.
 STORE_PATHS = ("src/store.zig", "src/store/*")
 
@@ -746,7 +751,7 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
     fast = targets & PR_UNIT_ROOTS
     if targets & WHOLE_SUITE_GATES:
         # A bootstrap-only change still compiles and runs one Store-free root through the
-        # changed setup and producer; the Store-reaching binaries run on main.
+        # changed setup and producer; the other Store-reaching binaries run on main.
         fast |= {"test-logic"} if bootstrap_only else {"test-native", "test-logic"}
     if not any(matches(path, STORE_PATHS) for path in paths):
         fast.discard("test-store")
@@ -823,6 +828,17 @@ def documentation(path):
     return path.endswith(".md") or path.startswith(("docs/", "research/"))
 
 
+# Agent and repository tooling: hooks, settings, skills and their scripts, and the ignore and attribute files.
+# No unit root or fixture runs them; the policy self-checks that read them keep their own selection
+# (POLICY_SELF_CHECKS, and the verify-rui map test, which is never skipped).
+TOOLING_PATHS = (".agents/*", ".claude/*", ".gitignore", ".gitattributes")
+
+
+def tooling(path):
+    # .agents/setup is a bootstrap input the build reads, so it keeps the bootstrap selection.
+    return matches(path, TOOLING_PATHS) and not matches(path, BOOTSTRAP_INPUTS)
+
+
 def ci_policy(path):
     """CI code and workflows: the policy job runs their checks, and no unit root or fixture is reached through them."""
     return (path.startswith((".github/", "tests/ci/", "tests/formal/")) and path != ".github/actions/setup/action.yml"
@@ -872,6 +888,12 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         if ci_policy(path):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
             shortcut = True
+        if tooling(path):
+            reasons.add("Agent and repository tooling: no unit root or fixture runs it")
+            shortcut = True
+        if path in DIAGNOSTIC_INTEGRATIONS:
+            reasons.add("Diagnostic integration script no fixture owns: run by hand, no CI target")
+            shortcut = True
         matched = shortcut
         for patterns, checks, native_checks, reason in RULES:
             if matches(path, patterns):
@@ -910,11 +932,6 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                 manual_checks.add(f"{path}: syntax/compilation and reviewer-selected affected diagnostic when measurement claims change")
                 reasons.add("Qualification executable: cheap checks do not qualify its measurement claims")
             continue
-        if not matched and path in DIAGNOSTIC_INTEGRATIONS:
-            targets.add("check")
-            native_targets.add("check")
-            reasons.add("Diagnostic integration script no fixture owns: the full check, as before")
-            matched = True
         if not matched and path.startswith("tests/integration/") and Path(path).stem.replace("_", "-") in available:
             candidate = Path(path).stem.replace("_", "-")
             targets.add(candidate)
@@ -955,6 +972,9 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     if DEPENDENCY_MANIFEST in changed:
         packages = changed_dependencies(*contents[DEPENDENCY_MANIFEST]) if DEPENDENCY_MANIFEST in contents else None
         linked = package_targets(packages, graph, available) if packages is not None else None
+        if linked is not None:
+            # A bump adds the targets CI runs on a PR or in the check gates, never every linking target.
+            linked &= CI_RUNNABLE
         if linked is None:
             unclassified = True
             targets.add("check")

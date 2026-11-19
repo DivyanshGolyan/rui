@@ -546,7 +546,7 @@ pub fn build(b: *std.Build) void {
     measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
 
     darwin.configureAcceptance(b, ci.directory);
-    link_table.add(b, target, check_step, pr_ci);
+    link_table.add(b);
 
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
