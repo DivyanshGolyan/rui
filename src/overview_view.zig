@@ -5036,6 +5036,177 @@ test "archive row marker survives a clipped name without overlapping the age" {
     try expectRow((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 40, .{}, 0)).?.segments, 40, &.{ .{ "A long archived Sess…", .strong }, .{ "· archived", .quiet }, .{ "now", .quiet } });
 }
 
+const window_test_page = 5;
+
+/// The Host for the window domain test: `host` holds the archived Sessions newest first, and an
+/// Archived read answers `window_test_page` rows strictly below its key (or from the head), as the Host does.
+fn hostPage(host: []const Listed, cursor: session_list.ArchivedCursor, rows: []Listed) ArchivedPage {
+    const limit: u64 = switch (cursor) {
+        .head => std.math.maxInt(u64),
+        .below => |key| key,
+        else => unreachable,
+    };
+    var count: usize = 0;
+    for (host) |row| {
+        if (row.archive_seq.? >= limit) continue;
+        if (count == window_test_page) break;
+        rows[count] = row;
+        count += 1;
+    }
+    var more_below = false;
+    if (count != 0) {
+        const last = rows[count - 1].archive_seq.?;
+        for (host) |row| if (row.archive_seq.? < last) {
+            more_below = true;
+            break;
+        };
+    }
+    return .{
+        .rows = rows[0..count],
+        .first = if (count != 0) rows[0].archive_seq else null,
+        .last = if (count != 0) rows[count - 1].archive_seq else null,
+        .more_above = false,
+        .more_below = more_below,
+    };
+}
+
+/// Serves every Archived read the effects ask for, from `host`, until none is left.
+fn serveWindow(state: *State, host: []const Listed, first: Effects) !void {
+    var effects = first;
+    for (0..8) |_| {
+        var next: Effects = .{};
+        var served = false;
+        for (effects.slice()) |effect| switch (effect) {
+            .read_archived => |read| {
+                var buffer: [window_test_page]Listed = undefined;
+                next = try step(state, .{ .archived = .{ .read = read, .page = hostPage(host, read.from, &buffer) } });
+                served = true;
+            },
+            else => {},
+        };
+        if (!served) return;
+        effects = next;
+    }
+    return error.TestWindowDidNotSettle;
+}
+
+/// The held Archived window equals the Host's rows over the window's key range (all of the Host's rows
+/// from the head), and says whether the Host holds anything older.
+fn expectWindowMatchesHost(state: *const State, host: []const Listed) !void {
+    const Held = struct { reference: Reference, seq: u64 };
+    const bounds = archivedBounds(state);
+    if (bounds.first == null and !state.archived.at_head) return;
+    var held: [64]Held = undefined;
+    var held_count: usize = 0;
+    for (state.rows.items) |row| {
+        if (!row.listed or row.archive_state != .archived) continue;
+        held[held_count] = .{ .reference = row.reference, .seq = row.archive_seq.? };
+        held_count += 1;
+    }
+    // The window's keys: from its last row up to its first, or to the Host's newest while it is at the head.
+    const low = bounds.last orelse 0;
+    const high = if (state.archived.at_head) std.math.maxInt(u64) else bounds.first orelse 0;
+    var expected_count: usize = 0;
+    for (host) |row| {
+        const key = row.archive_seq.?;
+        if (key >= low and key <= high) expected_count += 1;
+    }
+    try std.testing.expectEqual(expected_count, held_count);
+    for (host) |row| {
+        const key = row.archive_seq.?;
+        if (key < low or key > high) continue;
+        var found = false;
+        for (held[0..held_count]) |got| {
+            if (std.mem.eql(u8, &got.reference, &row.reference) and got.seq == key) found = true;
+        }
+        try std.testing.expect(found);
+    }
+    if (bounds.last) |last| {
+        var older = false;
+        for (host) |row| {
+            if (row.archive_seq.? < last) older = true;
+        }
+        try std.testing.expectEqual(older, state.archived.more_below);
+    }
+}
+
+test "archived window matches a fresh read over the whole domain" {
+    var refs: [40][6]u8 = undefined;
+    for (&refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "w{d:0>5}", .{at}) catch unreachable;
+    // Host rows newest first: archive keys 20 down to 1 under w00001..w00020.
+    var host_buffer: [40]Listed = undefined;
+    for (0..20) |index| {
+        const key: u64 = 20 - index;
+        host_buffer[index] = session(&refs[key], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    for ([_]bool{ false, true }) |scrolled| for ([_]u8{ 0, 1, 2, 3, 4 }) |scenario| {
+        var host: [40]Listed = host_buffer;
+        var count: usize = 20;
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.size = .{ .width = 80, .height = 2 };
+        var effects: Effects = .{};
+        try changeArchiveView(&state, .archived, &effects);
+        try serveWindow(&state, host[0..count], effects);
+        try expectWindowMatchesHost(&state, host[0..count]);
+        var token: u64 = 2;
+        if (scrolled) for ([_]usize{ 4, 9 }) |at| {
+            state.selected = .{ .session = host[at].reference };
+            const ticked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+            try serveWindow(&state, host[0..count], ticked);
+            try expectWindowMatchesHost(&state, host[0..count]);
+        };
+        // The change: each scenario touches the window in its own way and answers one roster delta. `inside` is
+        // a row the window holds in both modes.
+        const inside: usize = if (scrolled) 8 else 2;
+        var delta_buffer: [1]Listed = undefined;
+        switch (scenario) {
+            0 => {
+                // newly archived, above the window's first row
+                const top = session(&refs[21], .{ .stopped = .{ .since = test_now_s + 1, .cause = .stop } }, .{ .label = "new", .archive_state = .archived, .archive_seq = 21 });
+                std.mem.copyBackwards(Listed, host[1 .. count + 1], host[0..count]);
+                host[0] = top;
+                count += 1;
+                delta_buffer[0] = top;
+            },
+            1 => {
+                // unarchived: a held row goes live
+                var live = host[inside];
+                live.archive_state = .active;
+                live.archive_seq = null;
+                std.mem.copyForwards(Listed, host[inside .. count - 1], host[inside + 1 .. count]);
+                count -= 1;
+                delta_buffer[0] = live;
+            },
+            2 => {
+                // changed in place: a held row gets a new label
+                var changed = host[inside];
+                changed.label = "renamed";
+                host[inside] = changed;
+                delta_buffer[0] = changed;
+            },
+            3 => {
+                // below the window: the oldest Host row changes, and the window does not hold it
+                var older = host[count - 1];
+                older.label = "older";
+                host[count - 1] = older;
+                delta_buffer[0] = older;
+            },
+            4 => {
+                // archiving: a live Session with a pending archive is roster, not window
+                delta_buffer[0] = session(&refs[30], .{ .stopping = .{ .since = test_now_s } }, .{ .label = "archiving", .archive_state = .archiving, .archive_seq = 30 });
+            },
+            else => unreachable,
+        }
+        const ticked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        try serveWindow(&state, host[0..count], ticked);
+        token += 1;
+        const delta = try respond(&state, .changed, testToken(token), delta_buffer[0..1]);
+        try serveWindow(&state, host[0..count], delta);
+        try expectWindowMatchesHost(&state, host[0..count]);
+    };
+}
+
 test "archive filter switch keeps the roster and reads the window once per entry" {
     const row = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "private active title" });
     const archived = session("bbbbbb", .{ .stopped = .{ .since = test_now_s - 1, .cause = .stop } }, .{ .label = "saved title", .archive_state = .archived, .archive_seq = 7 });
