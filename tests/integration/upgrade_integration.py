@@ -1407,7 +1407,7 @@ def terminal_cases(root, binary, releases, artifacts):
             c.assert_unchanged()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
             receipt = exit_on_sigint(screen, process, "overview cancellation report after restoration")
-            assert b"Upgrade installation failed:" in receipt, receipt.decode()
+            assert b"Upgrade cancelled; nothing changed." in receipt and b"Upgrade installation failed" not in receipt, receipt.decode()
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
@@ -1467,7 +1467,7 @@ def conversation_case(root, binary, releases, artifacts):
             c.assert_unchanged()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
             receipt = exit_on_sigint(screen, process, "conversation cancellation report after restoration")
-            assert b"Upgrade installation failed:" in receipt, receipt.decode()
+            assert b"Upgrade cancelled; nothing changed." in receipt and b"Upgrade installation failed" not in receipt, receipt.decode()
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
         with terminal_process([str(binary), "session", "resume", "--store", str(c.store), session], env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)

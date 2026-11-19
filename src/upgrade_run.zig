@@ -531,7 +531,8 @@ pub fn installed(f: Facts) bool {
 }
 
 pub fn guidance(f: Facts, cleanup_retained: bool, path_selected: bool) bool {
-    return failureCause(f) != null or cleanup_retained or hostsOf(f).guidance or !path_selected;
+    const has_failure = if (failureCause(f)) |cause| cause != .cancelled else false;
+    return has_failure or cleanup_retained or hostsOf(f).guidance or !path_selected;
 }
 
 pub fn run(f: Facts, stopping: bool, finished: bool, phase: Phase) status.Run {
@@ -639,7 +640,7 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         try std.testing.expectEqualDeep(if (stopping) status.Ended.cancelled else status.Ended{ .failed = row[1] }, ending(f, stopping));
         try std.testing.expectEqual(status.Outcome.unchanged, outcome(f));
         try std.testing.expect(!installed(f));
-        try std.testing.expect(guidance(f, false, true));
+        try std.testing.expectEqual(row[0] != .cancelled, guidance(f, false, true));
         try std.testing.expectEqual(Exit.install_failed, exit(f));
         f.selection = .{ .failed = row[0] };
         try std.testing.expectEqualDeep(if (stopping) status.Ended.cancelled else status.Ended{ .failed = row[1] }, ending(f, stopping));
@@ -655,8 +656,8 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         try std.testing.expectEqualDeep(status.Run{ .installing = .{ .found = .{ .host = .{ .running = 2 } }, .step = row[1] } }, run(f, false, false, row[0]));
         try std.testing.expectEqual(status.Run.cancelling, run(f, true, false, row[0]));
     }
-    // F2 (#1792): a worker cancellation retains failure guidance.
+    // #1792: a cancellation before publication is not failure guidance.
     const cancelled_before_publication: Facts = .{ .mode = .install, .selection = .{ .ok = .{ .released = receipt } }, .release = .{ .ok = receipt }, .census = .{ .ok = 0 }, .resumed = true, .published = .{ .failed = .cancelled } };
     try std.testing.expectEqual(status.Ended.cancelled, ending(cancelled_before_publication, true));
-    try std.testing.expect(guidance(cancelled_before_publication, false, true));
+    try std.testing.expect(!guidance(cancelled_before_publication, false, true));
 }
