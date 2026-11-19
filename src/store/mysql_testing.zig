@@ -341,7 +341,7 @@ pub fn planText(storage: *Store, sql: []const u8, out: []u8) ![]const u8 {
 }
 
 fn readPlan(source: *wire.Connection, out: []u8) ![]const u8 {
-    const Row = struct { line: Bounded(1024) };
+    const Row = struct { line: Bounded(16384) };
     var columns: rows.Columns(Row) = undefined;
     var length: usize = 0;
     while (!source.isReady()) switch (try source.next()) {

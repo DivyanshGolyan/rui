@@ -728,7 +728,7 @@ test "MySQL plans each archiving candidate and page through its index" {
                 .{ .sql = membership.unaccepted_action_candidates_sql, .mysql = comptime rsql.sentTemplate(membership.unaccepted_action_candidates_sql).prepared(), .index = "action_operation_unaccepted" },
             };
             for (candidates) |candidate| {
-                var buffer: [8192]u8 = undefined;
+                var buffer: [16384]u8 = undefined;
                 const plan = try mysql_testing.planText(&storage, candidate.mysql, &buffer);
                 errdefer std.debug.print("MySQL plan for {s}:\n{s}", .{ candidate.sql, plan });
                 try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
@@ -740,7 +740,7 @@ test "MySQL plans each archiving candidate and page through its index" {
             };
             inline for (pages) |page| {
                 const literal = comptime bindLiterals(rsql.sentTemplate(page.source).prepared(), &.{ "0", "1000" });
-                var buffer: [8192]u8 = undefined;
+                var buffer: [16384]u8 = undefined;
                 const plan = try mysql_testing.planText(&storage, literal, &buffer);
                 errdefer std.debug.print("MySQL plan for page {s}:\n{s}", .{ page.source, plan });
                 try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan on s") == null);
