@@ -13,7 +13,24 @@ pub const Intent = struct {
     pub fn needsPreferences(self: Intent) bool {
         return self.store == null or self.provider == null or self.model == null;
     }
+
+    /// Whether the command line names a provider or model, which makes a wide
+    /// launch's binding explicit.
+    pub fn namesBinding(self: Intent) bool {
+        return self.provider != null or self.model != null;
+    }
 };
+
+test "Intent.namesBinding is true when either provider or model is named" {
+    const cases = [_]struct { intent: Intent, names: bool }{
+        .{ .intent = .{}, .names = false },
+        .{ .intent = .{ .provider = "codex" }, .names = true },
+        .{ .intent = .{ .model = "gpt-6-luna" }, .names = true },
+        .{ .intent = .{ .provider = "codex", .model = "gpt-6-luna" }, .names = true },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.names, case.intent.namesBinding());
+    try std.testing.expect(!(Intent{ .store = "/store" }).namesBinding());
+}
 
 pub const Snapshot = struct {
     intent: Intent,

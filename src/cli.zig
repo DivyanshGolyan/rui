@@ -1609,6 +1609,10 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     defer init.gpa.destroy(entry);
     try prepareOverview(init, options, entry);
     if (entry.launch) |*launch| try reportHostLaunch(init.io, launch, true, false, 0);
+    const selectors: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
+    const sign_in = entry.binding == null;
+    // A named launch with no binding waits for sign-in to save one, so it must open sign-in.
+    std.debug.assert(!selectors.namesBinding() or entry.binding != null or sign_in);
     return openOverview(init, .{
         .store = entry.store.slice(),
         .workspace = entry.workspace_buffer[0..entry.workspace_len],
@@ -1616,9 +1620,9 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
         .directory = undefined,
         .provider = if (entry.binding) |*binding| binding.provider.slice() else null,
         .model = if (entry.binding) |*binding| binding.model.slice() else null,
-        .sign_in = entry.binding == null,
+        .sign_in = sign_in,
         .login_at = entry.login_at,
-        .selectors = .{ .store = options.store, .provider = options.provider, .model = options.model },
+        .selectors = selectors,
     });
 }
 
