@@ -6,6 +6,7 @@ import sys
 
 from host_process import close_stdin, dispose_all, stop_process, wait_for
 import os_semantics
+import runtime_leftovers
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -35,7 +36,8 @@ def dispose_provider_case(process, store):
     )
 
 
-def matching_processes(store, *, descendants=False):
+def matching_hosts(store, *, descendants=False):
+    """(pid, resolved Store) for each detached Host on `store` (or beneath it, with descendants)."""
     expected = str(pathlib.Path(store).resolve())
     owned = os_semantics.processes_executing(RUI)
     matches = []
@@ -46,15 +48,23 @@ def matching_processes(store, *, descendants=False):
             except OSError:
                 continue
             if selected == expected or (descendants and pathlib.Path(selected).is_relative_to(expected)):
-                matches.append(pid)
+                matches.append((pid, selected))
     return matches
 
 
+def matching_processes(store, *, descendants=False):
+    return [pid for pid, _ in matching_hosts(store, descendants=descendants)]
+
+
 def forced_crash_cleanup(store, *, descendants=False):
-    for pid in matching_processes(store, descendants=descendants):
+    hosts = matching_hosts(store, descendants=descendants)
+    for pid, _ in hosts:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     wait_for(lambda: matching_processes(store, descendants=descendants), "forced-crash cleanup to reap the detached Host",
              timeout=5, interval=0.02, ready=lambda found: not found)
+    # The reaped Hosts left their sockets and .store hints behind; retire them before the caller deletes the Store.
+    for stored in {pathlib.Path(store).resolve(), *(pathlib.Path(selected) for _, selected in hosts)}:
+        runtime_leftovers.retire(stored)

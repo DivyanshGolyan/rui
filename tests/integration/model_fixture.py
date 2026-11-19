@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import atexit
 import email.utils
 import http.server
 import json
@@ -10,7 +11,8 @@ import sys
 import threading
 import time
 
-from host_process import HeldReplies, TestHTTPServer, hold, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, TestHTTPServer, hold, disposed_store, is_peer_disconnect, start_ready_process, stop_process, wait_for, wait_for_execution_release
+import runtime_leftovers
 from host_process import dispose_all
 
 
@@ -535,8 +537,23 @@ def stop_host(process):
     stop_process(process)
 
 
+# Stores of crashed Hosts. A crash leaves the Host's socket and .store hint behind, as a real crash does;
+# this suite process retires them at exit, once every case has finished with its Store.
+_CRASHED_STORES = set()
+
+
+def _retire_crashed_stores():
+    for store in sorted(_CRASHED_STORES):
+        runtime_leftovers.retire(store)
+
+
+atexit.register(_retire_crashed_stores)
+
+
 def crash_host(process, state, label, diagnostics=None):
     assert process.poll() is None, process.returncode
+    if (store := disposed_store(process)) is not None:
+        _CRASHED_STORES.add(store)
     deadline = time.monotonic() + 10
     errors = []
     try:
@@ -569,7 +586,7 @@ def crash_host(process, state, label, diagnostics=None):
             "stderr": stderr,
         }
     finally:
-        stop_process(process, timeout=max(0, deadline - time.monotonic()), seal_observations=False)
+        stop_process(process, timeout=max(0, deadline - time.monotonic()), seal_observations=False, retire=False)
 
 
 def configure(state, store, key, session, model, schema=None, instructions=None):
