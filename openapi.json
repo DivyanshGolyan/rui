@@ -7001,7 +7001,7 @@
               "window": {
                 "type": "string",
                 "x-rui-max-bytes": 25,
-                "pattern": "^(head|tail|(below|above):[1-9][0-9]*)$"
+                "pattern": "^(head|tail|(below|above):[1-9][0-9]{0,18})$"
               }
             },
             "required": [
