@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -141,6 +142,31 @@ class RuntimeLeftovers(unittest.TestCase):
                 self.assertTrue(sibling.exists() and accepting.exists())
             finally:
                 listening.close()
+
+    def test_retire_settles_a_host_that_dies_after_its_wrapper(self):
+        # strace --kill-on-exit: the reaped wrapper's Host still accepts for a moment.
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            store = root / "store"
+            path = root / "late.sock"
+            listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listening.bind(str(path))
+            listening.listen(1)
+            path.with_suffix(".store").write_text(str(store))
+            closer = threading.Timer(0.2, listening.close)
+            closer.start()
+            saved = os.environ.get(runtime_leftovers.OVERRIDE)
+            os.environ[runtime_leftovers.OVERRIDE] = str(root)
+            try:
+                HOST.retire_settled(store)
+            finally:
+                closer.cancel()
+                listening.close()
+                if saved is None:
+                    os.environ.pop(runtime_leftovers.OVERRIDE, None)
+                else:
+                    os.environ[runtime_leftovers.OVERRIDE] = saved
+            self.assertFalse(path.exists() or path.with_suffix(".store").exists())
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
         # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no
