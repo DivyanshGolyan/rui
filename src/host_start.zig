@@ -159,10 +159,12 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
         try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
         document = try parse(gpa, bytes, failure);
     }
+    const automatic = !document.object.contains("providers");
     if (value) |given| {
+        const materialized = try beginProviderEdit(init, settings, automatic, path, failure);
         try input(init, settings, path, given, failure);
         const all = try complete(gpa, settings, failure);
-        const admitted = lookup(all, path) orelse return invalid(failure, "settings", "assignment did not produce a setting");
+        if (lookup(all, path) == null) return invalid(failure, "settings", "assignment did not produce a setting");
         if (std.mem.startsWith(u8, path, "store.")) {
             const selected_store = lookup(all, "store").?;
             if (document.object.getPtr("store")) |old| {
@@ -175,9 +177,11 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
                 }
             }
         }
-        try put(gpa, &document, path, admitted);
+        try saveProviderEdit(gpa, &document, all, path, materialized);
     } else {
+        const materialized = try beginProviderEdit(init, settings, automatic, path, failure);
         const all = try complete(gpa, settings, failure);
+        if (materialized) try saveProviderEdit(gpa, &document, all, path, true);
         if (lookup(all, path)) |existing| {
             var sample = try encoded(gpa, existing);
             for (hs.leaves) |leaf| if (std.mem.eql(u8, leaf.kind, "path") and matches(leaf.pattern, path)) {
@@ -277,7 +281,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
                     try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, entry);
                 }
             }
-            if (automatic) try defaultProviders(ctx.init, settings, &failure);
+            const materialized = try beginProviderEdit(ctx.init, settings, automatic, "providers.openai", &failure);
             const key_bytes = switch (ctx.key) {
                 .provided => |value| value,
                 .existing => existing: {
@@ -291,9 +295,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             try assign(settings, ctx.init.gpa, "providers.openai.key", try std.fmt.allocPrint(ctx.gpa, "file:{s}", .{ctx.key_file}), &failure);
             try assign(settings, ctx.init.gpa, "providers.openai.unauthenticated", "false", &failure);
             const all = try complete(ctx.gpa, settings, &failure);
-            if (!document.object.contains("providers")) {
-                try put(ctx.gpa, &document, "providers", lookup(all, "providers").?);
-            } else try put(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?);
+            try saveProviderEdit(ctx.gpa, &document, all, "providers.openai", materialized);
             const bytes = try encoded(ctx.gpa, document);
             if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
             settings.deinit();
@@ -482,6 +484,22 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
             try assign(settings, init.gpa, at, "{}", failure);
         }
     }
+}
+
+/// Owner of the automatic provider set becoming explicit. An edit below `providers` on a document with
+/// no providers object first materializes the automatic set, so the edit adds to or removes from it
+/// rather than replacing it. `providers` itself is an exact set and is never materialized first.
+/// Returns whether the set was materialized; the caller then saves the whole providers object.
+fn beginProviderEdit(init: std.process.Init, settings: *hs.Settings, automatic: bool, path: []const u8, failure: *start_report.Failure) !bool {
+    if (!automatic or !std.mem.startsWith(u8, path, "providers.")) return false;
+    try defaultProviders(init, settings, failure);
+    return true;
+}
+
+/// Saves a provider edit into `document`: the whole providers object after materialization, else `path` alone.
+fn saveProviderEdit(gpa: std.mem.Allocator, document: *std.json.Value, all: std.json.Value, path: []const u8, materialized: bool) !void {
+    if (materialized) return put(gpa, document, "providers", lookup(all, "providers").?);
+    try put(gpa, document, path, lookup(all, path).?);
 }
 
 pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
@@ -1207,7 +1225,8 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
             const wanted = switch (index) {
                 0 => provider == .codex,
                 1 => false,
-                2 => provider == .openai,
+                // A path below providers on a document with no providers object keeps the automatic codex route.
+                2 => provider == .codex or provider == .openai,
                 else => provider == .codex or provider == .openai,
             };
             try std.testing.expectEqual(wanted, served);
@@ -1223,6 +1242,64 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     try std.testing.expectEqualStrings(try platform.defaultMysqlInterface(dir, &runtime), settings.interface.dir.slice());
     try selectStore(init, settings, dir, false, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
+}
+
+test "Host start saved edits below providers materialize the automatic set and only providers replaces it" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try private.realPath(init.io, &root)];
+    // With HOME holding no sign-in, the automatic set is codex alone.
+    const Start = enum { automatic, explicit };
+    const Change = enum { endpoint, whole, unset };
+    const cases = [_]struct { start: Start, change: Change, served: []const []const u8 }{
+        .{ .start = .automatic, .change = .endpoint, .served = &.{ "codex", "openai" } },
+        .{ .start = .automatic, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .automatic, .change = .unset, .served = &.{} },
+        .{ .start = .explicit, .change = .endpoint, .served = &.{ "codex", "chatgpt", "openai" } },
+        .{ .start = .explicit, .change = .whole, .served = &.{"chatgpt"} },
+        .{ .start = .explicit, .change = .unset, .served = &.{"chatgpt"} },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("providers edit case {s} {s}\n", .{ @tagName(case.start), @tagName(case.change) });
+        try private.writeFile(init.io, .{ .sub_path = "host.json", .data = switch (case.start) {
+            .automatic => "{}",
+            .explicit => "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}",
+        } });
+        try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        var failure: start_report.Failure = undefined;
+        switch (case.change) {
+            .endpoint => try savedEdit(init, dir, "providers.openai.endpoint", "https://example.test/v1", &failure),
+            .whole => try savedEdit(init, dir, "providers", "{\"chatgpt\":{}}", &failure),
+            .unset => try savedEdit(init, dir, "providers.codex", null, &failure),
+        }
+        const bytes = try private.readFileAlloc(init.io, "host.json", arena.allocator(), .limited(hs.max_document_bytes));
+        const json = try parse(arena.allocator(), bytes, &failure);
+        const providers_object = lookup(json, "providers").?;
+        try std.testing.expectEqual(case.served.len, providers_object.object.count());
+        for (case.served) |name| try std.testing.expect(providers_object.object.contains(name));
+    }
+    // A --set below providers on a document with no providers object keeps the automatic set too.
+    try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{}" });
+    try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    const intent = try readSources(init, .{ .dir = dir, .assignments = &.{"providers.openai.endpoint=https://example.test/v1"} }, settings, &failure);
+    try std.testing.expectEqual(ProviderIntent.explicit, intent);
+    try std.testing.expect(settings.providers.entries.codex != null and settings.providers.entries.openai != null);
+    try std.testing.expect(settings.providers.entries.chatgpt == null);
 }
 
 test "Host start reads a previous release's retired flags as the settings those flags filled" {
@@ -1341,13 +1418,15 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     try showSaved(init, dir, &shown.writer, &failure);
     var json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers.openai") != null);
-    try std.testing.expect(lookup(json, "providers.codex") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
+    // Unsetting openai on the materialized automatic set removes only openai; codex stays.
     try savedEdit(init, dir, "providers.openai", null, &failure);
     shown.clearRetainingCapacity();
     try showSaved(init, dir, &shown.writer, &failure);
     json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers") != null);
-    inline for (std.enums.values(protocol.Provider)) |provider| try std.testing.expect(lookup(json, "providers." ++ @tagName(provider)) == null);
+    try std.testing.expect(lookup(json, "providers.openai") == null);
+    try std.testing.expect(lookup(json, "providers.codex") != null);
     try savedEdit(init, dir, "store.mysql.url", "env:MYSQL_TEST_URL", &failure);
     try savedEdit(init, dir, "store.mysql.url", null, &failure);
     shown.clearRetainingCapacity();
@@ -1458,7 +1537,9 @@ pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Setting
         const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
         const path = assignment[0..equals];
         const selects_providers = std.mem.eql(u8, path, "providers") or std.mem.startsWith(u8, path, "providers.");
-        if (selects_providers and intent == .automatic) try assign(settings, init.gpa, "providers", "{}", failure);
+        if (selects_providers and intent == .automatic) {
+            if (!try beginProviderEdit(init, settings, true, path, failure)) try assign(settings, init.gpa, "providers", "{}", failure);
+        }
         try input(init, settings, path, assignment[equals + 1 ..], failure);
         if (selects_providers) intent = .explicit;
     }
@@ -1959,8 +2040,8 @@ test "Host start source layers preserve explicit provider intent and assignment 
         .{ .saved = "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}", .document = "{}", .assignments = &.{"providers.openai={}"}, .providers = .{ true, true, true } },
         .{ .saved = "{\"providers\":{\"openai\":{}}}", .document = "{\"providers\":{}}", .assignments = &.{ "providers.codex={}", "providers.chatgpt={}", "providers.codex=null" }, .providers = .{ false, false, true } },
         .{ .saved = "{\"providers\":{\"codex\":{}}}", .document = "{\"providers\":{\"openai\":{}}}", .assignments = &.{"providers.openai=null"}, .providers = .{ false, false, false } },
-        .{ .saved = "{}", .document = "{}", .assignments = &.{ "providers.chatgpt={}", "providers.openai={}", "providers.chatgpt=null" }, .providers = .{ true, false, false } },
-        .{ .saved = "{}", .document = "{}", .assignments = &.{"providers.openai=null"}, .providers = .{ false, false, false } },
+        .{ .saved = "{}", .document = "{}", .assignments = &.{ "providers.chatgpt={}", "providers.openai={}", "providers.chatgpt=null" }, .providers = .{ true, true, false } },
+        .{ .saved = "{}", .document = "{}", .assignments = &.{"providers.openai=null"}, .providers = .{ false, true, false } },
     };
     for (cases, 0..) |case, index| {
         settings.* = .{};
@@ -1981,7 +2062,7 @@ test "Host start source layers preserve explicit provider intent and assignment 
     }
 }
 
-test "Host start detached first provider assignment selects an exact ordered set" {
+test "Host start detached provider assignments add to the automatic set and providers selects an exact ordered set" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -1995,9 +2076,9 @@ test "Host start detached first provider assignment selects an exact ordered set
     const settings = try gpa.create(hs.Settings);
     defer gpa.destroy(settings);
     const cases = [_]struct { assignments: []const []const u8, openai: bool, codex: bool, chatgpt: bool }{
-        .{ .assignments = &.{"providers.openai={}"}, .openai = true, .codex = false, .chatgpt = false },
+        .{ .assignments = &.{"providers.openai={}"}, .openai = true, .codex = true, .chatgpt = false },
         .{ .assignments = &.{"providers.codex={}"}, .openai = false, .codex = true, .chatgpt = false },
-        .{ .assignments = &.{"providers.chatgpt={}"}, .openai = false, .codex = false, .chatgpt = true },
+        .{ .assignments = &.{"providers.chatgpt={}"}, .openai = false, .codex = true, .chatgpt = true },
         .{ .assignments = &.{ "providers.openai={}", "providers.codex={}", "providers.openai=null" }, .openai = false, .codex = true, .chatgpt = false },
         .{ .assignments = &.{ "providers.codex={}", "providers={}", "providers.chatgpt={}" }, .openai = false, .codex = false, .chatgpt = true },
     };
