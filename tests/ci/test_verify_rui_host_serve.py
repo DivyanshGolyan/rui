@@ -3,6 +3,8 @@ import copy
 import json
 from pathlib import Path
 import runpy
+import shutil
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -79,7 +81,8 @@ class HostRestartRuntimeTest(unittest.TestCase):
         return patch.dict(self.steps.__globals__, {'stop_host': stop_host, 'launch_host': launch_host})
 
     def make_run(self, meta=None, **extra):
-        root = Path(self.id().replace('.', '_'))
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
         return types.SimpleNamespace(meta=meta or {}, evidence=root, root=root, frame_served=None, **extra)
 
     def terminal(self):
