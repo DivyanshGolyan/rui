@@ -350,7 +350,8 @@ const ArchivedPage = struct {
     }
 };
 
-/// The first display line of an inline first Message, the same rule as the Session row's last line.
+/// The first display line of an inline first Message: session_line.firstLine, cut to the line bound. The client
+/// escapes it for the terminal exactly as it does a line it reads itself.
 fn archivedLine(prefix: ?*const rsql.Blob(512), text: *Bounded(session_line.max_line_bytes)) ?[]const u8 {
     const bytes = utf8_validation.completePrefix((prefix orelse return null).slice());
     const line = session_line.firstLine(bytes);

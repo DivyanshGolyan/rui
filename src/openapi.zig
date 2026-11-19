@@ -13,6 +13,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
+const session_list = @import("session_list.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -32,7 +33,7 @@ const Variant = struct {
 };
 
 /// The Archived window cursor: `head`, `tail`, `below:<key>` or `above:<key>`, keys canonical and nonzero.
-const archived_cursor_pattern = "^(head|tail|(below|above):[1-9][0-9]*)$";
+const archived_cursor_pattern = "^(head|tail|(below|above):[1-9][0-9]{0,18})$";
 const live_list_deltas = .{ "not_modified", "changed", "full" };
 
 fn windowVariant(comptime shape: anytype, comptime examples: anytype) Variant {
@@ -1721,15 +1722,7 @@ fn matches(pattern: []const u8, text: []const u8) bool {
         for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
         return true;
     }
-    if (std.mem.eql(u8, pattern, archived_cursor_pattern)) {
-        if (std.mem.eql(u8, text, "head") or std.mem.eql(u8, text, "tail")) return true;
-        const colon = std.mem.indexOfScalar(u8, text, ':') orelse return false;
-        if (!std.mem.eql(u8, text[0..colon], "below") and !std.mem.eql(u8, text[0..colon], "above")) return false;
-        const digits = text[colon + 1 ..];
-        if (digits.len == 0 or digits[0] == '0') return false;
-        for (digits) |byte| if (!std.ascii.isDigit(byte)) return false;
-        return true;
-    }
+    if (std.mem.eql(u8, pattern, archived_cursor_pattern)) return if (session_list.parseArchivedCursor(text)) |_| true else |_| false;
     const lower_name = std.mem.startsWith(u8, pattern, "^[a-z0-9_-]{1,");
     if (lower_name or std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
         const begin = std.mem.indexOfScalar(u8, pattern, ',').? + 1;

@@ -1130,8 +1130,17 @@ test "MySQL plans each archiving candidate and page through its index" {
                 var buffer: [16384]u8 = undefined;
                 const plan = try mysql_testing.planText(&storage, literal, &buffer);
                 errdefer std.debug.print("MySQL plan for window page {s}:\n{s}", .{ source, plan });
-                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan on session") == null);
+                // No table is scanned: the page ranges over session_tab and every first-Message read is keyed.
+                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
                 try std.testing.expect(std.mem.indexOf(u8, plan, "session_tab") != null);
+            }
+            {
+                const report = @import("domain/report.zig");
+                const literal = comptime bindLiterals(rsql.sentTemplate(report.first_candidate_source).prepared(), &.{"'abcdef'"});
+                var buffer: [16384]u8 = undefined;
+                const plan = try mysql_testing.planText(&storage, literal, &buffer);
+                errdefer std.debug.print("MySQL plan for the first Message:\n{s}", .{plan});
+                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
             }
             inline for (pages) |page| {
                 const literal = comptime bindLiterals(rsql.sentTemplate(page.source).prepared(), &.{ "0", "1000" });

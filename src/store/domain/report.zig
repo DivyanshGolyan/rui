@@ -226,8 +226,9 @@ pub const first_admission_join = " LEFT JOIN message_admission first_bound ON fi
 /// The admission column of `first_admission_join`: the Session's first Message, or NULL when it has none.
 pub const first_admission_column = "first_pick.admission_id";
 
+pub const first_candidate_source = "SELECT " ++ first_admission_column ++ " AS admission_id FROM session" ++ first_admission_join ++ " WHERE session.session_ref=?1";
 const first_candidate = rsql.Read(.{
-    .sql = "SELECT " ++ first_admission_column ++ " AS admission_id FROM session" ++ first_admission_join ++ " WHERE session.session_ref=?1",
+    .sql = first_candidate_source,
     .Args = struct { session: []const u8 },
     .Row = struct { admission_id: ?rsql.Positive },
     .cardinality = .optional,
