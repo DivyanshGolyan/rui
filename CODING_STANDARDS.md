@@ -59,20 +59,6 @@ For housekeeping, red-main reverts, model trials or similar work without an issu
 The plan checks the text, not whether the issue exists.
 [PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
-### Bug fixes
-
-A bug fix starts by asking why the bug was possible, not where the symptom is.
-Name the design cause and fix that, using the [codebase-design](https://github.com/mattpocock/skills) vocabulary (deep module, seam, one owner):
-
-- **Two owners for one rule:** merge them into one owner every path calls.
-- **A rule applied beyond its case:** make the case a value the owner decides on, not a guess from scattered signals.
-- **A check that only one path runs:** move it to the owner every path crosses.
-- **A shallow interface:** callers that must call helpers in order, or know a policy, get one deep function instead.
-- **A test that pinned the bug:** rewrite it to the invariant the person needs ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
-
-The PR Summary states the cause in one line (`Why possible: ...`) beside its [shape](#shape-before-code), and how the fix removes that class rather than this instance.
-When the root fix is larger than the bug (a new owner, a contract change), land the instance fix, file the root fix as an issue under the same workstream, and link it.
-
 ### Shape before code
 
 Before writing code for a change to `src/`, show the changed structure in a fenced diagram, diff-sketch or tree in the PR's `## Summary`.
@@ -109,6 +95,9 @@ A new surface that does the same job as an existing component calls that compone
 
 Before correcting a failure, identify its owner, invariant and earliest violating transition.
 Correct that transition or replace the owning model, not a downstream observer.
+For a bug, that owner answers why the bug was possible: a rule with two owners, a rule applied beyond its case, a check only one path runs, a caller that must know a policy or a call order, or a test that pinned the broken promise ([Bugs refine the catalog](docs/verification/testing.md#bugs-refine-the-catalog)).
+The bug fix's `## Summary` states it in a `Why possible:` line and how the fix removes that class.
+Only a root fix that needs a user decision under [Authority](AGENTS.md#authority) (a contract or behavior change, or wider scope) may land after the instance fix, as a linked issue under the same workstream.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.

@@ -9,8 +9,7 @@ Load guidance for the task at hand, combining applicable routes:
 
 - **Product scope or behavior:** read [README.md](README.md), then use the [Architecture index](ARCHITECTURE.md) to load the affected subsystem contract.
 - **Terminal screens:** for any change to how a screen looks or reads, read [Design principles](DESIGN.md), then the [Session UI](docs/contracts/session-ui.md) contract.
-- **Engineering:** for implementation, design, debugging, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
-- **Bug fixes:** read [Bug fixes](CODING_STANDARDS.md#bug-fixes) and fix why the bug was possible, not only the symptom.
+- **Engineering:** for implementation, design, debugging, bug fixes, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
 - **Review:** read [Review](CODING_STANDARDS.md#review), including when implementing findings.
   Reviews are read-only unless fixes are requested.
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
