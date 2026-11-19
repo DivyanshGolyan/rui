@@ -7439,7 +7439,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    // Recorded by running this same fixture domain against base 03aa26d0.
+    // Recorded against base 03aa26d0, then re-recorded when #1938 made every working row spin and held rows show their word.
     try std.testing.expectEqual(@as(u64, 0x697d3b6457f515c), bytes_and_styles);
 }
 
