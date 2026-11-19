@@ -938,12 +938,17 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
 }
 
 /// The one place an unanswered socket is decided. After a complete process
-/// census, a Host process resolving to a socket has replaced that socket's
-/// candidate, so one still unanswered has no live owner: a leftover, not a
-/// failed Host. Without a complete census it stays a per-Host failure.
+/// census that located every Host process's socket, a Host process resolving
+/// to a socket has replaced that socket's candidate, so one still unanswered
+/// has no live owner: a leftover, not a failed Host. Otherwise it stays a
+/// per-Host failure.
 fn settleUnansweredSockets(candidates: []UpgradeCandidate, census: enum { complete, incomplete }) void {
+    // A Host process whose socket stayed unknown might own any unanswered socket.
+    const located = census == .complete and for (candidates) |candidate| {
+        if (candidate.pid != null and candidate.socket == null) break false;
+    } else true;
     for (candidates) |*candidate| switch (candidate.result) {
-        .unanswered => |err| candidate.result = if (census == .complete) .stale else .{ .failed = err },
+        .unanswered => |err| candidate.result = if (located) .stale else .{ .failed = err },
         else => {},
     };
 }
@@ -6295,18 +6300,25 @@ test "#1855 only a socket unanswered at connect, after a complete census, is a s
         .{ .candidate = .{ .socket = "/silent.sock", .result = .{ .failed = error.TransferInactive } }, .complete = .failed, .incomplete = .failed },
         .{ .candidate = .{ .socket = "/live.sock", .directory = "/host", .pid = 42, .result = .{ .observed = observation } }, .complete = .observed, .incomplete = .observed },
         .{ .candidate = .{ .socket = "/owned.sock", .pid = 43, .result = .{ .failed = error.HostPeerPidMismatch } }, .complete = .failed, .incomplete = .failed },
-        .{ .candidate = .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } }, .complete = .failed, .incomplete = .failed },
     };
-    inline for (.{ .complete, .incomplete }) |census| {
-        var candidates: [rows.len]UpgradeCandidate = undefined;
-        for (rows, &candidates) |row, *candidate| candidate.* = row.candidate;
-        settleUnansweredSockets(&candidates, census);
-        for (rows, candidates) |row, candidate| try std.testing.expectEqual(@field(row, @tagName(census)), switch (candidate.result) {
-            .stale => Settled.stale,
-            .failed => Settled.failed,
-            .observed => Settled.observed,
-            .unanswered => unreachable,
-        });
+    // A Host process whose socket stayed unknown might own any unanswered socket.
+    const unlocated: Row = .{ .candidate = .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } }, .complete = .failed, .incomplete = .failed };
+    inline for (.{ false, true }) |with_unlocated| {
+        inline for (.{ .complete, .incomplete }) |census| {
+            const all = if (with_unlocated) rows ++ [_]Row{unlocated} else rows;
+            var candidates: [all.len]UpgradeCandidate = undefined;
+            for (all, &candidates) |row, *candidate| candidate.* = row.candidate;
+            settleUnansweredSockets(&candidates, census);
+            for (all, candidates) |row, candidate| {
+                const expected = @field(row, @tagName(census));
+                try std.testing.expectEqual(if (with_unlocated and expected == .stale) Settled.failed else expected, switch (candidate.result) {
+                    .stale => Settled.stale,
+                    .failed => Settled.failed,
+                    .observed => Settled.observed,
+                    .unanswered => unreachable,
+                });
+            }
+        }
     }
 }
 
