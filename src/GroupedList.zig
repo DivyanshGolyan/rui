@@ -9,7 +9,6 @@ const RowInset = @import("widgets/RowInset.zig");
 
 pub const Segment = overview_view.Segment;
 pub const Target = overview_view.Target;
-pub const Scroll = struct { userdata: *anyopaque, scrolled: *const fn (*anyopaque, *vxfw.EventContext, u32, u32) anyerror!void };
 pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
@@ -48,8 +47,6 @@ selected: ?u32 = null,
 selection_background: @import("overview_style.zig").Background = .selection,
 on_press: ?Press = null,
 on_presence: ?List.Presence = null,
-/// Told after a wheel scroll moves the list: the top line and the lines shown at the last draw.
-on_scroll: ?Scroll = null,
 edges: ?List.Edges = null,
 caps: overview_view.Caps = .{},
 inner: List = .{},
@@ -115,7 +112,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (mouse.button == .wheel_up or mouse.button == .wheel_down or mouse.button == .wheel_left or mouse.button == .wheel_right) {
                 self.anchor_after_scroll = mouse.row;
                 try self.inner.widget().handleEvent(ctx, input);
-                if (self.on_scroll) |scroll| try scroll.scrolled(scroll.userdata, ctx, @intCast(self.inner.list.scroll.top), self.shown.end -| self.shown.first);
                 return;
             }
             for (self.shown_at, 0..) |span, offset| {
@@ -128,6 +124,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         else => {},
     }
     try self.inner.widget().handleEvent(ctx, input);
+}
+
+/// The shown rows after a wheel scroll, once a draw has applied it (see List.scrollReport).
+pub fn scrollReport(self: *Self) ?List.Scroll {
+    return self.inner.scrollReport();
 }
 
 pub fn followSelection(self: *Self) void {
@@ -175,6 +176,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     surface.widget = self.widget();
     self.shown = self.inner.shown;
     self.shown_at = self.inner.shown_at;
+    // A wheel scroll moved the top: an anchor the shell holds follows the new top row, so the next draw keeps it.
+    if (self.inner.wheel_applied and self.anchor != null) if (self.shown_at.len > 0) if (self.shown_at[0].target) |target| {
+        self.anchor = .{ .target = target, .index = self.shown.first, .row = 0 };
+    };
     if (self.anchor_after_scroll) |pointer_row| {
         self.anchor_after_scroll = null;
         for (self.shown_at, 0..) |span, offset| {

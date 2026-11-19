@@ -583,6 +583,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
+            // A wheel scroll reports the rows it shows once a draw has applied it.
+            if (self.app_sessions.scrollReport()) |scroll| try appScrolled(self, ctx, scroll.top, scroll.height);
             const presentation = try self.eventResult(.{ .presentation_tick = .{
                 .now_ms = self.animationMs(),
                 .list_visible = if (self.root.size.width == 0) null else self.root.size.width >= Root.split_at or self.root.session == null,
@@ -651,8 +653,8 @@ fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!vo
     ctx.redraw = ctx.redraw or self.state.presentation_revision != revision;
 }
 
-/// A wheel scroll moved the list. The core learns which rows are shown, so the Archived window reads the edge the
-/// list reaches; the top row becomes the anchor, so a trim above it moves nothing on screen.
+/// A wheel scroll moved the list, as the draw after it shows. The core learns which rows are shown, so the Archived
+/// window reads the edge the list reaches; the top row becomes the anchor, so a trim above it moves nothing on screen.
 fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.state.archive != .archived or top >= self.state.order.items.len) return;
@@ -1190,7 +1192,6 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
-    self.app_sessions.on_scroll = .{ .userdata = self, .scrolled = appScrolled };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     return self;
