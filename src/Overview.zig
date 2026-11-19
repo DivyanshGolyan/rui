@@ -4426,19 +4426,22 @@ test "overview Archived window effect runs one job and its reply becomes the win
         var calls: usize = 0;
         var last: session_list.ArchivedCursor = .head;
 
+        // The slim row is written in the wire shape and decoded with the window reply's own row decoder: a
+        // parts-form first Message with no inline line, so the overview must read its line by position.
         fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
             _ = self;
             _ = requests;
             calls += 1;
             last = cursor;
+            const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
             page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
-            page.rows[0] = .{
-                .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable },
-                .archive_seq = 42,
-                .stopped_at = test_now_s,
-                .label = null,
-                .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = .{ .value = protocol.Bounded(session_list.max_first_line_bytes).from("Archived line") catch unreachable } },
-            };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
             return null;
         }
     };
@@ -4458,6 +4461,9 @@ test "overview Archived window effect runs one job and its reply becomes the win
     try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
     try std.testing.expect(!overview.state.archived.inflight);
     try std.testing.expect(overview.state.archived.at_head);
+    // The parts-form row's line was read once, at the position the wire row carried (its admission differs from the live row's, so the line is read again).
+    try std.testing.expectEqualSlices(u8, "k7m2qx", &Seen.now.line.session);
+    try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
 }
 
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {

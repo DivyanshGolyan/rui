@@ -5280,40 +5280,6 @@ test "archived window reads the line of a window row that has none, once, and dr
     try std.testing.expectEqual(FirstLineRead.unread, moved.find("w00009".*).?.line);
 }
 
-test "archived window row decodes from the wire with its position and content, and reads its parts line" {
-    const protocol = @import("protocol.zig");
-    const protocol_reply = @import("protocol_reply.zig");
-    const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5b) };
-    const content: content_value.Value = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } };
-    const wire: protocol.ArchivedRow.Fields = .{ .reference = "w00009", .archive_seq = 9, .stopped_at = test_now_s - 9, .label = null, .first = .{ .position = 3, .admission = 9, .content = content, .line = null } };
-    var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
-    var out = std.Io.Writer.fixed(&json);
-    try wire.writeJson(&out);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const decoded = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
-    var rows = [_]Listed{Listed.archived(&decoded)};
-
-    var state = try opened(&.{});
-    defer state.deinit();
-    state.size = .{ .width = 80, .height = 2 };
-    var effects: Effects = .{};
-    try changeArchiveView(&state, .archived, &effects);
-    const answered = try step(&state, .{ .archived = .{ .read = effects.slice()[0].read_archived, .page = .{ .rows = &rows, .first = 9, .last = 9, .more_above = false, .more_below = false } } });
-    var reads_seen: usize = 0;
-    for (answered.slice()) |effect| switch (effect) {
-        .read_first_lines => |reads| for (reads.slice()) |read| {
-            reads_seen += 1;
-            try std.testing.expectEqual(@as(u64, 3), read.position);
-            try std.testing.expectEqual(@as(u64, 9), read.admission);
-            try std.testing.expectEqualDeep(content, read.content);
-        },
-        else => {},
-    };
-    try std.testing.expectEqual(@as(usize, 1), reads_seen);
-    try std.testing.expectEqual(FirstLineRead.requested, state.find("w00009".*).?.line);
-}
-
 test "archived window names a row by the same line the first-line read gives: control bytes and long lines" {
     const long: [300]u8 = @splat('a');
     for ([_][]const u8{ "x\x1b[31my", &long }) |raw| {
