@@ -64,7 +64,7 @@ tool_labels: [std.enums.values(tools.BuiltInTool).len][]const u8 = undefined,
 model_choice: ModelChoice = .{},
 renaming: bool = false,
 rename_bytes: [status.max_label_bytes]u8 = undefined,
-rename_editor: Editor = .init(&.{}),
+rename_editor: Editor = .initLocked(&.{}, .line_refusals_release),
 pasting: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -242,7 +242,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         },
         4 => self.openModel(),
         6 => {
-            self.rename_editor = .init(&self.rename_bytes);
+            self.rename_editor = .initLocked(&self.rename_bytes, .line_refusals_release);
             _ = self.rename_editor.append(self.session.label.slice());
             self.renaming = true;
         },

@@ -1593,8 +1593,12 @@ fn testingStatusFor(page: *Self, ctx: *vxfw.EventContext) ![]const u8 {
 
 test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their field; typed refusals only report" {
     const Fault = enum { unbound, typed_overflow, typed_invalid_utf8, typed_invalid_scalar, paste_invalid, paste_overflow };
-    for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| {
-        errdefer std.debug.print("Sign-in refusal field={s} fault={s}\n", .{ @tagName(field), @tagName(fault) });
+    const Ack = enum { enter, letter, backspace_at_start, arrow };
+    for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| for (std.enums.values(Ack)) |ack| {
+        const paste = fault == .paste_invalid or fault == .paste_overflow;
+        // A typed refusal never locks, so the acknowledgement keys only vary for pastes.
+        if (!paste and ack != .enter) continue;
+        errdefer std.debug.print("Sign-in refusal field={s} fault={s} ack={s}\n", .{ @tagName(field), @tagName(fault), @tagName(ack) });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -1616,30 +1620,37 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
             .key => "API key",
             .model => "Model ID",
         };
-        const paste = fault == .paste_invalid or fault == .paste_overflow;
         const overflow = try arena.allocator().alloc(u8, editor.area.buffer.len + 1);
         @memset(overflow, 'x');
         const before = try arena.allocator().dupe(u8, editor.text());
+        // Every fault reaches the field as the person's keys, through the drawn view.
         switch (fault) {
             .unbound => try testingSend(&page, &ctx, "\x1bx", 90, 28),
+            .typed_overflow => try testingSend(&page, &ctx, overflow, 90, 28),
             .typed_invalid_utf8 => try testingSend(&page, &ctx, "\xff", 90, 28),
-            .typed_invalid_scalar => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = "\x01" } }, false),
-            .typed_overflow => try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = overflow } }, false),
+            .typed_invalid_scalar => try testingSend(&page, &ctx, "\u{200b}", 90, 28),
             .paste_invalid => try testingSend(&page, &ctx, "\x1b[200~\xff\x1b[201~", 90, 28),
-            .paste_overflow => {
-                try page.formEvent(field, .paste_start, true);
-                try page.formEvent(field, .{ .key_press = .{ .codepoint = 'x', .text = overflow } }, true);
-                try page.formEvent(field, .paste_end, false);
-            },
+            .paste_overflow => try testingSend(&page, &ctx, try std.fmt.allocPrint(arena.allocator(), "\x1b[200~{s}\x1b[201~", .{overflow}), 90, 28),
         }
         const status = try testingStatusFor(&page, &ctx);
         // A typed overflow keeps the bytes that fit before refusing, as the editor always has.
         if (fault != .typed_overflow) try std.testing.expectEqualStrings(before, editor.text());
-        if (paste) {
+        if (!paste) {
+            // A typed refusal is reported, locks nothing and does not block Connect.
+            try std.testing.expectEqual(@as(?core.Field, null), form.refusedField());
+            try std.testing.expect(std.mem.indexOf(u8, status, " · text couldn't be entered") != null);
+            try std.testing.expect(std.mem.indexOf(u8, status, "Paste refused") == null);
+            // The person deletes what overflowed, so the field's own validation is not the thing under test.
+            const extra = editor.text().len - before.len;
+            const deletes = try arena.allocator().alloc(u8, extra);
+            @memset(deletes, 0x7f);
+            try testingSend(&page, &ctx, deletes, 90, 28);
+            try std.testing.expectEqualStrings(before, editor.text());
+            try std.testing.expect(try page.freeze(.key, .connect));
+        } else {
             // The Status row wraps, so match the field-naming prefix; the full sentence is in pasteStatus.
             const message = try std.fmt.allocPrint(arena.allocator(), "Paste refused in {s}.", .{label});
             try std.testing.expect(std.mem.indexOf(u8, status, message) != null);
-            // Connect is blocked; the click only moves focus back to the refused field.
             try testingClickConnect(&page, &ctx);
             try std.testing.expect(page.state.page == .api and page.task.thread == null and page.frozen == null);
             try std.testing.expectEqual(switch (field) {
@@ -1647,20 +1658,29 @@ test "SUI-63 Sign-in paste refusals block Connect until acknowledged in their fi
                 .key => .key,
                 .model => .model,
             }, page.state.focus);
-            // Any edit key acknowledges the lock and applies normally.
-            try testingSend(&page, &ctx, "q", 90, 28);
-            try std.testing.expect(editor.rejected == null);
-            try std.testing.expectEqual(before.len + 1, editor.text().len);
-            try std.testing.expect(std.mem.indexOf(u8, try testingStatusFor(&page, &ctx), "Paste refused") == null);
-            try std.testing.expect(try page.freeze(.key, .connect));
-        } else {
-            try std.testing.expect(std.mem.indexOf(u8, status, " · text couldn't be entered") != null);
-            try std.testing.expect(std.mem.indexOf(u8, status, "Paste refused") == null);
-            for (std.enums.values(core.Field)) |other| try std.testing.expect(form.editor(other).rejected == null);
-            // A typed refusal leaves the field editable; no field is locked, so Connect is not blocked by it.
-            try testingSend(&page, &ctx, "\x7f", 90, 28);
-            try testingSend(&page, &ctx, "q", 90, 28);
-            try std.testing.expect(std.mem.indexOfScalar(u8, editor.text(), 'q') != null);
+            switch (ack) {
+                .enter => try testingSend(&page, &ctx, "\r", 90, 28),
+                .letter => try testingSend(&page, &ctx, "q", 90, 28),
+                .backspace_at_start => {
+                    editor.setCursor(0);
+                    try testingSend(&page, &ctx, "\x7f", 90, 28);
+                },
+                // A caret move is not an acknowledgement: the lock and its Status stay.
+                .arrow => try testingSend(&page, &ctx, "\x1b[D", 90, 28),
+            }
+            const after = try testingStatusFor(&page, &ctx);
+            if (ack == .arrow) {
+                try std.testing.expect(editor.rejected != null);
+                try std.testing.expect(std.mem.indexOf(u8, after, message) != null);
+                try testingClickConnect(&page, &ctx);
+                try std.testing.expect(page.task.thread == null and page.frozen == null);
+            } else {
+                // The acknowledgement clears the lock and the stale transient, so Connect proceeds.
+                try std.testing.expect(editor.rejected == null);
+                try std.testing.expect(std.mem.indexOf(u8, after, "Paste refused") == null);
+                try std.testing.expect(std.mem.indexOf(u8, after, "couldn't be entered") == null);
+                try std.testing.expect(try page.freeze(.key, .connect));
+            }
         }
     };
 }

@@ -10,13 +10,16 @@ area: TextArea,
 rejected: ?keymap.Refusal = null,
 edits: u32 = 0,
 paste_appends: bool = false,
-/// Which refusals lock the draft until acknowledged. `every_refusal` locks on
-/// any refusal and lets the owner release it. `pastes_only` locks only on a
-/// refused paste; a typed refusal is only reported through `.refused`, and
-/// Enter or any edit key in the locked field acknowledges it.
+/// Which refusals lock the draft. Set only through `init`/`initLocked`.
+/// `every_refusal` locks on any refusal until the owner releases it.
+/// `pastes_only` locks only on a refused paste; a typed refusal is only
+/// reported through `.refused`. Enter, or a key that changes the text,
+/// acknowledges a pastes_only lock.
+/// `line_refusals_release` is `every_refusal` except that a refusal this
+/// editor returns as `.refused` with a line-ending reason releases at once.
 lock: Lock = .every_refusal,
 
-pub const Lock = enum { every_refusal, pastes_only };
+pub const Lock = enum { every_refusal, pastes_only, line_refusals_release };
 pub const KeyOutcome = keymap.Outcome(Key);
 pub const TextCheck = TextArea.TextCheck;
 
@@ -27,6 +30,7 @@ pub fn init(buffer: []u8) Editor {
     return .{ .area = area };
 }
 
+/// The lock policy is fixed at construction; the owner never sets `lock` directly.
 pub fn initLocked(buffer: []u8, lock: Lock) Editor {
     var editor: Editor = .init(buffer);
     editor.lock = lock;
@@ -90,11 +94,12 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             // Vaxis decodes whole characters and reports malformed bytes as
             // U+FFFD carrying them; as text they would wait for a character
             // that never comes and swallow every key after.
-            self.acknowledgeEdit();
+            self.acknowledgeLock();
             break :blk self.typedRefusal(.invalid);
         } else self.key(pressed),
         else => .none,
     };
+    if (self.lock == .line_refusals_release and outcome == .refused and outcome.refused.endsLine()) self.release();
     const Outcome = keymap.Outcome(@TypeOf(keys).Action);
     return switch (outcome) {
         .action => |name| if (keys.get(name)) |action| .{ .action = action } else .none,
@@ -130,9 +135,8 @@ fn typedRefusal(self: *Editor, reason: keymap.Refusal) KeyOutcome {
     return .none;
 }
 
-/// Any edit key in a field locked by a refused paste acknowledges it, so the
-/// key then applies normally. Enter acknowledges without editing.
-fn acknowledgeEdit(self: *Editor) void {
+/// Typed text in a field locked by a refused paste acknowledges it.
+fn acknowledgeLock(self: *Editor) void {
     if (self.lock == .pastes_only and self.rejected != null) self.release();
 }
 
@@ -185,15 +189,36 @@ fn settle(self: *Editor, result: TextArea.Result, at_end: bool) KeyOutcome {
 fn key(self: *Editor, value: vaxis.Key) KeyOutcome {
     if (self.pasting()) _ = self.finishPaste(.explicit);
     const press = keypress.classify(value);
-    if (self.lock == .pastes_only and self.rejected != null) switch (press) {
-        .enter => {
-            self.release();
-            return .redraw;
-        },
-        .edit, .text, .control => self.release(),
-        .key => |key_name| if (editsText(key_name)) self.release(),
-        .chord, .none => {},
+    if (self.lock == .pastes_only and self.rejected != null and acknowledges(press)) {
+        self.release();
+        // An acknowledgement always redraws, so the owner drops its transient report.
+        if (std.meta.activeTag(press) == .enter) return .redraw;
+        const outcome = self.pressKey(press);
+        return if (outcome == .none) .redraw else outcome;
+    }
+    return self.pressKey(press);
+}
+
+/// Enter, or a key that changes the text, acknowledges a pastes_only lock. Caret
+/// moves do not. An edit that changes nothing (Backspace at the start) still
+/// acknowledges, because the person tried to edit.
+fn acknowledges(press: keymap.Press) bool {
+    return switch (press) {
+        .enter, .text, .control => true,
+        .edit => |command| changesText(command),
+        .key => |key_name| key_name == .ctrl_d,
+        .chord, .none => false,
     };
+}
+
+fn changesText(command: keymap.Edit) bool {
+    return switch (command) {
+        .tab, .newline, .delete_next, .delete_previous, .delete_to_line_start, .delete_to_line_end, .delete_word, .delete_word_part => true,
+        .left, .right, .line_start, .line_end, .word_left, .word_right => false,
+    };
+}
+
+fn pressKey(self: *Editor, press: keymap.Press) KeyOutcome {
     switch (press) {
         .key => |key_name| return self.edit(key_name) orelse .{ .action = key_name },
         .enter => return if (self.rejected) |why| .{ .refused = why } else .submit,
@@ -255,13 +280,6 @@ fn insert(self: *Editor, bytes: []const u8, multiline: bool) KeyOutcome {
         self.reject(.invalid);
     }
     return outcome;
-}
-
-fn editsText(key_name: Key) bool {
-    return switch (key_name) {
-        .left, .right, .up, .down, .home, .end, .ctrl_d => true,
-        else => false,
-    };
 }
 
 pub fn insertMultiline(self: *Editor, gpa: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!KeyOutcome {
@@ -411,15 +429,15 @@ test "SUI-12 typed bytes give the draft and caret" {
     try std.testing.expectEqual(@as(usize, 65535), editor.text().len);
 }
 
-test "SUI-63 DraftEditor lock policy: pastes_only locks only refused pastes and Enter or an edit key acknowledges" {
+test "SUI-63 DraftEditor lock policy: pastes_only locks only refused pastes; Enter or a text edit acknowledges, a caret move does not" {
     const Fault = enum { typed_invalid_utf8, typed_scalar, typed_overflow, paste_invalid, paste_overflow, paste_edit_rejected };
-    const Ack = enum { enter, letter, backspace };
+    const Ack = enum { enter, letter, backspace, backspace_at_start, arrow_left };
     const spaces = @as([33]u8, @splat(' '));
-    for (std.enums.values(Editor.Lock)) |lock| for (std.enums.values(Fault)) |fault| for (std.enums.values(Ack)) |ack| {
+    for ([_]Editor.Lock{ .every_refusal, .pastes_only }) |lock| for (std.enums.values(Fault)) |fault| for (std.enums.values(Ack)) |ack| {
         errdefer std.debug.print("DraftEditor lock={s} fault={s} ack={s}\n", .{ @tagName(lock), @tagName(fault), @tagName(ack) });
         var storage: [32]u8 = undefined;
-        var editor: Editor = .initText(&storage, "keptTAIL", 4);
-        editor.lock = lock;
+        var editor: Editor = .initLocked(&storage, lock);
+        std.debug.assert(editor.set("keptTAIL", 4) == null);
         const fault_outcome: Editor.KeyOutcome = switch (fault) {
             .typed_invalid_utf8 => editor.appEvent(keymap.every, .{ .key_press = .{ .codepoint = 'x', .text = "\xff" } }, false),
             .typed_scalar => editor.appEvent(keymap.every, .{ .key_press = .{ .codepoint = 'x', .text = "\x01" } }, false),
@@ -454,6 +472,7 @@ test "SUI-63 DraftEditor lock policy: pastes_only locks only refused pastes and 
                 .paste_overflow => .{ .refused = .paste_overflow },
                 .paste_edit_rejected => .{ .refused = .edit_rejected },
             },
+            .line_refusals_release => unreachable,
         };
         try std.testing.expectEqual(expected_fault, fault_outcome);
         try std.testing.expectEqual(locked, editor.rejected != null);
@@ -463,41 +482,52 @@ test "SUI-63 DraftEditor lock policy: pastes_only locks only refused pastes and 
         const retained_len = editor.text().len;
         var retained: [32]u8 = undefined;
         @memcpy(retained[0..retained_len], editor.text());
+        if (ack == .backspace_at_start) editor.setCursor(0);
         const caret = editor.cursor();
-        var stream: Typing = .{};
         const bytes: []const u8 = switch (ack) {
             .enter => "\r",
             .letter => "q",
-            .backspace => "\x7f",
+            .backspace, .backspace_at_start => "\x7f",
+            .arrow_left => "\x1b[D",
         };
-        // A locked every_refusal editor ignores edit keys; only its owner releases it.
-        const applied = !(lock == .every_refusal and locked);
+        var stream: Typing = .{};
         const outcome = stream.send(&editor, bytes);
-        const lock_after = if (lock == .pastes_only) false else locked;
-        try std.testing.expectEqual(lock_after, editor.rejected != null);
-        switch (ack) {
+        // Only pastes_only releases, and only for an acknowledging key; a caret move leaves the lock.
+        const acknowledged = locked and lock == .pastes_only and ack != .arrow_left;
+        try std.testing.expectEqual(locked and !acknowledged, editor.rejected != null);
+        if (acknowledged) switch (ack) {
             .enter => {
                 try std.testing.expectEqualStrings(retained[0..retained_len], editor.text());
                 try std.testing.expectEqual(caret, editor.cursor());
-                if (!locked) {
-                    try std.testing.expectEqual(Editor.KeyOutcome.submit, outcome);
-                } else switch (lock) {
-                    .every_refusal => try std.testing.expect(outcome == .refused),
-                    .pastes_only => try std.testing.expectEqual(Editor.KeyOutcome.redraw, outcome),
-                }
+                try std.testing.expectEqual(Editor.KeyOutcome.redraw, outcome);
             },
-            .letter => if (applied and retained_len < retained.len) {
+            .letter => {
                 try std.testing.expectEqual(retained_len + 1, editor.text().len);
                 try std.testing.expectEqual(@as(u8, 'q'), editor.text()[caret]);
-            } else {
-                try std.testing.expectEqualStrings(retained[0..retained_len], editor.text());
-                if (!applied) try std.testing.expectEqual(Editor.KeyOutcome.none, outcome);
             },
-            .backspace => if (applied and caret > 0) {
-                try std.testing.expectEqual(retained_len - 1, editor.text().len);
-            } else {
+            .backspace => try std.testing.expectEqual(retained_len - 1, editor.text().len),
+            .backspace_at_start => {
                 try std.testing.expectEqualStrings(retained[0..retained_len], editor.text());
-                if (!applied) try std.testing.expectEqual(Editor.KeyOutcome.none, outcome);
+                try std.testing.expectEqual(Editor.KeyOutcome.redraw, outcome);
+            },
+            .arrow_left => {},
+        } else if (locked) {
+            // Nothing else reaches the text or caret while the draft is locked.
+            try std.testing.expectEqualStrings(retained[0..retained_len], editor.text());
+            try std.testing.expectEqual(caret, editor.cursor());
+            if (ack == .enter) try std.testing.expect(outcome == .refused) else try std.testing.expectEqual(Editor.KeyOutcome.none, outcome);
+        } else switch (ack) {
+            .enter => try std.testing.expectEqual(Editor.KeyOutcome.submit, outcome),
+            .letter => if (retained_len < retained.len) {
+                try std.testing.expectEqual(retained_len + 1, editor.text().len);
+            } else try std.testing.expectEqualStrings(retained[0..retained_len], editor.text()),
+            .backspace => if (caret > 0) {
+                try std.testing.expectEqual(retained_len - 1, editor.text().len);
+            } else try std.testing.expectEqualStrings(retained[0..retained_len], editor.text()),
+            .backspace_at_start => try std.testing.expectEqualStrings(retained[0..retained_len], editor.text()),
+            .arrow_left => {
+                try std.testing.expectEqualStrings(retained[0..retained_len], editor.text());
+                try std.testing.expectEqual(caret -| 1, editor.cursor());
             },
         }
     };
