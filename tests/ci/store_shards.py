@@ -33,7 +33,10 @@ import host_process
 import live_engines
 import unit_test_metadata as metadata
 
-SHARD_COUNT = 4
+# RUI_UNIT_SHARD_COUNT overrides the process count for experiments (Store and native).
+SHARD_COUNT = int(os.environ.get("RUI_UNIT_SHARD_COUNT", "4"))
+if SHARD_COUNT < 1:
+    raise ValueError("RUI_UNIT_SHARD_COUNT must be a positive integer")
 MAX_OUTPUT = 64 * 1024 * 1024
 END = re.compile(rb"(?:^|\n)(OK|SKIP|FAIL[^\n]*)\r?\n")
 
