@@ -1627,7 +1627,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full" | "window";
+            delta: "not_modified" | "changed" | "full";
             since: string;
             next: {
                 after: components["schemas"]["Decimal"];
@@ -1640,7 +1640,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full" | "window";
+            delta: "not_modified" | "changed" | "full";
             since: string;
             next: {
                 through: components["schemas"]["Decimal"];
@@ -1653,7 +1653,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full" | "window";
+            delta: "not_modified" | "changed" | "full";
             since: string;
             next: null;
         } | {
@@ -1663,7 +1663,7 @@ export interface components {
             type: "session_list";
             sessions: components["schemas"]["ArchivedRowFields"][];
             /** @enum {string} */
-            delta: "not_modified" | "changed" | "full" | "window";
+            delta: "window";
             since: string;
             next: {
                 first: components["schemas"]["Decimal"] | null;
@@ -1693,8 +1693,8 @@ export interface components {
             kind: "list_sessions";
             store: string;
             workspace: string | null;
-            /** @enum {string} */
-            archive: "active" | "archived" | "all";
+            /** @constant */
+            archive: "archived";
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
             window: string;

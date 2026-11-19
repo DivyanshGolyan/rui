@@ -3721,8 +3721,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 200,
-                "x-rui-max-bytes": 200
+                "maxLength": 256,
+                "x-rui-max-bytes": 256
               },
               {
                 "type": "null"
@@ -6691,8 +6691,7 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full",
-                  "window"
+                  "full"
                 ]
               },
               "since": {
@@ -6746,8 +6745,7 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full",
-                  "window"
+                  "full"
                 ]
               },
               "since": {
@@ -6803,8 +6801,7 @@
                 "enum": [
                   "not_modified",
                   "changed",
-                  "full",
-                  "window"
+                  "full"
                 ]
               },
               "since": {
@@ -6843,9 +6840,6 @@
               "delta": {
                 "type": "string",
                 "enum": [
-                  "not_modified",
-                  "changed",
-                  "full",
                   "window"
                 ]
               },
@@ -6996,12 +6990,7 @@
                 ]
               },
               "archive": {
-                "type": "string",
-                "enum": [
-                  "active",
-                  "archived",
-                  "all"
-                ]
+                "const": "archived"
               },
               "after": {
                 "$ref": "#/components/schemas/Decimal"
@@ -7011,7 +7000,8 @@
               },
               "window": {
                 "type": "string",
-                "x-rui-max-bytes": 25
+                "x-rui-max-bytes": 25,
+                "pattern": "^(head|tail|(below|above):[1-9][0-9]*)$"
               }
             },
             "required": [
