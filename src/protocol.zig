@@ -1260,7 +1260,6 @@ fn ParserOf(comptime Custody: type) type {
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
             if (seen.contains(.text) and out.text.state != .value) return error.InvalidMessage;
-            if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
             if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         }
 
@@ -3284,7 +3283,7 @@ test "WIR-1 wire_object_grammar" {
         .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"instructions\":\"\"" ++ "}}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"text\":" ++ value ++ "}" },
         .{ .json = message ++ "\"text\":" ++ value ++ ",\"configuration\":{}}", .failure = error.UnexpectedField },
-        .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}", .failure = error.InvalidMessage },
+        .{ .json = message ++ "\"text\":" ++ value ++ ",\"require_model\":true}" },
         .{ .json = message ++ "\"skill\":\"review\"}", .failure = error.UnexpectedField },
         .{ .json = message ++ "\"sender_handle\":null}", .failure = error.UnexpectedField },
         .{ .json = inspect ++ since ++ "}" },

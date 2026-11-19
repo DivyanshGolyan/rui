@@ -261,7 +261,7 @@ This does not authorize recreating user Stores.
 Public activity search was added to wire label `8` after v0.53.1 shipped it: an added request needs no new label, and an older Host answers it as unknown.
 Wire label `8` changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
 The Store keeps no wire label (format 74): a client and a Host compare the wire the running Host reports in `host_info` and refuse each other as incompatible, so a wire change needs no Store format step.
-It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
+It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, on which any Message may carry `require_model` (digest domain `rui/core/message/v4`, which binds the flag; a Message without it keeps its digest).
 Pre-provider captures are not accepted or defaulted to Codex.
 
 ### Store durability

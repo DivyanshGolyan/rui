@@ -400,7 +400,7 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     self.publication = original_state.capturing(self.publication);
     self.captured = switch (self.intent.?) {
-        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(self.intent.?.ticket().?) }, self.target).get(),
+        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(self.intent.?.ticket().?), .require_model = true }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
@@ -545,6 +545,28 @@ test "submission cancelled and failed joins preserve independent publication fac
             }
         }
     }
+}
+
+test "a chat Message captures require_model so the Host refuses a Session whose provider is unserved" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var input: Input = undefined;
+    input.init();
+    var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
+    defer self.close();
+    try self.begin(.{ .message = input.submitText("hello") });
+    _ = self.join();
+    const captured = &(self.captured orelse return error.TestExpectedCapture);
+    var bytes: [4096]u8 = undefined;
+    const length = try captured.file.readPositionalAll(io, &bytes, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+    try std.testing.expectEqualStrings("k7m2qx", parsed.value.object.get("session").?.string);
 }
 
 test "submission recovery validates reopened originals and pins the saved reader through handoff" {

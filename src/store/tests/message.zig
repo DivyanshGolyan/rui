@@ -59,6 +59,46 @@ test "a creating Message with require_model creates nothing without a model" {
     }.run);
 }
 
+test "a Message to an existing Session with require_model is refused only while its provider is unserved" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try store_testing.configureTestSession(&storage, "existing-provider");
+            const cases = [_]struct { served: bool, require_model: bool, key: []const u8, file: []const u8 }{
+                .{ .served = true, .require_model = false, .key = "existing-served", .file = "existing-served" },
+                .{ .served = true, .require_model = true, .key = "existing-served-required", .file = "existing-served-required" },
+                .{ .served = false, .require_model = false, .key = "existing-unserved", .file = "existing-unserved" },
+                .{ .served = false, .require_model = true, .key = "existing-unserved-required", .file = "existing-unserved-required" },
+            };
+            for (cases) |item| {
+                storage.served = protocol.routesAll(if (item.served) .endpoint else .unserved);
+                var message: wire_request.MessageCommand = .{ .require_model = item.require_model };
+                try message.key.set(item.key);
+                try message.session.set(session.slice());
+                message.text = try testingBytesContent(&tmp, item.file, "hello again");
+                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                const reply = storage.submitMessageWithModel(&message, null, .{});
+                if (!item.served and item.require_model) {
+                    try std.testing.expect(reply == .rejected);
+                    try std.testing.expectEqual(protocol.MessageRejection.model_capability_unavailable, reply.rejected.code);
+                } else {
+                    try std.testing.expect(reply == .accepted);
+                }
+            }
+            var changed_condition = wire_request.MessageCommand{ .require_model = true };
+            try changed_condition.key.set("existing-served");
+            try changed_condition.session.set(session.slice());
+            changed_condition.text = try testingBytesContent(&tmp, "existing-changed", "hello again");
+            defer changed_condition.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&changed_condition, null, .{}) == .conflict);
+        }
+    }.run);
+}
+
 fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configuration, actual: @import("../../creation_receipt.zig").Configuration) !void {
     try std.testing.expectEqual(expected.provider, actual.provider);
     try std.testing.expectEqualStrings(expected.model.slice(), actual.model.slice());
