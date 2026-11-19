@@ -856,7 +856,7 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_unaccepted ON action_operation(session_ref) WHERE acceptance_position IS NULL",
         },
         .mysql = &.{
-            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED AFTER action_operation_approval_lead, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
         },
     },
 };
@@ -2058,6 +2058,26 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
+/// The partial index named `name`, or null when no index has that name or it has no WHERE. rsql's
+/// `@in_index` states the rows of exactly these indexes.
+pub fn partialIndex(comptime name: []const u8) ?Index {
+    comptime {
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return if (index.where == null) null else index;
+        return null;
+    }
+}
+
+/// The MySQL generated column that a `.leading` partial index is built on, as the DDL names it.
+pub fn leadingColumnName(comptime index: Index) []const u8 {
+    return leadingColumn(index);
+}
+
+/// One key part of a `.unique_when` partial index on MySQL: `predicate` (already rendered) decides whether
+/// `column` is kept. The index DDL and rsql's `@in_index` both build their key parts with this function.
+pub fn mysqlKeyPart(comptime predicate: []const u8, comptime column: []const u8) []const u8 {
+    return "(CASE WHEN " ++ predicate ++ " THEN " ++ column ++ " END)";
+}
+
 const mysql_index_names: []const []const u8 = blk: {
     @setEvalBranchQuota(objects_quota);
     var names: []const []const u8 = &.{};
@@ -2461,7 +2481,7 @@ fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const 
         parts = "";
         for (index.columns, 0..) |column, position| {
             const part = indexColumn(column);
-            parts = parts ++ (if (position == 0) "" else ",") ++ "(CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ part.name ++ " END)" ++ part.order;
+            parts = parts ++ (if (position == 0) "" else ",") ++ mysqlKeyPart(expression(.mysql, all[tablePosition(all, index.table)], index.where.?), part.name) ++ part.order;
         }
     }
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";

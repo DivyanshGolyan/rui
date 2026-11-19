@@ -704,6 +704,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
+    try dropUnacceptedActionIndex(storage);
     try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
     const Native = struct {
@@ -744,6 +745,13 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
         for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
     }
+}
+
+/// Undoes format 86's unaccepted Action index (on MySQL, its `_lead` generated column too). Every helper
+/// that rewinds a Store below format 86 runs this first, through dropPinOrganization.
+fn dropUnacceptedActionIndex(storage: *Store) !void {
+    if (storage.engine == .mysql) return mysql_testing.rawExec(storage, "ALTER TABLE action_operation DROP INDEX action_operation_unaccepted, DROP COLUMN action_operation_unaccepted_lead");
+    return sqlite.exec(storage.sqliteDatabase(), "DROP INDEX action_operation_unaccepted");
 }
 
 /// Format 85 has no session_archive table; archive membership lives in session.archive_seq.

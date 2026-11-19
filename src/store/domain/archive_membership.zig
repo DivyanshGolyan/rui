@@ -42,9 +42,12 @@ pub fn filterSql(comptime alias: []const u8, comptime parameter: []const u8) []c
 /// Sessions that may be archiving, from the indexes that hold in-flight work: open turns (`outcome_code`
 /// null, or `outcome_position` null with a code), and unaccepted Actions. A superset of the archiving
 /// Sessions, so the caller still decides each one with `stateSql`.
-pub const archiving_candidates_sql = "SELECT t.session_ref FROM turn t @index(turn_one_active_per_session) WHERE t.outcome_code IS NULL " ++
-    "UNION SELECT u.session_ref FROM turn u @index(turn_unpositioned) WHERE (u.outcome_code IS NULL)!=(u.outcome_position IS NULL) " ++
-    "UNION SELECT a.session_ref FROM action_operation a @index(action_operation_unaccepted) WHERE a.acceptance_position IS NULL";
+/// Each candidate is one statement, so each can be planned on its own. `@in_index` states the rows of the
+/// named partial index on both engines (rsql.zig).
+pub const open_turn_candidates_sql = "SELECT t.session_ref FROM turn t @index(turn_one_active_per_session) WHERE @in_index(t, turn_one_active_per_session)";
+pub const unpositioned_turn_candidates_sql = "SELECT u.session_ref FROM turn u @index(turn_unpositioned) WHERE @in_index(u, turn_unpositioned)";
+pub const unaccepted_action_candidates_sql = "SELECT a.session_ref FROM action_operation a @index(action_operation_unaccepted) WHERE @in_index(a, action_operation_unaccepted)";
+pub const archiving_candidates_sql = open_turn_candidates_sql ++ " UNION " ++ unpositioned_turn_candidates_sql ++ " UNION " ++ unaccepted_action_candidates_sql;
 
 const mark_archived = rsql.Write(.{
     .sql = "UPDATE session SET archive_seq=?2 WHERE session_ref=@session(?1)",
