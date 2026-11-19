@@ -2,8 +2,16 @@ const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
 
 pub const Family = enum { automatic, ipv4 };
-pub const connect_timeout_ns: i96 = 10_000_000_000;
-pub const download_timeout_ns: i96 = 300_000_000_000;
+
+// Release generation reads these single-line literal declarations from the
+// pinned release source. The strict reader accepts positive second values up
+// to 86400 with connect <= download and distinct exit codes from 1 through 255.
+pub const connect_timeout_seconds: u32 = 10;
+pub const download_timeout_seconds: u32 = 300;
+pub const retry_exit_codes = [_]u8{ 6, 28 };
+
+pub const connect_timeout_ns: i96 = @as(i96, connect_timeout_seconds) * 1_000_000_000;
+pub const download_timeout_ns: i96 = @as(i96, download_timeout_seconds) * 1_000_000_000;
 
 /// One release download: what curl fetches and where its bytes go.
 /// A loopback `http://` URL is the fixture origin; every other URL is HTTPS.
@@ -75,9 +83,10 @@ pub fn after(family: Family, exit: ?u8, remaining_ns: i96) Next {
 /// cannot be the total-transfer timeout; it is a connection-phase timeout,
 /// including a resolver stall on a redirect. No stderr text is interpreted.
 fn retry(family: Family, exit_code: ?u8, remaining_ns: i96) bool {
+    const code = exit_code orelse return false;
     return family == .automatic and
         remaining_ns >= connect_timeout_ns and
-        (exit_code == 6 or exit_code == 28);
+        std.mem.indexOfScalar(u8, &retry_exit_codes, code) != null;
 }
 
 /// The last non-empty line of curl's stderr, made terminal-safe and ended

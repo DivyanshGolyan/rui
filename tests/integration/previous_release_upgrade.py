@@ -81,7 +81,8 @@ def install_candidate_release(candidate, publisher, root):
     script.write_text(release.installer(
         (candidate / "release/install.sh").read_text(), version,
         {target: digest for target in release.PLATFORMS},
-        (candidate / "release/publish.sh").read_text()))
+        (candidate / "release/publish.sh").read_text(),
+        release.download_policy((candidate / "src/download_policy.zig").read_text())))
     tools = root / "tools"
     tools.mkdir()
     curl = tools / "curl"

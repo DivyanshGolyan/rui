@@ -101,6 +101,11 @@ export interface ServedWork {
 }
 
 export interface SessionSummary extends ServedWork {
+	/** Decimal times and counts remain lossless strings. */
+	stateChangeAt: Schemas["SessionRow"]["state_change_at"];
+	subtreeStateChangeAt: Schemas["SessionRow"]["subtree_state_change_at"];
+	descendantCount: Schemas["SessionRow"]["descendant_count"];
+	descendantNeedsYouCount: Schemas["SessionRow"]["descendant_needs_you_count"];
 	id: string;
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
@@ -493,7 +498,11 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, ...servedWork(row.work), archiveState: row.archive_state, parent: row.parent, creator: row.creator });
+				summaries.push({
+					id: row.reference, label: row.label, state: row.work.state.kind, ...servedWork(row.work), archiveState: row.archive_state, parent: row.parent, creator: row.creator,
+					stateChangeAt: row.state_change_at, subtreeStateChangeAt: row.subtree_state_change_at,
+					descendantCount: row.descendant_count, descendantNeedsYouCount: row.descendant_needs_you_count,
+				});
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

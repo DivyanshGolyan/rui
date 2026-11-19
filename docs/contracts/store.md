@@ -75,6 +75,7 @@ Both engine migrations backfill it from existing `parent_ref` values and leave u
 Validated creation writes this immutable provenance for attached and detached children; lifecycle attachment remains in `parent_ref`.
 [Session provenance](sessions.md#session-provenance) owns the distinction and its public meaning.
 The step to 82 records each Message admission's source kind, backfills it from the sender and source Action, and indexes person inputs by that kind. Kinds 4 and 5 are reserved for future sources.
+The step to 84 adds an index on creator and Session references for creator-subtree reads.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -238,6 +239,7 @@ With curl configuration files disabled and no other curl timeouts enabled, an ea
 An exhausted transfer deadline, cancellation, signals, HTTP errors, certificate errors, and other exit codes do not trigger a retry.
 After an IPv4 retry succeeds, later downloads in that upgrade use IPv4 once. A fresh upgrade starts with normal selection again.
 The retry replaces a partial archive rather than appending to it. SHA-256 verification and publication rules remain unchanged.
+The released shell installer disables curl configuration files and applies the same exit-code and remaining-budget retry rule to its archive download, with conservative whole-second rounding of curl transfer time. The native updater uses the timeout and retry-code literals in `src/download_policy.zig` directly. Release generation reads those literals from the pinned source for the shell installer. It validates the downloaded archive before publication.
 Recovery changes neither system DNS settings nor certificate verification. The existing checking and preparation UI remains unchanged.
 A final nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
 The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.

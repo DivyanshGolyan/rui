@@ -36,6 +36,7 @@ pub fn exclusive(name: []const u8) bool {
         "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
         // Changes innodb_flush_log_at_trx_commit for its own run, a server global; moved from mysql_testing.zig into the engine contract.
         "store.engine_contract.test.SH-2 a COMMIT whose answer was lost is saved once or not at all, and the caller is told which",
+        "store.tests.session_list.test.SL-1: Session list rolls up eligible descendants beyond the page",
     };
     for (isolated) |test_name| if (std.mem.eql(u8, name, test_name)) return true;
     const prefix = "store.mysql_testing.test.";
@@ -228,18 +229,21 @@ test "history fixtures own a contention-free window for every shard count" {
 test "session handler comparison has exclusive ownership for every shard count" {
     const names = [_][]const u8{
         "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
+        "store.tests.session_list.test.SL-1: Session list rolls up eligible descendants beyond the page",
         "store.test.ordinary",
     };
     const times = [_]Timing{
-        .{ .name = names[0], .seconds = 6 }, .{ .name = names[1], .seconds = 1 },
+        .{ .name = names[0], .seconds = 6 }, .{ .name = names[1], .seconds = 6 }, .{ .name = names[2], .seconds = 1 },
     };
     try std.testing.expect(exclusive(names[0]));
-    try std.testing.expect(!exclusive(names[1]));
+    try std.testing.expect(exclusive(names[1]));
+    try std.testing.expect(!exclusive(names[2]));
     for (1..9) |count| {
         const placement = try assign(std.testing.allocator, &names, &times, count);
         defer std.testing.allocator.free(placement);
         try std.testing.expectEqual(@as(usize, 0), placement[0]);
-        // Its shared-window cost must not displace ordinary work from zero.
         try std.testing.expectEqual(@as(usize, 0), placement[1]);
+        // Their shared-window cost must not displace ordinary work from zero.
+        try std.testing.expectEqual(@as(usize, 0), placement[2]);
     }
 }

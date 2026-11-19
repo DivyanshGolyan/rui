@@ -84,6 +84,22 @@ test "a Workspace's changed page reads only its own Sessions, however many other
             return counter.steps;
         }
     };
+    // Keep the workspace index boundary present in both measurements. Otherwise
+    // adding the first larger digest can change the final index-iteration step.
+    var boundary_index: usize = 0;
+    while (true) : (boundary_index += 1) {
+        var name: [48]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name, "workspace-boundary-{d}", .{boundary_index});
+        var boundary = try tmp.dir.createDirPathOpen(std.testing.io, path, .{});
+        var boundary_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const boundary_path = boundary_buffer[0..try boundary.realPath(std.testing.io, &boundary_buffer)];
+        boundary.close(std.testing.io);
+        const boundary_digest = store_core.workspaceDigest(boundary_path);
+        const watched_digest = store_core.workspaceDigest(workspace);
+        if (std.mem.order(u8, &boundary_digest, &watched_digest) != .gt) continue;
+        _ = try Page.configure(&storage, "scoped-boundary", "", boundary_path);
+        break;
+    }
     const watched = try Page.configure(&storage, "scoped-watched", "", workspace);
     var request: protocol.ListSessions = .{ .workspace = .{}, .since = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) } };
     try request.workspace.?.set(workspace);
@@ -95,6 +111,64 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     }
     try std.testing.expect(storage.changes.covers(request.since.?.generation));
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
+}
+
+test "SL-2: a fixed creator subtree skips unrelated Sessions in its Workspace" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = try configureTestSession(&storage, "creator-cost-sentinel");
+    const root = try configureTestSession(&storage, "creator-cost-root");
+    const child = try configureTestSession(&storage, "creator-cost-child");
+    const grandchild = try configureTestSession(&storage, "creator-cost-grandchild");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
+    const request: protocol.ListSessions = .{ .after = 1, .ceiling = 4 };
+    const Facts = struct { own: u64, subtree: u64, descendants: u64, needs_you: u64 };
+    const Measure = struct {
+        fn run(store: *Store, dir: *std.testing.TmpDir, list: protocol.ListSessions, ids: [3][]const u8) !struct { steps: u64, facts: [3]Facts } {
+            var used = std.atomic.Value(u64).init(0);
+            std.testing.allocator.free(try testingSessionList(store, dir, list, &used, 101));
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            const bytes = testingSessionList(store, dir, list, &used, 102) catch |err| {
+                counter.end(store.sqliteDatabase());
+                return err;
+            };
+            counter.end(store.sqliteDatabase());
+            defer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const rows = parsed.value.object.get("sessions").?.array.items;
+            try std.testing.expectEqual(@as(usize, 3), rows.len);
+            var facts: [3]Facts = undefined;
+            for (rows, ids, &facts, 0..) |row, id, *fact, index| {
+                try std.testing.expectEqualStrings(id, row.object.get("reference").?.string);
+                fact.* = .{
+                    .own = try std.fmt.parseInt(u64, row.object.get("state_change_at").?.string, 10),
+                    .subtree = try std.fmt.parseInt(u64, row.object.get("subtree_state_change_at").?.string, 10),
+                    .descendants = try std.fmt.parseInt(u64, row.object.get("descendant_count").?.string, 10),
+                    .needs_you = try std.fmt.parseInt(u64, row.object.get("descendant_needs_you_count").?.string, 10),
+                };
+                try std.testing.expect(fact.own > 0 and fact.subtree >= fact.own);
+                try std.testing.expectEqual(@as(u64, 2 - index), fact.descendants);
+                try std.testing.expectEqual(@as(u64, 0), fact.needs_you);
+            }
+            return .{ .steps = counter.steps, .facts = facts };
+        }
+    };
+    const ids = [3][]const u8{ root.slice(), child.slice(), grandchild.slice() };
+    const before = try Measure.run(&storage, &tmp, request, ids);
+    for (0..128) |index| {
+        var key: [48]u8 = undefined;
+        _ = try configureTestSession(&storage, try std.fmt.bufPrint(&key, "creator-cost-peer-{d}", .{index}));
+    }
+    const after = try Measure.run(&storage, &tmp, request, ids);
+    try std.testing.expectEqualDeep(before.facts, after.facts);
+    std.debug.print("fixed creator subtree SQLite VM steps: before={d} after={d} peers=128\n", .{ before.steps, after.steps });
+    try std.testing.expect(after.steps <= before.steps + 100);
 }
 
 test "a list row reads the same steps however long its Session's history" {
@@ -250,7 +324,7 @@ test "a list row whose queue read fails answers main's MessageAdmissionReadFaile
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref"), error.SessionReadFailed, .queued);
 }
 
 test "a list row that fails to render reports its error before a later row's failed step" {
@@ -267,7 +341,7 @@ test "a list row that fails to render reports its error before a later row's fai
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
+    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref") };
     fault.arm(storage.sqliteDatabase());
     defer fault.disarm(storage.sqliteDatabase());
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
@@ -323,8 +397,8 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(8, rounds);
-    try std.testing.expectEqual(1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+    try std.testing.expectEqual(9, rounds);
+    try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {

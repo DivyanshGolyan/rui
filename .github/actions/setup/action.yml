@@ -24,6 +24,10 @@ inputs:
     # quota and evicted main's.
     description: Allow explicit failure-safe cache saves; read-only cache workflows pass 'false' to restore only
     default: ${{ github.ref == 'refs/heads/main' }}
+outputs:
+  build-match:
+    description: How the build cache restored - exact, restore-key or miss
+    value: ${{ steps.caches.outputs.build-match }}
 runs:
   using: composite
   steps:

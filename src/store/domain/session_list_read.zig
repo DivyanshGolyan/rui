@@ -8,6 +8,7 @@ const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
 const session_line = @import("../../session_line.zig");
+const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -61,6 +62,8 @@ pub const list_failures = .{
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
     .{ list_row_bare, error.SessionReadFailed },
+    .{ changed_ancestors, error.SessionReadFailed },
+    .{ descendant_page, error.SessionReadFailed },
 } ++ report_domain.report_failures;
 
 fn runList(a: *ReadAccess) !void {
@@ -198,7 +201,7 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     try store_access.runAs(a, error.SessionReadFailed);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
-    try readRows(a, page.refs[0..page.count], visitor);
+    try readRows(a, request, page.refs[0..page.count], visitor);
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     try visitor.tail(if (page.more)
@@ -206,6 +209,51 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     else
         .{ .last = .{ .delta = .full, .since = since } });
 }
+
+const changed_ancestors = rsql.Read(.{
+    .sql = "WITH RECURSIVE ancestors(session_ref,creator_ref) AS (" ++
+        "SELECT session.session_ref,session.creator_ref FROM session JOIN session seed ON seed.creator_ref=session.session_ref " ++
+        "WHERE seed.session_ref=?1 AND (?2 IS NULL OR session.workspace=?2)" ++ archiveFilterSql("?3") ++
+        " UNION SELECT session.session_ref,session.creator_ref FROM session JOIN ancestors child ON child.creator_ref=session.session_ref " ++
+        "WHERE (?2 IS NULL OR session.workspace=?2)" ++ archiveFilterSql("?3") ++ ") " ++
+        "SELECT session_ref,NOT EXISTS (SELECT 1 FROM ancestors tail WHERE tail.creator_ref IS NULL OR NOT EXISTS " ++
+        "(SELECT 1 FROM ancestors parent WHERE parent.session_ref=tail.creator_ref)) AS cycle FROM ancestors",
+    .Args = struct { seed: []const u8, workspace: ?[]const u8, archive: session_archive.Filter },
+    .Row = struct { session_ref: SessionText, cycle: bool },
+    .cardinality = .each,
+    .compound = true,
+});
+
+const ChangedCandidates = struct {
+    refs: [session_list.session_list_page_size + 1]change_ring.Id = undefined,
+    count: usize = 0,
+    after: ?*const change_ring.Id,
+    failure: ?error{CorruptStore} = null,
+
+    fn add(self: *ChangedCandidates, ref: *const change_ring.Id) void {
+        if (self.after) |after| if (std.mem.order(u8, ref, after) != .gt) return;
+        var at: usize = 0;
+        while (at < self.count and std.mem.order(u8, &self.refs[at], ref) == .lt) : (at += 1) {}
+        if (at < self.count and std.mem.eql(u8, &self.refs[at], ref)) return;
+        if (at == self.refs.len) return;
+        const end = @min(self.count, self.refs.len - 1);
+        var move = end;
+        while (move > at) : (move -= 1) self.refs[move] = self.refs[move - 1];
+        self.refs[at] = ref.*;
+        self.count = @min(self.count + 1, self.refs.len);
+    }
+
+    pub fn visit(self: *ChangedCandidates, row: *const changed_ancestors.Row) bool {
+        const ref = row.session_ref.slice();
+        if (ref.len != change_ring.id_bytes or row.cycle) {
+            self.failure = error.CorruptStore;
+            return false;
+        }
+        const id = ref[0..change_ring.id_bytes].*;
+        self.add(&id);
+        return true;
+    }
+};
 
 fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions, since: u64, through: u64, visitor: anytype) !void {
     var workspace: ?u64 = null;
@@ -217,10 +265,28 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     }
     const self = a.store;
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
-    var references: [session_list.session_list_page_size + 1]change_ring.Id = undefined;
-    const changed = self.changes.changed(since, through, workspace, after, &references);
+    var candidates: ChangedCandidates = .{ .after = after };
+    var seed_after: ?change_ring.Id = null;
+    while (true) {
+        var seeds: [session_list.session_list_page_size + 1]change_ring.Id = undefined;
+        const found = self.changes.changed(since, through, workspace, if (seed_after) |*id| id else null, &seeds);
+        const count = @min(found.len, session_list.session_list_page_size);
+        for (found[0..count]) |*seed| {
+            candidates.add(seed);
+            a.readEach(changed_ancestors, .{
+                .seed = seed,
+                .workspace = if (request.workspace) |*scope| scope.slice() else null,
+                .archive = request.archive,
+            }, std.math.maxInt(u64), &candidates);
+            try runList(a);
+            if (candidates.failure) |err| return err;
+        }
+        if (found.len <= session_list.session_list_page_size) break;
+        seed_after = found[count - 1];
+    }
+    const changed = candidates.refs[0..candidates.count];
     const count = @min(changed.len, session_list.session_list_page_size);
-    try readRows(a, changed[0..count], visitor);
+    try readRows(a, request, changed[0..count], visitor);
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const next = (change_ring.Token{ .instance = self.instance, .generation = through }).format(&token);
     try visitor.tail(if (changed.len > count)
@@ -229,11 +295,148 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
         .{ .last = .{ .delta = .changed, .since = next } });
 }
 
+const clock_columns =
+    "(SELECT COALESCE((SELECT e.recorded_at FROM conversation_entry e WHERE e.source_admission_id=t.first_admission_id AND e.entry_kind=1)," ++
+    "CASE WHEN m.turn_id IS NULL AND (SELECT o.purpose FROM model_operation o WHERE o.turn_id=t.turn_id ORDER BY o.operation_id DESC LIMIT 1)=1 THEN m.admitted_at END) " ++
+    "FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1)) AS clock_started_at," ++
+    "(SELECT max(o.resolved_at) FROM model_operation o JOIN turn t ON t.turn_id=o.turn_id " ++
+    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
+    "AND EXISTS (SELECT 1 FROM action_operation a WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) AS clock_approval_entered_at," ++
+    "(SELECT max((SELECT max(COALESCE(a.decided_at,a.resolved_at)) FROM action_operation a " ++
+    "WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) FROM model_operation o " ++
+    "WHERE o.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
+    "AND NOT EXISTS (SELECT 1 FROM action_operation pending WHERE pending.parent_operation_id=o.operation_id " ++
+    "AND pending.approval_position IS NOT NULL AND pending.authorized=0 AND pending.resolution_code IS NULL)) AS clock_approval_left_at,";
+
+const descendant_page = rsql.Read(.{
+    .sql = "WITH RECURSIVE descendants(origin,session_ref,workspace_digest,workspace) AS (" ++
+        "SELECT session.session_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
+        "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archiveFilterSql("?11") ++
+        " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
+        "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
+        "WHERE 1=1" ++ archiveFilterSql("?11") ++ ") " ++
+        "SELECT member.origin,session.session_ref,session.created_at," ++ clock_columns[0 .. clock_columns.len - 1] ++
+        ",EXISTS(SELECT 1 FROM session root WHERE root.session_ref=member.origin AND root.creator_ref IN " ++
+        "(SELECT cycle_member.session_ref FROM descendants cycle_member WHERE cycle_member.origin=member.origin)) AS cycle " ++
+        "FROM session JOIN descendants member ON member.session_ref=session.session_ref " ++
+        "WHERE member.origin>?12 OR (member.origin=?12 AND session.session_ref>?13) ORDER BY member.origin,session.session_ref LIMIT 9",
+    .Args = struct {
+        root0: Bounded(session_id.bytes),
+        root1: Bounded(session_id.bytes),
+        root2: Bounded(session_id.bytes),
+        root3: Bounded(session_id.bytes),
+        root4: Bounded(session_id.bytes),
+        root5: Bounded(session_id.bytes),
+        root6: Bounded(session_id.bytes),
+        root7: Bounded(session_id.bytes),
+        workspace: ?[]const u8,
+        digest: ?[32]u8,
+        archive: session_archive.Filter,
+        after_origin: Bounded(session_id.bytes),
+        after_member: Bounded(session_id.bytes),
+    },
+    .Row = struct {
+        origin: SessionText,
+        session_ref: SessionText,
+        created_at: rsql.Positive,
+        clock_started_at: ?rsql.Positive,
+        clock_approval_entered_at: ?rsql.Positive,
+        clock_approval_left_at: ?rsql.Positive,
+        cycle: bool,
+    },
+    .cardinality = .each,
+    .compound = true,
+});
+
+const Rollup = struct {
+    subtree_state_change_at: u64 = 0,
+    descendant_count: u64 = 0,
+    descendant_needs_you_count: u64 = 0,
+};
+
+const DescendantPage = struct {
+    rows: [session_list.session_list_page_size + 1]descendant_page.Row = undefined,
+    count: usize = 0,
+    failure: ?error{CorruptStore} = null,
+
+    pub fn visit(self: *DescendantPage, row: *const descendant_page.Row) bool {
+        if (self.count == self.rows.len or row.origin.slice().len != change_ring.id_bytes or row.session_ref.slice().len != change_ring.id_bytes or row.cycle) {
+            self.failure = error.CorruptStore;
+            return false;
+        }
+        self.rows[self.count] = row.*;
+        self.count += 1;
+        return true;
+    }
+};
+
+fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, works: []WorkRead, totals: []Rollup) !void {
+    @memset(totals, .{});
+    if (references.len == 0) return;
+    var roots: [session_list.session_list_page_size]Bounded(session_id.bytes) = @splat(.{});
+    for (references, 0..) |*reference, index| roots[index].set(reference) catch return error.CorruptStore;
+    var after_origin: ?change_ring.Id = null;
+    var after_member: ?change_ring.Id = null;
+    while (true) {
+        var page: DescendantPage = .{};
+        a.readEach(descendant_page, .{
+            .root0 = roots[0],
+            .root1 = roots[1],
+            .root2 = roots[2],
+            .root3 = roots[3],
+            .root4 = roots[4],
+            .root5 = roots[5],
+            .root6 = roots[6],
+            .root7 = roots[7],
+            .workspace = if (request.workspace) |*scope| scope.slice() else null,
+            .digest = if (request.workspace) |*scope| store_core.workspaceDigest(scope.slice()) else null,
+            .archive = request.archive,
+            .after_origin = if (after_origin) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
+            .after_member = if (after_member) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
+        }, session_list.session_list_page_size + 1, &page);
+        try runList(a);
+        if (page.failure) |err| return err;
+        const count = @min(page.count, session_list.session_list_page_size);
+        if (count == 0) break;
+        var work_count: usize = 0;
+        for (page.rows[0..count]) |*row| {
+            if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
+            const read = &works[work_count];
+            read.* = .{ .session = row.session_ref.slice() };
+            _ = read.queue(a);
+            work_count += 1;
+        }
+        if (work_count != 0) {
+            try runList(a);
+            for (works[0..work_count]) |*read| try read.advance();
+            try readWorks(a, works[0..work_count]);
+        }
+        var work_index: usize = 0;
+        for (page.rows[0..count]) |*row| {
+            if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
+            var index: usize = 0;
+            while (index < references.len and !std.mem.eql(u8, row.origin.slice(), &references[index])) : (index += 1) {}
+            if (index == references.len) return error.CorruptStore;
+            const total = &totals[index];
+            const read = &works[work_index];
+            work_index += 1;
+            const work = try read.work(row.created_at.get(), now_ms);
+            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), read, work));
+            total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
+            if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
+        }
+        if (page.count <= session_list.session_list_page_size) break;
+        after_origin = page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
+        after_member = page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
+    }
+}
+
 const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
-    last_line_columns ++ ",";
+    last_line_columns ++ "," ++ clock_columns;
 
 const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
@@ -282,6 +485,9 @@ const ListRow = struct {
     last_answer: ?rsql.Blob(1024),
     last_approval_position: ?rsql.Positive,
     last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
+    clock_started_at: ?rsql.Positive,
+    clock_approval_entered_at: ?rsql.Positive,
+    clock_approval_left_at: ?rsql.Positive,
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
     first_admitted_at: ?rsql.Positive,
@@ -297,14 +503,17 @@ const ListScratch = struct {
     works: [session_list.session_list_page_size]WorkRead,
     shown: [session_list.session_list_page_size]ShownRow,
     decoded: ListRow,
+    rollups: [session_list.session_list_page_size]Rollup,
 };
 
-noinline fn readRows(a: *ReadAccess, references: []const change_ring.Id, visitor: anytype) !void {
+noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
     const scratch = a.store.reportScratch(ListScratch);
     const firsts = &scratch.firsts;
     const works = &scratch.works;
+    const now = std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange;
+    try readRollups(a, request, references, now, works, scratch.rollups[0..references.len]);
     for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
         first.queue(a, reference);
         work.* = .{ .session = reference };
@@ -316,13 +525,13 @@ noinline fn readRows(a: *ReadAccess, references: []const change_ring.Id, visitor
     const shown = &scratch.shown;
     for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
         row.* = .{ .reference = reference, .first = first.admission(), .work = work };
-    try readRowSettings(a, shown[0..references.len], &scratch.decoded, std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, visitor);
+    try readRowSettings(a, shown[0..references.len], scratch.rollups[0..references.len], &scratch.decoded, now, visitor);
 }
 
 const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
 
-noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, decoded: *ListRow, now_ms: u64, visitor: anytype) !void {
-    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = decoded, .rows = rows, .now_ms = now_ms, .visitor = visitor };
+noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, rollups: []const Rollup, decoded: *ListRow, now_ms: u64, visitor: anytype) !void {
+    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = decoded, .rows = rows, .rollups = rollups, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
         const work = try row.work.work(0, now_ms);
         if (row.first == 0)
@@ -341,6 +550,7 @@ fn RowsRead(comptime Visitor: type) type {
         read_version: change_ring.Token,
         decoded: *ListRow,
         rows: []const ShownRow,
+        rollups: []const Rollup,
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
@@ -350,7 +560,7 @@ fn RowsRead(comptime Visitor: type) type {
             if (read.failure != null) return false;
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
-            var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
+            var values = rowValues(read.rows, read.rollups, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
                 read.failure = err;
                 return false;
             };
@@ -367,13 +577,48 @@ fn RowsRead(comptime Visitor: type) type {
 
 const ErrorOf = @import("../../error_set.zig").Of;
 
-fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8, last_text: *Bounded(session_list.max_last_line_bytes)) !session_list.Row {
+const ClockFacts = struct {
+    created_at: u64,
+    started_at: ?u64,
+    approval_entered_at: ?u64,
+    approval_left_at: ?u64,
+
+    fn of(row: anytype) ClockFacts {
+        return .{
+            .created_at = row.created_at.get(),
+            .started_at = if (row.clock_started_at) |value| value.get() else null,
+            .approval_entered_at = if (row.clock_approval_entered_at) |value| value.get() else null,
+            .approval_left_at = if (row.clock_approval_left_at) |value| value.get() else null,
+        };
+    }
+};
+
+fn stateChangeAt(facts: ClockFacts, read: *const WorkRead, work: @import("../../session_work.zig").Work) !u64 {
+    const inputs = read.inputs;
+    var clock = facts.created_at;
+    if (inputs.latest) |latest| {
+        clock = @max(clock, (facts.started_at orelse return error.CorruptStore));
+        if (latest.terminal) |terminal| clock = @max(clock, terminal.at);
+        if (latest.stopped_at) |stopped| clock = @max(clock, stopped);
+        if (latest.terminal != null and work.state == .pending) clock = @max(clock, work.state.since());
+    } else if (inputs.oldest_pending) |pending| clock = @max(clock, pending.at);
+    if (inputs.excluded) |excluded| clock = @max(clock, excluded.stop_at);
+    if (work.state == .working and (inputs.latest == null or inputs.latest.?.terminal != null)) {
+        if (inputs.owed_since) |owed| clock = @max(clock, owed);
+    }
+    if (facts.approval_entered_at) |entered| clock = @max(clock, entered);
+    if (facts.approval_left_at) |left| clock = @max(clock, left);
+    return clock;
+}
+
+fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_ms: u64, row: *const ListRow, sorted: *[tool_name.max_tools][]const u8, last_text: *Bounded(session_list.max_last_line_bytes)) !session_list.Row {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
     const first_message = try report_domain.firstMessage(row, rows[index].first);
+    const clock = try stateChangeAt(.of(row), rows[index].work, work);
     return .{
         .archive_state = row.archive_state,
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
@@ -387,6 +632,10 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .permission_mode = permission_mode,
         .label = if (row.label) |*label| label.slice() else null,
         .created_at = row.created_at.get(),
+        .state_change_at = clock,
+        .subtree_state_change_at = @max(clock, rollups[index].subtree_state_change_at),
+        .descendant_count = rollups[index].descendant_count,
+        .descendant_needs_you_count = rollups[index].descendant_needs_you_count,
         .revision = row.revision.get(),
         .end = row.next_position.get() - 1,
         .first_message = first_message,
