@@ -25,6 +25,7 @@ const change_ring = @import("../../change_ring.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
+const page_slots = @import("../page_slots.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const sourced_input = @import("sourced_input.zig");
@@ -793,70 +794,45 @@ pub const work_joins = "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.
     "LEFT JOIN message_admission work_excluded ON work_excluded.admission_id=(" ++ excludedByCutoffSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
     "LEFT JOIN session_stop work_stop ON work_stop.command_key=(" ++ stopAfterSql("command_key", work_session_ref, "work_excluded.admission_id") ++ ") ";
 
-/// The Session refs one work_rows statement binds: a Session list page.
-pub const work_rows_slots = session_list.session_list_page_size;
-
 /// The statement source, with no `@index` marks (the plan tests render it).
 pub const work_rows_source = "SELECT work_session.session_ref AS work_ref," ++ work_columns ++ " FROM session work_session " ++ work_joins ++
     "WHERE work_session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
 
-const RefSlot = Bounded(change_ring.id_bytes);
-
-/// Up to work_rows_slots Sessions' work, every stage at once: one row per Session found, in no promised order, each
-/// carrying its own ref. Unused slots are empty and match no Session. WorkRows queues it and matches each row to its
-/// Session; a single Session binds one slot.
+/// Up to a page of Sessions' work, every stage at once: one row per Session found, in no promised order, each carrying
+/// its own ref. Unused slots are empty and match no Session. WorkRows queues it and matches each row to its Session
+/// through page_slots; a single Session binds one slot.
 pub const work_rows = rsql.Read(.{
     .sql = work_rows_source,
-    .Args = struct { session0: RefSlot, session1: RefSlot, session2: RefSlot, session3: RefSlot, session4: RefSlot, session5: RefSlot, session6: RefSlot, session7: RefSlot },
+    .Args = page_slots.Args,
     .Row = WithWork(struct { work_ref: SessionText }),
     .cardinality = .each,
 });
 
-/// The work of up to work_rows_slots Sessions in one work_rows statement. Each row decodes into `decoded` (it is over
-/// 1 KiB) and is replayed at once into the WorkRead whose Session ref it carries, so only the WorkReads outlive it. A row
-/// for a Session that was not asked for, or a second row for one, is CorruptStore; so is a Session with no row (finish).
-/// `reads` is borrowed from queue until the statement's round runs.
+/// The work of up to a page of Sessions in one work_rows statement. Each row decodes into `decoded` (it is over 1 KiB)
+/// and is replayed at once into the WorkRead of the slot its Session ref names; page_slots refuses an unknown, second
+/// or missing row. `reads` is borrowed from queue until the statement's round runs.
 pub const WorkRows = struct {
     decoded: work_rows.Row = undefined,
     reads: []WorkRead = &.{},
-    found: [work_rows_slots]bool = @splat(false),
-    failure: ?error{ CorruptStore, ActionReadFailed } = null,
+    slots: page_slots.PageSlots(error{ CorruptStore, ActionReadFailed }) = .{},
 
-    /// Queues the work of `reads`, each a fresh WorkRead of its Session ref. Binds the refs by value, so no ref bytes
-    /// outlive this call. An empty `reads` queues nothing, so it adds no statement to the round.
+    /// Queues the work of `reads`, each a fresh WorkRead of its Session ref. An empty `reads` queues nothing.
     pub fn queue(rows: *WorkRows, a: *ReadAccess, reads: []WorkRead) error{CorruptStore}!void {
-        std.debug.assert(reads.len <= work_rows_slots);
         rows.reads = reads;
-        rows.found = @splat(false);
-        rows.failure = null;
-        if (reads.len == 0) return;
-        var args: work_rows.Args = undefined;
-        inline for (@typeInfo(work_rows.Args).@"struct".field_names, 0..) |name, index|
-            @field(args, name) = if (index < reads.len) RefSlot.from(reads[index].session) catch return error.CorruptStore else .{};
-        a.readEach(work_rows, args, std.math.maxInt(u64), rows);
+        try rows.slots.bind("session", reads);
+        if (rows.slots.args()) |args| a.readEach(work_rows, args, std.math.maxInt(u64), rows);
     }
 
     pub fn visit(rows: *WorkRows, row: *const work_rows.Row) bool {
-        rows.take(row) catch |err| {
-            rows.failure = err;
-            return false;
-        };
-        return true;
+        return rows.slots.keep(rows.take(row));
     }
 
     fn take(rows: *WorkRows, row: *const work_rows.Row) error{ CorruptStore, ActionReadFailed }!void {
-        const index = for (rows.reads, 0..) |*read, index| {
-            if (std.mem.eql(u8, read.session, row.work_ref.slice())) break index;
-        } else return error.CorruptStore;
-        if (rows.found[index]) return error.CorruptStore;
-        rows.found[index] = true;
-        try rows.reads[index].decode(row);
+        try rows.reads[try rows.slots.slotOf(row.work_ref.slice())].decode(row);
     }
 
-    /// The read's outcome once its round ran: a refused row first, then a Session with no row.
     pub fn finish(rows: *const WorkRows) error{ CorruptStore, ActionReadFailed }!void {
-        if (rows.failure) |err| return err;
-        for (rows.found[0..rows.reads.len]) |found| if (!found) return error.CorruptStore;
+        return rows.slots.finish();
     }
 };
 

@@ -24,6 +24,7 @@ const TestingScript = shared_fixtures.TestingScript;
 const RoundMeter = shared_fixtures.RoundMeter;
 const TwinRounds = shared_fixtures.TwinRounds;
 const round_budgets = shared_fixtures.round_budgets;
+const pass_budgets = shared_fixtures.pass_budgets;
 const completeSessionStop = shared_fixtures.completeSessionStop;
 const configureTestSessionAsk = shared_fixtures.configureTestSessionAsk;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
@@ -1053,6 +1054,41 @@ test "Session list changed page round budget is the same for 1, 9, 64, 65 and 13
             const configured = try store.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             return configured.accepted.session.slice()[0..change_ring.id_bytes].*;
+        }
+    }.run);
+}
+
+// SH-110 drives one Session, where reading a page's work and settings per row or per page both take two passes. Eight
+// changed Sessions fill one page and one changed_ancestors batch, so per-row statements would cost SQLite a pass per
+// repeat: the page keeps its pass budget only when work_rows and list_rows are one statement each.
+test "SH-110 a changed page of eight changed Sessions takes its pass budget on every engine" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+            for (0..protocol.session_list_page_size) |index| {
+                var key: [32]u8 = undefined;
+                var command = try completeConfiguration(try std.fmt.bufPrint(&key, "changed-passes-{d}", .{index}), "", workspace, "model");
+                try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
+            }
+            var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            const page = try TestingListing.read(&storage, &tmp, .{ .since = since });
+            try meter.stop(.readChangedSessionList);
+            try std.testing.expectEqual(protocol.ListDelta.changed, page.delta);
+            try std.testing.expect(page.next == null);
+            try std.testing.expectEqual(protocol.session_list_page_size, page.count);
+            const measured = meter.measured.get(.readChangedSessionList).?;
+            try std.testing.expectEqual(round_budgets.get(.readChangedSessionList), measured.rounds);
+            try std.testing.expectEqual(@as(u64, pass_budgets.get(.readChangedSessionList).?), measured.shape.access_passes);
+            if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
         }
     }.run);
 }

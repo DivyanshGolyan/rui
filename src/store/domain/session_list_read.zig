@@ -15,6 +15,7 @@ const workspace_path = @import("../../workspace_path.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
+const page_slots = @import("../page_slots.zig");
 const command_domain = @import("command.zig");
 const archive_membership = @import("archive_membership.zig");
 const content_domain = @import("content.zig");
@@ -516,7 +517,7 @@ const changed_ancestors = rsql.Read(.{
 /// Binds one batch of seeds by value, so no seed bytes outlive this call. Unused slots are empty and match no
 /// Session.
 fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, archive: session_archive.Filter) !changed_ancestors.Args {
-    const slots = try refSlots(seeds);
+    const slots = try page_slots.refSlots(seeds);
     return .{
         .seed0 = slots[0],
         .seed1 = slots[1],
@@ -529,13 +530,6 @@ fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, ar
         .workspace = workspace,
         .archive = archive,
     };
-}
-
-/// Up to session_list_page_size Session refs as by-value statement slots; unused slots are empty.
-fn refSlots(refs: []const change_ring.Id) ![session_list.session_list_page_size]Bounded(change_ring.id_bytes) {
-    var slots: [session_list.session_list_page_size]Bounded(change_ring.id_bytes) = @splat(.{});
-    for (refs, slots[0..refs.len]) |*ref, *slot| slot.* = try .from(ref);
-    return slots;
 }
 
 const ChangedCandidates = struct {
@@ -672,7 +666,7 @@ pub const descendant_work = rsql.Read(.{
 
 /// Binds a page's roots by value, so no root bytes outlive this call. Unused slots are empty and match no Session.
 fn subtreeArgs(request: *const session_list.ListSessions, roots: []const change_ring.Id) !descendant_work.Args {
-    const slots = try refSlots(roots);
+    const slots = try page_slots.refSlots(roots);
     return .{
         .root0 = slots[0],
         .root1 = slots[1],
@@ -755,11 +749,9 @@ const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT 
 pub const list_rows_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
     report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
 
-const RefSlot = Bounded(change_ring.id_bytes);
-
 pub const list_rows = rsql.Read(.{
     .sql = list_rows_source,
-    .Args = struct { session0: RefSlot, session1: RefSlot, session2: RefSlot, session3: RefSlot, session4: RefSlot, session5: RefSlot, session6: RefSlot, session7: RefSlot },
+    .Args = page_slots.Args,
     .Row = ListRow,
     .cardinality = .each,
 });
@@ -806,55 +798,28 @@ const ListScratch = struct {
 };
 
 /// The settings rows of one page in one list_rows statement. Each row decodes into `decoded` (it is over 1 KiB) and is
-/// copied into the slot of the Session ref it carries. A row for a Session that was not asked for, or a second row for
-/// one, is CorruptStore; so is a Session with no row (finish). `references` is borrowed from queue until the page's rows
-/// are shaped.
+/// copied into the slot its Session ref names; page_slots refuses an unknown, second or missing row.
 const ListRows = struct {
     decoded: ListRow = undefined,
     rows: [session_list.session_list_page_size]ListRow = undefined,
-    found: [session_list.session_list_page_size]bool = @splat(false),
-    references: []const change_ring.Id = &.{},
-    failure: ?error{CorruptStore} = null,
+    slots: page_slots.PageSlots(error{CorruptStore}) = .{},
 
     /// Queues the settings of `references`. An empty page queues nothing, so it adds no statement to the round.
-    fn queue(rows: *ListRows, a: *ReadAccess, references: []const change_ring.Id) !void {
-        rows.references = references;
-        rows.found = @splat(false);
-        rows.failure = null;
-        if (references.len == 0) return;
-        const slots = try refSlots(references);
-        a.readEach(list_rows, .{
-            .session0 = slots[0],
-            .session1 = slots[1],
-            .session2 = slots[2],
-            .session3 = slots[3],
-            .session4 = slots[4],
-            .session5 = slots[5],
-            .session6 = slots[6],
-            .session7 = slots[7],
-        }, std.math.maxInt(u64), rows);
+    fn queue(rows: *ListRows, a: *ReadAccess, references: []const change_ring.Id) error{CorruptStore}!void {
+        try rows.slots.bind(null, references);
+        if (rows.slots.args()) |args| a.readEach(list_rows, args, std.math.maxInt(u64), rows);
     }
 
     pub fn visit(rows: *ListRows, row: *const ListRow) bool {
-        const index = for (rows.references, 0..) |*reference, index| {
-            if (std.mem.eql(u8, reference, row.session_ref.slice())) break index;
-        } else {
-            rows.failure = error.CorruptStore;
-            return false;
-        };
-        if (rows.found[index]) {
-            rows.failure = error.CorruptStore;
-            return false;
-        }
-        rows.found[index] = true;
-        rows.rows[index] = row.*;
-        return true;
+        return rows.slots.keep(rows.take(row));
     }
 
-    /// The read's outcome once its round ran: a refused row first, then a Session with no row.
+    fn take(rows: *ListRows, row: *const ListRow) error{CorruptStore}!void {
+        rows.rows[try rows.slots.slotOf(row.session_ref.slice())] = row.*;
+    }
+
     fn finish(rows: *const ListRows) error{CorruptStore}!void {
-        if (rows.failure) |err| return err;
-        for (rows.found[0..rows.references.len]) |found| if (!found) return error.CorruptStore;
+        return rows.slots.finish();
     }
 };
 

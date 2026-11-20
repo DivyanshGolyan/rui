@@ -162,6 +162,7 @@ const cores = .{
     .{ "store/command_replay.zig", @import("store/command_replay.zig") },
     .{ "store/engine/mysql_commit.zig", @import("store/engine/mysql_commit.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
+    .{ "store/page_slots.zig", @import("store/page_slots.zig") },
     .{ "store/pass_plan.zig", @import("store/pass_plan.zig") },
     .{ "store/round_order.zig", @import("store/round_order.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
