@@ -307,13 +307,20 @@ def source_strings(source):
                      for match in tokens if not (token := match.group()).startswith("//"))
 
 
-@cache
-def tree_fixture_literals():
-    return {target: {text for script in tree_graph().scripts(scripts)
-                     if Path(script).suffix in {".py", ".sh"} and (ROOT / script).is_file()
-                     for literal in script_literals((ROOT / script).read_text(), Path(script).suffix)
+def fixture_literals_of(graph, read):
+    """Each fixture's assertion text, read through `read(name)` for the scripts the graph reaches."""
+    return {target: {text for script in graph.scripts(scripts)
+                     if Path(script).suffix in {".py", ".sh"} and read(script) is not None
+                     for literal in script_literals(read(script), Path(script).suffix)
                      if (text := fixture_text(literal))}
             for target, (scripts, _, _) in FIXTURES.items()}
+
+
+@cache
+def tree_fixture_literals():
+    def read(name):
+        return (ROOT / name).read_text() if (ROOT / name).is_file() else None
+    return fixture_literals_of(tree_graph(), read)
 
 
 @cache
@@ -856,6 +863,11 @@ DIAGNOSTIC_INTEGRATIONS = (
 )
 
 
+# The qualification tree whose Go packages measurement-check runs, and the files in it that make a package.
+QUALIFICATION_ROOT = "tests/qualification/"
+QUALIFICATION_GO = (".go", "go.mod", "go.sum")
+
+
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
     graph = graph or tree_graph()
     changed = list(paths)
@@ -921,8 +933,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             native_targets.update(reached - LINUX_ONLY)
             reasons.add("Import graph: the unit roots and fixtures that reach the changed file")
             matched = True
-        if path.startswith("tests/qualification/"):
-            if path.endswith((".go", "go.mod", "go.sum")):
+        if path.startswith(QUALIFICATION_ROOT):
+            if path.endswith(QUALIFICATION_GO):
                 targets.add("measurement-check")
                 native_targets.add("measurement-check")
                 reasons.add("Measurement code: pinned Go package checks")
@@ -1055,6 +1067,77 @@ def revision_text(commit, path):
     return shown.stdout if shown.returncode == 0 else None
 
 
+def revision_contents(paths, base, head):
+    """Each path select() reads before and after the change: the source, the fixture table and the manifest."""
+    return {path: (revision_text(base, path), revision_text(head, path))
+            for path in paths
+            if path.startswith("src/") or path in (FIXTURE_TABLE, DEPENDENCY_MANIFEST)
+            or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())}
+
+
+# How directly a selected target reaches a changed path, strongest first: the target's own source or
+# script; an import, link or path rule the selector follows; or a fallback or coverage expansion only.
+DIRECT, GRAPH, BROAD = 0, 1, 2
+EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py"),
+                   "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
+                   # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
+                   "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
+# The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
+# reach is a rsql-table input, so a change any of them reaches is one. tests/ci/rsql_table.py runs these.
+STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integration")
+
+
+def own_patterns(target, read):
+    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them."""
+    scripts, executables, owners = FIXTURES.get(target, ((), (), ()))
+    own = [*scripts, *executables, *owners, *UNIT_ROOTS.get(target, ()), *EXTRA_OWN_FILES.get(target, ())]
+    if target == "rsql-table":
+        # build/product.zig owns the statement-table inputs; the list moves with the commit, so read it there.
+        text = read("build/product.zig") or ""
+        listed = re.search(r"pub const rsql_table_inputs = \[_\]\[\]const u8\{([^}]*)\}", text)
+        own += re.findall(r'"([^"]+)"', listed.group(1)) if listed else []
+    return tuple(own)
+
+
+def attribute(path, graph, available, read, contents=None, fixture_literals=None):
+    """How each target the selector reaches for one changed path reaches it: {target: DIRECT | GRAPH | BROAD}.
+
+    The selector's own mapping (select()) names the selected targets; a selected target covers each target
+    `covers()` says it runs, and the covered one takes the same tier. A target whose own source or script
+    the path is takes DIRECT whether or not the selector selected it.
+    """
+    attributes = {}
+
+    def record(target, tier):
+        attributes[target] = min(tier, attributes.get(target, BROAD + 1))
+
+    for target in available:
+        if matches(path, own_patterns(target, read)):
+            record(target, DIRECT)
+    selected = select([path], "review", available, graph=graph, contents=contents or {},
+                      fixture_literals=fixture_literals)["targets"]
+    reached = graph.targets(path) or set()
+    rule_named = {target for patterns, checks, *_ in RULES if matches(path, patterns) for target in checks}
+    if any(path in graph.reached[root] for root in STATEMENT_TABLE_TARGETS):
+        record("rsql-table", GRAPH)
+    if path == DEPENDENCY_MANIFEST and contents and DEPENDENCY_MANIFEST in contents:
+        # The link edges the changed packages reach, before the PR tier's CI_RUNNABLE filter drops some of them.
+        packages = changed_dependencies(*contents[DEPENDENCY_MANIFEST])
+        linked = package_targets(packages, graph, available) if packages is not None else None
+        for target in linked or ():
+            record(target, GRAPH)
+    for source in selected:
+        if source in reached or source in rule_named or (path == DEPENDENCY_MANIFEST and source in graph.links) \
+                or (source == "stack-frames" and path in graph.host):
+            tier = GRAPH
+        else:
+            tier = BROAD
+        for target in available:
+            if covers(target, {source}):
+                record(target, tier)
+    return attributes
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
@@ -1064,11 +1147,7 @@ def main():
     available = set(build_files.steps())
     paths, base = changed_paths(args.base, args.head)
     head = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
-    result = select(paths, args.phase, available,
-                    contents={path: (revision_text(base, path), revision_text(head, path))
-                              for path in paths
-                              if path.startswith("src/") or path in (FIXTURE_TABLE, DEPENDENCY_MANIFEST)
-                              or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
+    result = select(paths, args.phase, available, contents=revision_contents(paths, base, head))
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

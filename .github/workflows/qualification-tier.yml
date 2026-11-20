@@ -12,7 +12,7 @@ on:
   workflow_call:
     inputs:
       base:
-        description: Commit the batch starts after; each failing step bisects BASE..HEAD
+        description: Commit the batch starts after; each failing step names its suspects in BASE..HEAD
         type: string
         required: true
       head:
@@ -117,7 +117,7 @@ jobs:
           STATE: ${{ steps.verdict.outputs.state }}
         run: test "$STATE" = success
   report:
-    # One issue per failure signature, with the bisect's verdict on it.
+    # One issue per failure signature, with the failing step's suspects on it.
     needs: [selected, upgrade, renderer]
     if: ${{ failure() }}
     runs-on: ubuntu-24.04

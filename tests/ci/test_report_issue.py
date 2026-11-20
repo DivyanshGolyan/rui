@@ -464,6 +464,18 @@ class ReportTest(unittest.TestCase):
                          'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
         self.assertNotIn('causes', body)
 
+    def test_a_promotion_suspects_line_rides_on_the_failure_it_ranked(self):
+        suspect = ('Promotion suspects: stack-frames: 1. ' + 'e' * 40 + ' PR #1692, tier b (import or rule): '
+                   'Change the stack frames; touched src/server.zig')
+        fake = FakeGitHub([dict(id=1, name='linux suites (check)', conclusion='failure')],
+                          {1: BASH + logged('stack-frames: failed (exit 1)') + logged(suspect)
+                           + logged('--- stack-frames: last 1 lines of the failed step\'s output ---')})
+        self.run_main(fake, '--label', 'promotion-red')
+        [create] = fake.made('create')
+        body = create[create.index('--body') + 1]
+        self.assertIn(suspect, body)
+        self.assertNotIn('last 1 lines', body)
+
     def test_a_job_with_several_causes_carries_every_steps_verdict(self):
         verdicts = ['Promotion bisect: bash-integration: first fails at ' + 'd' * 40 + ' (Change the bash owner)',
                     'Promotion bisect: host-stop-integration: first fails at ' + 'e' * 40 + ' (Change Host stop)']
