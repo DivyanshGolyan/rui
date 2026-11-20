@@ -1,40 +1,52 @@
 #!/usr/bin/env python3
-"""Find the commit in a promotion batch that turned a failing check red.
+"""Explain a red promotion step: rank the batch's commits as its suspects, or bisect it by hand.
 
 A promotion qualifies main HEAD against the batch since `stable`, the last
-promoted release. When a job fails, each step it recorded as failed
-(steps.py, run_selected.py) is bisected on its own, on the same runner: its
-recorded command is replayed first at HEAD, to confirm the red reproduces,
-then by binary search over the batch's first-parent commits. `stable` is
-presumed good, since it passed promotion; it is replayed only when the first
-commit of the batch fails. A Linux job's replays stop starting at BISECT_CAP_SECONDS, a budget its
-failed steps share. A failure before any recorded step, such as setup, has nothing to replay. A macOS
-runner does not replay at all (replays_here): its replays cost the most runner-minutes. Replay output
-goes to files, not the job log, so the issue filer reads only the original failure. The verdict never
-turns a promotion green.
+promoted release. When a job fails, `suspects` reads the job's failure record
+(steps.py, run_selected.py) and ranks the batch's commits by how the selector
+reaches each failed step's targets: a commit whose own source or script a
+target runs ranks first, then one the selector's import, link or path rules
+reach it through, then one a fallback or coverage rule alone selects. No step
+is replayed. A failed step's log tail rides in the record and prints beside
+the ranking.
+
+`bisect` is the manual path: a named step's recorded command is replayed at
+the batch's first-parent commits by binary search, capped at BISECT_CAP_SECONDS.
+Replay output goes to files. The verdict never turns a promotion green.
 """
 import argparse
+import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 
 from git_command import git
+import build_files
+import select_tests
 import steps
 
-# Linux replays stop starting after this much bisect time per job; the Promote 38-45 window's
-# slowest find landed at 80 minutes (its last replay started at 66), so 90 leaves room for a slower runner.
+# Manual bisect replays stop starting after this much time, shared by the step's replays.
+# The Promote 38-45 window's slowest find landed at 80 minutes (its last replay started at 66), so 90 leaves room for a slower runner.
 BISECT_CAP_SECONDS = 90 * 60
+# The line prefixes the issue filer attaches to a failure (report_issue.py reads both).
+BISECT_PREFIX = "Promotion bisect: "
+SUSPECT_PREFIX = "Promotion suspects: "
+TOP_SUSPECTS = 5
+# What a batch commit can touch that the selector reads: the sources, tests and build the target graph is made of.
+SNAPSHOT = ("src", "tests", "build", "build.zig", "build.zig.zon")
+TIER_LABELS = {select_tests.DIRECT: "tier a (own source)", select_tests.GRAPH: "tier b (import or rule)",
+               select_tests.BROAD: "tier c (fallback)"}
 
 
-def replays_here(environ=os.environ):
-    """False on a macOS runner. Promote runs 38 to 45 spent 569 of their 1,575 bisect minutes
-    there, mostly replays of full-callers and full-execution that ran for over an hour and
-    often failed for the machine's own reasons. Outside GitHub Actions, RUNNER_OS is unset and
-    the replay runs."""
-    return environ.get("RUNNER_OS") != "macOS"
+def targets_of(step_name):
+    """A step's build targets: a run_selected batch names them space-separated, flags excluded."""
+    return [word for word in step_name.split() if not word.startswith("-")]
 
 
 def fetch(base, head):
@@ -52,6 +64,121 @@ def batch(base, head):
     return listed.split() if listed else []
 
 
+def rank(targets, entries, limit=TOP_SUSPECTS):
+    """The batch's commits that select one of `targets`, most direct first, newer first within a tier.
+
+    `entries` run oldest first; each is {"sha", "subject", "paths": {path: {target: tier}}}, where a path's
+    map holds the tier at which the selector reaches each target that path changes (select_tests.attribute).
+    Returns dicts with the commit's tier and the touched paths that reach a target at that tier.
+    """
+    ranked = []
+    for position, entry in enumerate(entries):
+        best, files = None, []
+        for path, reaches in entry["paths"].items():
+            tiers = [reaches[target] for target in targets if target in reaches]
+            if not tiers:
+                continue
+            tier = min(tiers)
+            if best is None or tier < best:
+                best, files = tier, [path]
+            elif tier == best:
+                files.append(path)
+        if best is not None:
+            ranked.append(dict(sha=entry["sha"], subject=entry["subject"], tier=best,
+                               files=sorted(files), position=position))
+    ranked.sort(key=lambda suspect: (suspect["tier"], -suspect["position"]))
+    return ranked[:limit]
+
+
+def pull_request(subject):
+    match = re.search(r"\(#(\d+)\)\s*$", subject)
+    return f"PR #{match[1]}" if match else "no PR number in the subject"
+
+
+def suspect_lines(name, targets, ranked, size):
+    """The `Promotion suspects:` lines for one failed step; the issue filer copies each one."""
+    if size == 0:
+        return [f"{SUSPECT_PREFIX}{name}: no commits between the base and head, so nothing to rank"]
+    if not targets:
+        return [f"{SUSPECT_PREFIX}{name}: not a selector target, so no batch commit can be ranked; read the failed step's log"]
+    if not ranked:
+        return [f"{SUSPECT_PREFIX}{name}: none of the {size} batch commits selects {', '.join(targets)}; "
+                "read the failed step's log"]
+    return [f"{SUSPECT_PREFIX}{name}: {number}. {suspect['sha']} {pull_request(suspect['subject'])}, "
+            f"{TIER_LABELS[suspect['tier']]}: {suspect['subject']}; touched {', '.join(suspect['files'])}"
+            for number, suspect in enumerate(ranked, 1)]
+
+
+def snapshot_attribution(sha):
+    """One batch commit's entry for rank(): the selector's reach of each path the commit changes, at its tree."""
+    paths, parent = select_tests.changed_paths(f"{sha}^1", sha)
+    subject = git("log", "-1", "--format=%s", sha)
+    entry = dict(sha=sha, subject=subject, paths={})
+    if not paths:
+        return entry
+    with tempfile.TemporaryDirectory(prefix="promotion-snapshot-") as scratch:
+        root = Path(scratch)
+        listed = git("ls-tree", "--name-only", sha, cwd=select_tests.ROOT).split()
+        present = [name for name in listed if name in SNAPSHOT]
+        archive = subprocess.run(["git", "archive", "--format=tar", sha, *present], cwd=select_tests.ROOT,
+                                 check=True, capture_output=True).stdout
+        tarfile.open(fileobj=io.BytesIO(archive)).extractall(root, filter="data")
+
+        def read(name):
+            return (root / name).read_text(encoding="utf-8", errors="surrogateescape") if (root / name).is_file() else None
+
+        names = sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+        contents = select_tests.revision_contents(paths, parent, sha)
+        try:
+            graph = select_tests.Graph(names, read)
+            available = set(build_files.steps(root))
+            literals = select_tests.fixture_literals_of(graph, read)
+            entry["paths"] = {path: select_tests.attribute(path, graph, available, read, contents=contents,
+                                                           fixture_literals=literals)
+                              for path in paths}
+        except (ValueError, AttributeError, IndexError) as error:
+            # The selector cannot read this commit (an unknown import, or a tree without the functional cores the
+            # graph reads, as before logic_tests.zig): any target may hide behind it, so each is a broad suspect.
+            print(f"{SUSPECT_PREFIX}note: the selector cannot read {sha} ({error!r}); every target is a broad suspect")
+            every = {target: select_tests.BROAD for target in available}
+            entry["paths"] = {path: dict(every) for path in paths}
+    return entry
+
+
+def excerpt_lines(name, failed):
+    excerpt = failed.get("excerpt") or []
+    if not excerpt:
+        return []
+    return [f"--- {name}: last {len(excerpt)} lines of the failed step's output ---", *excerpt, "--- end of excerpt ---"]
+
+
+def suspect_report(failed, entries):
+    """Every line the suspects report prints for the recorded failed steps, given the batch's entries (oldest first)."""
+    if not failed:
+        return [f"{SUSPECT_PREFIX}no recorded step failed, so there is nothing to rank; read the job's failed step"]
+    lines = []
+    for failure in failed:
+        targets = targets_of(failure["name"])
+        lines += suspect_lines(failure["name"], targets, rank(targets, entries), len(entries))
+        lines += excerpt_lines(failure["name"], failure)
+    return lines
+
+
+def suspects(base, head, failed_path):
+    failed = steps.failures(failed_path) if failed_path else []
+    entries = []
+    if failed:
+        fetch(base, head)
+        entries = [snapshot_attribution(sha) for sha in batch(base, head)]
+    print("\n".join(suspect_report(failed, entries)))
+
+
+def capped(good, bad, commits, replays):
+    # `good` is -1 until a batch commit passes; then the failing commit lies in commits[good+1..bad].
+    return dict(verdict="capped", first=commits[good + 1], last=commits[bad], narrowed=bad - good,
+                batch_passed=good >= 0, replays=replays)
+
+
 def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
     """Return the batch's first failing commit, or the narrowed range when the deadline stops it.
 
@@ -67,22 +194,17 @@ def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
         replays.append(dict(sha=sha, passed=ok))
         return ok
 
-    def capped(good, bad):
-        # `good` is -1 until a batch commit passes; then the failing commit lies in commits[good+1..bad].
-        return dict(verdict="capped", first=commits[good + 1], last=commits[bad], narrowed=bad - good,
-                    batch_passed=good >= 0, replays=replays)
-
     def out_of_time():
         return deadline is not None and clock() >= deadline
 
     good, bad = -1, len(commits) - 1
     if out_of_time():
-        return capped(good, bad)
+        return capped(good, bad, commits, replays)
     if run(commits[bad]):
         return dict(verdict="not-reproduced", replays=replays)
     while bad - good > 1:
         if out_of_time():
-            return capped(good, bad)
+            return capped(good, bad, commits, replays)
         middle = (good + bad) // 2
         if run(commits[middle]):
             good = middle
@@ -90,7 +212,7 @@ def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
             bad = middle
     if bad == 0:
         if out_of_time():
-            return capped(good, bad)
+            return capped(good, bad, commits, replays)
         if not run(base):
             return dict(verdict="before-batch", replays=replays)
     return dict(verdict="culprit", culprit=commits[bad], replays=replays)
@@ -138,50 +260,68 @@ def bisect_steps(failed, commits, base, head, replay, deadline, clock=time.monot
         result = bisect(commits, base, lambda sha: replay(index, step, sha), deadline=deadline, clock=clock)
         result.update(step=step["name"], argv=step["argv"])
         results.append(result)
-        lines.append(f"Promotion bisect: {step['name']}: {describe(result, base, head)}")
+        lines.append(f"{BISECT_PREFIX}{step['name']}: {describe(result, base, head)}")
     return results, lines
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True, help="last promoted commit (stable)")
-    parser.add_argument("--head", required=True, help="promotion candidate (main HEAD)")
-    parser.add_argument("--logs", required=True, type=Path, help="directory for each replay's output")
-    parser.add_argument("--failed", type=Path, default=steps.record_path(), help="the job's failure record")
-    args = parser.parse_args()
-    failed = steps.failures(args.failed) if args.failed else []
+def run_bisect(base, head, failed, logs):
     if not failed:
-        print("Promotion bisect: no recorded step failed, so there is nothing to replay; read the job's failed step")
+        print(f"{BISECT_PREFIX}no recorded step failed, so there is nothing to replay; read the job's failed step")
         return
-    if not replays_here():
-        # The issue filer attaches "Promotion bisect:" lines to the failure, so this one keeps that prefix.
-        print("Promotion bisect: skipped on macOS; read the failed step's log")
-        return
-    fetch(args.base, args.head)
-    commits = batch(args.base, args.head)
-    args.logs.mkdir(parents=True, exist_ok=True)
+    fetch(base, head)
+    commits = batch(base, head)
+    logs.mkdir(parents=True, exist_ok=True)
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_STEP_SUMMARY"}
 
     def replay(index, step, sha):
         git("checkout", "--quiet", "--force", "--detach", sha)
         name = f"{index}-{sha}"
-        replay_env = dict(env, STEP_OUTPUT=str(args.logs / f"{name}-output"))
-        with open(args.logs / f"{name}.log", "w") as log:
+        replay_env = dict(env, STEP_OUTPUT=str(logs / f"{name}-output"))
+        with open(logs / f"{name}.log", "w") as log:
             code = subprocess.run(step["argv"], stdout=log, stderr=subprocess.STDOUT, env=replay_env).returncode
         print(f"{step['name']}: replay at {sha}: {'passed' if code == 0 else f'failed (exit {code})'}", flush=True)
         return code == 0
 
     deadline = time.monotonic() + BISECT_CAP_SECONDS
     try:
-        results, lines = bisect_steps(failed, commits, args.base, args.head, replay, deadline)
+        results, lines = bisect_steps(failed, commits, base, head, replay, deadline)
     finally:
-        git("checkout", "--quiet", "--force", "--detach", args.head)
-    verdict = dict(base=args.base, head=args.head, batch=len(commits), steps=results)
-    (args.logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+        git("checkout", "--quiet", "--force", "--detach", head)
+    verdict = dict(base=base, head=head, batch=len(commits), steps=results)
+    (logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     print("\n".join(lines))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:
             print("\n" + "\n".join(lines) + "\n", file=output)
+
+
+def manual_steps(step_name):
+    """The failed step a manual bisect replays: its command as run_selected.py would run it."""
+    from run_selected import command  # run_selected imports the issue filer, which imports this module
+    return [dict(name=step_name, argv=command(targets_of(step_name)))]
+
+
+def manual_bisect(base, head, step_name, logs):
+    run_bisect(base, head, manual_steps(step_name), logs)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    rank_parser = commands.add_parser("suspects", help="rank the batch's commits for each recorded failed step")
+    rank_parser.add_argument("--base", required=True, help="last promoted commit (stable)")
+    rank_parser.add_argument("--head", required=True, help="promotion candidate (main HEAD)")
+    rank_parser.add_argument("--failed", type=Path, default=steps.record_path(), help="the job's failure record")
+    bisect_parser = commands.add_parser("bisect", help="manual: replay one step across base..head by binary search")
+    bisect_parser.add_argument("--base", required=True, help="commit the batch starts after")
+    bisect_parser.add_argument("--head", required=True, help="last commit of the batch")
+    bisect_parser.add_argument("--step", required=True, help="the failed step's name: its space-separated targets")
+    bisect_parser.add_argument("--logs", required=True, type=Path, help="directory for each replay's output")
+    args = parser.parse_args()
+    if args.command == "suspects":
+        suspects(args.base, args.head, args.failed)
+    else:
+        manual_bisect(args.base, args.head, args.step, args.logs)
 
 
 if __name__ == "__main__":

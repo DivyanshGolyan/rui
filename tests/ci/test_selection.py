@@ -22,6 +22,7 @@ from link_table import fingerprint_error
 from select_tests import (ACCEPTANCE_INPUTS, BOOTSTRAP_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, CI_RUNNABLE, CONTENT_RULES, DEPENDENCY_MANIFEST, DIAGNOSTIC_INTEGRATIONS, FIXTURES, ci_policy, documentation, PR_UNIT_ROOTS, changed_dependencies, dependency_entries, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, ROOT, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning, normalize, tooling)
+from select_tests import BROAD, DIRECT, GRAPH, attribute, tree_fixture_literals
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -1711,7 +1712,7 @@ fi
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml',
-                     'race-sweep.yml')
+                     'race-sweep.yml', 'promote.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -2792,6 +2793,42 @@ class LinkedDependencySelectionTest(unittest.TestCase):
             elif result["fast_targets"] != PR_ROOTS:
                 failures.append((path, result["fast_targets"]))
         self.assertEqual(failures, [])
+
+
+class SuspectAttributionTest(unittest.TestCase):
+    """The selector's reach for real paths, at the working tree the selector tests read."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.graph = tree_graph()
+        cls.available = set(build_files.steps())
+        cls.literals = tree_fixture_literals()
+
+    def reach(self, path, contents=None):
+        def read(name):
+            return (ROOT / name).read_text() if (ROOT / name).is_file() else None
+
+        return attribute(path, self.graph, self.available, read, contents=contents, fixture_literals=self.literals)
+
+    def test_a_targets_own_script_or_source_is_direct(self):
+        self.assertEqual(self.reach("tests/ci/stack_frames.py")["stack-frames"], DIRECT)
+        self.assertEqual(self.reach("src/bash.zig")["bash-integration"], DIRECT)
+        self.assertEqual(self.reach("src/store/rsql.zig")["rsql-table"], DIRECT)
+
+    def test_a_statement_table_root_reach_makes_rsql_table_a_graph_suspect(self):
+        self.assertEqual(self.reach("src/store/tests.zig").get("rsql-table"), GRAPH)
+
+    def test_a_changed_package_reaches_the_targets_that_link_it_even_outside_the_pr_tier(self):
+        before = (ROOT / "build.zig.zon").read_text()
+        after = before.replace('"N-V-__8AAIgi2gCNAFzaSP_Qwb8MVv4GhCI5tn9HjmJdBW5y"', '"N-V-__8AAIgi2gCNAFzaSP_Qwb8MVv4GhCI5tn9HjmJdBX5y"')
+        self.assertNotEqual(before, after)
+        reach = self.reach("build.zig.zon", contents={"build.zig.zon": (before, after)})
+        self.assertEqual(reach["admission-debug-integration"], GRAPH)
+
+    def test_an_unclassified_path_reaches_only_by_fallback(self):
+        reach = self.reach("src/unlisted_new_source.zig")
+        self.assertEqual(reach["check"], BROAD)
+        self.assertEqual(set(reach.values()), {BROAD})
 
 
 class PolicyPrepushTest(unittest.TestCase):

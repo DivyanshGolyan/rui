@@ -23,11 +23,19 @@ def record_path():
     return Path(temp) / "rui-failed-steps.jsonl" if temp else None
 
 
-def record_failure(name, argv):
-    """Append a failed step: what promotion.py replays to bisect it."""
+# The last lines of a failed step's output that the record keeps for promotion's suspects report.
+EXCERPT_LINES = 30
+EXCERPT_WIDTH = 300
+
+
+def record_failure(name, argv, output=""):
+    """Append a failed step: what promotion.py replays and ranks suspects for, with the tail of its output."""
     if path := record_path():
+        entry = dict(name=name, argv=argv)
+        if excerpt := [line[:EXCERPT_WIDTH] for line in output.splitlines()[-EXCERPT_LINES:]]:
+            entry["excerpt"] = excerpt
         with open(path, "a") as record:
-            print(json.dumps(dict(name=name, argv=argv)), file=record)
+            print(json.dumps(entry), file=record)
 
 
 def failures(path):

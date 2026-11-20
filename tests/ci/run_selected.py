@@ -69,7 +69,7 @@ def main():
             summarize(note)
             returncode = returncode or 1
         if returncode:
-            record_failure(' '.join(batch), command(batch))
+            record_failure(' '.join(batch), command(batch), output)
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
                       "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.")
             if skipped := [target for later in batches[index + 1:] for target in later if not target.startswith("-")]:

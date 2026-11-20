@@ -18,9 +18,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from select_tests import STATEMENT_TABLE_TARGETS
+
 ROOT = Path(__file__).resolve().parents[2]
 TABLE = ROOT / "src/store/rsql_table.zig"
-TARGETS = "test-native,test-store,session-list-integration"
+TARGETS = ",".join(STATEMENT_TABLE_TARGETS)
 PREFIX = b"rsqlstmt_"
 REGENERATE = "python3 tests/ci/rsql_table.py generate"
 

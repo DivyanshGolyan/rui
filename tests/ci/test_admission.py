@@ -1169,7 +1169,7 @@ class ReleaseFlowTest(unittest.TestCase):
 
     def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
         text = PROMOTE.read_text()
-        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag', 'race_sweep'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release', 'dependency_lag', 'race_sweep', 'bisect'])
         self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
         self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
         qualify = job(text, 'qualify')
@@ -1200,7 +1200,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('sha256sum --check --strict SHA256SUMS', publication)
         self.assertIn('name: rui-digests', RELEASE_BUILD.read_text())
 
-    BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
+    SUSPECTS = 'python3 -B tests/ci/promotion.py suspects --base "$BASE" --head "$HEAD_SHA"'
 
     @staticmethod
     def step_list(body):
@@ -1208,7 +1208,7 @@ class ReleaseFlowTest(unittest.TestCase):
         return [steps.parse(argument) for argument in shlex.split(script.replace('\\\n', ' '))
                 if not argument.startswith('--') and '=' in argument and not argument.startswith('$')]
 
-    def test_every_promotion_bisect_replays_only_its_jobs_record(self):
+    def test_every_failed_promotion_step_ranks_only_its_jobs_record(self):
         check = CHECK.read_text()
         jobs = [('linux_suites', job(check, 'linux_suites'), 'run_selected.py'),
                 ('macos_suites', job(check, 'macos_suites'), 'run_selected.py'),
@@ -1216,12 +1216,13 @@ class ReleaseFlowTest(unittest.TestCase):
                 ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py')]
         for name, body, recorder in jobs:
             with self.subTest(job=name):
-                bisect = body.split('      - name: Bisect the promotion batch with each failed step\n', 1)[1]
-                bisect = bisect.split('\n      - ', 1)[0]
-                self.assertIn(f'        run: {self.BISECT}', bisect)
-                self.assertNotIn('steps.', bisect)
-                self.assertNotIn('FAILED', bisect)
-                self.assertIn(f'tests/ci/{recorder}', body.split('Bisect the promotion batch', 1)[0])
+                self.assertNotIn('Bisect the promotion batch', body)
+                suspects = body.split('      - name: Name the promotion suspects of each failed step\n', 1)[1]
+                suspects = suspects.split('\n      - ', 1)[0]
+                self.assertIn(f'        run: {self.SUSPECTS}', suspects)
+                self.assertNotIn('steps.', suspects)
+                self.assertNotIn('FAILED', suspects)
+                self.assertIn(f'tests/ci/{recorder}', body.split('Name the promotion suspects', 1)[0])
 
     def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
         upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))

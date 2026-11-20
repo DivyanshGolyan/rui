@@ -10,7 +10,9 @@ name: Promote
 # Otherwise, only for main HEAD, Promote runs the same qualification tier
 # (qualification-tier.yml) over the batch since stable, the last promoted
 # release, and Release publishes the archives it built and tested. A failing
-# job bisects the batch with its own command; the run never merges. A red
+# job names its batch's suspects in its log (promotion.py suspects); the run never
+# merges. A manual run with `bisect-step` replays one named step across
+# `bisect-base`..`bisect-head` by binary search and promotes nothing. A red
 # record refuses a manual promotion.
 on:
   workflow_dispatch:
@@ -20,11 +22,29 @@ on:
         type: string
         required: false
         default: ''
+      bisect-step:
+        description: Manual bisect, promotes nothing; the failed step's name, its space-separated targets (such as stack-frames)
+        type: string
+        required: false
+        default: ''
+      bisect-base:
+        description: Manual bisect; the commit the bisected batch starts after (stable)
+        type: string
+        required: false
+        default: ''
+      bisect-head:
+        description: Manual bisect; the last commit of the bisected batch
+        type: string
+        required: false
+        default: ''
   schedule:
     - cron: '45 */3 * * *'
 
 permissions:
   contents: read
+
+# Restore shared compilation inputs without saving them: the manual bisect replays old commits.
+cache-mode: read
 
 concurrency:
   # One promotion at a time; a second dispatch waits for the first to finish.
@@ -33,7 +53,7 @@ concurrency:
 
 jobs:
   batch:
-    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private && inputs.bisect-step == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -149,3 +169,41 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run race-sweep.yml --repo "$GITHUB_REPOSITORY" --ref main
+  bisect:
+    # A manual replay of one failed step across a range of main commits. It qualifies,
+    # records and publishes nothing, and the 90-minute replay cap is promotion.py's.
+    if: ${{ inputs.bisect-step != '' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Require a range to bisect
+        env:
+          BASE: ${{ inputs.bisect-base }}
+          HEAD_SHA: ${{ inputs.bisect-head }}
+        run: test -n "$BASE" && test -n "$HEAD_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          # Every target a failed step can name, so the replay's toolchain and fixtures are all present.
+          targets: '["check-full","test-logic","admission-debug-integration","stack-frames","rsql-table"]'
+          publish-caches: 'false'
+      - name: Bisect the named step across the range
+        env:
+          STEP: ${{ inputs.bisect-step }}
+          BASE: ${{ inputs.bisect-base }}
+          HEAD_SHA: ${{ inputs.bisect-head }}
+        run: python3 -B tests/ci/promotion.py bisect --base "$BASE" --head "$HEAD_SHA" --step "$STEP" --logs "$RUNNER_TEMP/promotion-bisect"
+      - name: Retain the verdict and replay logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: promotion-bisect-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/promotion-bisect
+          retention-days: 14
+          if-no-files-found: ignore
