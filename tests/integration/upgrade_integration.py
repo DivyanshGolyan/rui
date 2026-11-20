@@ -631,7 +631,10 @@ def upgrade_journey(root, binary, releases):
         try:
             with os_semantics.unix_stream() as listener:
                 listener.bind(str(unreadable))
-                listener.listen(1)
+                # Never accepted, every census probe stays queued. A backlog of 1 fills
+                # after the first probe on Darwin, which then refuses the post-publication
+                # census and makes this live listener look like a leftover socket.
+                listener.listen(16)
                 gate = releases.gate_archive()
                 start = len(releases.requests)
                 child = a.spawn_upgrade()
@@ -1242,7 +1245,7 @@ def restart_all_cases(root, binary, releases):
         try:
             with os_semantics.unix_stream() as listener:
                 listener.bind(str(unreadable))
-                listener.listen(1)
+                listener.listen(16)  # Room for every probe; see upgrade_journey.
                 output = first.run("host", "restart", "--all", expect=6)
                 assert "Store unknown (socket " in output and "failed at discovery:" in output, output
                 assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
