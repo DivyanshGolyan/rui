@@ -10,7 +10,7 @@ GitHub must require pull requests and the GitHub Actions `admission` check on `m
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
 Nothing runs on `main` per merge.
-Two PRs that pass alone but break `main` together, by compilation or by a test, and a break the PR tier does not select, are caught by [scheduled promotion](#scheduled-promotion) within one three-hour tick, which bisects to the commit that broke it and publishes nothing while HEAD is red.
+Two PRs that pass alone but break `main` together, by compilation or by a test, and a break the PR tier does not select, are caught by [scheduled promotion](#scheduled-promotion) within one three-hour tick, which bisects to the commit that broke it (a macOS step is diagnosed from its log instead) and publishes nothing while HEAD is red.
 The owner accepted, on 18 Nov 2026, that the fast PR tier lets more breaks reach `main` and that they are found there within hours.
 A changed head requires current candidate checks before merge.
 
@@ -56,7 +56,7 @@ When [stable](#promote) already holds HEAD it does nothing.
 When HEAD has a red `main-qualified` record it skips quietly, since the failing run already filed its issues.
 Otherwise it qualifies HEAD, or publishes the archives of HEAD's green record, exactly as a manual promotion does below, and a green HEAD that main has moved past since the last release becomes a release without anyone dispatching it.
 The batch runs from `stable`, the last promoted commit, so a failing step bisects the commits since the last release.
-A failing job files or updates one `main-red` issue per cause, with the bisect's verdict on it; a manual promotion files `promotion-red` instead.
+A failing job files or updates one `main-red` issue per cause, with the bisect's verdict on it (a macOS step has none); a manual promotion files `promotion-red` instead.
 Setting the repository variable `SCHEDULED_RELEASES` to `paused` (`gh variable set SCHEDULED_RELEASES --body paused`) holds scheduled publication: scheduled runs still qualify HEAD and record its verdict, and a manual promotion publishes a green record's archives; deleting the variable resumes it.
 Every run records its verdict as the `main-qualified` commit status of HEAD, whose target is the run: green only when every tier passed, red when one failed, and unfinished when a tier was cancelled, which the next tick qualifies again.
 [main_qualified.py](../../tests/ci/main_qualified.py) alone writes and reads that record and names the batch.
@@ -74,7 +74,8 @@ A red record refuses a manual promotion: fix forward and promote a later commit,
 Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so the next scheduled run skips it.
 Promote is the sole caller of the one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues under the label Promote passes (`main-red` on schedule, `promotion-red` by hand), and Promote publishes after it. Its jobs appear as `qualify / <job>`.
 Promote qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, Linux `mysql-wire-integration`, the upgrade check on both systems and the renderer contracts.
-A failing suite, upgrade or contract job bisects each step that failed, on the same runner, by replaying that step's recorded command: once at HEAD, then by binary search over the batch's first-parent commits. A macOS runner does not bisect; its failed step's log is the only verdict.
+A failing suite, upgrade or contract job bisects each step that failed, on the same runner, by replaying that step's recorded command: once at HEAD, then by binary search over the batch's first-parent commits.
+A failed macOS step is diagnosed from its log alone; its bisect is skipped.
 A step is one suite batch, one upgrade check or one contract; a suite job stops at its first failed batch, and [steps.py](../../tests/ci/steps.py) runs every upgrade check and contract even after one fails.
 Each step's verdict names the first commit where it fails, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdicts are retained with the run.
 Two steps broken by different commits get different verdicts, but a suite batch with several causes names only its earliest; the job's issues carry every verdict line.

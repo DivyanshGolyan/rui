@@ -81,7 +81,7 @@ The pre-push hook re-runs the last CI red as described in [local feedback eviden
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 
 `main` is red while an open `main-red` issue says so.
-PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, bisects each failed step to the commit that broke it and files one `main-red` issue per cause, naming that commit.
+PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, bisects each failed step to the commit that broke it (a macOS step is diagnosed from its log instead) and files one `main-red` issue per cause, naming that commit.
 The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
 When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.
 A verdict that the red did not reproduce at HEAD, or already failed at the batch's base, names no commit; triage it as below.

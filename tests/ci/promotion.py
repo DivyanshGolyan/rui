@@ -95,8 +95,8 @@ def main():
         print("Promotion bisect: no recorded step failed, so there is nothing to replay; read the job's failed step")
         return
     if not replays_here():
-        # Not a "Promotion bisect:" line: the issue filer attaches those verdicts to the failure.
-        print("Promotion skipped the bisect on macOS, where replays cost the most runner-minutes; read the failed step's log")
+        # The issue filer attaches "Promotion bisect:" lines to the failure, so this one keeps that prefix.
+        print("Promotion bisect: skipped on macOS; read the failed step's log")
         return
     fetch(args.base, args.head)
     commits = batch(args.base, args.head)

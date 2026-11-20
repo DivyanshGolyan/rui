@@ -164,8 +164,8 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertEqual(repository.check(), 1)
         verdict, stdout = repository.bisect(runner_os="macOS")
         self.assertIsNone(verdict)
-        self.assertIn("skipped the bisect on macOS", stdout)
-        self.assertNotIn("Promotion bisect:", stdout)
+        self.assertIn("Promotion bisect: skipped on macOS; read the failed step's log", stdout)
+        self.assertNotIn("replay at", stdout)
         self.assertFalse((repository.root / "logs").exists())
         self.assertEqual(repository.git("rev-parse", "HEAD"), repository.commits[-1])
 
