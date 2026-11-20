@@ -279,13 +279,46 @@ pub fn rawExec(storage: *Store, sql: []const u8) !void {
     try run(sql);
 }
 
-/// Refreshes the optimizer statistics of every base table in the Store's database, so a plan read next is costed on
-/// the rows the Store holds now rather than on the statistics of the empty tables the Store opened with.
+/// Refreshes the optimizer statistics of every Store table, so a plan read next is costed on the rows the Store holds
+/// now rather than on the statistics of the empty tables the Store opened with. Statistics are not rows, so the database
+/// stays clean. Fails when the server reports an error for any table.
 pub fn analyzeTables(storage: *Store) !void {
-    try rawExec(storage, "SET @rui_analyze=(SELECT CONCAT('ANALYZE TABLE ',GROUP_CONCAT(CONCAT('`',table_name,'`'))) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE')");
-    try rawExec(storage, "PREPARE rui_analyze FROM @rui_analyze");
-    try rawExec(storage, "EXECUTE rui_analyze");
-    try rawExec(storage, "DEALLOCATE PREPARE rui_analyze");
+    const statement = comptime blk: {
+        var text: []const u8 = "ANALYZE TABLE ";
+        var first = true;
+        for (schema.objects(.mysql)) |object| if (object.kind == .table) {
+            text = text ++ (if (first) "" else ",") ++ object.name;
+            first = false;
+        };
+        break :blk text;
+    };
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    try use(storage);
+    try root.query(statement);
+    errdefer drainAfterFailure();
+    const Row = struct { table: Bounded(256), op: Bounded(32), msg_type: Bounded(32), msg_text: Bounded(1024) };
+    var columns: rows.Columns(Row) = undefined;
+    var tables: usize = 0;
+    var failed = false;
+    while (!root.isReady()) switch (try root.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, &root, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, &root, &row);
+            tables += 1;
+            if (std.mem.eql(u8, row.msg_type.slice(), "error")) {
+                std.debug.print("ANALYZE TABLE {s}: {s}\n", .{ row.table.slice(), row.msg_text.slice() });
+                failed = true;
+            }
+        },
+        .err => |err| {
+            std.debug.print("MySQL refused ANALYZE TABLE: {d} {s}\n", .{ err.code, err.message });
+            failed = true;
+        },
+        else => {},
+    };
+    if (failed or tables == 0) return error.AnalyzeFailed;
 }
 
 /// Test-only: every row of `table` as SELECT * returns it, field bytes (null for SQL NULL), in the server's order.
@@ -360,6 +393,13 @@ pub fn plan(storage: *Store, comptime sql: []const u8, args: anytype, out: []u8)
     if (std.mem.startsWith(u8, text, "-> Zero rows")) {
         std.debug.print("MySQL planned no access path, since a bound key names no row:\n{s}", .{text});
         return error.PlanBindsNoRow;
+    }
+    // A statement whose every table MySQL reads while optimizing (a key-bound row and the probes that follow from it
+    // alone) plans as rows fetched before execution: none of its probes shows, so the plan proves nothing either. Plan
+    // such a probe over a statement that drives it once per row.
+    if (std.mem.startsWith(u8, text, "-> Rows fetched before execution") and std.mem.indexOf(u8, text, " using ") == null) {
+        std.debug.print("MySQL read every table while optimizing, so the plan shows no probe:\n{s}", .{text});
+        return error.PlanShowsNoProbe;
     }
     return text;
 }

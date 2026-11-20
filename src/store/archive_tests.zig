@@ -1086,44 +1086,59 @@ test "Archived window equals the Archived membership over the archive's edge cas
 // tables of one or two rows MySQL's cost model prefers a scan or a hash join to any index, which says nothing about a
 // Store of real size, so a plan test that ranks access paths across joins reads the plan over `PlanStore`.
 
-/// A Store holding enough Sessions, Turns, Actions, Messages and Session stops that MySQL costs a keyed probe below a
-/// scan, as it does at scale: a creator chain `chain_length` Sessions deep, and as many running Bash Sessions, every
-/// fourth one archived. Statistics are refreshed after the writes.
+/// A Store shaped like one at scale, where MySQL costs a keyed probe below a scan: a creator chain `chain_length`
+/// Sessions deep whose every link has answered Turns, so most Turns are finished and positioned, and was archived and
+/// restored, so every link has a Session stop, and a few running Bash
+/// Sessions: every eighth link starts one and archives it, and the last link starts `live`, which stays active.
+/// Statistics are refreshed after the writes.
 const PlanStore = struct {
     const chain_length = 16;
+    const answered_turns = 2;
     /// The first Session of the creator chain and the last one, which descends from it through every link.
     root: protocol.Bounded(protocol.max_session_bytes),
     leaf: protocol.Bounded(protocol.max_session_bytes),
-    /// The last running Bash Session: it has a Turn, an Operation and an Action in flight.
+    /// The last running Bash Session, not archived: it has a Turn, an Operation and an Action in flight.
     live: protocol.Bounded(protocol.max_session_bytes),
-    /// Every running Bash Session in creation order; the last eight are a full page of refs to bind.
-    bash: [chain_length]protocol.Bounded(protocol.max_session_bytes) = undefined,
+    /// Every link of the creator chain, in creation order.
+    chain: [chain_length]protocol.Bounded(protocol.max_session_bytes) = undefined,
 
-    /// The last eight Bash Sessions' refs, in reverse creation order, as a full page binds them.
+    /// A full page of eight refs as the Store binds them: `live` and the last seven links of the creator chain.
     fn page(store: *const PlanStore) [8][]const u8 {
         var refs: [8][]const u8 = undefined;
-        for (&refs, 0..) |*ref, index| ref.* = store.bash[chain_length - 1 - index].slice();
+        refs[0] = store.live.slice();
+        for (refs[1..], 0..) |*ref, index| ref.* = store.chain[chain_length - 1 - index].slice();
         return refs;
     }
 
     fn populate(storage: *Store, tmp: *std.testing.TmpDir) !PlanStore {
         const root = try testing.configureTestSession(storage, "plan-chain-0");
         var result: PlanStore = .{ .root = root, .leaf = root, .live = undefined };
-        for (1..chain_length + 1) |link| {
-            var key: [protocol.max_key_bytes]u8 = undefined;
+        inline for (1..chain_length + 1) |link| {
+            const name = std.fmt.comptimePrint("plan-{d}", .{link});
             var command: wire_request.ConfigureCommand = .{};
-            try command.key.set(try std.fmt.bufPrint(&key, "plan-chain-{d}", .{link}));
+            try command.key.set(name ++ "-chain");
             command.configuration = try fixtures.testingAgentSpec(&.{}, "ask");
             command.configuration.parent.state = .value;
             try command.configuration.parent.value.set(result.leaf.slice());
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             result.leaf = reply.accepted.session;
-            result.live = (try runningBash(storage, tmp, try std.fmt.bufPrint(&key, "plan-bash-{d}", .{link}))).session;
-            result.bash[link - 1] = result.live;
-            if (link % 4 == 0) {
-                var archive = try archiveCommand(try std.fmt.bufPrint(&key, "plan-archive-{d}", .{link}), result.live.slice(), true);
-                try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            result.chain[link - 1] = result.leaf;
+            inline for (0..answered_turns) |turn| {
+                const answer = std.fmt.comptimePrint("{s}-answer-{d}", .{ name, turn });
+                try testing.answerTestTurn(storage, tmp, result.leaf.slice(), answer, &.{.{ .encoded = "done", .decoded = "done" }});
+            }
+            // Archiving and restoring leaves a stop behind, as Session stops accumulate at scale.
+            var archived = try archiveCommand(name ++ "-archived", result.leaf.slice(), true);
+            try std.testing.expect(storage.archiveSession(&archived, .{}) == .accepted);
+            var restored = try archiveCommand(name ++ "-restored", result.leaf.slice(), false);
+            try std.testing.expect(storage.archiveSession(&restored, .{}) == .accepted);
+            if (link % 8 == 1 or link == chain_length) {
+                const bash = (try runningBash(storage, tmp, name ++ "-bash")).session;
+                if (link == chain_length) result.live = bash else {
+                    var archive = try archiveCommand(name ++ "-archive", bash.slice(), true);
+                    try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                }
             }
         }
         try @import("mysql_testing.zig").analyzeTables(storage);
@@ -1131,17 +1146,19 @@ const PlanStore = struct {
     }
 };
 
-/// Fails unless every access to `table` by its own name is keyed on `key`. The pending-Message probes name
-/// message_admission_session_pending, a partial index MySQL states through a `_lead` column that a `session_ref=`
-/// probe cannot seek, so rsql drops that index on MySQL and the probe seeks the Session ref through another index.
-fn expectKeyedOn(plan: []const u8, comptime table: []const u8, comptime key: []const u8) !void {
+/// Fails unless the plan reads `name` (a table or alias, as MySQL names it) and every such read is keyed on `key`. The pending-Message probes
+/// name message_admission_session_pending, a partial index MySQL states through a `_lead` column that a `session_ref=`
+/// probe cannot seek, so rsql drops the `@index` hint on MySQL and the probe seeks the Session ref through another
+/// index, walking that Session's Message history (#1979). Until #1979 lands, the plan tests hold the probe to a
+/// Session-keyed seek rather than to the partial index.
+fn expectKeyedOn(plan: []const u8, comptime name: []const u8, comptime key: []const u8) !void {
     var lines = std.mem.splitScalar(u8, plan, '\n');
     var seen = false;
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, " on " ++ table ++ " using ") == null) continue;
+        if (std.mem.indexOf(u8, line, " on " ++ name ++ " using ") == null) continue;
         seen = true;
         if (std.mem.indexOf(u8, line, "(" ++ key) == null) {
-            std.debug.print("{s} is not keyed on {s}: {s}\n", .{ table, key, line });
+            std.debug.print("{s} is not keyed on {s}: {s}\n", .{ name, key, line });
             return error.TestUnexpectedResult;
         }
     }
@@ -1238,6 +1255,7 @@ test "MySQL plans a page's work rows through the Session key and keyed probes" {
             try expectKeyedOn(plan, "work_session", "session_ref");
             try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
             try expectKeyedOn(plan, "message_admission", "session_ref=");
+            try std.testing.expect(std.mem.indexOf(u8, plan, "session_stop_exclusion") != null);
         }
     }.run);
 }
@@ -1280,14 +1298,13 @@ test "MySQL plans each archiving candidate and page through its index" {
             if (case.engine != .mysql) return;
             const membership = @import("domain/archive_membership.zig");
             const session_list_read = @import("domain/session_list_read.zig");
-            const report = @import("domain/report.zig");
             const mysql_testing = @import("mysql_testing.zig");
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            const session = try testing.configureTestSession(&storage, "plan-archiving");
+            _ = try PlanStore.populate(&storage, &tmp);
             const candidates = [_]struct { sql: []const u8, index: []const u8 }{
                 .{ .sql = membership.turn_candidates_sql, .index = "turn_outcome_unpositioned" },
                 .{ .sql = membership.unaccepted_action_candidates_sql, .index = "action_operation_unaccepted" },
@@ -1304,15 +1321,15 @@ test "MySQL plans each archiving candidate and page through its index" {
                 var buffer: [16384]u8 = undefined;
                 const plan = try mysql_testing.plan(&storage, source, .{@as(u64, 1000)}, &buffer);
                 errdefer std.debug.print("MySQL plan for window page {s}:\n{s}", .{ source, plan });
-                // No table is scanned: the page ranges over session_tab and every first-Message read is keyed.
+                // No table is scanned: the page ranges over session_tab, and each row's first Message (report.zig's
+                // first_admission_join, which the first-candidate read shares) is read through keyed probes of that
+                // row's Session: its first Turn by turn_session_latest and its oldest pending Message (`u`) by the Session ref.
+                // A first-candidate read keyed on one Session is read whole while MySQL optimizes and shows no probe,
+                // so the page is where those probes are planned.
                 try expectNoScan(plan, &.{});
                 try std.testing.expect(std.mem.indexOf(u8, plan, "session_tab") != null);
-            }
-            {
-                var buffer: [16384]u8 = undefined;
-                const plan = try mysql_testing.plan(&storage, report.first_candidate_source, .{session.slice()}, &buffer);
-                errdefer std.debug.print("MySQL plan for the first Message:\n{s}", .{plan});
-                try expectNoScan(plan, &.{});
+                try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
+                try expectKeyedOn(plan, "u", "session_ref=");
             }
             const pages = [_]struct { source: []const u8, index: []const u8 }{
                 .{ .source = session_list_read.live_turn_source, .index = "turn_outcome_unpositioned" },
