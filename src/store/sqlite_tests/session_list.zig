@@ -406,9 +406,10 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             return err;
         };
     try std.testing.expectEqual(2, rounds);
-    // Passes, measured: 8 for the first round, one per row, since each row's settings and work statements share a pass
-    // (a statement repeated in one pass forces the next); 1 for the creator-subtree round's descendant work row. The
-    // staged work stages' later terms are gone (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
+    // Passes, measured: 1 for the page round (its ceiling and page statements are all distinct, so one pass), then 8 for
+    // the rows' round: work_row and list_row repeat once per row, and a statement repeated in one pass forces the next.
+    // The creator-subtree page is one more statement in that round; with no descendants it rides the first pass and
+    // adds none. The staged work stages' later terms are gone (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
     try std.testing.expectEqual(@as(usize, 8 + 1), a.passes);
 }
 

@@ -1492,9 +1492,11 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
             const one = try compared.one.work(created_at, now_ms);
             try std.testing.expectEqualDeep(work, one);
             try std.testing.expectEqual(expectedKind(shape), std.meta.activeTag(work.state));
-            // The ended Turn's background Action still awaits its decision in the store. The approval read does not name it
-            // (first_action is NULL for this shape, cause not traced here), so the Session reads working; both reads agree.
-            if (shape == .ended_with_approval) try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND authorized=0 AND background_position IS NOT NULL", .{}));
+            // The ended Turn's background Action still awaits its decision: the store holds it, and first_action names it.
+            if (shape == .ended_with_approval) {
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND authorized=0 AND background_position IS NOT NULL", .{}));
+                try std.testing.expect(compared.staged.inputs.first_action != null);
+            }
             try std.testing.expect(reached(shape, &compared.staged));
         }
 
@@ -1514,7 +1516,8 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                 .finished => .finished,
                 .stopped => .stopped,
                 .stopped_then_admitted => .working,
-                // A background approval still awaiting its decision keeps the ended Turn's Session working (derive's answer).
+                // A background approval still awaiting its decision keeps the ended Turn's Session working. The Turn is
+                // ended, so the state is the derived working, not approval: the approval is read through first_action only.
                 .ended_with_approval => .working,
             };
         }
@@ -1535,7 +1538,7 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                 .stopped_then_queued => staged.inputs.oldest_pending != null,
                 // The new Turn admitted the Message behind the stop, so nothing is pending or excluded.
                 .stopped_then_admitted => turn != null and turn.?.terminal == null and staged.inputs.oldest_pending == null and staged.inputs.excluded == null,
-                .ended_with_approval => turn != null and turn.?.terminal != null,
+                .ended_with_approval => turn != null and turn.?.terminal != null and staged.inputs.first_action != null,
                 .owed => staged.inputs.owed_since != null,
                 .resolved_plain, .resolved_promoted_first, .resolved_promoted_second => turn != null and turn.?.actions.total == 2 and turn.?.actions.latest_resolution_at != null,
             };
@@ -1640,7 +1643,7 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                     try promotion.key.set("sl6-ended-approval-background");
                     try std.testing.expect(storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
                     const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
-                    try answerTestTurn(storage, tmp, session.slice(), "sl6-ended-approval-answer", &answer);
+                    try store_testing.settleAnswerTestTurn(storage, tmp, binding, "sl6-ended-approval-answer", &answer);
                     return session;
                 },
                 .owed => {

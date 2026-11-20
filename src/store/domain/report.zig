@@ -543,6 +543,19 @@ fn resultLatestSql(comptime columns: []const u8, comptime session: []const u8, c
     return resultBranchSql(columns, session, operation, background) ++ " ORDER BY acceptance_position DESC LIMIT 1";
 }
 
+/// The Session's newest Resolution for `operation`'s Actions, as one scalar. The foreground and background branches are
+/// disjoint and each is ordered by acceptance position, and positions are unique per Session, so the newer branch head
+/// is the latest. WorkActions and the work_row render it, so both name the latest Resolution the same way.
+fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []const u8) []const u8 {
+    return "(SELECT latest.resolved_at FROM (SELECT f.acceptance_position,f.resolved_at FROM (" ++
+        resultLatestSql("acceptance_position,resolved_at", session, operation, false) ++ ") f UNION ALL SELECT b.acceptance_position,b.resolved_at FROM (" ++
+        resultLatestSql("acceptance_position,resolved_at", session, operation, true) ++ ") b) latest ORDER BY latest.acceptance_position DESC LIMIT 1)";
+}
+
+/// The decided Action's session_revision join: the revision its permission_revision names. WorkActions and the work_row
+/// render it, as a LEFT JOIN and a JOIN, so one owner spells the join.
+const session_revision_of_action = "session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision";
+
 /// The oldest Action running on `operation`, joined to its call. The staged WorkOldest and the work_row probe render it.
 fn oldestRunningSql(comptime columns: []const u8, comptime operation: []const u8) []const u8 {
     return "SELECT " ++ columns ++ " FROM action_operation a JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
@@ -665,16 +678,14 @@ const work_actions = WorkActions(struct { operation: u64, session: []const u8 },
 
 fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime session: []const u8) type {
     return rsql.Read(.{
-        .sql = "WITH action_results AS (" ++ resultBranchSql("acceptance_position,resolved_at", session, operation, false) ++ " UNION ALL " ++
-            resultBranchSql("acceptance_position,resolved_at", session, operation, true) ++ ") " ++
-            "SELECT count(*) AS total,@count_where(" ++ unresolved_action ++ ") AS unresolved," ++
+        .sql = "SELECT count(*) AS total,@count_where(" ++ unresolved_action ++ ") AS unresolved," ++
             "@count_where(" ++ awaiting_action ++ ") AS awaiting," ++
             "min(CASE WHEN " ++ awaiting_action ++ " THEN a.action_id END) AS first_awaiting," ++
             "(" ++ firstApprovalSql(session) ++ ") AS first_action," ++
             "@count_where(" ++ running_action ++ ") AS running," ++
-            "(SELECT resolved_at FROM action_results ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+            latestResolutionAtSql(session, operation) ++ " AS latest_resolution_at," ++
             "@max_where(a.decided_at," ++ decided_action ++ ") AS latest_decision_at " ++
-            "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
+            "FROM action_operation a LEFT JOIN " ++ session_revision_of_action ++ " " ++
             "WHERE a.parent_operation_id=" ++ operation,
         .Args = Args,
         .Row = WorkActionsRow,
@@ -749,14 +760,13 @@ const work_cutoff = "coalesce((" ++ command_domain.sessionStopCutoffSql(work_ses
 
 pub const work_row_source = "SELECT " ++ latestColumnsSql("work_turn", "work_operation", work_session_ref) ++ "," ++
     "(" ++ firstApprovalSql(work_session_ref) ++ ") AS first_action," ++
-    "(SELECT count(*) FROM action_operation a WHERE a.parent_operation_id=" ++ work_live_operation ++ ") AS actions_total," ++
+    actionProbeSql("count(*)", work_live_operation, "a.action_id IS NOT NULL") ++ " AS actions_total," ++
     actionProbeSql("count(*)", work_live_operation, unresolved_action) ++ " AS actions_unresolved," ++
     actionProbeSql("count(*)", work_live_operation, awaiting_action) ++ " AS actions_awaiting," ++
     actionProbeSql("min(a.action_id)", work_live_operation, awaiting_action) ++ " AS actions_first_awaiting," ++
     actionProbeSql("count(*)", work_live_operation, running_action) ++ " AS actions_running," ++
-    "CASE WHEN work_background_result.action_id IS NULL OR work_foreground_result.acceptance_position>work_background_result.acceptance_position " ++
-    "THEN work_foreground_result.resolved_at ELSE work_background_result.resolved_at END AS actions_latest_resolution_at," ++
-    "(SELECT max(a.decided_at) FROM action_operation a JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
+    latestResolutionAtSql(work_session_ref, work_live_operation) ++ " AS actions_latest_resolution_at," ++
+    "(SELECT max(a.decided_at) FROM action_operation a JOIN " ++ session_revision_of_action ++ " " ++
     "WHERE a.parent_operation_id=" ++ work_live_operation ++ " AND " ++ decided_action ++ ") AS actions_latest_decision_at," ++
     "work_running.action_id AS running_action,work_running.attempt_at AS running_at," ++
     "work_running_call.description AS running_description,work_running.call_ordinal AS running_call," ++
@@ -768,8 +778,6 @@ pub const work_row_source = "SELECT " ++ latestColumnsSql("work_turn", "work_ope
     "FROM session work_session " ++
     "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.turn_id " ++ latestTurnFromSql(work_session_ref) ++ ") " ++
     "LEFT JOIN model_operation work_operation ON work_operation.operation_id=work_turn.operation_id " ++
-    "LEFT JOIN action_operation work_foreground_result ON work_foreground_result.action_id=(" ++ resultLatestSql("action_id", work_session_ref, work_live_operation, false) ++ ") " ++
-    "LEFT JOIN action_operation work_background_result ON work_background_result.action_id=(" ++ resultLatestSql("action_id", work_session_ref, work_live_operation, true) ++ ") " ++
     "LEFT JOIN action_operation work_running ON work_running.action_id=(" ++ oldestRunningSql("a.action_id", work_live_operation) ++ ") " ++
     "LEFT JOIN model_tool_call work_running_call ON work_running_call.operation_id=work_running.parent_operation_id " ++
     "AND work_running_call.call_ordinal=work_running.call_ordinal " ++
@@ -876,7 +884,7 @@ pub const WorkRead = struct {
             .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id, .session = w.session }, w),
             .oldest => reads_domain.readFirst(a, work_oldest, .{ .operation = w.inputs.latest.?.operation_id }, w),
             .cutoff => {
-                if (w.ahead == null and w.inputs.latest != null) a.readEach(work_approval, .{ .session = w.session }, 1, &w.approval);
+                if (w.cutoffApprovalDue()) a.readEach(work_approval, .{ .session = w.session }, 1, &w.approval);
                 reads_domain.readFirst(a, command_domain.stop_cutoff, .{ .session = w.session }, w);
             },
             .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
@@ -910,7 +918,7 @@ pub const WorkRead = struct {
     }
 
     pub fn advance(w: *WorkRead) !void {
-        if (w.stage == .cutoff and w.ahead == null and w.inputs.latest != null) {
+        if (w.stage == .cutoff and w.cutoffApprovalDue()) {
             const row = w.approval.row orelse return error.ActionReadFailed;
             w.takeApproval(row.first_action);
         }
@@ -1039,6 +1047,12 @@ pub const WorkRead = struct {
 
     /// The one writer of `first_action`: the oldest approval awaiting a decision on the Session. The approval read
     /// (the cutoff stage, once a Turn is read) and the actions aggregate carry the same column, so both call this.
+    /// The cutoff stage's approval gate, the one rule for when that stage reads or takes first_action: no ahead counts
+    /// and a latest Turn. queue reads the approval under it, advance and decode take it under it.
+    fn cutoffApprovalDue(w: *const WorkRead) bool {
+        return w.ahead == null and w.inputs.latest != null;
+    }
+
     fn takeApproval(w: *WorkRead, first: ?rsql.Positive) void {
         w.inputs.first_action = optional(first);
     }
@@ -1056,7 +1070,7 @@ pub const WorkRead = struct {
                 .actions => feed(w, &count, actionsRow(row)),
                 .oldest => if (row.running_action != null) feed(w, &count, oldestRow(row)),
                 .cutoff => {
-                    if (w.inputs.latest != null) w.takeApproval(try optionalPositive(row.first_action));
+                    if (w.cutoffApprovalDue()) w.takeApproval(try optionalPositive(row.first_action));
                     if (row.stop_cutoff) |cutoff| feed(w, &count, @as(error{CorruptStore}!command_domain.stop_cutoff.Row, .{ .admission_cutoff = cutoff }));
                 },
                 .queued => if (row.queued_admission != null) feed(w, &count, queuedRow(row)),
