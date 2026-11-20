@@ -577,12 +577,13 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     // batch. All statements queue into one round. Each batch binds its seeds by value.
     const seeds = self.changes.changed(since, through, workspace, null, &scratch.changed);
     const scope: ?[]const u8 = if (request.workspace) |*workspace_scope| workspace_scope.slice() else null;
-    for (0..seeds.len) |index| {
-        candidates.add(&seeds[index]);
-        a.readEach(changed_ancestors, try changedAncestorArgs(seeds[index..][0..1], scope, request.archive), std.math.maxInt(u64), &candidates);
-        try runList(a);
-        if (candidates.failure) |err| return err;
+    var first: usize = 0;
+    while (first < seeds.len) : (first += session_list.session_list_page_size) {
+        const batch = seeds[first..@min(seeds.len, first + session_list.session_list_page_size)];
+        for (batch) |*seed| candidates.add(seed);
+        a.readEach(changed_ancestors, try changedAncestorArgs(batch, scope, request.archive), std.math.maxInt(u64), &candidates);
     }
+    if (seeds.len != 0) try runList(a);
     if (candidates.failure) |err| return err;
     const changed = candidates.refs[0..candidates.count];
     const count = @min(changed.len, session_list.session_list_page_size);
