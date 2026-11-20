@@ -2243,6 +2243,31 @@
       ]
     },
     {
+      "name": "settings-signin",
+      "note": "App settings Sign-in: the dialog covers the retained screen and paints every cell around it in the ground, so no covered text shows",
+      "open": "overview",
+      "steps": [
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "What shall we work on?"},
+        {"keys": ["End", "Enter"]},
+        {"wait": "Notifications"},
+        {"mouse": {"at": "Sign-in", "do": "click"}},
+        {"wait": "Welcome to Rui"}
+      ],
+      "expect": [
+        "Welcome to Rui",
+        "ChatGPT",
+        "API key",
+        "Close"
+      ],
+      "absent": [
+        "Notifications",
+        "Version"
+      ]
+    },
+    {
       "name": "settings-model",
       "note": "Open Settings from the overview, move to Model, and open the shared choice",
       "open": "overview",
