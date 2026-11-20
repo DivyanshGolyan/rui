@@ -581,8 +581,8 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var candidates: ChangedCandidates = .{ .after = after };
     // Every changed seed is named first, then the seeds go in batches of session_list_page_size, one statement per
-    // batch. All statements queue into one round, but a statement repeated in one pass forces the next, so C seeds
-    // take ceil(C/8) passes (tests.pass_budgets pins the C <= 8 case). Each batch binds its seeds by value.
+    // batch. All statements queue into one round, but on SQLite a statement repeated in one pass forces the next, so C
+    // seeds take ceil(C/8) passes there (tests.pass_budgets pins the C <= 8 case). Each batch binds its seeds by value.
     const seeds = self.changes.changed(since, through, workspace, null, &scratch.changed);
     const scope: ?[]const u8 = if (request.workspace) |*workspace_scope| workspace_scope.slice() else null;
     var first: usize = 0;

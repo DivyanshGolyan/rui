@@ -38,6 +38,8 @@ pub const Database = *c.sqlite3;
 database: Database,
 statements: sqlite.StatementCache = .{},
 read_blob: ContentBlob = .{},
+/// Access passes this connection ran, counted in test builds where MySQL counts its own (Engine.notePass).
+testing_access_passes: if (@import("builtin").is_test) u64 else void = if (@import("builtin").is_test) 0 else {},
 
 pub const ContentBlob = struct {
     handle: ?*c.sqlite3_blob = null,

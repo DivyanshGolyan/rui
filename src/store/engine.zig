@@ -90,7 +90,9 @@ pub const Engine = union(Kind) {
 
     pub inline fn notePass(e: *Engine, comptime kind: Pass) void {
         if (@import("builtin").is_test) switch (e.*) {
-            .sqlite => {},
+            .sqlite => |*s| if (kind == .access) {
+                s.testing_access_passes += 1;
+            },
             .mysql => |*s| s.notePass(kind),
         };
     }

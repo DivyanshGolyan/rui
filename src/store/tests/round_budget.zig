@@ -173,7 +173,7 @@ test "MySQL round shape subtracts the entry baseline from every component" {
 }
 
 // SH-110's pass check, over its whole domain: a pinned point keeps its budget at exactly its passes, one more or one fewer
-// fails it, and an unpinned point is not checked. The MySQL leg that applies it needs a live server.
+// fails it, and an unpinned point is not checked.
 test "SH-110 a pass budget holds only at its exact passes, and pins every Session list entry point" {
     for ([_]EntryPoint{ .readSessionList, .readArchivedWindow, .readChangedSessionList }) |point| {
         const budget = pass_budgets.get(point) orelse return error.ListPointUnpinned;

@@ -1298,14 +1298,15 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHostToolSetText = 0,
 });
 
-/// MySQL Access passes per entry point, where a point's passes are pinned beside its rounds. Each pass is one
-/// COM_QUERY (RoundMeter.QueryShape.access_passes), and a statement repeated in one pass forces the next, so rounds
-/// alone do not bound a point's round trips. Null leaves a point's passes unpinned.
+/// Access passes per entry point, where a point's passes are pinned beside its rounds, on every engine. A pass is one
+/// COM_QUERY on MySQL, which batches every statement of a round into one pass while it fits. On SQLite a statement
+/// repeated in one pass forces the next, so a statement queued once per row costs a pass per row: rounds alone do not
+/// bound that. Null leaves a point's passes unpinned.
 pub const pass_budgets: std.EnumArray(EntryPoint, ?u16) = .initDefault(@as(?u16, null), .{
     .readSessionList = 2, // R1 the ceiling and page statements; R2 the creator subtree, work_rows and list_rows: all distinct, one pass each round.
     .readArchivedWindow = 1, // One statement, one pass.
     // R1 changed_ancestors; R2 as readSessionList. changed_ancestors is one statement per session_list_page_size seeds,
-    // so C changed seeds take ceil(C/8) passes in R1: the budget is the C <= 8 case the engine contract drives.
+    // so on SQLite C changed seeds take ceil(C/8) passes in R1: the budget is the C <= 8 case the engine contract drives.
     .readChangedSessionList = 2,
 });
 
@@ -1337,7 +1338,9 @@ pub const RoundMeter = struct {
         prefix_only: u64 = 0,
 
         pub fn snapshot(storage: *Store) QueryShape {
-            if (storage.engine != .mysql) return .{};
+            // SQLite sends no COM_QUERY; it counts only its Access passes, where a statement repeated in one pass forces
+            // the next, as MySQL's batch room does not.
+            if (storage.engine == .sqlite) return .{ .access_passes = storage.engine.sqlite.testing_access_passes };
             const state = storage.engine.mysql.state;
             const shape = state.testing_shape;
             return .{

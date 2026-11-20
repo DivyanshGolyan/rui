@@ -1687,10 +1687,10 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
                 std.debug.print("{s}: COM_QUERY shape differs\n", .{@tagName(point)});
                 failed = true;
             };
-            if (!shared_fixtures.keepsPassBudget(point, measured.shape)) {
-                std.debug.print("{s}: Access passes {d}, budget {d}\n", .{ @tagName(point), measured.shape.access_passes, pass_budgets.get(point).? });
-                failed = true;
-            }
+        }
+        if (!case.rerun and !shared_fixtures.keepsPassBudget(point, measured.shape)) {
+            std.debug.print("{s}: Access passes {d}, budget {d}\n", .{ @tagName(point), measured.shape.access_passes, pass_budgets.get(point).? });
+            failed = true;
         }
     }
     if (failed) {
@@ -1703,7 +1703,7 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
                 measured.content_rounds,
                 contentRoundBudget(case.engine, point),
             });
-            if (case.engine == .mysql and !case.rerun) if (pass_budgets.get(point)) |budget|
+            if (!case.rerun) if (pass_budgets.get(point)) |budget|
                 std.debug.print("  Access passes {d} (budget {d})\n", .{ measured.shape.access_passes, budget });
             if (case.engine == .mysql and !case.rerun) std.debug.print(
                 "  COM_QUERY {d} = Access passes {d} + identity passes {d} + content queries {d} + controls {d} + prefix-only passes {d} (expected {d})\n",
