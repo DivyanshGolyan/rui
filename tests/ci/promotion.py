@@ -106,11 +106,9 @@ def capped_line(result):
     first, last = result["first"], result["last"]
     if not result["batch_passed"]:
         # Nothing in the batch has passed yet, and stable is never replayed when the cap stops the search.
-        found = f"is {first}" if first == last else f"is in {first}..{last}"
+        found = f"is {first}" if first == last else f"is one of {first} to {last}"
         return (f"stopped at the {minutes}-minute cap after {count}; the first failing commit {found} "
                 f"or before this batch (stable not checked)")
-    if result["narrowed"] == 1:
-        return f"stopped at the {minutes}-minute cap after {count}; the first failing commit is {first}"
     return (f"stopped at the {minutes}-minute cap after {count}; the first failing commit is one of the "
             f"{result['narrowed']} commits from {first} to {last}")
 

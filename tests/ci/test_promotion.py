@@ -205,7 +205,7 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertEqual((result["verdict"], len(replays), result["first"], result["last"], result["narrowed"]),
                          ("capped", 3, "c0", "c4", 5))
         self.assertEqual(promotion.describe(result, "base", "head"),
-                         "stopped at the 90-minute cap after 3 replays; the first failing commit is in c0..c4 "
+                         "stopped at the 90-minute cap after 3 replays; the first failing commit is one of c0 to c4 "
                          "or before this batch (stable not checked)")
 
     def test_a_deadline_that_has_passed_starts_no_replay_and_a_later_one_finds_the_culprit(self):
@@ -226,7 +226,7 @@ class PromotionBisectTest(unittest.TestCase):
              dict(batch_passed=False), "the 90-minute cap left this step unreplayed; read its log"),
             ("in the loop with no batch commit passed", lambda sha: False, 15, ["c21", "c10"],
              dict(batch_passed=False, first="c0", last="c10"),
-             "stopped at the 90-minute cap after 2 replays; the first failing commit is in c0..c10 "
+             "stopped at the 90-minute cap after 2 replays; the first failing commit is one of c0 to c10 "
              "or before this batch (stable not checked)"),
             ("in the loop after a batch commit passed", lambda sha: int(sha[1:]) < 3, 40,
              ["c21", "c10", "c4", "c1"], dict(batch_passed=True, first="c2", last="c4", narrowed=3),
@@ -294,7 +294,7 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertEqual([result["step"] for result in results], ["first", "second"])
         self.assertEqual(lines, [
             "Promotion bisect: first: stopped at the 90-minute cap after 3 replays; the first failing commit is "
-            "in c0..c4 or before this batch (stable not checked)",
+            "one of c0 to c4 or before this batch (stable not checked)",
             "Promotion bisect: second: the 90-minute cap left this step unreplayed; read its log",
         ])
 
