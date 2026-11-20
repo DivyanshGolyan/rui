@@ -1338,13 +1338,14 @@ pub const RoundMeter = struct {
         prefix_only: u64 = 0,
 
         pub fn snapshot(storage: *Store) QueryShape {
-            // SQLite sends no COM_QUERY; the Store counts its Access passes on every engine (Store.testingAccessPasses).
-            if (storage.engine == .sqlite) return .{ .access_passes = storage.testingAccessPasses().* };
+            // The Store counts its Access passes on every engine (Store.testingAccessPasses); SQLite sends no COM_QUERY.
+            const access_passes = storage.testingAccessPasses().*;
+            if (storage.engine == .sqlite) return .{ .access_passes = access_passes };
             const state = storage.engine.mysql.state;
             const shape = state.testing_shape;
             return .{
                 .queries = state.connection.queries,
-                .access_passes = shape.access_passes,
+                .access_passes = access_passes,
                 .identity_passes = shape.identity_passes,
                 .content_queries = shape.content_queries,
                 .controls = shape.controls,

@@ -40,8 +40,6 @@ pub const ContentHost = struct {
     chunk: *const fn (context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer,
 };
 
-pub const Pass = enum { access, identity };
-
 pub const Engine = union(Kind) {
     sqlite: Sqlite,
     mysql: Mysql,
@@ -88,10 +86,11 @@ pub const Engine = union(Kind) {
         };
     }
 
-    pub inline fn notePass(e: *Engine, comptime kind: Pass) void {
+    /// Counts a MySQL identity pass in test builds. Access passes are the Store's count (Store.testingAccessPasses).
+    pub inline fn noteIdentityPass(e: *Engine) void {
         if (@import("builtin").is_test) switch (e.*) {
             .sqlite => {},
-            .mysql => |*s| s.notePass(kind),
+            .mysql => |*s| s.noteIdentityPass(),
         };
     }
 

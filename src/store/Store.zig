@@ -2504,7 +2504,7 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (columns.count() != 0) self.engine.notePass(.identity);
+        if (columns.count() != 0) self.engine.noteIdentityPass();
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
