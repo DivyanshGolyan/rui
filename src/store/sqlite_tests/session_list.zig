@@ -778,8 +778,8 @@ test "the work row plans every stage as a keyed search" {
     const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ report_domain.work_row.sql);
     defer _ = c.sqlite3_finalize(statement);
     // No stage scans a table. The three temporary sorts each order one Operation's or one Turn's rows, as the staged
-    // probes they mirror do: the running Action (work_oldest's ORDER BY attempt_at), the background result (WorkActions'
-    // action_results union) and the latest Turn's stop (WorkLatest's stopped_at). Any other sort is a plan change.
+    // probes they mirror do: the running Action (work_oldest's ORDER BY attempt_at), the newest background result (the one
+    // background probe of latestResolutionAtSql, whose index is in background order) and the latest Turn's stop (WorkLatest's stopped_at). Any other sort is a plan change.
     var temp_sorts: usize = 0;
     while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
         const detail = std.mem.span(c.sqlite3_column_text(statement, 3));

@@ -1642,8 +1642,11 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                     var promotion: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = action_id };
                     try promotion.key.set("sl6-ended-approval-background");
                     try std.testing.expect(storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+                    // Promotion answers the call, so the model runs again; that continuation ends the Turn with a final
+                    // answer. No Message is admitted, so nothing declines the approval and firstApprovalSql still names it.
+                    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
-                    try store_testing.settleAnswerTestTurn(storage, tmp, binding, "sl6-ended-approval-answer", &answer);
+                    try store_testing.settleAnswerTestTurn(storage, tmp, continuation, "sl6-ended-approval-answer", &answer);
                     return session;
                 },
                 .owed => {

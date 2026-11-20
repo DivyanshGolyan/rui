@@ -543,16 +543,19 @@ fn resultLatestSql(comptime columns: []const u8, comptime session: []const u8, c
     return resultBranchSql(columns, session, operation, background) ++ " ORDER BY acceptance_position DESC LIMIT 1";
 }
 
-/// The Session's newest Resolution for `operation`'s Actions, as one scalar: the newer of the two branch heads, the
-/// foreground head unless the background head is newer. Positions are unique per Session, so the comparison names one
-/// branch. WorkActions and the work_row render it, so both name the latest Resolution the same way.
+/// The Session's newest Resolution for `operation`'s Actions, as one scalar: the background head when it is newer than
+/// the foreground head, else the foreground head. Positions are unique per Session, so one branch holds the newest.
+/// The background probe is bounded below by the foreground head's position, so it alone decides between the branches:
+/// one probe per branch reads resolved_at, plus the foreground position the bound needs. The foreground probes walk
+/// action_operation_session_results in acceptance order; action_operation_background_results is in background order, so
+/// the one background probe sorts its Operation's background results. A result has a resolved_at (an accepted Action is
+/// resolved), so a NULL from the background probe means no newer background result. WorkActions and the work_row render
+/// it, so both name the latest Resolution the same way.
 fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []const u8) []const u8 {
     const foreground_position = "(" ++ resultLatestSql("acceptance_position", session, operation, false) ++ ")";
-    const background_position = "(" ++ resultLatestSql("acceptance_position", session, operation, true) ++ ")";
-    const foreground_resolved = "(" ++ resultLatestSql("resolved_at", session, operation, false) ++ ")";
-    const background_resolved = "(" ++ resultLatestSql("resolved_at", session, operation, true) ++ ")";
-    return "CASE WHEN " ++ background_position ++ " IS NULL OR " ++ foreground_position ++ ">" ++ background_position ++
-        " THEN " ++ foreground_resolved ++ " ELSE " ++ background_resolved ++ " END";
+    const newer_background = resultBranchSql("resolved_at", session, operation, true) ++
+        " AND acceptance_position>coalesce(" ++ foreground_position ++ ",0) ORDER BY acceptance_position DESC LIMIT 1";
+    return "coalesce((" ++ newer_background ++ "),(" ++ resultLatestSql("resolved_at", session, operation, false) ++ "))";
 }
 
 /// The decided Action's session_revision join: the revision its permission_revision names. WorkActions and the work_row
