@@ -437,9 +437,10 @@ pub const Scratch = struct {
     changed: [change_ring.capacity]change_ring.Id = undefined,
     /// The settings rows of one page, read in its first round beside its one-statement work rows.
     settings: [session_list.session_list_page_size]SettingsRow = undefined,
-    /// The one-statement work rows of one page, read in the same first round as the settings rows.
+    /// The one-statement work rows of one page, read in its first round beside its settings rows. Once decoded, the
+    /// same slots carry the rows of each descendant page, one page's rows per round.
     work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
-    /// The creator-subtree read of one page: its roots, its page and the WorkReads of its descendants.
+    /// The creator-subtree read of one page: its roots, its two page buffers and the WorkRead of one descendant.
     rollup: RollupRead = .{},
 };
 
@@ -673,20 +674,21 @@ const DescendantPage = struct {
     }
 };
 
-/// One creator-subtree read: the page roots, the page last read, the cursor for the next page, and the WorkReads of
-/// the page's descendants. It lives in the caller's Scratch, apart from the page's own WorkReads.
+/// One creator-subtree read: the page roots, the two page buffers (the page being walked and the next one, queued in
+/// the same round as the walked page's work rows), the cursor for the next page, and the WorkRead of the descendant
+/// being folded. It lives in the caller's Scratch.
 const RollupRead = struct {
     roots: [session_list.session_list_page_size]Bounded(session_id.bytes) = @splat(.{}),
-    page: DescendantPage = .{},
+    pages: [2]DescendantPage = .{ .{}, .{} },
+    current: usize = 0,
     after_origin: ?change_ring.Id = null,
     after_member: ?change_ring.Id = null,
-    works: [session_list.session_list_page_size]report_domain.WorkRead = undefined,
-    work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
+    work: report_domain.WorkRead = undefined,
 };
 
-/// Queues the creator-subtree page after the cursor in `read`. The caller runs the round.
-fn queueRollupPage(a: *ReadAccess, request: *const session_list.ListSessions, read: *RollupRead) !void {
-    read.page = .{};
+/// Queues the creator-subtree page after the cursor in `read` into `page`. The caller runs the round.
+fn queueRollupPage(a: *ReadAccess, request: *const session_list.ListSessions, read: *const RollupRead, page: *DescendantPage) !void {
+    page.* = .{};
     a.readEach(descendant_page, .{
         .root0 = read.roots[0],
         .root1 = read.roots[1],
@@ -701,47 +703,51 @@ fn queueRollupPage(a: *ReadAccess, request: *const session_list.ListSessions, re
         .archive = request.archive,
         .after_origin = if (read.after_origin) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
         .after_member = if (read.after_member) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
-    }, session_list.session_list_page_size + 1, &read.page);
+    }, session_list.session_list_page_size + 1, page);
 }
 
-/// Folds the creator subtree into the rollups. Page 1 was read by the caller's first round, so its rows come first;
-/// every later page is queued and run here. The Sessions of a page take their WorkReads in rounds of their own.
-fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, read: *RollupRead, totals: []Rollup) !void {
+/// Folds the creator subtree into the rollups. The caller's first round read page 1 and its roots' work; each page
+/// here is walked in one round that reads its descendants' work rows and queues the next page beside them, so every
+/// extra page costs one round. The descendants' work rows reuse the caller's slots, which the roots have decoded.
+fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, read: *RollupRead, slots: []WorkRowSlot, totals: []Rollup) !void {
     while (true) {
-        if (read.page.failure) |err| return err;
-        const count = @min(read.page.count, session_list.session_list_page_size);
+        const page = &read.pages[read.current];
+        if (page.failure) |err| return err;
+        const count = @min(page.count, session_list.session_list_page_size);
         if (count == 0) return;
+        const more = page.count > session_list.session_list_page_size;
+        if (more) {
+            read.after_origin = page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
+            read.after_member = page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
+            try queueRollupPage(a, request, read, &read.pages[read.current ^ 1]);
+        }
         var work_count: usize = 0;
-        for (read.page.rows[0..count]) |*row| {
+        for (page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
-            const slot = &read.work_rows[work_count];
+            const slot = &slots[work_count];
             a.readInto(report_domain.work_row, .{ .session = row.session_ref.slice() }, &slot.row, &slot.found);
             work_count += 1;
         }
-        if (work_count != 0) try runList(a);
-        var work_index: usize = 0;
-        for (read.page.rows[0..count]) |*row| {
+        if (work_count != 0 or more) try runList(a);
+        work_count = 0;
+        for (page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
             var index: usize = 0;
             while (index < references.len and !std.mem.eql(u8, row.origin.slice(), &references[index])) : (index += 1) {}
             if (index == references.len) return error.CorruptStore;
             const total = &totals[index];
-            const slot = &read.work_rows[work_index];
-            const work_read = &read.works[work_index];
-            work_index += 1;
+            const slot = &slots[work_count];
+            work_count += 1;
             if (!slot.found.get()) return error.CorruptStore;
-            work_read.* = .{ .session = row.session_ref.slice() };
-            try work_read.decode(&slot.row);
-            const work = try work_read.work(row.created_at.get(), now_ms);
-            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), work_read, work));
+            read.work = .{ .session = row.session_ref.slice() };
+            try read.work.decode(&slot.row);
+            const work = try read.work.work(row.created_at.get(), now_ms);
+            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), &read.work, work));
             total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
             if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
         }
-        if (read.page.count <= session_list.session_list_page_size) return;
-        read.after_origin = read.page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
-        read.after_member = read.page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
-        try queueRollupPage(a, request, read);
-        try runList(a);
+        if (!more) return;
+        read.current ^= 1;
     }
 }
 
@@ -829,9 +835,9 @@ const WorkRowSlot = struct {
     found: store_access.Found = undefined,
 };
 
-/// Reads one page of rows in three stages. The first round queues the creator-subtree page 1, every row's first
-/// WorkRead stage and every row's settings, which need only the Session ref. The rounds after it finish the
-/// WorkReads and the subtree pages. Then the rows are shaped from the settings read.
+/// Reads one page of rows in three stages. The first round queues the creator-subtree page 1, every row's one-statement
+/// work row and every row's settings, which need only the Session ref. The rounds after it walk the subtree pages, one
+/// round per page. Then the rows are shaped from the settings read.
 noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
@@ -841,22 +847,23 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
     const rollups = list.rollups[0..references.len];
     @memset(rollups, .{});
     const rollup = &scratch.rollup;
-    // One assignment resets the cursors and the page. Naming `roots` stores the fields' defaults and skips `works`,
+    // One assignment resets the cursors and the pages. Naming `roots` stores the fields' defaults and skips `work`,
     // which is undefined by default and is written before it is read.
     rollup.* = .{ .roots = @splat(.{}) };
     for (references, 0..) |*reference, index| rollup.roots[index].set(reference) catch return error.CorruptStore;
-    if (references.len != 0) try queueRollupPage(a, request, rollup);
+    if (references.len != 0) try queueRollupPage(a, request, rollup, &rollup.pages[rollup.current]);
     for (references, scratch.work_rows[0..references.len], scratch.settings[0..references.len]) |*reference, *slot, *settings| {
         a.readInto(report_domain.work_row, .{ .session = reference }, &slot.row, &slot.found);
         a.readInto(list_row, .{ .session = reference }, &settings.row, &settings.found);
     }
     try runList(a);
-    try readRollups(a, request, references, now, rollup, rollups);
+    // The page's own rows decode before the descendants' rows reuse the same slots.
     for (references, works[0..references.len], scratch.work_rows[0..references.len]) |*reference, *work, *slot| {
         if (!slot.found.get()) return error.CorruptStore;
         work.* = .{ .session = reference };
         try work.decode(&slot.row);
     }
+    try readRollups(a, request, references, now, rollup, scratch.work_rows[0..], rollups);
     const shown = &list.shown;
     for (references, works[0..references.len], shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
     try readRowSettings(a, shown[0..references.len], scratch.settings[0..references.len], rollups, now, visitor);
