@@ -641,7 +641,7 @@ pub const descendant_work_source = "WITH RECURSIVE descendants(origin,session_re
     "FROM descendants member JOIN session work_session ON work_session.session_ref=member.session_ref " ++
     report_domain.work_joins ++ "WHERE member.session_ref<>member.origin";
 
-const descendant_work = rsql.Read(.{
+pub const descendant_work = rsql.Read(.{
     .sql = descendant_work_source,
     .Args = struct {
         root0: Bounded(change_ring.id_bytes),

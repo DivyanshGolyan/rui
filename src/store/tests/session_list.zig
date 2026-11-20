@@ -1795,3 +1795,162 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
         }
     }.run);
 }
+
+// SL-8. The expected rollup is the fold of each descendant's own list row, the U3 path (work_row and WorkRead.decode,
+// tied to the staged machine by SL-6), never the subtree statement under test. The children span every work shape the
+// list derives, including the stopped parent whose stop_remaining reads its attached child (the alias-shadowing witness).
+test "SL-8: a creator subtree's rollup is its descendants' own rows, for every work shape" {
+    try store_testing.forEachEngine(struct {
+        const Seen = struct { reference: change_ring.Id, state_change_at: u64, subtree_state_change_at: u64, descendants: u64, needs_you_descendants: u64, needs_you: bool };
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "sl8-root");
+            var children: [12]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            var count: usize = 0;
+            // Admission takes the next runnable Session in the whole Store, so each fixture that admits runs while no
+            // other Session has runnable work, and the stopping Session with queued work comes last.
+            children[count] = try running(&storage, &tmp, "sl8-running", false);
+            count += 1;
+            children[count] = try live(&storage, &tmp, "sl8-live");
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.awaiting.make(&storage, &tmp, "sl8-awaiting");
+            count += 1;
+            children[count] = try retrying(&storage, &tmp, "sl8-retrying");
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.finished.make(&storage, &tmp, "sl8-finished");
+            count += 1;
+            const stopped = try shared_fixtures.TestingWorkShape.stopped.make(&storage, &tmp, "sl8-stopped");
+            children[count] = stopped;
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.idle.make(&storage, &tmp, "sl8-idle");
+            count += 1;
+            const owed = try configureTestSession(&storage, "sl8-owed");
+            try store_testing.exec(&storage, "UPDATE session SET obligation_since=?1 WHERE session_ref=?2", .{ @as(u64, 1), owed.slice() });
+            children[count] = owed;
+            count += 1;
+            children[count] = try stoppingWithChild(&storage, &tmp);
+            count += 1;
+            children[count] = try running(&storage, &tmp, "sl8-stopping-queued", true);
+            count += 1;
+            for (children[0..count]) |*child| try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+            const grandchild = try configureTestSession(&storage, "sl8-grandchild");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ stopped.slice(), grandchild.slice() });
+
+            var seen: [32]Seen = undefined;
+            const rows = seen[0..try readAll(&storage, &tmp, &seen)];
+            var descendants: [13][]const u8 = undefined;
+            for (children[0..count], descendants[0..count]) |*child, *slot| slot.* = child.slice();
+            descendants[count] = grandchild.slice();
+            try expectRollup(rows, root.slice(), descendants[0 .. count + 1]);
+            try expectRollup(rows, stopped.slice(), &.{grandchild.slice()});
+            // The fixtures reach the groups the rollup counts: some descendant needs you and some does not.
+            const root_row = find(rows, root.slice()).?;
+            try std.testing.expect(root_row.needs_you_descendants != 0 and root_row.needs_you_descendants < root_row.descendants);
+        }
+
+        fn expectRollup(rows: []const Seen, reference: []const u8, descendants: []const []const u8) !void {
+            const row = find(rows, reference) orelse return error.TestUnexpectedResult;
+            var latest = row.state_change_at;
+            var needs_you: u64 = 0;
+            for (descendants) |descendant| {
+                const own = find(rows, descendant) orelse return error.TestUnexpectedResult;
+                latest = @max(latest, own.state_change_at);
+                if (own.needs_you) needs_you += 1;
+            }
+            try std.testing.expectEqual(@as(u64, descendants.len), row.descendants);
+            try std.testing.expectEqual(needs_you, row.needs_you_descendants);
+            try std.testing.expectEqual(latest, row.subtree_state_change_at);
+        }
+
+        fn find(rows: []const Seen, reference: []const u8) ?*const Seen {
+            for (rows) |*row| if (std.mem.eql(u8, &row.reference, reference)) return row;
+            return null;
+        }
+
+        /// Every list page's rows, walked by the page cursor.
+        fn readAll(storage: *Store, tmp: *std.testing.TmpDir, seen: []Seen) !usize {
+            var request: protocol.ListSessions = .{};
+            var total: usize = 0;
+            while (true) {
+                var used = std.atomic.Value(u64).init(0);
+                const bytes = try testingSessionList(storage, tmp, request, &used, 8);
+                defer std.testing.allocator.free(bytes);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer parsed.deinit();
+                const object = parsed.value.object;
+                for (object.get("sessions").?.array.items) |item| {
+                    const row = item.object;
+                    const state = row.get("work").?.object.get("state").?.object;
+                    const kind = state.get("kind").?.string;
+                    seen[total] = .{
+                        .reference = row.get("reference").?.string[0..change_ring.id_bytes].*,
+                        .state_change_at = try number(row, "state_change_at"),
+                        .subtree_state_change_at = try number(row, "subtree_state_change_at"),
+                        .descendants = try number(row, "descendant_count"),
+                        .needs_you_descendants = try number(row, "descendant_needs_you_count"),
+                        // session_work.group: approval, and bash with an approval awaiting, need you.
+                        .needs_you = std.mem.eql(u8, kind, "approval") or (std.mem.eql(u8, kind, "bash") and !std.mem.eql(u8, state.get("approvals").?.string, "0")),
+                    };
+                    total += 1;
+                }
+                if (object.get("next").? != .object) return total;
+                const next = object.get("next").?.object;
+                request = .{ .after = try number(next, "after"), .ceiling = try number(next, "ceiling") };
+            }
+        }
+
+        fn number(object: std.json.ObjectMap, name: []const u8) !u64 {
+            return std.fmt.parseInt(u64, object.get(name).?.string, 10);
+        }
+
+        /// An approval allowed once and admitted, so its Action runs in a live Turn; with `stop_queued`, the Session
+        /// is then stopped and a Message queued behind the stop.
+        fn running(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8, stop_queued: bool) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try shared_fixtures.TestingWorkShape.awaiting.make(storage, tmp, name);
+            const action = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+            try allow.key.set(name ++ "-allow");
+            try allow.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+            if (stop_queued) {
+                var stop = try completeSessionStop(name ++ "-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "after the stop");
+            }
+            return session;
+        }
+
+        fn live(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try configureTestSessionAsk(storage, name);
+            try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "propose");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            return session;
+        }
+
+        fn retrying(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try configureTestSession(storage, name);
+            try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "first");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(model, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+            return session;
+        }
+
+        /// SL-6's stopping_with_child: a stopped Turn whose attached child still owes work.
+        fn stoppingWithChild(storage: *Store, tmp: *std.testing.TmpDir) !protocol.Bounded(protocol.max_session_bytes) {
+            const parent = try live(storage, tmp, "sl8-parent");
+            const child = try configureTestSessionAsk(storage, "sl8-attached");
+            try store_testing.exec(storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+            try submitTestMessage(storage, tmp, "sl8-attached-file", "sl8-attached-message", child.slice(), "work");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            var stop = try completeSessionStop("sl8-parent-stop", parent.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            return parent;
+        }
+    }.run);
+}

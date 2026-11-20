@@ -285,7 +285,7 @@ fn listStatementForTesting(comptime failed: anyerror, comptime fragment: []const
     return namedStatementForTesting(session_list_read_domain.list_failures, failed, fragment);
 }
 
-fn expectListStepFailure(sql: [:0]const u8, expected: anyerror, comptime work: enum { queued, awaiting }) !void {
+fn expectListStepFailure(sql: [:0]const u8, expected: anyerror, comptime work: enum { queued, awaiting, descendant }) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -297,6 +297,11 @@ fn expectListStepFailure(sql: [:0]const u8, expected: anyerror, comptime work: e
             try submitTestMessage(&storage, &tmp, "list-names-input", "list-names-message", session.slice(), "q");
         },
         .awaiting => _ = try TestingWorkShape.awaiting.make(&storage, &tmp, "list-names-awaiting"),
+        .descendant => {
+            const root = try configureTestSession(&storage, "list-names-root");
+            const child = try configureTestSession(&storage, "list-names-child");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+        },
     }
     var used = std.atomic.Value(u64).init(0);
     var fault: TestingStatementFault = .{ .sql = sql };
@@ -327,6 +332,12 @@ test "a list row whose work statement fails answers TurnReadFailed" {
 
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
     try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "LEFT JOIN turn work_turn ON"), error.TurnReadFailed, .queued);
+}
+
+test "a list page whose creator subtree read fails answers SessionReadFailed" {
+    // One statement reads the subtree and its descendants' work, so the two fail together under the subtree's name.
+    // The fragment is unique to that statement; the work fragments above still name only the roots' work_row.
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "WHERE member.session_ref<>member.origin"), error.SessionReadFailed, .descendant);
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
@@ -787,4 +798,34 @@ test "the work row plans every stage as a keyed search" {
         if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) temp_sorts += 1;
     }
     try std.testing.expectEqual(@as(usize, 3), temp_sorts);
+}
+
+test "the creator subtree plans its descendants' work as keyed searches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const c = sqlite.c;
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ session_list_read_domain.descendant_work.sql);
+    defer _ = c.sqlite3_finalize(statement);
+    // Only the recursive CTE's own rows are scanned: the walk's queue and its members. Every Session, Turn, Operation,
+    // Action and Message is a keyed search. TEMP_SORTS_REASON
+    var temp_sorts: usize = 0;
+    while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+        const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
+        std.debug.print("plan: {s}\n", .{detail});
+        if (std.mem.startsWith(u8, detail, "SCAN ")) {
+            const scanned = detail["SCAN ".len..];
+            const name = scanned[0 .. std.mem.indexOfScalar(u8, scanned, ' ') orelse scanned.len];
+            var allowed = false;
+            for ([_][]const u8{ "member", "parent", "cycle_member", "descendants" }) |alias| allowed = allowed or std.mem.eql(u8, name, alias);
+            std.testing.expect(allowed) catch |err| {
+                std.debug.print("unexpected scan: {s}\n", .{detail});
+                return err;
+            };
+        }
+        if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) temp_sorts += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 999), temp_sorts);
 }
