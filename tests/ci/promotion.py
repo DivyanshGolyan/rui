@@ -7,8 +7,7 @@ promoted release. When a job fails, each step it recorded as failed
 recorded command is replayed first at HEAD, to confirm the red reproduces,
 then by binary search over the batch's first-parent commits. `stable` is
 presumed good, since it passed promotion; it is replayed only when the first
-commit of the batch fails. A one-commit batch is its culprit without replays,
-and Linux replays stop at BISECT_CAP_SECONDS. A failure before any recorded step, such as setup,
+commit of the batch fails. and Linux replays stop at BISECT_CAP_SECONDS. A failure before any recorded step, such as setup,
 has nothing to replay. A macOS runner does not replay at all (replays_here):
 its replays cost the most runner-minutes. Replay output goes to files, not the
 job log, so the issue filer reads only the original failure. The verdict never
@@ -56,13 +55,11 @@ def batch(base, head):
 def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
     """Return the batch's first failing commit, or the narrowed range when the deadline stops it.
 
-    A batch of one commit is its own culprit, since `base` passed. No new replay starts once
-    `clock()` reaches `deadline`; the caller shares one deadline across a job's failed steps.
+    No new replay starts once `clock()` reaches `deadline`; the caller shares one deadline across
+    a job's failed steps.
     """
     if not commits:
         return dict(verdict="empty-batch", replays=[])
-    if len(commits) == 1:
-        return dict(verdict="single-commit", culprit=commits[0], replays=[])
     replays = []
 
     def run(sha):
@@ -100,8 +97,6 @@ def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
 
 def describe(result, base, head):
     verdict = result["verdict"]
-    if verdict == "single-commit":
-        return f"the batch holds one commit, {result['culprit']}; it is the culprit"
     if verdict == "culprit":
         subject = git("log", "-1", "--format=%s", result["culprit"])
         return f"first fails at {result['culprit']} ({subject})"

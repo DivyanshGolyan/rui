@@ -33,7 +33,6 @@ A Promote run whose step has failed is red even while its bisect step keeps the 
 A scheduled Promote run is Promote's tier and bisect on `main` every three hours; it files `main-red` issues, and you triage its runs as a promotion's.
 A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names. On macOS there are no replay logs: a failed macOS step's bisect is skipped, and its failed step's log is the only evidence.
 A `stopped at the 90-minute cap` verdict names only a range of commits, so diagnose from the replays it ran and that range.
-A `the batch holds one commit` verdict is the culprit by rule, with no replay behind it.
 A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../docs/verification/release.md#release-publication) says which, and what recovers each.
 
 ## 3. Decide whether the diff caused it

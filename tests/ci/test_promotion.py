@@ -191,21 +191,6 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertTrue(promotion.replays_here({"RUNNER_OS": "Linux"}))
         self.assertTrue(promotion.replays_here({}))
 
-    def test_a_one_commit_batch_is_its_own_culprit_without_replays(self):
-        repository = self.batch(broken=dict(state=6))
-        self.assertEqual(repository.check(), 1)
-        merge = repository.commits[-1]
-        verdict, stdout = repository.bisect(base=repository.commits[-2])
-        [step] = verdict["steps"]
-        self.assertEqual((step["verdict"], step["culprit"], step["replays"]), ("single-commit", merge, []))
-        self.assertIn(f"Promotion bisect: state: the batch holds one commit, {merge}; it is the culprit", stdout)
-        self.assertNotIn("replay at", stdout)
-
-    def test_a_one_commit_batch_calls_no_replay(self):
-        calls = []
-        result = promotion.bisect(["only"], "base", lambda sha: calls.append(sha) or False)
-        self.assertEqual((result["verdict"], result["culprit"], calls), ("single-commit", "only", []))
-
     def test_the_bisect_stops_starting_replays_at_the_deadline(self):
         commits = [f"c{i}" for i in range(22)]
         now = [0]
