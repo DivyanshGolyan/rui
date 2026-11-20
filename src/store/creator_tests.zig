@@ -169,3 +169,61 @@ test "session creator Configure and Message births preserve origin across archiv
         }
     }.run);
 }
+
+test "session creator names the authenticated sender of a creating Message without parent input" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const sender_id = try testing.configureTestSession(&storage, "creator-sender");
+            const sender = sender_id.slice();
+            var tools: wire_request.ConfigureCommand = .{};
+            try tools.key.set("creator-sender-tools");
+            try tools.session.set(sender);
+            tools.configuration.tools = try .of(&.{"bash"});
+            tools.configuration.permission_mode.state = .value;
+            try tools.configuration.permission_mode.value.set("bypass");
+            try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
+            try testing.submitTestMessage(&storage, &tmp, "creator-sender-seed", "creator-sender-seed", sender, "start a chat");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try fixtures.settleTwoActionsForTesting(&storage, &tmp, model, "creator-sender-calls");
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            var input: @import("domain/action.zig").ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action, &input);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+
+            // `rui session start` from the sender's Bash: a creating Message with its Host-issued handle.
+            const file = try tmp.dir.createFile(std.testing.io, "creator-started", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, "work on this");
+            var started = try testing.completeMessage("creator-started", "", file, "work on this");
+            defer started.removeTemporaryContent(std.testing.io) catch unreachable;
+            started.configuration = (try testing.completeConfiguration("unused-started", "", workspace, "model-a")).configuration;
+            started.sender = .{};
+            try started.sender.?.store.set(storage.storeId());
+            try started.sender.?.session.set(sender);
+            started.sender_handle = input.sender_handle;
+            const accepted = storage.submitMessageWithModel(&started, null, .{});
+            try std.testing.expect(accepted == .accepted);
+            const child = accepted.accepted.session;
+            try expectOrigin(&storage, child.slice(), sender, null, .all, true);
+            try std.testing.expect(storage.submitMessageWithModel(&started, null, .{}).accepted.replayed);
+            try expectOrigin(&storage, child.slice(), sender, null, .all, true);
+
+            // An explicit parent still names the creator and attaches the child.
+            const parented_file = try tmp.dir.createFile(std.testing.io, "creator-parented", .{ .read = true });
+            try parented_file.writeStreamingAll(std.testing.io, "attached work");
+            var parented = try testing.completeMessage("creator-parented", "", parented_file, "attached work");
+            defer parented.removeTemporaryContent(std.testing.io) catch unreachable;
+            parented.configuration = (try childCommand("unused-parented", sender)).configuration;
+            parented.sender = started.sender;
+            parented.sender_handle = input.sender_handle;
+            const attached = storage.submitMessageWithModel(&parented, null, .{});
+            try std.testing.expect(attached == .accepted);
+            try expectOrigin(&storage, attached.accepted.session.slice(), sender, sender, .all, true);
+        }
+    }.run);
+}

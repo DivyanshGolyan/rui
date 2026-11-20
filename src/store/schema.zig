@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 87;
+pub const schema_version: u32 = 88;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -67,6 +67,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
+    .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -881,6 +882,17 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "ALTER TABLE action_operation ADD COLUMN action_operation_unaccepted_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NULL THEN session_ref END) STORED AFTER action_operation_approval_lead, ADD INDEX action_operation_unaccepted(action_operation_unaccepted_lead)",
             "ALTER TABLE turn ADD COLUMN turn_outcome_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN outcome_position IS NULL THEN session_ref END) STORED AFTER turn_unpositioned_lead, ADD INDEX turn_outcome_unpositioned(turn_outcome_unpositioned_lead)",
+        },
+    },
+    // A Session whose first Message came from another Session was started by it (Divyansh,
+    // 2026-11-20): saved creation before format 88 named a creator only from explicit parent input.
+    .{
+        .from = 87,
+        .sqlite = &.{
+            "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
+        },
+        .mysql = &.{
+            "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
         },
     },
 };

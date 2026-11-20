@@ -579,6 +579,13 @@ pub const SubmitMessage = struct {
         else
             null;
         if (rejection) |code| return t.refuse(r, code, null);
+        // A Session started by another Session's Action was created by that Session. An explicit
+        // parent names the creator itself; without one, the authenticated sender is the creator,
+        // with no lifecycle attachment.
+        if (command.configuration.?.parent.state != .value) if (t.reads().sender) |found| {
+            creation.creator = found.session.ref;
+            creation.attach_parent = false;
+        };
         t.later = .{ .saved = undefined };
         return (try t.validate(r, null)).?;
     }

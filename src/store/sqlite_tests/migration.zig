@@ -731,3 +731,64 @@ test "schema 54 gains empty model catalog tables at 55 without changing its rows
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact", .{}));
     try std.testing.expect(try storage.readModelCatalogSource() == null);
 }
+
+fn copySession(comptime reference: []const u8, comptime seq: []const u8) []const u8 {
+    return "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,created_at,next_position,created_seq,workspace_digest,workspace_key) " ++
+        "SELECT '" ++ reference ++ "',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,created_at,next_position," ++ seq ++ ",workspace_digest,workspace_key FROM session WHERE session_ref='rhvzwc';";
+}
+
+fn admission(comptime key: []const u8, comptime seq: []const u8, comptime session: []const u8, comptime sender: ?[]const u8) []const u8 {
+    const command = "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('" ++ key ++ "',1,'" ++ session ++ "',zeroblob(32),1,'',0,0," ++ seq ++ ");";
+    const from = if (sender) |peer| "'" ++ peer ++ "'," ++ seq ++ ",2" else "NULL,NULL,1";
+    return command ++ "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at,sender_session_ref,sender_position,source_kind) VALUES(" ++
+        seq ++ ",'" ++ session ++ "','" ++ key ++ "',(SELECT MIN(content_id) FROM content),1793781800," ++ from ++ ");";
+}
+
+// Format 87 Sessions covering every creator case: started by another Session (peer01), started by a
+// person and later messaged by a Session (pers01), first Message sent to itself (sefx01), no Message
+// (empt01), and a saved creator that differs from the first sender (kept01).
+const format_87_fixture_sql = copySession("peer01", "101") ++ copySession("pers01", "102") ++ copySession("sefx01", "103") ++
+    copySession("empt01", "104") ++ copySession("kept01", "105") ++
+    "UPDATE session SET creator_ref='rhvzwc' WHERE session_ref='kept01';" ++
+    admission("cb-peer-1", "901", "peer01", "rhvzwc") ++ admission("cb-peer-2", "902", "peer01", null) ++
+    admission("cb-pers-1", "903", "pers01", null) ++ admission("cb-pers-2", "904", "pers01", "rhvzwc") ++
+    admission("cb-self-1", "905", "sefx01", "sefx01") ++
+    admission("cb-kept-1", "906", "kept01", "peer01");
+
+test "schema 88 creator migration names the Session that sent each Session's first Message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/creator.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(raw, store_testing.baseline_rows);
+    for (store_schema.migrations) |step| {
+        if (step.from == 87) break;
+        for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+    }
+    try sqlite.exec(raw, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=87");
+    try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d}", .{store_schema.application_id}));
+    const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','87'),('wire_version',?1),('store_selector',?2)");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, protocol.wire_version);
+    try sqlite.bindText(meta, 2, root);
+    try sqlite.expectDone(meta);
+    try sqlite.exec(raw, format_87_fixture_sql);
+    try sqlite.exec(raw, "CREATE TEMP TABLE before_creators AS SELECT session_ref,creator_ref FROM session WHERE session_ref NOT IN ('peer01','pers01','sefx01','empt01','kept01')");
+    try store_schema.openExisting(std.testing.io, raw, root, null, null);
+    try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session WHERE session_ref='peer01' AND creator_ref='rhvzwc'"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session WHERE session_ref='kept01' AND creator_ref='rhvzwc'"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session WHERE session_ref IN ('pers01','sefx01','empt01') AND creator_ref IS NULL"));
+    // The migration names a creator and nothing else: no lifecycle parent appears.
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session WHERE session_ref IN ('peer01','pers01','sefx01','empt01','kept01') AND parent_ref IS NOT NULL"));
+    // Baseline Sessions keep their creator unless their own first Message came from another Session.
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session s JOIN before_creators b ON b.session_ref=s.session_ref WHERE b.creator_ref IS NOT NULL AND s.creator_ref IS NOT b.creator_ref"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try store_schema.openExisting(std.testing.io, raw, root, null, null);
+}

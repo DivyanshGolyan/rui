@@ -7,9 +7,10 @@
 
 ### Session provenance
 
-A Session's nullable `creator` identifies the Session supplied by validated creation `parent` input.
+A Session's nullable `creator` identifies the Session supplied by validated creation `parent` input, or, without one, the authenticated Session sender of the creating Message.
 The Store saves it once as `session.creator_ref` for both attached and detached creation.
-Creation without a parent leaves it null.
+Other creation without a parent leaves it null.
+Store format 88 fills a null creator once from the Session sender of each Session's first admitted Message, when that sender is another Session (Divyansh, 2026-11-20); a Session whose first Message came from a person stays without a creator.
 A non-null creator is another existing Session's canonical six-character reference.
 Subsequent configuration and command replay preserve the original creator.
 
