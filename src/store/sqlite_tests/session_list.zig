@@ -647,7 +647,7 @@ test "SL-7: a damaged work stage is refused the same way by the one-statement an
     // Each damage is one stage's column set to a value its CHECK or the decoder refuses. The check-constraint edits
     // need ignore_check_constraints, as the settings test above does. The staged read's error is the expectation, so
     // a damage that reads nothing cannot pass by agreeing with nothing (expectError fails on success).
-    const Damage = enum { resolved_without_code, in_flight_without_attempt, waiting_without_schedule, ended_without_outcome_time, unknown_outcome, running_without_call, excluded_without_position, queued_with_zero_admission_time, running_unauthorized };
+    const Damage = enum { resolved_without_code, in_flight_without_attempt, waiting_without_schedule, ended_without_outcome_time, unknown_outcome, running_without_call, excluded_without_position, queued_with_zero_admission_time, owed_zero_behind_queued, running_unauthorized };
     for (std.enums.values(Damage)) |damage| {
         errdefer std.debug.print("SL-7 damage {t} failed\n", .{damage});
         var tmp = std.testing.tmpDir(.{});
@@ -663,14 +663,37 @@ test "SL-7: a damaged work stage is refused the same way by the one-statement an
                 try compared.status;
                 const outcome = compared.staged.outcome() orelse return error.TestUnexpectedResult;
                 try std.testing.expectEqualStrings("bogus", outcome.code);
+                try expectSameWork(&storage, session.slice(), &compared);
             },
-            // derive does not refuse a running Action that is not authorized: both reads succeed and agree on it. The brief
-            // expected a CorruptStore here; the finding is reported, and the case pins the agreement rather than a refusal.
-            .running_unauthorized => try compared.status,
+            // A running Action that is not authorized is refused by derive, the owner of the Session's state: the status
+            // reads succeed, and both derive their work to the same CorruptStore.
+            .running_unauthorized => {
+                try compared.status;
+                try expectSameWork(&storage, session.slice(), &compared);
+                const created_at = try store_testing.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()});
+                try std.testing.expectError(error.CorruptStore, compared.staged.work(created_at, sl7_now_ms));
+            },
+            // The staged read stops at the queued stage and never reads the owed stage, so its damage is not refused: the
+            // one-statement read decodes the same stages and must agree.
+            .owed_zero_behind_queued => {
+                try compared.status;
+                try expectSameWork(&storage, session.slice(), &compared);
+            },
             else => try std.testing.expectError(error.CorruptStore, compared.status),
         }
     }
 }
+
+/// SL-6's comparison, for a damage both reads answer: the derived work of the staged and the one-statement reads agree,
+/// including a refusal from derive, which both must give.
+fn expectSameWork(storage: *Store, session: []const u8, compared: *const tests.CompareWork) !void {
+    const created_at = try store_testing.queryU64(storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session});
+    const staged = compared.staged.work(created_at, sl7_now_ms);
+    const one = compared.one.work(created_at, sl7_now_ms);
+    if (staged) |expected| try std.testing.expectEqualDeep(expected, try one) else |err| try std.testing.expectError(err, one);
+}
+
+const sl7_now_ms: u64 = 4_000_000_000_000;
 
 fn damaged(storage: *Store, tmp: *std.testing.TmpDir, damage: anytype) !protocol.Bounded(protocol.max_session_bytes) {
     const Damage = @TypeOf(damage);
@@ -719,6 +742,14 @@ fn damaged(storage: *Store, tmp: *std.testing.TmpDir, damage: anytype) !protocol
             const session = try configureTestSession(storage, "sl7-queued");
             try submitTestMessage(storage, tmp, "sl7-queued-file", "sl7-queued-message", session.slice(), "queued");
             try store_testing.sqlite_only.exec(storage, "UPDATE message_admission SET admitted_at=0 WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        // The Session's Message is queued behind an ended Turn, so the staged read stops at the queued stage and never reads
+        // the owed stage. Its obligation_since is damaged to 0, which the owed stage refuses but this read does not reach.
+        .owed_zero_behind_queued => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-owed");
+            try submitTestMessage(storage, tmp, "sl7-owed-file", "sl7-owed-message", session.slice(), "queued after the end");
+            try store_testing.sqlite_only.exec(storage, "UPDATE session SET obligation_since=0 WHERE session_ref=?1", .{session.slice()});
             return session;
         },
         .running_unauthorized => {

@@ -749,13 +749,18 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
         var stop = try completeSessionStop(name ++ "-stop", session.slice());
         try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     };
+    return readRoundsForTesting(&storage, &tmp, count);
+}
+
+/// The rounds one whole-list read takes over `storage`, which must hold `stopped` stopped Sessions for its row check.
+fn readRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize) !u32 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
     var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
     try capture.create(root[0..length], 1, false);
     defer capture.deinit();
-    const entry = try store_core.enter(&storage, .none);
+    const entry = try store_core.enter(storage, .none);
     defer entry.release();
     var a: reads_domain.ReadAccess = .open(&entry);
     defer a.deinit();
@@ -768,8 +773,39 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
     const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
-    try std.testing.expectEqual(count, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
+    try std.testing.expectEqual(stopped, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
     return rounds;
+}
+
+// Round budget with descendants. A list page takes 2 rounds: membership, then the rows with their settings and work and
+// subtree page 1. Each later round folds one subtree page's Sessions' work and queues the next page beside it, so each
+// further subtree page costs one round. A subtree page holds nine rows (eight, and one peeked to find the next page),
+// and a root's own row is one of them, so 7 children already fill two pages. Measured: 0 children 2 rounds, 2 children
+// (one page) 3, 7 children (two pages) 4, 16 children (three pages) 5.
+test "a list page's descendants take one round for their work, and one more per further subtree page" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            try std.testing.expectEqual(@as(u32, 2), try descendantRoundsForTesting(case, 0));
+            try std.testing.expectEqual(@as(u32, 3), try descendantRoundsForTesting(case, 2));
+            try std.testing.expectEqual(@as(u32, 4), try descendantRoundsForTesting(case, 7));
+            try std.testing.expectEqual(@as(u32, 5), try descendantRoundsForTesting(case, 16));
+        }
+    }.run);
+}
+
+fn descendantRoundsForTesting(case: *store_testing.Case, children: usize) !u32 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const root = try configureTestSession(&storage, "descendant-rounds-root");
+    var name: [48]u8 = undefined;
+    for (0..children) |index| {
+        const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-rounds-{d}", .{index}));
+        try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+    }
+    return readRoundsForTesting(&storage, &tmp, 0);
 }
 
 test "a list page's rows share their rounds, so eight rows take as many as one" {
@@ -1425,7 +1461,7 @@ const session_work = @import("../../session_work.zig");
 
 test "SL-6: a Session's one-statement work is its staged work, for every stage outcome" {
     try store_testing.forEachEngine(struct {
-        const Shape = enum { idle, queued, live, awaiting, running, live_stopping, stopping_with_child, finished, finished_then_queued, stopped, stopped_then_queued, owed, resolved_plain, resolved_promoted_first, resolved_promoted_second };
+        const Shape = enum { idle, queued, live, awaiting, running, live_stopping, stopping_with_child, finished, finished_then_queued, stopped, stopped_then_queued, stopped_then_admitted, owed, resolved_plain, resolved_promoted_first, resolved_promoted_second, ended_with_approval };
         const now_ms: u64 = 4_000_000_000_000;
 
         fn run(case: *store_testing.Case) !void {
@@ -1451,6 +1487,9 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
             const one = try compared.one.work(created_at, now_ms);
             try std.testing.expectEqualDeep(work, one);
             try std.testing.expectEqual(expectedKind(shape), std.meta.activeTag(work.state));
+            // The ended Turn's background Action still awaits its decision in the store. The approval read does not name it
+            // (first_action is NULL for this shape, cause not traced here), so the Session reads working; both reads agree.
+            if (shape == .ended_with_approval) try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND authorized=0 AND background_position IS NOT NULL", .{}));
             try std.testing.expect(reached(shape, &compared.staged));
         }
 
@@ -1469,6 +1508,9 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                 .stopping_with_child => .working,
                 .finished => .finished,
                 .stopped => .stopped,
+                .stopped_then_admitted => .working,
+                // A background approval still awaiting its decision keeps the ended Turn's Session working (derive's answer).
+                .ended_with_approval => .working,
             };
         }
 
@@ -1486,6 +1528,9 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                 .finished_then_queued => staged.inputs.oldest_pending != null and turn != null,
                 .stopped => staged.inputs.excluded != null,
                 .stopped_then_queued => staged.inputs.oldest_pending != null,
+                // The new Turn admitted the Message behind the stop, so nothing is pending or excluded.
+                .stopped_then_admitted => turn != null and turn.?.terminal == null and staged.inputs.oldest_pending == null and staged.inputs.excluded == null,
+                .ended_with_approval => turn != null and turn.?.terminal != null,
                 .owed => staged.inputs.owed_since != null,
                 .resolved_plain, .resolved_promoted_first, .resolved_promoted_second => turn != null and turn.?.actions.total == 2 and turn.?.actions.latest_resolution_at != null,
             };
@@ -1563,6 +1608,34 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
                         try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
                         try store_testing.exec(storage, "UPDATE action_operation SET resolved_at=?1 WHERE action_id=?2", .{ at, action });
                     }
+                    return session;
+                },
+                .stopped_then_admitted => {
+                    const session = try shared_fixtures.TestingWorkShape.stopped.make(storage, tmp, "sl6-stopped-admitted");
+                    try submitTestMessage(storage, tmp, "sl6-stopped-admitted-file", "sl6-stopped-admitted-message", session.slice(), "admitted after the stop");
+                    _ = (try storage.admitNextModelAttempt(.{})).?;
+                    return session;
+                },
+                .ended_with_approval => {
+                    // Case 13: a bash Action awaits its decision, is promoted to background before the Turn ends, and the
+                    // Turn then ends. Its approval is still open on an ended Turn, so only the cutoff stage's approval reads it.
+                    const session = try configureTestSessionAsk(storage, "sl6-ended-approval");
+                    try submitTestMessage(storage, tmp, "sl6-ended-approval-file", "sl6-ended-approval-message", session.slice(), "propose");
+                    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try settleCallsForTesting(storage, tmp, binding, "sl6-ended-approval-calls", &.{.{
+                        .item_id = "sl6-ended-approval-item",
+                        .name = "bash",
+                        .encoded_call_id = "sl6-ended-approval-call",
+                        .decoded_call_id = "sl6-ended-approval-call",
+                        .encoded_arguments = "{\\\"description\\\":\\\"Review\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Review\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    }});
+                    const action_id = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{binding.operation_id});
+                    var promotion: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = action_id };
+                    try promotion.key.set("sl6-ended-approval-background");
+                    try std.testing.expect(storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+                    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+                    try answerTestTurn(storage, tmp, session.slice(), "sl6-ended-approval-answer", &answer);
                     return session;
                 },
                 .owed => {
