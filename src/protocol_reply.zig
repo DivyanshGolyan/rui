@@ -3601,6 +3601,8 @@ fn listValidationCase2() !void {
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
     var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
+    // An archiving row carries its archive key; the largest one is the longest row.
+    maximal.archive_seq = largest;
     maximal.creator = .{};
     try maximal.creator.?.set("zzzzzz");
     maximal.parent = .{};
