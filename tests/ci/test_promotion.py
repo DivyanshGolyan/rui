@@ -321,6 +321,11 @@ class SuspectRankingTest(unittest.TestCase):
         ranked = promotion.rank(["t"], batch)
         self.assertEqual([suspect["sha"][0] for suspect in ranked], ["c", "b", "a"])
 
+    def test_an_unreadable_commit_is_listed_only_for_a_step_with_targets(self):
+        batch = [dict(entry("a" * 40, "Unreadable (#7)"), error="boom")]
+        self.assertEqual([suspect["tier"] for suspect in promotion.rank(["t"], batch)], [promotion.UNATTRIBUTED])
+        self.assertEqual(promotion.rank([], batch), [])
+
     def test_the_commit_tier_is_its_most_direct_touched_file_and_only_matching_files_are_listed(self):
         batch = [entry("d" * 40, "Mixed (#4)", **{"alpha": {"t": BROAD}, "beta": {"t": GRAPH},
                                                   "gamma": {"other": DIRECT}})]

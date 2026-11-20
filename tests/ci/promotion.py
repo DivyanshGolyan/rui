@@ -161,9 +161,9 @@ def rank(targets, entries, limit=TOP_SUSPECTS, log=frozenset()):
         matched = {path: hits for path, tokens in entry.get("tokens", {}).items()
                    if (hits := (tokens & log) - shared_away)}
         shared = set().union(*matched.values()) if matched else set()
-        if entry.get("error"):
+        if entry.get("error") and targets:
             best = UNATTRIBUTED
-        elif best is None and not shared:
+        elif best is None and not shared or entry.get("error"):
             continue
         ranked.append(dict(sha=entry["sha"], subject=entry["subject"], tier=best, log=sorted(shared),
                            files=sorted(set(files) | set(matched)), position=position))

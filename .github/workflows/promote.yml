@@ -190,7 +190,10 @@ jobs:
         id: targets
         env:
           STEP: ${{ inputs.bisect-step }}
-        run: echo "targets=$(python3 -B tests/ci/promotion.py bisect-targets --step "$STEP")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          targets=$(python3 -B tests/ci/promotion.py bisect-targets --step "$STEP")
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup
         with:
           # The step's own targets; the setup action installs what setup_requirements says they need. Restore only.
