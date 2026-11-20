@@ -1207,7 +1207,7 @@ test "MySQL plans the creator subtree's work through keyed probes" {
                 rest = rest[at + "Table scan on ".len ..];
                 const alias = rest[0 .. std.mem.indexOfAny(u8, rest, " \n") orelse rest.len];
                 var allowed = false;
-                for ([_][]const u8{ "member", "parent", "cycle_member", "descendants" }) |name| allowed = allowed or std.mem.eql(u8, alias, name);
+                for ([_][]const u8{ "member", "parent", "descendants" }) |name| allowed = allowed or std.mem.eql(u8, alias, name);
                 try std.testing.expect(allowed);
             }
             for ([_][]const u8{ "session_creator", "turn_session_latest", "message_admission_session_pending" }) |index|

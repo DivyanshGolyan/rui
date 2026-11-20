@@ -625,18 +625,18 @@ fn clockColumnsSql(comptime session: []const u8) []const u8 {
 /// The creator subtree of up to session_list_page_size page roots, every descendant with its own clock facts and
 /// work columns, in one statement. Each descendant row carries its origin (the page root it descends from); root rows
 /// are dropped, since the roots' work is the page's own work_row. The walk is unbounded and has no order: the fold
-/// is a max and two counts, and a truncated walk would report wrong counts. A creator cycle through a root always
-/// shows on a non-root member row, because a Session is never its own creator (schema CHECK).
+/// is a max and two counts, and a truncated walk would report wrong counts. Each row carries its root's creator, and a
+/// row that is that creator flags a cycle: the root's creator is in its own subtree. Every creator cycle the walk can
+/// reach runs through a root, and it shows on a non-root row, because a Session is never its own creator (schema CHECK).
 /// The statement source, with `@index` marks as written (the plan tests render it).
-pub const descendant_work_source = "WITH RECURSIVE descendants(origin,session_ref,workspace_digest,workspace) AS (" ++
-    "SELECT session.session_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
+pub const descendant_work_source = "WITH RECURSIVE descendants(origin,root_creator,session_ref,workspace_digest,workspace) AS (" ++
+    "SELECT session.session_ref,session.creator_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
     "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archive_membership.filterSql("session", "?11") ++
-    " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
+    " UNION SELECT parent.origin,parent.root_creator,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
     "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
     "WHERE 1=1" ++ archive_membership.filterSql("session", "?11") ++ ") " ++
     "SELECT member.origin,work_session.session_ref,work_session.created_at," ++ clockColumnsSql("work_session.session_ref") ++
-    ",EXISTS(SELECT 1 FROM session root WHERE root.session_ref=member.origin AND root.creator_ref IN " ++
-    "(SELECT cycle_member.session_ref FROM descendants cycle_member WHERE cycle_member.origin=member.origin)) AS cycle," ++
+    ",(member.root_creator IS NOT NULL AND member.session_ref=member.root_creator) AS cycle," ++
     report_domain.work_columns ++ " " ++
     "FROM descendants member JOIN session work_session ON work_session.session_ref=member.session_ref " ++
     report_domain.work_joins ++ "WHERE member.session_ref<>member.origin";

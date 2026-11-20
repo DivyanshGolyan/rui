@@ -15,9 +15,8 @@ const Statement = engine.Statement;
 
 const Sqlite = @This();
 
-/// The widest result row a Store statement reads: the Session list's creator-subtree read, its 7 own columns and the
-/// 39 work columns (report.work_columns). Every statement's Row is checked against the column limit when it is first
-/// prepared, so a wider statement fails to compile instead of failing to prepare.
+/// At least the widest Row cachedTyped accepts. cachedTyped checks every statement's Row against the column limit, so a
+/// wider statement fails to compile instead of failing to prepare.
 const max_result_columns = 46;
 
 /// SQLITE_LIMIT_COLUMN: the widest SQLite table or the widest statement row, whichever is wider.

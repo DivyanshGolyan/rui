@@ -849,9 +849,9 @@ test "the creator subtree plans its descendants' work as keyed searches" {
     defer _ = c.sqlite3_finalize(statement);
     // Only the recursive CTE's own rows are scanned: the walk's queue and its members. Every Session, Turn, Operation,
     // Action and Message is a keyed search (the walk's `parent` and `member` scans read the materialized CTE, and the
-    // cycle probe searches it through an automatic index). The three temporary sorts are work_row's own, one per
-    // descendant: the running Action, the newest background result and the latest Turn's stop. The recursive UNION
-    // adds none, and the walk has no ORDER BY. Any other sort is a plan change.
+    // cycle test compares two of a row's own columns). The three temporary sorts are work_row's own, one per descendant:
+    // the running Action, the newest background result and the latest Turn's stop. The recursive UNION adds none, and the
+    // walk has no ORDER BY. Any other sort is a plan change.
     var temp_sorts: usize = 0;
     while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
         const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
@@ -859,7 +859,7 @@ test "the creator subtree plans its descendants' work as keyed searches" {
             const scanned = detail["SCAN ".len..];
             const name = scanned[0 .. std.mem.indexOfScalar(u8, scanned, ' ') orelse scanned.len];
             var allowed = false;
-            for ([_][]const u8{ "member", "parent", "cycle_member", "descendants" }) |alias| allowed = allowed or std.mem.eql(u8, name, alias);
+            for ([_][]const u8{ "member", "parent", "descendants" }) |alias| allowed = allowed or std.mem.eql(u8, name, alias);
             std.testing.expect(allowed) catch |err| {
                 std.debug.print("unexpected scan: {s}\n", .{detail});
                 return err;

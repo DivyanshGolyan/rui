@@ -1594,16 +1594,6 @@ test "SL-1: Session list rolls up eligible descendants beyond the page" {
 
 const session_work = @import("../../session_work.zig");
 
-test "WithWork of no head is WorkRow field for field" {
-    const fields = @typeInfo(report_domain.WithWork(struct {})).@"struct";
-    const expected = @typeInfo(report_domain.WorkRow).@"struct";
-    comptime std.debug.assert(fields.field_names.len == expected.field_names.len);
-    inline for (fields.field_names, fields.field_types, expected.field_names, expected.field_types) |name, Field, want, Want| {
-        comptime std.debug.assert(std.mem.eql(u8, name, want));
-        comptime std.debug.assert(Field == Want);
-    }
-}
-
 test "SL-6: a Session's one-statement work is its staged work, for every stage outcome" {
     try store_testing.forEachEngine(struct {
         const Shape = enum { idle, queued, live, awaiting, running, live_stopping, stopping_with_child, finished, finished_then_queued, stopped, stopped_then_queued, stopped_then_admitted, owed, resolved_plain, resolved_promoted_first, resolved_promoted_second, ended_with_approval };
@@ -1810,7 +1800,7 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
 
 // SL-8. The expected rollup is the fold of each descendant's own list row, the U3 path (work_row and WorkRead.decode,
 // tied to the staged machine by SL-6), never the subtree statement under test. The children span every work shape the
-// list derives, including the stopped parent whose stop_remaining reads its attached child (the alias-shadowing witness).
+// list derives, including the stopped parent whose stop_remaining reads its attached child.
 test "SL-8: a creator subtree's rollup is its descendants' own rows, for every work shape" {
     try store_testing.forEachEngine(struct {
         const Seen = struct { reference: change_ring.Id, state_change_at: u64, subtree_state_change_at: u64, descendants: u64, needs_you_descendants: u64, needs_you: bool };
@@ -1897,16 +1887,14 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
                 const object = parsed.value.object;
                 for (object.get("sessions").?.array.items) |item| {
                     const row = item.object;
-                    const state = row.get("work").?.object.get("state").?.object;
-                    const kind = state.get("kind").?.string;
                     seen[total] = .{
                         .reference = row.get("reference").?.string[0..change_ring.id_bytes].*,
                         .state_change_at = try number(row, "state_change_at"),
                         .subtree_state_change_at = try number(row, "subtree_state_change_at"),
                         .descendants = try number(row, "descendant_count"),
                         .needs_you_descendants = try number(row, "descendant_needs_you_count"),
-                        // session_work.group: approval, and bash with an approval awaiting, need you.
-                        .needs_you = std.mem.eql(u8, kind, "approval") or (std.mem.eql(u8, kind, "bash") and !std.mem.eql(u8, state.get("approvals").?.string, "0")),
+                        // The row's own group, which session_work.group derives and the list row serves.
+                        .needs_you = std.meta.stringToEnum(session_work.Group, row.get("work").?.object.get("group").?.string).? == .needs_you,
                     };
                     total += 1;
                 }

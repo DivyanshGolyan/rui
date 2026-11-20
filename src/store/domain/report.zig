@@ -865,6 +865,16 @@ pub fn WithWork(comptime Head: type) type {
     return @Struct(.auto, null, &names, &types, &attrs);
 }
 
+// WithWork of no head is WorkRow, field for field and in order.
+comptime {
+    const made = @typeInfo(WithWork(struct {})).@"struct";
+    const work = @typeInfo(WorkRow).@"struct";
+    std.debug.assert(made.field_names.len == work.field_names.len);
+    for (made.field_names, made.field_types, work.field_names, work.field_types) |name, Field, want, Want| {
+        std.debug.assert(std.mem.eql(u8, name, want) and Field == Want);
+    }
+}
+
 /// Asserts at compile time that `Row` carries every WorkRow field at WorkRow's type, so WorkRead.decode reads a
 /// WithWork row exactly as it reads a WorkRow.
 fn checkWorkFields(comptime Row: type) void {
@@ -1097,8 +1107,9 @@ pub const WorkRead = struct {
 
     /// Replays the staged read over one row that carries the work columns: a `work_row` row or any WithWork row. Each
     /// stage keeps the slice of the row its own statement would have returned, through the same keep and step, so the
-    /// transitions and refusals are the staged machine's. A missing row is the caller's refusal. The actions and owed "no row" refusals cannot occur: their aggregate or
-    /// scalar always returns a row, so the decoder has no branch for them.
+    /// transitions and refusals are the staged machine's. A missing row is the caller's refusal. The actions and owed
+    /// "no row" refusals cannot occur: their aggregate or scalar always returns a row, so the decoder has no branch for
+    /// them.
     pub fn decode(w: *WorkRead, row: anytype) error{ CorruptStore, ActionReadFailed }!void {
         comptime checkWorkFields(@TypeOf(row.*));
         std.debug.assert(w.stage == .latest and w.ahead == null);
