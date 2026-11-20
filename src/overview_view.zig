@@ -384,9 +384,9 @@ pub const CreateResult = union(enum) {
     unconfirmed: []const u8,
 };
 
-/// The span of list lines the shell is showing. The Archived list has no pinned gap, so a line is its order index.
+/// The span of list lines the shell is showing, first through end (exclusive), as the list drew them.
 pub const Viewport = struct { first: usize, end: usize };
-/// The same span by the references of its end rows.
+/// The same span by the references of its first and last Session rows.
 const ViewRows = struct { first: Reference, last: Reference };
 /// The order indices a window must keep, first through end (exclusive).
 const Focus = struct { first: usize, end: usize };
@@ -395,7 +395,7 @@ pub const Event = union(enum) {
     input: InputDelivery,
     list_settled: struct { wide: bool, focused: bool },
     list_presence: struct { at_ms: u64, pointer_over: bool },
-    /// The lines the list shows after a wheel scroll: first..end, in the Archived list's row order.
+    /// The lines the list shows after a wheel scroll, reported after the draw that applies it.
     viewport: Viewport,
 
     resized: Size,
@@ -799,7 +799,8 @@ pub const State = struct {
     listing_wanted: bool = false,
     rows: Vec(Row) = .{},
     archived: ArchivedWindow = .{},
-    /// The first and last rows the list showed at its last scroll report, by reference; null until a report.
+    /// The first and last Session rows the list showed at its last wheel scroll, by reference. A selection move
+    /// clears it (step), so it holds the most recent input only: the wheel while it is set, else the selection.
     viewport: ?ViewRows = null,
 
     by_reference: Vec(Keyed) = .{},
@@ -1382,6 +1383,15 @@ const RowPresentation = struct {
 };
 
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
+    const selected_before = state.selected;
+    const effects = try stepEvent(state, event);
+    // A selection move or click is the most recent input: it releases the rows a wheel scroll held (archivedFocus).
+    const moved = !std.meta.eql(selected_before, state.selected);
+    if (event == .clicked or (event != .viewport and moved)) state.viewport = null;
+    return effects;
+}
+
+fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     switch (event) {
         .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .presentation_start, .presentation_presented, .presentation_tick, .list_settled, .list_presence => {},
         else => state.presentation_revision +%= 1,
@@ -2101,19 +2111,15 @@ fn archivedReads(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (!state.archived.at_head and focus.first < screen) return readArchived(state, effects, .{ .above = bounds.first.? });
 }
 
-/// The order indices the Archived window must keep: the rows the list shows (from its last scroll report) and
-/// the selected Session, whichever reach further. Wheel scrolling moves the shown rows without moving the
-/// selection, so both count. Trimming and reads take their edges from here and never drop a row in this span.
+/// The order indices the Archived window must keep: the rows the list shows after its last wheel scroll, or else
+/// the selected Session. Only the most recent input holds rows, so a long wheel scroll holds the shown span
+/// alone and a selection move releases the wheel's span. Trimming and reads take their edges from here.
 fn archivedFocus(state: *const State) Focus {
-    var focus: ?Focus = null;
-    if (state.selected == .session) if (position(state, state.selected.session)) |at| {
-        focus = .{ .first = at, .end = at + 1 };
-    };
     if (state.viewport) |span| if (position(state, span.first)) |top| if (position(state, span.last)) |bottom| {
-        const seen: Focus = .{ .first = @min(top, bottom), .end = @max(top, bottom) + 1 };
-        focus = if (focus) |held| .{ .first = @min(held.first, seen.first), .end = @max(held.end, seen.end) } else seen;
+        return .{ .first = @min(top, bottom), .end = @max(top, bottom) + 1 };
     };
-    return focus orelse .{ .first = 0, .end = 0 };
+    if (state.selected == .session) if (position(state, state.selected.session)) |at| return .{ .first = at, .end = at + 1 };
+    return .{ .first = 0, .end = 0 };
 }
 
 fn readArchived(state: *State, effects: *Effects, from: session_list.ArchivedCursor) void {
@@ -2121,12 +2127,22 @@ fn readArchived(state: *State, effects: *Effects, from: session_list.ArchivedCur
     effects.add(.{ .read_archived = .{ .from = from, .rows = session_list.archived_window_size, .epoch = state.archived.epoch } });
 }
 
-/// The rows at the ends of a reported span, by reference, so a later trim cannot move them out from under the list.
+/// The Session rows at the first and last Session lines of a reported span, by reference, so a later trim cannot
+/// move them out from under the list. Headings and the pinned gap hold no row and are skipped. Only the Archived
+/// list reports a viewport, and its rows are the Host's order.
 fn viewportRows(state: *const State, span: Viewport) ?ViewRows {
-    const order = state.order.items;
-    if (span.first >= order.len or span.end <= span.first) return null;
-    const last = @min(span.end, order.len) - 1;
-    return .{ .first = state.rows.items[order[span.first]].reference, .last = state.rows.items[order[last]].reference };
+    if (state.archive != .archived) return null;
+    var first: ?usize = null;
+    var last: usize = 0;
+    var line = span.first;
+    while (line < span.end and line < Lines.count(state)) : (line += 1) {
+        const entry = Lines.kind(state, line) orelse break;
+        if (entry != .row) continue;
+        first = first orelse entry.row;
+        last = entry.row;
+    }
+    const top = first orelse return null;
+    return .{ .first = state.rows.items[state.order.items[top]].reference, .last = state.rows.items[state.order.items[last]].reference };
 }
 
 /// Re-anchors the Archived window at the head in a new epoch. A full roster walk and an empty page off the
@@ -2838,7 +2854,9 @@ fn move(state: *State, action: Action) void {
     const current: usize = switch (state.selected) {
         .new_session => 0,
         .sessions, .archived => 1,
-        .session => |ref| if (position(state, ref)) |at| at + 2 else 0,
+        // A selection a trim dropped from the held rows sits just above the top shown Session, so the next move
+        // starts from the rows on screen.
+        .session => |ref| if (position(state, ref)) |at| at + 2 else if (state.viewport) |span| (if (position(state, span.first)) |top| top + 1 else 0) else 0,
         .settings => order.len + 2,
     };
     const target = switch (action) {
@@ -6677,6 +6695,81 @@ test "Down past the end of the held Archived rows reads the next page and keeps 
         try std.testing.expectEqual(@as(u64, 200 - want), archiveSeqAt(&state, selectedAt(&state)));
     }
     try std.testing.expect(heldArchived(&state) > page);
+}
+
+/// The 1200-row Archived list at its head, ten rows a screen, with its first window served.
+fn archivedWheelFixture(refs: *[1200][6]u8, host: *[1200]Listed) !State {
+    for (refs, 0..) |*ref, at| _ = std.fmt.bufPrint(ref, "x{d:0>5}", .{at}) catch unreachable;
+    for (0..host.len) |index| {
+        const key: u64 = host.len - index;
+        host[index] = session(&refs[index], .{ .stopped = .{ .since = test_now_s - key, .cause = .stop } }, .{ .label = "archived", .archive_state = .archived, .archive_seq = key });
+    }
+    var state = try opened(&.{});
+    errdefer state.deinit();
+    state.size = .{ .width = 80, .height = 10 };
+    var effects: Effects = .{};
+    try changeArchiveView(&state, .archived, &effects);
+    try serveWindowWith(session_list.archived_window_size, &state, host, effects);
+    return state;
+}
+
+/// One wheel event of four rows, as the shell reports it: the viewport moves and the selection does not.
+fn wheelRows(state: *State, host: []const Listed, top_ref: *Reference, down: bool) !usize {
+    const at = position(state, top_ref.*) orelse return error.TestExpectedEqual;
+    const next = if (down) @min(at + 4, state.order.items.len -| 1) else at -| 4;
+    top_ref.* = state.rows.items[state.order.items[next]].reference;
+    const asked = try step(state, .{ .viewport = .{ .first = next, .end = next + 10 } });
+    try serveWindowWith(session_list.archived_window_size, state, host, asked);
+    return countReads(asked);
+}
+
+test "archived window: a long wheel scroll after a selection holds the shown rows, not every row from the selection down" {
+    var refs: [1200][6]u8 = undefined;
+    var host: [1200]Listed = undefined;
+    var state = try archivedWheelFixture(&refs, &host);
+    defer state.deinit();
+    for (0..4) |_| try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    var top_ref = state.rows.items[state.order.items[0]].reference;
+    var most: usize = 0;
+    // 250 events, 1000 rows: the span from the selection to the shown rows would hold every one of them.
+    for (0..250) |_| {
+        _ = try wheelRows(&state, &host, &top_ref, true);
+        most = @max(most, heldArchived(&state));
+    }
+    try std.testing.expect(most <= 6 * session_list.archived_window_size + 2 * 10);
+    try std.testing.expect(state.viewport != null);
+}
+
+test "archived window: a selection move after a wheel scroll releases the wheel's rows and focuses the selection" {
+    var refs: [1200][6]u8 = undefined;
+    var host: [1200]Listed = undefined;
+    var state = try archivedWheelFixture(&refs, &host);
+    defer state.deinit();
+    for (0..4) |_| try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    var top_ref = state.rows.items[state.order.items[0]].reference;
+    for (0..20) |_| _ = try wheelRows(&state, &host, &top_ref, true);
+    try std.testing.expect(state.viewport != null);
+    try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    try std.testing.expectEqual(@as(?ViewRows, null), state.viewport);
+    const at = selectedAt(&state);
+    try std.testing.expectEqual(Focus{ .first = at, .end = at + 1 }, archivedFocus(&state));
+}
+
+test "archived window: a trim that drops the selected row, then Down, selects from the shown rows" {
+    var refs: [1200][6]u8 = undefined;
+    var host: [1200]Listed = undefined;
+    var state = try archivedWheelFixture(&refs, &host);
+    defer state.deinit();
+    for (0..4) |_| try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    var top_ref = state.rows.items[state.order.items[0]].reference;
+    // 100 events, 400 rows: the trim drops the rows above the shown span, the selected row among them.
+    for (0..100) |_| _ = try wheelRows(&state, &host, &top_ref, true);
+    const span = state.viewport orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(?usize, null), position(&state, state.selected.session));
+    const shown_top = position(&state, span.first) orelse return error.TestExpectedEqual;
+    try serveWindowWith(session_list.archived_window_size, &state, &host, try press(&state, .next));
+    // Down starts from the top shown row: it selects the row the list shows at its top.
+    try std.testing.expectEqual(shown_top, selectedAt(&state));
 }
 
 test "the Archived view lists Sessions flat in the Host's order, with no nesting and no pins first" {
