@@ -1009,6 +1009,7 @@ pub const TestingWorkShape = enum {
     finished,
     stopped,
     awaiting,
+    running,
 
     pub fn make(shape: TestingWorkShape, storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
         const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
@@ -1030,6 +1031,17 @@ pub const TestingWorkShape = enum {
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const call = [_]TestingCall{.{ .item_id = name ++ "-item", .name = "bash", .encoded_call_id = name ++ "-call", .decoded_call_id = name ++ "-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
                 try settleCallsForTesting(storage, tmp, binding, name ++ "-metadata", &call);
+                return session;
+            },
+            .running => {
+                // An approval allowed once and admitted: the Action is running in a live Turn.
+                const session = try TestingWorkShape.awaiting.make(storage, tmp, name);
+                const first = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation", .{});
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
+                try allow.key.set(name ++ "-allow");
+                try allow.session.set(session.slice());
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
                 return session;
             },
         }
@@ -1219,9 +1231,9 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .activityTool = 4,
     .failedResponseBinding = 1,
     .readSessionReport = 6,
-    .readSessionList = 6, // The settings rows and the creator-subtree page 1 join the first WorkRead round (was 8).
+    .readSessionList = 2, // R1 membership; R2 settings, work and creator-subtree page 1. The budget fixture's subtree page has no descendant row, so no descendant work round. Work is one statement per Session (was 6).
     .readArchivedWindow = 1, // One statement serves an Archived page, its rows decorated in the same round.
-    .readChangedSessionList = 5, // One ancestor round for every changed seed; the page rows share its rounds (was 7).
+    .readChangedSessionList = 2, // Ancestors, then the rows with their work statements in one round. Work is one statement per Session (was 5).
     .publishRetryCrossings = 1,
     .actionContent = 2,
     .readAction = 1,
@@ -1482,4 +1494,40 @@ pub const membership_records = store_testing.hostToolRecordsWith(&.{.{ .name = "
 pub fn membershipToolSet(digests: *[membership_records.len][32]u8) tool_defs.HostToolSet {
     for (&membership_records, digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
     return .{ .records = &membership_records, .digests = digests };
+}
+
+/// The staged work read and the one-statement work read of one Session, over one snapshot. `status` is the staged
+/// read's outcome; the two reads are compared only when it is success, and the errors must be equal otherwise.
+pub const CompareWork = struct {
+    staged: report_domain.WorkRead,
+    one: report_domain.WorkRead,
+    status: anyerror!void,
+};
+
+fn readOneWork(a: *reads_domain.ReadAccess, session: []const u8, out: *report_domain.WorkRead) !void {
+    var row: report_domain.WorkRow = undefined;
+    var found: store_access.Found = undefined;
+    a.readInto(report_domain.work_row, .{ .session = session }, &row, &found);
+    try store_access.runNamed(a, report_domain.work_row_failures, error.CorruptStore);
+    if (!found.get()) return error.CorruptStore;
+    try out.decode(&row);
+}
+
+pub fn compareWorkForTesting(storage: *Store, session: []const u8) !CompareWork {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
+    defer a.deinit();
+    var result: CompareWork = .{ .staged = .{ .session = session }, .one = .{ .session = session }, .status = {} };
+    result.status = report_domain.readWorks(&a, (&result.staged)[0..1]);
+    const one_status: anyerror!void = readOneWork(&a, session, &result.one);
+    if (result.status) |_| {
+        try one_status;
+        try std.testing.expectEqualDeep(result.staged.inputs, result.one.inputs);
+        try std.testing.expectEqualDeep(result.staged.outcome(), result.one.outcome());
+        try std.testing.expectEqual(result.staged.cutoff, result.one.cutoff);
+    } else |staged_err| {
+        try std.testing.expectError(staged_err, one_status);
+    }
+    return result;
 }

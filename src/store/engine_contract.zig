@@ -1413,14 +1413,15 @@ fn sh3_a_list_action_step_fault_keeps_its(case: *store_testing.Case) !void {
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const call = [_]TestingCall{.{ .item_id = "list-actions-item", .name = "bash", .encoded_call_id = "list-actions-call", .decoded_call_id = "list-actions-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
-    var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_failures, null, "SELECT count(*) AS total,") };
+    var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_row_failures, null, "AS actions_total") };
     if (storage.engine == .sqlite) {
         fault.arm(storage.sqliteDatabase());
     } else try store_testing.failReadsOf(&storage, "action_operation");
     defer if (storage.engine == .sqlite) fault.disarm(storage.sqliteDatabase());
     var used = std.atomic.Value(u64).init(0);
     const expected = switch (storage.engine) {
-        .sqlite => error.ActionReadFailed,
+        // The list reads a row's Actions inside its one work statement, whose failure is TurnReadFailed.
+        .sqlite => error.TurnReadFailed,
         .mysql => error.SessionReadFailed,
     };
     try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));

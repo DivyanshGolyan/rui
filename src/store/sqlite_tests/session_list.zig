@@ -319,16 +319,14 @@ test "a live list page whose action candidate page read fails answers main's Ses
     try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "IN (SELECT a.session_ref FROM action_operation a"), error.SessionReadFailed, .queued);
 }
 
-test "a list row whose Action statement fails answers ActionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.ActionReadFailed, "FROM action_operation a LEFT JOIN session_revision"), error.ActionReadFailed, .awaiting);
+test "a list row whose work statement fails answers TurnReadFailed" {
+    // The list reads each row's work in one statement, so its Action, Turn and queue stages fail together. The first
+    // stage's name answers for all of them; the fragment is unique to that statement.
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "AS actions_total"), error.TurnReadFailed, .awaiting);
 }
 
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed, .queued);
-}
-
-test "a list row whose queue read fails answers main's MessageAdmissionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "LEFT JOIN turn work_turn ON"), error.TurnReadFailed, .queued);
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
@@ -407,10 +405,12 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(7, rounds);
-    // One term per round, measured after the settings rows and the creator-subtree page 1 joined the first WorkRead
-    // round (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
-    try std.testing.expectEqual(8 + 6 + 6 + 4 + 2 + 2 + 1, a.passes);
+    try std.testing.expectEqual(2, rounds);
+    // Passes, measured: 1 for the page round (its ceiling and page statements are all distinct, so one pass), then 8 for
+    // the rows' round: work_row and list_row repeat once per row, and a statement repeated in one pass forces the next.
+    // The creator-subtree page is one more statement in that round; with no descendants it rides the first pass and
+    // adds none. The staged work stages' later terms are gone (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
+    try std.testing.expectEqual(@as(usize, 8 + 1), a.passes);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {
@@ -642,4 +642,149 @@ test "creation receipt corruption work is bounded by ordinal range in SQLite ste
             try std.testing.expectEqual(few, many);
         }
     }
+}
+
+test "SL-7: a damaged work stage is refused the same way by the one-statement and staged reads" {
+    // Each damage is one stage's column set to a value its CHECK or the decoder refuses. The check-constraint edits
+    // need ignore_check_constraints, as the settings test above does. The staged read's error is the expectation, so
+    // a damage that reads nothing cannot pass by agreeing with nothing (expectError fails on success).
+    const Damage = enum { resolved_without_code, in_flight_without_attempt, waiting_without_schedule, ended_without_outcome_time, unknown_outcome, running_without_call, excluded_without_position, queued_with_zero_admission_time, owed_zero_behind_queued, running_unauthorized };
+    for (std.enums.values(Damage)) |damage| {
+        errdefer std.debug.print("SL-7 damage {t} failed\n", .{damage});
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try damaged(&storage, &tmp, damage);
+        const compared = try tests.compareWorkForTesting(&storage, session.slice());
+        switch (damage) {
+            // TurnOutcome.decode reads an unknown code as a failed outcome, not a refusal: both reads agree on it.
+            .unknown_outcome => {
+                try compared.status;
+                const outcome = compared.staged.outcome() orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings("bogus", outcome.code);
+                try expectSameWork(&storage, session.slice(), &compared);
+            },
+            // A running Action that is not authorized is refused by derive, the owner of the Session's state: the status
+            // reads succeed, and both derive their work to the same CorruptStore.
+            .running_unauthorized => {
+                try compared.status;
+                try expectSameWork(&storage, session.slice(), &compared);
+                const created_at = try store_testing.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()});
+                try std.testing.expectError(error.CorruptStore, compared.staged.work(created_at, sl7_now_ms));
+            },
+            // The staged read stops at the queued stage and never reads the owed stage, so its damage is not refused: the
+            // one-statement read decodes the same stages and must agree.
+            .owed_zero_behind_queued => {
+                try compared.status;
+                try expectSameWork(&storage, session.slice(), &compared);
+            },
+            else => try std.testing.expectError(error.CorruptStore, compared.status),
+        }
+    }
+}
+
+/// SL-6's comparison, for a damage both reads answer: the derived work of the staged and the one-statement reads agree,
+/// including a refusal from derive, which both must give.
+fn expectSameWork(storage: *Store, session: []const u8, compared: *const tests.CompareWork) !void {
+    const created_at = try store_testing.queryU64(storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session});
+    const staged = compared.staged.work(created_at, sl7_now_ms);
+    const one = compared.one.work(created_at, sl7_now_ms);
+    if (staged) |expected| try std.testing.expectEqualDeep(expected, try one) else |err| try std.testing.expectError(err, one);
+}
+
+const sl7_now_ms: u64 = 4_000_000_000_000;
+
+fn damaged(storage: *Store, tmp: *std.testing.TmpDir, damage: anytype) !protocol.Bounded(protocol.max_session_bytes) {
+    const Damage = @TypeOf(damage);
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+    defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF") catch unreachable;
+    switch (@as(Damage, damage)) {
+        .resolved_without_code => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-resolved");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET resolution_code=NULL,last_failure_code=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .in_flight_without_attempt => {
+            const session = try liveSession(storage, tmp, "sl7-in-flight");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET attempt_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .waiting_without_schedule => {
+            const session = try liveSession(storage, tmp, "sl7-waiting");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET retry_due_at_ms=5,retry_scheduled_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .ended_without_outcome_time => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-ended");
+            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .unknown_outcome => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-unknown");
+            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_code='bogus' WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .running_without_call => {
+            const session = try TestingWorkShape.running.make(storage, tmp, "sl7-call");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+            defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON") catch unreachable;
+            try store_testing.sqlite_only.exec(storage, "DELETE FROM model_tool_call WHERE operation_id=(SELECT parent_operation_id FROM action_operation WHERE attempt_ordinal=1)", .{});
+            return session;
+        },
+        .excluded_without_position => {
+            const session = try TestingWorkShape.stopped.make(storage, tmp, "sl7-excluded");
+            try store_testing.sqlite_only.exec(storage, "UPDATE session_stop SET position=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        // admitted_at is NOT NULL in this STRICT schema, so a NULL cannot be stored; 0 breaks its CHECK instead.
+        .queued_with_zero_admission_time => {
+            const session = try configureTestSession(storage, "sl7-queued");
+            try submitTestMessage(storage, tmp, "sl7-queued-file", "sl7-queued-message", session.slice(), "queued");
+            try store_testing.sqlite_only.exec(storage, "UPDATE message_admission SET admitted_at=0 WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        // The Session's Message is queued behind an ended Turn, so the staged read stops at the queued stage and never reads
+        // the owed stage. Its obligation_since is damaged to 0, which the owed stage refuses but this read does not reach.
+        .owed_zero_behind_queued => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-owed");
+            try submitTestMessage(storage, tmp, "sl7-owed-file", "sl7-owed-message", session.slice(), "queued after the end");
+            try store_testing.sqlite_only.exec(storage, "UPDATE session SET obligation_since=0 WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .running_unauthorized => {
+            const session = try TestingWorkShape.running.make(storage, tmp, "sl7-unauthorized");
+            try store_testing.sqlite_only.exec(storage, "UPDATE action_operation SET authorized=0 WHERE attempt_ordinal=1", .{});
+            return session;
+        },
+    }
+}
+
+fn liveSession(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try tests.configureTestSessionAsk(storage, name);
+    try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "propose");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    return session;
+}
+
+test "the work row plans every stage as a keyed search" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const c = sqlite.c;
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ report_domain.work_row.sql);
+    defer _ = c.sqlite3_finalize(statement);
+    // No stage scans a table. The three temporary sorts each order one Operation's or one Turn's rows, as the staged
+    // probes they mirror do: the running Action (work_oldest's ORDER BY attempt_at), the newest background result (the one
+    // background probe of latestResolutionAtSql, whose index is in background order) and the latest Turn's stop (WorkLatest's stopped_at). Any other sort is a plan change.
+    var temp_sorts: usize = 0;
+    while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+        const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
+        try std.testing.expect(!std.mem.startsWith(u8, detail, "SCAN "));
+        if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) temp_sorts += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), temp_sorts);
 }

@@ -1819,6 +1819,18 @@ pub fn answerTestTurn(
 ) !void {
     try submitTestMessage(storage, tmp, name ++ "-input", name ++ "-key", session, "input");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleAnswerTestTurn(storage, tmp, binding, name, parts);
+}
+
+/// Settles a final answer for the admitted attempt `binding` without admitting a Message first. A Message a person
+/// admits after an approval declines it, so a fixture that keeps the approval open settles the answer through here.
+pub fn settleAnswerTestTurn(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    binding: AttemptBinding,
+    comptime name: []const u8,
+    parts: []const TestingAnswerPart,
+) !void {
     var capacity: usize = 128;
     for (parts) |part| capacity += part.encoded.len + 32;
     const source_buffer = try std.testing.allocator.alloc(u8, capacity);

@@ -1153,6 +1153,31 @@ test "MySQL plans a list row's settings through the Session ref, with no base-ta
     }.run);
 }
 
+test "MySQL plans the work row through keyed probes" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            if (case.engine != .mysql) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const report_domain = @import("domain/report.zig");
+            const rsql = @import("rsql.zig");
+            const mysql_testing = @import("mysql_testing.zig");
+            const literal = comptime bindLiterals(rsql.sentTemplate(report_domain.work_row_source).prepared(), &.{"'abcdef'"});
+            var buffer: [32768]u8 = undefined;
+            const plan = try mysql_testing.planText(&storage, literal, &buffer);
+            errdefer std.debug.print("MySQL plan for the work row:\n{s}", .{plan});
+            // Every stage's probe is keyed on the Session ref or the live Operation, so no table is scanned, and the two
+            // indexes the latest Turn and the pending Message probes use are present.
+            try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "message_admission_session_pending") != null);
+        }
+    }.run);
+}
+
 test "MySQL plans each archiving candidate and page through its index" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
