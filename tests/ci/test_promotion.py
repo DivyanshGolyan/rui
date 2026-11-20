@@ -191,6 +191,113 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertTrue(promotion.replays_here({"RUNNER_OS": "Linux"}))
         self.assertTrue(promotion.replays_here({}))
 
+    def test_the_bisect_stops_starting_replays_at_the_deadline(self):
+        commits = [f"c{i}" for i in range(22)]
+        now = [0]
+        replays = []
+
+        def passes(sha):
+            replays.append(sha)
+            now[0] += 10
+            return False
+
+        result = promotion.bisect(commits, "base", passes, deadline=25, clock=lambda: now[0])
+        self.assertEqual((result["verdict"], len(replays), result["first"], result["last"], result["narrowed"]),
+                         ("capped", 3, "c0", "c4", 5))
+        self.assertEqual(promotion.describe(result, "base", "head"),
+                         "stopped at the 90-minute cap after 3 replays; the first failing commit is one of c0 to c4 "
+                         "or before this batch (stable not checked)")
+
+    def test_a_deadline_that_has_passed_starts_no_replay_and_a_later_one_finds_the_culprit(self):
+        commits = [f"c{i}" for i in range(22)]
+        replays = []
+        result = promotion.bisect(commits, "base", lambda sha: replays.append(sha) or False,
+                                  deadline=5, clock=lambda: 5)
+        self.assertEqual((result["verdict"], replays, result["narrowed"]), ("capped", [], 22))
+        found = promotion.bisect(commits, "base", lambda sha: int(sha[1:]) < 3, deadline=5, clock=lambda: 4)
+        self.assertEqual(found["culprit"], "c3")
+
+    def test_the_cap_verdict_is_true_at_every_check_point(self):
+        # 22 commits c0..c21; each replay takes 10 seconds on the injected clock.
+        commits = [f"c{i}" for i in range(22)]
+        cases = [
+            # (name, passes, deadline, replayed, verdict fields, describe text)
+            ("before HEAD", lambda sha: False, 0, [],
+             dict(batch_passed=False), "the 90-minute cap left this step unreplayed; read its log"),
+            ("in the loop with no batch commit passed", lambda sha: False, 15, ["c21", "c10"],
+             dict(batch_passed=False, first="c0", last="c10"),
+             "stopped at the 90-minute cap after 2 replays; the first failing commit is one of c0 to c10 "
+             "or before this batch (stable not checked)"),
+            ("in the loop after a batch commit passed", lambda sha: int(sha[1:]) < 3, 40,
+             ["c21", "c10", "c4", "c1"], dict(batch_passed=True, first="c2", last="c4", narrowed=3),
+             "stopped at the 90-minute cap after 4 replays; the first failing commit is one of the 3 commits "
+             "from c2 to c4"),
+            ("before the stable check", lambda sha: False, 50, ["c21", "c10", "c4", "c1", "c0"],
+             dict(batch_passed=False, first="c0", last="c0"),
+             "stopped at the 90-minute cap after 5 replays; the first failing commit is c0 or before this batch "
+             "(stable not checked)"),
+        ]
+        for name, passes, deadline, replayed, fields, text in cases:
+            with self.subTest(check_point=name):
+                sent = []
+
+                def replay(sha):
+                    sent.append(sha)
+                    return passes(sha)
+
+                now = [0]
+
+                def clock():
+                    return now[0]
+
+                def timed(sha):
+                    now[0] += 10
+                    return replay(sha)
+
+                result = promotion.bisect(commits, "base", timed, deadline=deadline, clock=clock)
+                self.assertEqual(result["verdict"], "capped")
+                self.assertEqual(sent, replayed)
+                self.assertEqual({key: result[key] for key in fields}, fields)
+                self.assertEqual(promotion.describe(result, "base", "head"), text)
+
+    def test_a_far_future_deadline_replays_exactly_what_no_deadline_does(self):
+        commits = [f"c{i}" for i in range(22)]
+        for broken in (0, 1, 10, 21, None):
+            with self.subTest(broken=broken):
+                sequences = []
+                for deadline in (None, 10**9):
+                    replays = []
+
+                    def passes(sha):
+                        replays.append(sha)
+                        return sha == "base" or (broken is not None and int(sha[1:]) < broken)
+
+                    result = promotion.bisect(commits, "base", passes, deadline=deadline, clock=lambda: 0)
+                    sequences.append((replays, result["verdict"], result.get("culprit")))
+                self.assertEqual(sequences[0], sequences[1])
+
+    def test_two_steps_sharing_one_deadline_give_the_second_step_no_replay(self):
+        commits = [f"c{i}" for i in range(22)]
+        failed = [dict(name="first", argv=["a"]), dict(name="second", argv=["b"])]
+        now = [0]
+        replayed = {0: [], 1: []}
+
+        def replay(index, step, sha):
+            replayed[index].append(sha)
+            now[0] += 10
+            return False
+
+        results, lines = promotion.bisect_steps(failed, commits, "base", "head", replay, deadline=25,
+                                                clock=lambda: now[0])
+        self.assertEqual(replayed[0], ["c21", "c10", "c4"])
+        self.assertEqual(replayed[1], [])
+        self.assertEqual([result["step"] for result in results], ["first", "second"])
+        self.assertEqual(lines, [
+            "Promotion bisect: first: stopped at the 90-minute cap after 3 replays; the first failing commit is "
+            "one of c0 to c4 or before this batch (stable not checked)",
+            "Promotion bisect: second: the 90-minute cap left this step unreplayed; read its log",
+        ])
+
     def test_search_order(self):
         commits = [f"c{i}" for i in range(22)]
         for broken in (0, 1, 10, 21):
