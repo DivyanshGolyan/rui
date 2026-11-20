@@ -87,7 +87,8 @@ print(time.monotonic_ns())
 PY
     ) || started=unavailable
     status=0
-    "$@" || status=$?
+    # A hung case fails on its own deadline, naming itself, before the CI step limit.
+    python3 "$directory/../ci/case_deadline.py" "${RUI_CASE_TIMEOUT_SECONDS:-900}" "$@" || status=$?
     verdict=passed
     if [ "$status" -ne 0 ]; then verdict=failed; fi
     record=$(python3 - "$name" "$verdict" "$status" "$started" <<'PY'

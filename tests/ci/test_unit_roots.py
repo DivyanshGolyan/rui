@@ -76,6 +76,7 @@ class ParallelRootsTest(unittest.TestCase):
         self.driver.write_text(before + "cases() { :; }\nrun_timed()" + after)
         (self.integration / "host_process.py").write_text(
             "import os, sys\nos.execvp(sys.argv[2], sys.argv[2:])\n")
+        (ci / "case_deadline.py").write_text("import os, sys\nos.execvp(sys.argv[2], sys.argv[2:])\n")
         (ci / "store_shards.py").write_text(
             "import os, subprocess, sys\nfrom pathlib import Path\n"
             "expected = {'store root.py': 'run', 'native root.py': 'native'}.get(Path(sys.argv[2]).name, 'aggregate')\n"
