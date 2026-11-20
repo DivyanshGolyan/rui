@@ -2121,7 +2121,7 @@ def main(selected="all"):
             leave_overview(master)
             assert caller.wait(timeout=5) == 0
             assert set(records.glob("*.json")) == before_records, "the overview captured a request"
-            assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
+            assert (sessions_after := run(preferences_home, "session", "list", "--store", store, "--all")) == sessions_before, (sessions_before, sessions_after)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5),
                         lambda: close_pty(master), lambda: close_pty(slave))
@@ -2150,7 +2150,7 @@ def main(selected="all"):
             assert b"request: " not in output + errors, (output, errors)
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
             assert (blocked_config / "requests").read_text() == "not a directory"
-            assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
+            assert (sessions_after := run(preferences_home, "session", "list", "--store", store, "--all")) == sessions_before, (sessions_before, sessions_after)
         finally:
             dispose_all(lambda: stop_process(blocked, timeout=5) if blocked is not None else None,
                         lambda: close_pty(master), lambda: close_pty(slave))
