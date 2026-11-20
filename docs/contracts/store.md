@@ -76,6 +76,7 @@ Validated creation writes this immutable provenance for attached and detached ch
 [Session provenance](sessions.md#session-provenance) owns the distinction and its public meaning.
 The step to 82 records each Message admission's source kind, backfills it from the sender and source Action, and indexes person inputs by that kind. Kinds 4 and 5 are reserved for future sources.
 The step to 84 adds an index on creator and Session references for creator-subtree reads.
+The step to 88 fills each null `session.creator_ref` from the Session sender of that Session's first admitted Message when the sender is another Session, the rule [Session provenance](sessions.md#session-provenance) applies to new admissions; it sets no `parent_ref` and changes no existing creator.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

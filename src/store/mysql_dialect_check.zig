@@ -749,6 +749,31 @@ test "schema 86 MySQL tool record migration merges records that differed only in
     writeRecord();
 }
 
+test "schema 88 MySQL creator migration names the Session that sent each Session's first Message" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 87) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database_sql, comptime @import("sqlite_tests/migration.zig").format87FixtureSql("REPEAT(X'00',32)"), false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(87).?, false);
+    var creators: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer creators.deinit();
+    try writeResult("SELECT (SELECT count(*) FROM session WHERE session_ref IN ('peer01','kept01') AND creator_ref='rhvzwc')," ++
+        "(SELECT count(*) FROM session WHERE session_ref IN ('pers01','sefx01','empt01') AND creator_ref IS NULL)," ++
+        "(SELECT count(*) FROM session WHERE session_ref IN ('peer01','pers01','sefx01','empt01','kept01') AND parent_ref IS NOT NULL)", &creators.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:3 1:0", creators.written());
+    try expectCatalog(migrated_database_sql);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "model call timing MySQL format 68 migration preserves format 67 resolutions with null final attempt timings" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
