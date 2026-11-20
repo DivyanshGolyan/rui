@@ -802,23 +802,29 @@ fn readListCostsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: u
 
 // Round budget over subtree size. A list page takes 2 rounds: membership, then the rows with their settings, their work
 // and the whole creator subtree with its descendants' work in one statement, whatever the subtree's size or depth. The
-// subtree statement is distinct from the rows' statements, so it rides the row round's first pass and the passes do not
-// change either. (Was 2 + about one round per 8-row subtree page: 16 children took 4 or 5 rounds.)
+// subtree statement is distinct from the rows' statements, so it rides the row round's first pass: the page takes the
+// passes of the same Sessions with no creator links (the descendants are list rows too, so the page's own row count
+// sets its passes). (Was 2 + about one round per 8-row subtree page: 16 children took 4 or 5 rounds.)
 test "a list page takes two rounds and the same passes however many descendants its roots have" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const none = try children(case, 0);
-            try std.testing.expectEqual(@as(u32, 2), none.rounds);
-            for ([_]usize{ 1, 2, 7, 16, 40 }) |count| {
-                const costs = try children(case, count);
-                try std.testing.expectEqual(none, costs);
-            }
-            try std.testing.expectEqual(none, try chain(case, 16));
-            try std.testing.expectEqual(none, try twoRoots(case, 20));
+            for ([_]usize{ 0, 1, 2, 7, 16, 40 }) |count| try expectSame(try children(case, count, false), try children(case, count, true));
+            try expectSame(try chain(case, 16, false), try chain(case, 16, true));
+            try expectSame(try twoRoots(case, 20, false), try twoRoots(case, 20, true));
+        }
+
+        fn expectSame(unlinked: ListCosts, linked: ListCosts) !void {
+            try std.testing.expectEqual(@as(u32, 2), unlinked.rounds);
+            try std.testing.expectEqual(@as(u32, 2), linked.rounds);
+            try std.testing.expectEqual(unlinked.passes, linked.passes);
+        }
+
+        fn link(storage: *Store, linked: bool, creator: []const u8, child: []const u8) !void {
+            if (linked) try store_testing.exec(storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ creator, child });
         }
 
         /// One root with `count` children, the root first on the page.
-        fn children(case: *store_testing.Case, count: usize) !ListCosts {
+        fn children(case: *store_testing.Case, count: usize, linked: bool) !ListCosts {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -828,13 +834,13 @@ test "a list page takes two rounds and the same passes however many descendants 
             var name: [48]u8 = undefined;
             for (0..count) |index| {
                 const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-rounds-{d}", .{index}));
-                try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+                try link(&storage, linked, root.slice(), child.slice());
             }
-            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{count});
+            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) count else 0});
         }
 
         /// A chain of `depth` Sessions under one root, each created by the one before it.
-        fn chain(case: *store_testing.Case, depth: usize) !ListCosts {
+        fn chain(case: *store_testing.Case, depth: usize, linked: bool) !ListCosts {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -845,14 +851,14 @@ test "a list page takes two rounds and the same passes however many descendants 
             var name: [48]u8 = undefined;
             for (0..depth) |index| {
                 const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-chain-{d}", .{index}));
-                try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ creator.slice(), child.slice() });
+                try link(&storage, linked, creator.slice(), child.slice());
                 creator = child;
             }
-            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{depth});
+            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) depth else 0});
         }
 
         /// Two roots on the page with `count` children each.
-        fn twoRoots(case: *store_testing.Case, count: usize) !ListCosts {
+        fn twoRoots(case: *store_testing.Case, count: usize, linked: bool) !ListCosts {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -863,10 +869,10 @@ test "a list page takes two rounds and the same passes however many descendants 
             var name: [48]u8 = undefined;
             for (0..count * 2) |index| {
                 const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-two-{d}", .{index}));
-                const creator = if (index % 2 == 0) left.slice() else right.slice();
-                try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ creator, child.slice() });
+                try link(&storage, linked, if (index % 2 == 0) left.slice() else right.slice(), child.slice());
             }
-            return readListCostsForTesting(&storage, &tmp, 0, &.{ left.slice(), right.slice() }, &.{ count, count });
+            const expected: u64 = if (linked) count else 0;
+            return readListCostsForTesting(&storage, &tmp, 0, &.{ left.slice(), right.slice() }, &.{ expected, expected });
         }
     }.run);
 }
