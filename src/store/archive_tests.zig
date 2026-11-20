@@ -1088,12 +1088,17 @@ test "Archived window equals the Archived membership over the archive's edge cas
 
 /// A Store shaped like one at scale, where MySQL costs a keyed probe below a scan: a creator chain `chain_length`
 /// Sessions deep whose every link has answered Turns, so most Turns are finished and positioned, and was archived and
-/// restored, so every link has a Session stop, and a few running Bash
-/// Sessions: every eighth link starts one and archives it, and the last link starts `live`, which stays active.
-/// Statistics are refreshed after the writes.
+/// restored, so every link has a Session stop, and running Bash Sessions: every eighth link starts one and archives
+/// it, and the last link starts `live`, which stays active. A page of eight refs must be a small share of the Store's
+/// Sessions, Turns and Actions, or MySQL rightly scans or hash-joins a table it would read most of. So `finished_bash`
+/// Sessions each run a Bash Action to success and answer after it, as most Sessions at scale have: their Actions are
+/// accepted and their Turns positioned, and the archiving candidates stay a small share too. `idle_sessions`
+/// configure-only Sessions add Session rows cheaply. Statistics are refreshed after the writes.
 const PlanStore = struct {
     const chain_length = 16;
     const answered_turns = 2;
+    const finished_bash = 16;
+    const idle_sessions = 96;
     /// The first Session of the creator chain and the last one, which descends from it through every link.
     root: protocol.Bounded(protocol.max_session_bytes),
     leaf: protocol.Bounded(protocol.max_session_bytes),
@@ -1141,6 +1146,16 @@ const PlanStore = struct {
                 }
             }
         }
+        inline for (0..finished_bash) |index| {
+            @setEvalBranchQuota(100_000);
+            const name = std.fmt.comptimePrint("plan-finished-{d}", .{index});
+            const bash = try runningBash(storage, tmp, name);
+            _ = try storage.settleActionAttempt(bash.binding, .succeeded, "Bash succeeded.", .{});
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try testing.settleAnswerTestTurn(storage, tmp, next, name ++ "-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+        }
+        var key_buffer: [64]u8 = undefined;
+        for (0..idle_sessions) |index| _ = try testing.configureTestSession(storage, try std.fmt.bufPrint(&key_buffer, "plan-idle-{d}", .{index}));
         try @import("mysql_testing.zig").analyzeTables(storage);
         return result;
     }
