@@ -586,6 +586,82 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     }.run);
 }
 
+test "SL-5: a list row's first Message and first approval are the Session's own, with or without a Turn" {
+    try store_testing.forEachEngine(struct {
+        fn firstAdmission(storage: *Store, session: []const u8) !u64 {
+            return store_testing.queryU64(storage, "SELECT min(admission_id) FROM message_admission WHERE session_ref=?1", .{session});
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+
+            // An approval awaiting a decision in a live Turn. It runs first: admitting the next model attempt takes the
+            // oldest pending Message of any Session, so later Sessions' Messages would be admitted instead.
+            const working = try configureTestSessionAsk(&storage, "sl5-working");
+            try submitTestMessage(&storage, &tmp, "sl5-working-file", "sl5-working-message", working.slice(), "propose");
+            const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{
+                .item_id = "sl5-awaiting",
+                .name = "bash",
+                .encoded_call_id = "sl5-awaiting",
+                .decoded_call_id = "sl5-awaiting",
+                .encoded_arguments = "{\\\"description\\\":\\\"Awaiting\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                .decoded_arguments = "{\"description\":\"Awaiting\",\"cmd\":\"true\",\"timeout_ms\":null}",
+            }};
+            try settleCallsForTesting(&storage, &tmp, proposing, "sl5-calls", &calls);
+            const awaiting = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1 AND authorized=0 AND resolution_code IS NULL", .{working.slice()});
+            const approval = try store_testing.queryU64(&storage, "SELECT approval_position FROM action_operation WHERE action_id=?1", .{awaiting});
+            {
+                var listed = try testingListRow(&storage, &tmp, working.slice());
+                defer listed.deinit();
+                try std.testing.expectEqual(awaiting, try listed.number(&.{ "work", "first_action" }));
+                try std.testing.expectEqual(approval, try listed.number(&.{ "last_line", "position" }));
+                var request: protocol.ActivityPage = .{};
+                try request.session.set(working.slice());
+                var activity: protocol.ActivityFacts = undefined;
+                try storage.activityPage(&request, &activity);
+                try std.testing.expectEqual(awaiting, activity.work.work.first_action);
+            }
+
+            // No Message and no Turn: neither column is named.
+            const bare = try configureTestSession(&storage, "sl5-bare");
+            {
+                var listed = try testingListRow(&storage, &tmp, bare.slice());
+                defer listed.deinit();
+                try std.testing.expect(listed.get(&.{"first_message"}) == .null);
+                try std.testing.expect(listed.get(&.{ "work", "first_action" }) == .null);
+            }
+
+            // A person's first Message, queued with no Turn.
+            const person = try configureTestSession(&storage, "sl5-person");
+            try submitTestMessage(&storage, &tmp, "sl5-person-file", "sl5-person-message", person.slice(), "from a person");
+            {
+                var listed = try testingListRow(&storage, &tmp, person.slice());
+                defer listed.deinit();
+                try std.testing.expectEqual(try firstAdmission(&storage, person.slice()), try listed.number(&.{ "first_message", "admission" }));
+                try std.testing.expect(listed.get(&.{ "first_message", "sender" }) == .null);
+                try std.testing.expect(listed.get(&.{ "work", "first_action" }) == .null);
+            }
+
+            // A peer Session's first Message: its sender is the peer.
+            const peer = try configureTestSession(&storage, "sl5-peer");
+            const receiver = try configureTestSession(&storage, "sl5-receiver");
+            try submitTestMessage(&storage, &tmp, "sl5-peer-file", "sl5-peer-message", receiver.slice(), "from a peer");
+            const peer_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{peer.slice()});
+            try store_testing.exec(&storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE session_ref=?3", .{ peer.slice(), peer_position, receiver.slice() });
+            {
+                var listed = try testingListRow(&storage, &tmp, receiver.slice());
+                defer listed.deinit();
+                try std.testing.expectEqualStrings(peer.slice(), listed.get(&.{ "first_message", "sender", "session" }).string);
+            }
+        }
+    }.run);
+}
+
 test "a page lists only the kinds it asks for, up to its limit" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -664,8 +740,8 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, protocol.session_list_page_size));
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }
