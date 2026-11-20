@@ -93,7 +93,8 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 SHA-256 of the frozen settings it started with; restart compares it with the
 target build's check, so a same-build restart happens exactly when saved
 settings changed since the Host started. A foreground `host serve` reports no
-digest, and a same-build restart leaves it running as already current.
+digest, and a same-build restart leaves it running as already current; a
+same-build Host whose target check gives no settings frame also stays current.
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL

@@ -170,6 +170,20 @@ pub const Effect = union(enum) {
     done: Outcome,
 };
 
+/// The running Host a same-build activation leaves current when the target gives no
+/// settings frame to compare: one on the target executable that reports a digest.
+fn keptRunning(facts: Facts) ?Running {
+    if (facts.same_executable != true) return null;
+    return switch (facts.current orelse return null) {
+        .same => |value| if (value.settings != null) value.running else null,
+        else => null,
+    };
+}
+
+fn keep(kept: ?Running, outcome: Outcome) Effect {
+    return .{ .done = if (kept) |running| .{ .already_ready = running } else outcome };
+}
+
 /// One Host's activation, in the order its checks run. `cancelled` is the
 /// caller's stop as the shell polls it now; it is read only before the
 /// target is resolved and between the check and the stop.
@@ -183,7 +197,10 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
     if (cancelled and facts.same_executable == null) return .{ .done = .cancelled };
     if (managed.order == .gt) return .{ .done = .superseded };
     if (!managed.environment_parses) return .{ .done = .{ .unsupported = .configuration_unavailable } };
-    if (facts.target_failed) |step| return .{ .done = .{ .target_unusable = step } };
+    // A Host already on the target that reports its settings is restarted only for a
+    // checked frame that differs; a target step that gives no frame leaves it current.
+    const kept = keptRunning(facts);
+    if (facts.target_failed) |step| return keep(kept, .{ .target_unusable = step });
     const same = facts.same_executable orelse return .resolve_target;
     var running: ?Same = null;
     if (same) running = switch (facts.current orelse return .confirm_current) {
@@ -193,13 +210,13 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
         // build before the digest) has nothing to compare: the same build stays.
         .same => |value| if (value.settings == null) return .{ .done = .{ .already_ready = value.running } } else value,
     };
-    if (facts.known_bad orelse return .inspect_target) return .{ .done = .{ .unsupported = .target_capability } };
-    if (!(facts.sources orelse return .reconstruct_sources)) return .{ .done = .{ .unsupported = .configuration_unavailable } };
+    if (facts.known_bad orelse return .inspect_target) return keep(kept, .{ .unsupported = .target_capability });
+    if (!(facts.sources orelse return .reconstruct_sources)) return keep(kept, .{ .unsupported = .configuration_unavailable });
     const checked: settings_handoff.Digest = switch (facts.check orelse return .check_target) {
         .cancelled => return .{ .done = .cancelled },
-        .unavailable => return .{ .done = .{ .target_unusable = .checking } },
-        .refused => |failure| return .{ .done = .{ .refused = .{ .stage = .checking, .failure = failure } } },
-        .untyped, .bad_frame => return .{ .done = .{ .unsupported = .target_capability } },
+        .unavailable => return keep(kept, .{ .target_unusable = .checking }),
+        .refused => |failure| return keep(kept, .{ .refused = .{ .stage = .checking, .failure = failure } }),
+        .untyped, .bad_frame => return keep(kept, .{ .unsupported = .target_capability }),
         .ok => |digest| digest,
     };
     // The same build is restarted only when its saved settings changed since it started.
@@ -671,8 +688,14 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                     if (managed.order == .gt) break :expected .{ .done = .superseded };
                     // 5. An environment entry without a value.
                     if (!managed.environment_parses) break :expected .{ .done = .{ .unsupported = .configuration_unavailable } };
+                    // A same-build Host reporting a digest stays current when the target gives no frame.
+                    const kept_running: ?Running = if (same_executable == true) if (current) |value| switch (value) {
+                        .same => |same_value| if (same_value.settings != null) same_value.running else null,
+                        else => null,
+                    } else null else null;
+                    const kept_done: ?Effect = if (kept_running) |value| .{ .done = .{ .already_ready = value } } else null;
                     // 5a. A target step the shell could not complete.
-                    if (target_failed) |step| break :expected .{ .done = .{ .target_unusable = step } };
+                    if (target_failed) |step| break :expected kept_done orelse .{ .done = .{ .target_unusable = step } };
                     // 6, 7. The target is the running executable.
                     const same = same_executable orelse break :expected .resolve_target;
                     var running_same: ?@FieldType(fixture.Current, "same") = null;
@@ -682,15 +705,15 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                         .same => |value| if (value.settings == null) break :expected .{ .done = .{ .already_ready = value.running } } else value,
                     };
                     // 8. The known-bad released target.
-                    if (known_bad orelse break :expected .inspect_target) break :expected .{ .done = .{ .unsupported = .target_capability } };
+                    if (known_bad orelse break :expected .inspect_target) break :expected kept_done orelse .{ .done = .{ .unsupported = .target_capability } };
                     // 9. Sources the target cannot be given.
-                    if (!(sources orelse break :expected .reconstruct_sources)) break :expected .{ .done = .{ .unsupported = .configuration_unavailable } };
+                    if (!(sources orelse break :expected .reconstruct_sources)) break :expected kept_done orelse .{ .done = .{ .unsupported = .configuration_unavailable } };
                     // 10. The target's check.
                     const checked_digest: settings_handoff.Digest = switch (check orelse break :expected .check_target) {
                         .cancelled => break :expected .{ .done = .cancelled },
-                        .unavailable => break :expected .{ .done = .{ .target_unusable = .checking } },
-                        .refused => break :expected .{ .done = .{ .refused = .{ .stage = .checking, .failure = fixture.refusal } } },
-                        .untyped, .bad_frame => break :expected .{ .done = .{ .unsupported = .target_capability } },
+                        .unavailable => break :expected kept_done orelse .{ .done = .{ .target_unusable = .checking } },
+                        .refused => break :expected kept_done orelse .{ .done = .{ .refused = .{ .stage = .checking, .failure = fixture.refusal } } },
+                        .untyped, .bad_frame => break :expected kept_done orelse .{ .done = .{ .unsupported = .target_capability } },
                         .ok => |digest| digest,
                     };
                     if (running_same) |value| if (value.settings) |settings| {
