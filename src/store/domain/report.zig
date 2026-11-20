@@ -543,13 +543,16 @@ fn resultLatestSql(comptime columns: []const u8, comptime session: []const u8, c
     return resultBranchSql(columns, session, operation, background) ++ " ORDER BY acceptance_position DESC LIMIT 1";
 }
 
-/// The Session's newest Resolution for `operation`'s Actions, as one scalar. The foreground and background branches are
-/// disjoint and each is ordered by acceptance position, and positions are unique per Session, so the newer branch head
-/// is the latest. WorkActions and the work_row render it, so both name the latest Resolution the same way.
+/// The Session's newest Resolution for `operation`'s Actions, as one scalar: the newer of the two branch heads, the
+/// foreground head unless the background head is newer. Positions are unique per Session, so the comparison names one
+/// branch. WorkActions and the work_row render it, so both name the latest Resolution the same way.
 fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []const u8) []const u8 {
-    return "(SELECT latest.resolved_at FROM (SELECT f.acceptance_position,f.resolved_at FROM (" ++
-        resultLatestSql("acceptance_position,resolved_at", session, operation, false) ++ ") f UNION ALL SELECT b.acceptance_position,b.resolved_at FROM (" ++
-        resultLatestSql("acceptance_position,resolved_at", session, operation, true) ++ ") b) latest ORDER BY latest.acceptance_position DESC LIMIT 1)";
+    const foreground_position = "(" ++ resultLatestSql("acceptance_position", session, operation, false) ++ ")";
+    const background_position = "(" ++ resultLatestSql("acceptance_position", session, operation, true) ++ ")";
+    const foreground_resolved = "(" ++ resultLatestSql("resolved_at", session, operation, false) ++ ")";
+    const background_resolved = "(" ++ resultLatestSql("resolved_at", session, operation, true) ++ ")";
+    return "CASE WHEN " ++ background_position ++ " IS NULL OR " ++ foreground_position ++ ">" ++ background_position ++
+        " THEN " ++ foreground_resolved ++ " ELSE " ++ background_resolved ++ " END";
 }
 
 /// The decided Action's session_revision join: the revision its permission_revision names. WorkActions and the work_row
