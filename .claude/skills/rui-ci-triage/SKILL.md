@@ -29,9 +29,9 @@ A run can fail in several jobs for different reasons.
 Read each failed job's own failing step before calling it derivative.
 The required `admission` job can fail because an upstream acceptance job failed or was cancelled.
 Read that upstream failure rather than blaming the aggregate.
-A Promote run whose step has failed is red even while its bisect step keeps the run in progress (up to four hours); report it as red at once.
-A scheduled Promote run is Promote's tier and bisect on `main` every three hours; it files `main-red` issues, and you triage its runs as a promotion's.
-A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names. On macOS there are no replay logs: a failed macOS step's bisect is skipped, and its failed step's log is the only evidence.
+A Promote run whose step has failed is red; report it as red at once.
+A scheduled Promote run is Promote's tier on `main` every three hours; it files `main-red` issues, and you triage its runs as a promotion's.
+A Promote failure ranks each failed step's suspects inside that job: read every `Promotion suspects: <step>:` line and the log excerpt the job prints before diagnosing the commit each names, since a suspect is the commit to read first, not a verdict. A manual bisect (Promote's `bisect-step` dispatch) prints `Promotion bisect:` verdict lines and retains its replay logs; it refuses a step that is not a build target, and a `Promotion excerpt:` line is the failed step's output tail.
 A `stopped at the 90-minute cap` verdict names only a range of commits, so diagnose from the replays it ran and that range.
 A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../docs/verification/release.md#release-publication) says which, and what recovers each.
 

@@ -27,7 +27,7 @@ on:
         required: true
         type: string
       promotion:
-        description: Run the full suite on Linux and macOS and bisect a failing job over the batch
+        description: Run the full suite on Linux and macOS and name each failing job's suspects in the batch
         required: true
         type: boolean
       # main-build.yml after each merge: never a test, never a promotion.
@@ -671,7 +671,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
     # handoff compiles without the producer's cache. A failed promotion shard
-    # also bisects its batch.
+    # also names its batch's suspects.
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # qualification.py packs Selected suites into at most ten shards, so
@@ -781,21 +781,12 @@ jobs:
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Bisect the promotion batch with each failed step
+      - name: Name the promotion suspects of each failed step
         if: ${{ failure() && inputs.promotion }}
-        timeout-minutes: 240
         env:
           BASE: ${{ inputs.base }}
           HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
-        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
-      - name: Retain the bisect's verdict and replay logs
-        if: ${{ failure() && inputs.promotion }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: promotion-bisect-linux-${{ matrix.name }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/promotion-bisect
-          retention-days: 14
-          if-no-files-found: ignore
+        run: python3 -B tests/ci/promotion.py suspects --base "$BASE" --head "$HEAD_SHA"
       - name: Existing Linux measurement-tool checks, not resource qualification
         if: ${{ needs.plan.outputs.linux_memory == 'true' && contains(matrix.targets, 'test-logic') }}
         run: |
@@ -902,21 +893,12 @@ jobs:
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Bisect the promotion batch with each failed step
+      - name: Name the promotion suspects of each failed step
         if: ${{ failure() && inputs.promotion }}
-        timeout-minutes: 240
         env:
           BASE: ${{ inputs.base }}
           HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
-        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
-      - name: Retain the bisect's verdict and replay logs
-        if: ${{ failure() && inputs.promotion }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: promotion-bisect-macos-${{ matrix.name }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/promotion-bisect
-          retention-days: 14
-          if-no-files-found: ignore
+        run: python3 -B tests/ci/promotion.py suspects --base "$BASE" --head "$HEAD_SHA"
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.

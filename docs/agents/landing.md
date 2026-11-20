@@ -81,7 +81,7 @@ The pre-push hook re-runs the last CI red as described in [local feedback eviden
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 
 `main` is red while an open `main-red` issue says so.
-PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, bisects each failed step to the commit that broke it (a macOS step is diagnosed from its log instead) and files one `main-red` issue per cause, naming that commit.
+PRs run a fast tier, so a break can reach `main`; [scheduled promotion](../verification/release.md#scheduled-promotion) finds it within one three-hour tick, names each failed step's suspect commits, most direct first, and files one `main-red` issue per cause, listing them.
 The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
 When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.
 A verdict that the red did not reproduce at HEAD, or already failed at the batch's base, names no commit; triage it as below.
@@ -105,7 +105,7 @@ Promote publishes a green main HEAD every three hours when main has moved past `
 Dispatch a promotion by hand without asking once the merged batch holds a fix users are waiting for and the next tick is too late: `gh workflow run promote.yml --ref main`, or `-f sha=qualified` for the newest green commit while main HEAD is red.
 A dispatch waits behind a running promotion, and a scheduled tick replaces it while it waits ([Scheduled promotion](../verification/release.md#scheduled-promotion)).
 Whoever dispatches a promotion watches it to the end and reports the result unprompted.
-A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
-A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
+A failed step means the promotion is red; report it at once, since its suspects are in the run's log as the job ends.
+A red promotion lists, on each `promotion-red` issue it files, the batch commits suspected of each failed step of that job, most direct first.
 Fix forward through an ordinary PR, then promote again.
 Recover a red Release as [Release publication](../verification/release.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

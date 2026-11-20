@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       batch-base:
-        description: Last promoted commit; a promotion's failure bisects base..candidate
+        description: Last promoted commit; a promotion's failure ranks base..candidate's suspects
         required: false
         type: string
         default: ''
@@ -149,7 +149,7 @@ jobs:
         timeout-minutes: 45
         env:
           # A promotion tests its release executable instead of compiling rui twice more.
-          # Only this step sees it, so a bisect replay compiles each commit's own.
+          # Only this step sees it.
           RUI_UNDER_TEST: ${{ steps.release.outputs.rui }}
         run: |
           set -euo pipefail
@@ -179,18 +179,9 @@ jobs:
           include-hidden-files: true
           retention-days: 3
           if-no-files-found: ignore
-      - name: Bisect the promotion batch with each failed step
+      - name: Name the promotion suspects of each failed step
         if: ${{ failure() && inputs.batch-base != '' }}
-        timeout-minutes: 240
         env:
           BASE: ${{ inputs.batch-base }}
           HEAD_SHA: ${{ inputs.candidate-ref }}
-        run: python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"
-      - name: Retain the bisect's verdict and replay logs
-        if: ${{ failure() && inputs.batch-base != '' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: promotion-bisect-upgrade-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/promotion-bisect
-          retention-days: 14
-          if-no-files-found: ignore
+        run: python3 -B tests/ci/promotion.py suspects --base "$BASE" --head "$HEAD_SHA"

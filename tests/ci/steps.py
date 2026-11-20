@@ -10,6 +10,7 @@ same command in another commit's tree with that tree's environment. The
 command list in the workflow is the only copy of each command.
 """
 import argparse
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -23,11 +24,19 @@ def record_path():
     return Path(temp) / "rui-failed-steps.jsonl" if temp else None
 
 
-def record_failure(name, argv):
-    """Append a failed step: what promotion.py replays to bisect it."""
+# The last lines of a failed step's output that the record keeps for promotion's suspects report.
+EXCERPT_LINES = 30
+EXCERPT_WIDTH = 300
+
+
+def record_failure(name, argv, output=""):
+    """Append a failed step: what promotion.py replays and ranks suspects for, with the tail of its output."""
     if path := record_path():
+        entry = dict(name=name, argv=argv)
+        if excerpt := [line[:EXCERPT_WIDTH] for line in output.splitlines()[-EXCERPT_LINES:]]:
+            entry["excerpt"] = excerpt
         with open(path, "a") as record:
-            print(json.dumps(dict(name=name, argv=argv)), file=record)
+            print(json.dumps(entry), file=record)
 
 
 def failures(path):
@@ -60,12 +69,19 @@ def main():
         if args.output_root:
             env["STEP_OUTPUT"] = str(args.output_root / name)
         print(f"::group::{name}: {command}", flush=True)
-        code = subprocess.run(argv, env=env).returncode
+        # The output streams to the log as it runs; its last lines go in the record for promotion's suspects report.
+        tail = deque(maxlen=EXCERPT_LINES)
+        process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   errors="replace")
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            tail.append(line)
+        code = process.wait()
         print("::endgroup::", flush=True)
         if code:
             print(f"::error::{name} failed (exit {code})", flush=True)
             failed.append(name)
-            record_failure(name, argv)
+            record_failure(name, argv, "".join(tail))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:
             for name, _ in args.steps:

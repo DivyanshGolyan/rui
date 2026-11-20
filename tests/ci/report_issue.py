@@ -17,6 +17,8 @@ import shlex
 import subprocess
 import time
 
+from promotion import BISECT_PREFIX, SUSPECT_PREFIX
+
 
 LABEL = "ci-red"
 FIXED_BY = re.compile(r"Fixed by ([0-9a-f]{40})\b")
@@ -46,7 +48,8 @@ WHITESPACE_PATHS = 10
 CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
 AGGREGATE_STEP = "Require every selected "
-BISECT = re.compile(r"^Promotion bisect: .+$", re.M)
+# The lines a promotion step writes for its failure: its suspects (promotion.py suspects) and any manual bisect verdict.
+PROMOTION_LINE = re.compile(rf"^(?:{re.escape(SUSPECT_PREFIX)}|{re.escape(BISECT_PREFIX)}).+$", re.M)
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
 
@@ -346,11 +349,11 @@ def main():
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
-        verdicts = BISECT.findall(untimed(log)) if log is not None else []
+        verdicts = PROMOTION_LINE.findall(untimed(log)) if log is not None else []
         causes = job_causes(log, cases, args.workflow, job)
         for cause in causes:
             if verdicts:
-                scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above bisects one "
+                scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above locates one "
                           "failed step, and a step with several causes names only its earliest."]
                          if len(causes) > 1 else [])
                 cause.detail = "\n".join(filter(None, (cause.detail, *verdicts, *scope)))
