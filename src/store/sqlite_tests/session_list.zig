@@ -424,6 +424,44 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     try std.testing.expectEqual(@as(usize, 8 + 1), a.passes);
 }
 
+// The creator-subtree statement is distinct from the rows' statements, so it rides the row round's first pass: a page
+// whose roots have descendants takes the passes of the same Sessions with no creator links. The descendants are list
+// rows too, so the page's own row count sets its passes either way.
+test "a creator subtree adds no list read passes" {
+    const Passes = struct {
+        fn read(count: usize, linked: bool) !usize {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "subtree-passes-root");
+            var name: [48]u8 = undefined;
+            for (0..count) |index| {
+                const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "subtree-passes-{d}", .{index}));
+                if (linked) try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+            }
+            var path: [protocol.max_store_bytes]u8 = undefined;
+            const length = try tmp.dir.realPath(std.testing.io, &path);
+            var used = std.atomic.Value(u64).init(0);
+            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+            try capture.create(path[0..length], 1, false);
+            defer capture.deinit();
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            var scratch: session_list_read_domain.Scratch = .{};
+            var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
+            try session_list_read_domain.readSessionList(&a, &.{}, &scratch, &reply);
+            var report = try capture.seal();
+            report.deinit();
+            return a.passes;
+        }
+    };
+    for ([_]usize{ 0, 1, 7, 16, 40 }) |count| try std.testing.expectEqual(try Passes.read(count, false), try Passes.read(count, true));
+}
+
 test "a stopping Turn with queued work adds no list read rounds or passes" {
     const Costs = struct {
         fn read(storage: *Store, tmp: *std.testing.TmpDir) !struct { rounds: u32, passes: usize } {

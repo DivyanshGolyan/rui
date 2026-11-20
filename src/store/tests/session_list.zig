@@ -754,15 +754,13 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 
 /// The rounds one whole-list read takes over `storage`, which must hold `stopped` stopped Sessions for its row check.
 fn readRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize) !u32 {
-    return (try readListCostsForTesting(storage, tmp, stopped, &.{}, &.{})).rounds;
+    return readListRoundsForTesting(storage, tmp, stopped, &.{}, &.{});
 }
 
-const ListCosts = struct { rounds: u32, passes: u32 };
-
-/// The rounds and passes of one whole-list read of the first page over `storage`, which must hold `stopped` stopped
+/// The rounds of one whole-list read of the first page over `storage`, which must hold `stopped` stopped
 /// Sessions for its row check. Each of `roots` must be on that page with `descendants` at its index as its
 /// descendant_count.
-fn readListCostsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize, roots: []const []const u8, descendants: []const u64) !ListCosts {
+fn readListRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize, roots: []const []const u8, descendants: []const u64) !u32 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -797,15 +795,14 @@ fn readListCostsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: u
             try std.testing.expect(found);
         }
     }
-    return .{ .rounds = rounds, .passes = a.passes };
+    return rounds;
 }
 
 // Round budget over subtree size. A list page takes 2 rounds: membership, then the rows with their settings, their work
 // and the whole creator subtree with its descendants' work in one statement, whatever the subtree's size or depth. The
-// subtree statement is distinct from the rows' statements, so it rides the row round's first pass: the page takes the
-// passes of the same Sessions with no creator links (the descendants are list rows too, so the page's own row count
-// sets its passes). (Was 2 + about one round per 8-row subtree page: 16 children took 4 or 5 rounds.)
-test "a list page takes two rounds and the same passes however many descendants its roots have" {
+// subtree's passes are SQLite's `a creator subtree adds no list read passes`. (Was 2 + about one round per 8-row subtree
+// page: 16 children took 4 or 5 rounds.)
+test "a list page takes two rounds however many descendants its roots have" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             for ([_]usize{ 0, 1, 2, 7, 16, 40 }) |count| try expectSame(try children(case, count, false), try children(case, count, true));
@@ -813,10 +810,9 @@ test "a list page takes two rounds and the same passes however many descendants 
             try expectSame(try twoRoots(case, 20, false), try twoRoots(case, 20, true));
         }
 
-        fn expectSame(unlinked: ListCosts, linked: ListCosts) !void {
-            try std.testing.expectEqual(@as(u32, 2), unlinked.rounds);
-            try std.testing.expectEqual(@as(u32, 2), linked.rounds);
-            try std.testing.expectEqual(unlinked.passes, linked.passes);
+        fn expectSame(unlinked: u32, linked: u32) !void {
+            try std.testing.expectEqual(@as(u32, 2), unlinked);
+            try std.testing.expectEqual(@as(u32, 2), linked);
         }
 
         fn link(storage: *Store, linked: bool, creator: []const u8, child: []const u8) !void {
@@ -824,7 +820,7 @@ test "a list page takes two rounds and the same passes however many descendants 
         }
 
         /// One root with `count` children, the root first on the page.
-        fn children(case: *store_testing.Case, count: usize, linked: bool) !ListCosts {
+        fn children(case: *store_testing.Case, count: usize, linked: bool) !u32 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -836,11 +832,11 @@ test "a list page takes two rounds and the same passes however many descendants 
                 const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-rounds-{d}", .{index}));
                 try link(&storage, linked, root.slice(), child.slice());
             }
-            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) count else 0});
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) count else 0});
         }
 
         /// A chain of `depth` Sessions under one root, each created by the one before it.
-        fn chain(case: *store_testing.Case, depth: usize, linked: bool) !ListCosts {
+        fn chain(case: *store_testing.Case, depth: usize, linked: bool) !u32 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -854,11 +850,11 @@ test "a list page takes two rounds and the same passes however many descendants 
                 try link(&storage, linked, creator.slice(), child.slice());
                 creator = child;
             }
-            return readListCostsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) depth else 0});
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) depth else 0});
         }
 
         /// Two roots on the page with `count` children each.
-        fn twoRoots(case: *store_testing.Case, count: usize, linked: bool) !ListCosts {
+        fn twoRoots(case: *store_testing.Case, count: usize, linked: bool) !u32 {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -872,7 +868,7 @@ test "a list page takes two rounds and the same passes however many descendants 
                 try link(&storage, linked, if (index % 2 == 0) left.slice() else right.slice(), child.slice());
             }
             const expected: u64 = if (linked) count else 0;
-            return readListCostsForTesting(&storage, &tmp, 0, &.{ left.slice(), right.slice() }, &.{ expected, expected });
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{ left.slice(), right.slice() }, &.{ expected, expected });
         }
     }.run);
 }
