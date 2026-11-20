@@ -114,16 +114,20 @@ class SocketTest(unittest.TestCase):
     def test_pau_13_watchdog_bounds_send_backpressure(self):
         writer, reader = socket.socketpair()
         writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-        client = PauseClient(writer, timeout=0.05)
+        client = None
         try:
-            # MSG_DONTWAIT makes only these sends non-blocking. Switching the socket
-            # itself would race the client's reader thread, whose read on a
-            # non-blocking socket returns nothing and ends as EOF.
+            # Fill the buffer before PauseClient starts its reader thread. O_NONBLOCK is the
+            # only portable way to make send() refuse a full buffer (Darwin's sosend ignores
+            # MSG_DONTWAIT when waiting for space, so it blocked forever), and no reader can
+            # see the non-blocking mode yet, so it cannot read an empty result as EOF.
+            writer.setblocking(False)
             try:
                 while True:
-                    writer.send(b"x" * 4096, socket.MSG_DONTWAIT)
+                    writer.send(b"x" * 4096)
             except BlockingIOError:
                 pass
+            writer.setblocking(True)
+            client = PauseClient(writer, timeout=0.05)
             started = threading.Event()
             outcome = []
             def call():
@@ -139,7 +143,10 @@ class SocketTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertIsInstance(outcome[0], TimeoutError)
         finally:
-            client.close()
+            if client is not None:
+                client.close()
+            else:
+                writer.close()
             reader.close()
 
     def test_pau_14_independent_eof_is_not_child_exit(self):
