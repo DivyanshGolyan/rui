@@ -319,16 +319,14 @@ test "a live list page whose action candidate page read fails answers main's Ses
     try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "IN (SELECT a.session_ref FROM action_operation a"), error.SessionReadFailed, .queued);
 }
 
-test "a list row whose Action statement fails answers ActionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.ActionReadFailed, "FROM action_operation a LEFT JOIN session_revision"), error.ActionReadFailed, .awaiting);
+test "a list row whose work statement fails answers TurnReadFailed" {
+    // The list reads each row's work in one statement, so its Action, Turn and queue stages fail together. The first
+    // stage's name answers for all of them; the fragment is unique to that statement.
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "AS actions_total"), error.TurnReadFailed, .awaiting);
 }
 
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed, .queued);
-}
-
-test "a list row whose queue read fails answers main's MessageAdmissionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.MessageAdmissionReadFailed, "admission_id>?2"), error.MessageAdmissionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "LEFT JOIN turn work_turn ON"), error.TurnReadFailed, .queued);
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
@@ -407,10 +405,11 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(7, rounds);
-    // One term per round, measured after the settings rows and the creator-subtree page 1 joined the first WorkRead
-    // round (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
-    try std.testing.expectEqual(8 + 6 + 6 + 4 + 2 + 2 + 1, a.passes);
+    try std.testing.expectEqual(2, rounds);
+    // Passes, measured: 8 for the first round, one per row, since each row's settings and work statements share a pass
+    // (a statement repeated in one pass forces the next); 1 for the creator-subtree round's descendant work row. The
+    // staged work stages' later terms are gone (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
+    try std.testing.expectEqual(@as(usize, 8 + 1), a.passes);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {

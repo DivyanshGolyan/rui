@@ -775,8 +775,10 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, protocol.session_list_page_size));
+            // Work is one statement per Session, so a page of any size takes the settings-and-work round and the subtree
+            // round: two rounds, down from seven (was 7, one per staged work stage).
+            try std.testing.expectEqual(@as(u32, 2), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 2), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }

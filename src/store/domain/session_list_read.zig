@@ -26,7 +26,6 @@ const report_domain = @import("report.zig");
 const tool_set = @import("tool_set.zig");
 const ReadAccess = reads_domain.ReadAccess;
 const WorkRead = report_domain.WorkRead;
-const readWorks = report_domain.readWorks;
 const SessionText = Bounded(session_id.max_reference_bytes);
 
 pub fn Watched(comptime Visitor: type) type {
@@ -75,7 +74,7 @@ pub const list_failures = .{
     .{ list_row, error.SessionReadFailed },
     .{ changed_ancestors, error.SessionReadFailed },
     .{ descendant_page, error.SessionReadFailed },
-} ++ report_domain.report_failures;
+} ++ report_domain.work_row_failures;
 
 fn runList(a: *ReadAccess) !void {
     return store_access.runNamed(a, list_failures, error.CorruptStore);
@@ -436,8 +435,10 @@ pub const Scratch = struct {
     live: LivePages = .{},
     /// The changed seeds of a since-delta page, in ID order, found before its ancestor statements queue.
     changed: [change_ring.capacity]change_ring.Id = undefined,
-    /// The settings rows of one page, read in its first round beside the first WorkRead stage.
+    /// The settings rows of one page, read in its first round beside its one-statement work rows.
     settings: [session_list.session_list_page_size]SettingsRow = undefined,
+    /// The one-statement work rows of one page, read in the same first round as the settings rows.
+    work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
     /// The creator-subtree read of one page: its roots, its page and the WorkReads of its descendants.
     rollup: RollupRead = .{},
 };
@@ -680,6 +681,7 @@ const RollupRead = struct {
     after_origin: ?change_ring.Id = null,
     after_member: ?change_ring.Id = null,
     works: [session_list.session_list_page_size]report_domain.WorkRead = undefined,
+    work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
 };
 
 /// Queues the creator-subtree page after the cursor in `read`. The caller runs the round.
@@ -712,16 +714,11 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
         var work_count: usize = 0;
         for (read.page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
-            const work = &read.works[work_count];
-            work.* = .{ .session = row.session_ref.slice() };
-            _ = work.queue(a);
+            const slot = &read.work_rows[work_count];
+            a.readInto(report_domain.work_row, .{ .session = row.session_ref.slice() }, &slot.row, &slot.found);
             work_count += 1;
         }
-        if (work_count != 0) {
-            try runList(a);
-            for (read.works[0..work_count]) |*work| try work.advance();
-            try readWorks(a, read.works[0..work_count]);
-        }
+        if (work_count != 0) try runList(a);
         var work_index: usize = 0;
         for (read.page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
@@ -729,8 +726,12 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
             while (index < references.len and !std.mem.eql(u8, row.origin.slice(), &references[index])) : (index += 1) {}
             if (index == references.len) return error.CorruptStore;
             const total = &totals[index];
+            const slot = &read.work_rows[work_index];
             const work_read = &read.works[work_index];
             work_index += 1;
+            if (!slot.found.get()) return error.CorruptStore;
+            work_read.* = .{ .session = row.session_ref.slice() };
+            try work_read.decode(&slot.row);
             const work = try work_read.work(row.created_at.get(), now_ms);
             total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), work_read, work));
             total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
@@ -822,6 +823,12 @@ const SettingsRow = struct {
     found: store_access.Found = undefined,
 };
 
+/// One Session's one-statement work row, read in a list round beside its settings row, and whether its Session was found.
+const WorkRowSlot = struct {
+    row: report_domain.WorkRow = undefined,
+    found: store_access.Found = undefined,
+};
+
 /// Reads one page of rows in three stages. The first round queues the creator-subtree page 1, every row's first
 /// WorkRead stage and every row's settings, which need only the Session ref. The rounds after it finish the
 /// WorkReads and the subtree pages. Then the rows are shaped from the settings read.
@@ -839,15 +846,17 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
     rollup.* = .{ .roots = @splat(.{}) };
     for (references, 0..) |*reference, index| rollup.roots[index].set(reference) catch return error.CorruptStore;
     if (references.len != 0) try queueRollupPage(a, request, rollup);
-    for (references, works[0..references.len], scratch.settings[0..references.len]) |*reference, *work, *settings| {
-        work.* = .{ .session = reference };
-        _ = work.queue(a);
+    for (references, scratch.work_rows[0..references.len], scratch.settings[0..references.len]) |*reference, *slot, *settings| {
+        a.readInto(report_domain.work_row, .{ .session = reference }, &slot.row, &slot.found);
         a.readInto(list_row, .{ .session = reference }, &settings.row, &settings.found);
     }
     try runList(a);
     try readRollups(a, request, references, now, rollup, rollups);
-    for (works[0..references.len]) |*work| try work.advance();
-    try readWorks(a, works[0..references.len]);
+    for (references, works[0..references.len], scratch.work_rows[0..references.len]) |*reference, *work, *slot| {
+        if (!slot.found.get()) return error.CorruptStore;
+        work.* = .{ .session = reference };
+        try work.decode(&slot.row);
+    }
     const shown = &list.shown;
     for (references, works[0..references.len], shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
     try readRowSettings(a, shown[0..references.len], scratch.settings[0..references.len], rollups, now, visitor);
@@ -907,8 +916,9 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
-    // The settings join and WorkRead's first_action read one fact, the oldest approval awaiting a decision. U3 merges
-    // the two reads; until then a disagreement means the Store is corrupt, not that either read may win.
+    // The settings join and the work row's first_action read one fact, the oldest approval awaiting a decision. Both
+    // reads run in one round over one snapshot, so a disagreement means the Store is corrupt. U3 put both in one round;
+    // the later PR that retires the staged machine can drop one of the two reads (Q2).
     if ((if (row.first_awaiting_action) |id| id.get() else null) != work.first_action) return error.CorruptStore;
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
     const first_message = try report_domain.firstMessage(row, if (row.first_admission) |admission| admission.get() else 0);
