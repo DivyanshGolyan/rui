@@ -2815,6 +2815,14 @@ class SuspectAttributionTest(unittest.TestCase):
         self.assertEqual(self.reach("src/bash.zig")["bash-integration"], DIRECT)
         self.assertEqual(self.reach("src/store/rsql.zig")["rsql-table"], DIRECT)
 
+    def test_a_go_test_under_qualification_is_its_packages_own_source(self):
+        self.assertEqual(self.reach("tests/qualification/measurement/measurement_test.go")["measurement-check"], DIRECT)
+
+    def test_the_verify_rui_skill_reaches_no_build_target_its_consumers_are_policy_tests(self):
+        # Its scripts are read by tests/ci/test_verify_rui*.py, which the policy suite runs; no fixture or unit root imports them.
+        self.assertEqual(self.reach(".claude/skills/verify-rui/scripts/verify-rui"), {})
+        self.assertEqual(self.reach(".claude/skills/verify-rui/scripts/frames.json"), {})
+
     def test_a_statement_table_root_reach_makes_rsql_table_a_graph_suspect(self):
         self.assertEqual(self.reach("src/store/tests.zig").get("rsql-table"), GRAPH)
 

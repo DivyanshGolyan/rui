@@ -64,13 +64,84 @@ def batch(base, head):
     return listed.split() if listed else []
 
 
-def rank(targets, entries, limit=TOP_SUSPECTS):
-    """The batch's commits that select one of `targets`, most direct first, newer first within a tier.
+# Words a log or a diff shares by accident: they say nothing about which commit broke a step.
+GENERIC_TOKENS = frozenset({
+    "error", "errors", "failed", "failure", "failures", "fails", "fail", "test", "tests", "testing", "expected",
+    "actual", "output", "stdout", "stderr", "assert", "assertion", "exit", "process", "command", "replay",
+    "passed", "passes", "return", "returns", "function", "import", "public", "private", "string", "value",
+    "values", "none", "true", "false", "traceback", "during", "before", "after", "should", "could", "would",
+    "there", "their", "which", "where", "while", "never", "always", "build", "python", "unittest", "files",
+    "file", "lines", "line", "error:", "ERROR", "FAIL", "PASS", "result", "results", "status", "failing",
+})
+# Tokens a log excerpt or a diff line names: a source file, a path, a quoted string or an identifier.
+FILE_TOKEN = re.compile(r"[A-Za-z_][\w-]*\.(?:go|zig|py|sh|ts|c|h|cjs|json|md|yml|txt)\b")
+PATH_TOKEN = re.compile(r"[\w.-]+(?:/[\w.-]+)+\.\w+")
+QUOTED_TOKEN = re.compile(r'"([^"\n]{5,80})"')
+WORD_TOKEN = re.compile(r"[A-Za-z_]\w{4,}")
+LOG_TOKENS_SHOWN = 4
 
-    `entries` run oldest first; each is {"sha", "subject", "paths": {path: {target: tier}}}, where a path's
-    map holds the tier at which the selector reaches each target that path changes (select_tests.attribute).
-    Returns dicts with the commit's tier and the touched paths that reach a target at that tier.
+
+# A log line that says what failed: a failing test or assertion, a panic, an error, or a file:line reference.
+FAILURE_LINE = re.compile(r"FAIL|panic|[Ee]rror|assert|[Ee]xpected|Traceback|\b[\w/.-]+\.(?:go|zig|py|sh|cjs|ts):\d+")
+# A name a log shares with the code that produced it: snake_case, CamelCase or a dotted or qualified name.
+IDENTIFIER_TOKEN = re.compile(r"[a-z]+_\w+|[A-Z][a-z]+[A-Z]\w*|[a-z]+[A-Z]\w*|[A-Za-z_]\w*\.\w+")
+
+
+def tokens_of(text):
+    """The identifying tokens of a diff line, with the generic ones dropped."""
+    found = set(PATH_TOKEN.findall(text)) | set(FILE_TOKEN.findall(text)) | set(QUOTED_TOKEN.findall(text))
+    found |= set(WORD_TOKEN.findall(text))
+    return {token for token in found if token not in GENERIC_TOKENS}
+
+
+def log_tokens_of(excerpt):
+    """The tokens of a failed step's excerpt that name what failed: failure lines, and identifier-shaped names.
+
+    Plain words (a session, a build, a path segment) match nearly every commit, so only snake_case, CamelCase,
+    qualified and quoted names and file names count; the excerpt's other lines are its passing output.
     """
+    failing = "\n".join(line for line in excerpt if FAILURE_LINE.search(line))
+    found = set(PATH_TOKEN.findall(failing)) | set(FILE_TOKEN.findall(failing)) | set(QUOTED_TOKEN.findall(failing))
+    found |= set(IDENTIFIER_TOKEN.findall(failing))
+    return {token for token in found if token not in GENERIC_TOKENS}
+
+
+def change_tokens(patch):
+    """{path: tokens} for a `git diff -U0` text: the added and removed lines of each file, and its path."""
+    tokens, path = {}, None
+    for line in patch.splitlines():
+        if line.startswith("diff --git a/"):
+            path = line.rsplit(" b/", 1)[-1]
+            tokens[path] = tokens_of(path)
+        elif path is not None and line[:1] in ("+", "-") and line[:3] not in ("+++", "---"):
+            tokens[path] |= tokens_of(line[1:])
+    return tokens
+
+
+def common_tokens(entries):
+    """Tokens most of the batch shares: they match every commit, so a match on one says nothing."""
+    if len(entries) < 4:
+        return frozenset()
+    seen = {}
+    for entry in entries:
+        for token in set().union(*entry.get("tokens", {}).values()):
+            seen[token] = seen.get(token, 0) + 1
+    return frozenset(token for token, count in seen.items() if count > len(entries) / 2)
+
+
+def rank(targets, entries, limit=TOP_SUSPECTS, log=frozenset()):
+    """The batch's commits that a failed step points at, the most likely first.
+
+    `entries` run oldest first; each is {"sha", "subject", "paths": {path: {target: tier}}, "tokens": {path:
+    tokens}}. A path's map holds the tier at which the selector reaches each target it changes
+    (select_tests.attribute); its tokens are the identifiers its added and removed lines name. `log` holds the
+    identifiers of the failed step's output. A commit whose changed lines name log tokens ranks first, most
+    shared tokens first; a tie falls back to the selector's tier (own source, import or rule, fallback) and
+    then to newer commits. Returns dicts with the commit's tier (None when only the log points at it), the
+    tokens it shares with the log, and the touched paths that the selector reaches or the log names.
+    """
+    shared_away = common_tokens(entries)
+    log = frozenset(log) - shared_away
     ranked = []
     for position, entry in enumerate(entries):
         best, files = None, []
@@ -83,10 +154,15 @@ def rank(targets, entries, limit=TOP_SUSPECTS):
                 best, files = tier, [path]
             elif tier == best:
                 files.append(path)
-        if best is not None:
-            ranked.append(dict(sha=entry["sha"], subject=entry["subject"], tier=best,
-                               files=sorted(files), position=position))
-    ranked.sort(key=lambda suspect: (suspect["tier"], -suspect["position"]))
+        matched = {path: hits for path, tokens in entry.get("tokens", {}).items()
+                   if (hits := (tokens & log) - shared_away)}
+        shared = set().union(*matched.values()) if matched else set()
+        if best is None and not shared:
+            continue
+        ranked.append(dict(sha=entry["sha"], subject=entry["subject"], tier=best, log=sorted(shared),
+                           files=sorted(set(files) | set(matched)), position=position))
+    ranked.sort(key=lambda suspect: (0 if suspect["log"] else 1, -len(suspect["log"]),
+                                     3 if suspect["tier"] is None else suspect["tier"], -suspect["position"]))
     return ranked[:limit]
 
 
@@ -95,17 +171,28 @@ def pull_request(subject):
     return f"PR #{match[1]}" if match else "no PR number in the subject"
 
 
+def reason(suspect):
+    """Why a suspect ranks: the log tokens it shares, the selector tier it reaches, or both."""
+    parts = []
+    if suspect["log"]:
+        shown = ", ".join(suspect["log"][:LOG_TOKENS_SHOWN])
+        parts.append(f"log match on {len(suspect['log'])} token{'s' if len(suspect['log']) != 1 else ''} ({shown})")
+    if suspect["tier"] is not None:
+        parts.append(TIER_LABELS[suspect["tier"]])
+    return ", ".join(parts) or "log match"
+
+
 def suspect_lines(name, targets, ranked, size):
     """The `Promotion suspects:` lines for one failed step; the issue filer copies each one."""
     if size == 0:
         return [f"{SUSPECT_PREFIX}{name}: no commits between the base and head, so nothing to rank"]
-    if not targets:
+    if not ranked and not targets:
         return [f"{SUSPECT_PREFIX}{name}: not a selector target, so no batch commit can be ranked; read the failed step's log"]
     if not ranked:
         return [f"{SUSPECT_PREFIX}{name}: none of the {size} batch commits selects {', '.join(targets)}; "
                 "read the failed step's log"]
     return [f"{SUSPECT_PREFIX}{name}: {number}. {suspect['sha']} {pull_request(suspect['subject'])}, "
-            f"{TIER_LABELS[suspect['tier']]}: {suspect['subject']}; touched {', '.join(suspect['files'])}"
+            f"{reason(suspect)}: {suspect['subject']}; touched {', '.join(suspect['files'])}"
             for number, suspect in enumerate(ranked, 1)]
 
 
@@ -113,7 +200,9 @@ def snapshot_attribution(sha):
     """One batch commit's entry for rank(): the selector's reach of each path the commit changes, at its tree."""
     paths, parent = select_tests.changed_paths(f"{sha}^1", sha)
     subject = git("log", "-1", "--format=%s", sha)
-    entry = dict(sha=sha, subject=subject, paths={})
+    patch = subprocess.run(["git", "diff", "--no-renames", "-U0", parent, sha], cwd=select_tests.ROOT, check=True,
+                           capture_output=True, text=True, errors="surrogateescape").stdout
+    entry = dict(sha=sha, subject=subject, paths={}, tokens=change_tokens(patch))
     if not paths:
         return entry
     with tempfile.TemporaryDirectory(prefix="promotion-snapshot-") as scratch:
@@ -159,7 +248,8 @@ def suspect_report(failed, entries):
     lines = []
     for failure in failed:
         targets = targets_of(failure["name"])
-        lines += suspect_lines(failure["name"], targets, rank(targets, entries), len(entries))
+        log = log_tokens_of(failure.get("excerpt") or [])
+        lines += suspect_lines(failure["name"], targets, rank(targets, entries, log=log), len(entries))
         lines += excerpt_lines(failure["name"], failure)
     return lines
 

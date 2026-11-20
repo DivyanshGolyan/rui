@@ -336,11 +336,80 @@ class SuspectRankingTest(unittest.TestCase):
         self.assertEqual(ranked[0]["sha"], f"{8:040d}")
 
 
+def logged_entry(sha, subject, tokens, reach=None):
+    """A batch commit whose changed file names `tokens`, reaching the selector's targets as `reach` says."""
+    return dict(sha=sha, subject=subject, paths={"changed.zig": reach or {}},
+                tokens={"changed.zig": set(tokens)})
+
+
+class LogMatchRankingTest(unittest.TestCase):
+    def test_a_commit_whose_changed_lines_name_the_failing_test_ranks_above_its_own_source(self):
+        owner = logged_entry("a" * 40, "Own the target (#1)", {"unrelated_name"}, {"t": DIRECT})
+        named = logged_entry("b" * 40, "Rename the failing test (#2)", {"TestRetireSocket"}, {"t": BROAD})
+        ranked = promotion.rank(["t"], [owner, named], log={"TestRetireSocket"})
+        self.assertEqual([suspect["sha"][0] for suspect in ranked], ["b", "a"])
+        self.assertEqual(ranked[0]["log"], ["TestRetireSocket"])
+        self.assertEqual(ranked[0]["files"], ["changed.zig"])
+
+    def test_more_shared_tokens_rank_first_and_a_tie_falls_back_to_the_tier_then_the_newer_commit(self):
+        one = logged_entry("a" * 40, "One (#1)", {"alpha_one"}, {"t": DIRECT})
+        two = logged_entry("b" * 40, "Two (#2)", {"alpha_one", "beta_two"}, {"t": BROAD})
+        tie_old = logged_entry("c" * 40, "Tie old (#3)", {"gamma_one"}, {"t": GRAPH})
+        tie_new = logged_entry("d" * 40, "Tie new (#4)", {"gamma_one"}, {"t": GRAPH})
+        ranked = promotion.rank(["t"], [one, two, tie_old, tie_new], log={"alpha_one", "beta_two", "gamma_one"})
+        self.assertEqual([suspect["sha"][0] for suspect in ranked], ["b", "a", "d", "c"])
+
+    def test_a_token_every_commit_shares_says_nothing_and_is_dropped(self):
+        entries = [logged_entry(f"{n}" * 40, f"Change {n} (#{n})", {"shared_name"}, {"t": DIRECT}) for n in range(1, 6)]
+        entries.append(logged_entry("6" * 40, "Other (#6)", set(), {"t": GRAPH}))
+        ranked = promotion.rank(["t"], entries, log={"shared_name"})
+        self.assertEqual(ranked[0]["tier"], DIRECT)
+        self.assertEqual([suspect["log"] for suspect in ranked][:1], [[]])
+
+    def test_the_log_points_at_a_commit_the_selector_does_not_reach(self):
+        unreached = logged_entry("e" * 40, "Only the log names it (#7)", {"TestOnlyTheLogNames"}, None)
+        ranked = promotion.rank(["t"], [unreached], log={"TestOnlyTheLogNames"})
+        [suspect] = ranked
+        self.assertIsNone(suspect["tier"])
+        self.assertEqual(promotion.reason(suspect), "log match on 1 token (TestOnlyTheLogNames)")
+
+    def test_tokens_keep_names_and_drop_generic_words(self):
+        tokens = promotion.tokens_of('--- FAIL: TestRetireSocketRemovesOnlyARefusingSocket (0.00s) '
+                                     'measurement_test.go:175: test "retire sockets" failed with error')
+        self.assertIn("TestRetireSocketRemovesOnlyARefusingSocket", tokens)
+        self.assertIn("measurement_test.go", tokens)
+        self.assertIn("retire sockets", tokens)
+        self.assertFalse(tokens & {"failed", "error", "test"})
+
+    def test_change_tokens_reads_each_files_added_and_removed_lines_and_its_path(self):
+        patch = ("diff --git a/lane/a.zig b/lane/a.zig\n"
+                 "--- a/lane/a.zig\n+++ b/lane/a.zig\n@@ -1 +1 @@\n-fn oldName() void {}\n+fn newName() void {}\n"
+                 "diff --git a/lane/b.py b/lane/b.py\n@@ -0,0 +1 @@\n+check_retire_socket()\n")
+        tokens = promotion.change_tokens(patch)
+        self.assertEqual(set(tokens), {"lane/a.zig", "lane/b.py"})
+        self.assertIn("newName", tokens["lane/a.zig"])
+        self.assertIn("oldName", tokens["lane/a.zig"])
+        self.assertIn("check_retire_socket", tokens["lane/b.py"])
+        self.assertNotIn("newName", tokens["lane/b.py"])
+
+    def test_log_tokens_keep_only_failing_identifiers(self):
+        excerpt = ["Building session list with the default build step",
+                   "ok   session_list_renders (0.02s)",
+                   "--- FAIL: TestRetireSocketRemovesOnlyARefusingSocket (0.00s)",
+                   'measurement_test.go:175: test "retire sockets" failed with bind invalid argument',
+                   "exit status 1"]
+        tokens = promotion.log_tokens_of(excerpt)
+        self.assertIn("TestRetireSocketRemovesOnlyARefusingSocket", tokens)
+        self.assertIn("measurement_test.go", tokens)
+        self.assertIn("retire sockets", tokens)
+        self.assertFalse(tokens & {"session", "build", "default", "session_list_renders", "renders", "bind"})
+
+
 class SuspectReportTest(unittest.TestCase):
     SHA = "9" * 40
 
     def test_each_suspect_line_names_its_commit_pr_tier_and_matching_files(self):
-        ranked = [dict(sha=self.SHA, subject="Change the bash owner (#1692)", tier=GRAPH,
+        ranked = [dict(sha=self.SHA, subject="Change the bash owner (#1692)", tier=GRAPH, log=[],
                        files=["alpha", "beta"], position=3)]
         [line] = promotion.suspect_lines("stack-frames", ["stack-frames"], ranked, 25)
         self.assertEqual(line, f"Promotion suspects: stack-frames: 1. {self.SHA} PR #1692, tier b (import or rule): "
@@ -349,7 +418,7 @@ class SuspectReportTest(unittest.TestCase):
 
     def test_a_subject_without_a_pull_request_number_says_so(self):
         self.assertIn("no PR number in the subject",
-                      promotion.suspect_lines("s", ["s"], [dict(sha=self.SHA, subject="Direct push", tier=DIRECT,
+                      promotion.suspect_lines("s", ["s"], [dict(sha=self.SHA, subject="Direct push", tier=DIRECT, log=[],
                                                                 files=["x"], position=0)], 1)[0])
 
     def test_an_empty_suspect_list_says_no_batch_commit_selects_the_step(self):
@@ -377,6 +446,16 @@ class SuspectReportTest(unittest.TestCase):
                                       "boom", "last line", "--- end of excerpt ---"])
         self.assertEqual(lines[5], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
                                    "read the failed step's log")
+
+    def test_the_excerpt_names_the_test_and_the_line_says_which_token_matched(self):
+        failed = [dict(name="measurement-check", argv=["x"],
+                       excerpt=["--- FAIL: TestRetireSocketRemovesOnlyARefusingSocket (0.00s)"])]
+        entries = [logged_entry(self.SHA, "Retire a socket (#1935)", {"TestRetireSocketRemovesOnlyARefusingSocket"},
+                                {"lane/measurement_test.go": {"measurement-check": DIRECT}})]
+        entries[0]["paths"] = {"changed.zig": {}}
+        [line, _] = promotion.suspect_report(failed, entries)[:2]
+        self.assertIn("log match on 1 token (TestRetireSocketRemovesOnlyARefusingSocket)", line)
+        self.assertIn("Retire a socket (#1935)", line)
 
     def test_no_recorded_failure_says_there_is_nothing_to_rank(self):
         self.assertEqual(promotion.suspect_report([], []),

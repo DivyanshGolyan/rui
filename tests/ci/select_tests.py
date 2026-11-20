@@ -1074,7 +1074,9 @@ def revision_contents(paths, base, head):
 # script; an import, link or path rule the selector follows; or a fallback or coverage expansion only.
 DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py"),
-                  "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig")}
+                   "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
+                   # select() maps every Go file under tests/qualification to measurement-check by a path rule.
+                   "measurement-check": ("tests/qualification/*.go", "tests/qualification/go.*")}
 # The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
 # reach is a rsql-table input, so a change any of them reaches is one. tests/ci/rsql_table.py runs these.
 STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integration")
