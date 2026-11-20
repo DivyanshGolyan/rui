@@ -1098,6 +1098,37 @@ fn bindLiterals(comptime sql: []const u8, comptime values: []const []const u8) [
     }
 }
 
+// The changed-page ancestor batch is one statement for up to eight seeds. Its literals follow the argument slots in
+// text order: eight seeds, then the workspace and archive slots of the seed member, then the same two in the recursive
+// member. A seed is bound at its Session key, which MySQL reads as the session PRIMARY index.
+test "MySQL plans the changed-page ancestor batch through the session key" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            if (case.engine != .mysql) return;
+            const rsql = @import("rsql.zig");
+            const session_list_read = @import("domain/session_list_read.zig");
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const sql = comptime bindLiterals(rsql.sentTemplate(session_list_read.changed_ancestors_source).prepared(), &.{
+                "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'",
+                "NULL",     "NULL",     "'active'", "'active'", "NULL",     "NULL",     "'active'", "'active'",
+            });
+            var buffer: [16384]u8 = undefined;
+            const plan = try mysql_testing.planText(&storage, sql, &buffer);
+            errdefer std.debug.print("MySQL plan for the changed-page ancestor batch:\n{s}", .{plan});
+            // MySQL materializes the recursive CTE and scans that temporary result (`seen`, `tail`, `parent`, `child`); only a
+            // scan of the session table itself would grow with the Store.
+            for ([_][]const u8{ "Table scan on session", "Table scan on seed" }) |scan|
+                try std.testing.expect(std.mem.indexOf(u8, plan, scan) == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "PRIMARY") != null);
+        }
+    }.run);
+}
+
 test "MySQL plans each archiving candidate and page through its index" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {

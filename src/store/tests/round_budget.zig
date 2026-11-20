@@ -42,9 +42,9 @@ const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
 const entering_fixtures = [_][]const u8{ "prefixSealForTesting", "readSessionForTesting" };
-// Budgets measured inside another entry point's round: an Archived window is a readSessionList request, so it enters
-// the Store through readSessionList and has no Store function of its own.
-const dispatched_points = [_]EntryPoint{.readArchivedWindow};
+// Budgets measured inside another entry point's round: an Archived window or a changed page is a readSessionList request, so it
+// enters the Store through readSessionList and has no Store function of its own.
+const dispatched_points = [_]EntryPoint{ .readArchivedWindow, .readChangedSessionList };
 
 test "every function that enters the Store has a round budget" {
     const sources = .{

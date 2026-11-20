@@ -1140,6 +1140,7 @@ pub const EntryPoint = enum {
     readSessionReport,
     readSessionList,
     readArchivedWindow,
+    readChangedSessionList,
     publishRetryCrossings,
     actionContent,
     readAction,
@@ -1220,6 +1221,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readSessionReport = 6,
     .readSessionList = 8, // One membership read derives creator-subtree facts.
     .readArchivedWindow = 1, // One statement serves an Archived page, its rows decorated in the same round.
+    .readChangedSessionList = 7, // One ancestor round for every changed seed, beside the page rows.
     .publishRetryCrossings = 1,
     .actionContent = 2,
     .readAction = 1,

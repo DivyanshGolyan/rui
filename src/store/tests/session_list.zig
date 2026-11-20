@@ -21,7 +21,9 @@ const TestingConfiguring = shared_fixtures.TestingConfiguring;
 const TestingListReply = shared_fixtures.TestingListReply;
 const TestingListing = shared_fixtures.TestingListing;
 const TestingScript = shared_fixtures.TestingScript;
+const RoundMeter = shared_fixtures.RoundMeter;
 const TwinRounds = shared_fixtures.TwinRounds;
+const round_budgets = shared_fixtures.round_budgets;
 const completeSessionStop = shared_fixtures.completeSessionStop;
 const configureTestSessionAsk = shared_fixtures.configureTestSessionAsk;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
@@ -733,6 +735,80 @@ test "a Workspace's changed page reads only its own Sessions, however many other
             try page.expectReferences(&.{watched.*});
             try std.testing.expect(page.next == null);
             return taken;
+        }
+    }.run);
+}
+
+// 65 and 130 changed Sessions need more than eight ancestor statements, so the read Access sends extra passes inside
+// the one round; the round count must not change.
+test "Session list changed page round budget is the same for 1, 9, 64, 65 and 130 changed Sessions" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            for ([_]usize{ 1, 9, 64, 65, 130 }, 0..) |count, round| {
+                const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+                for (0..count) |index| {
+                    var key: [32]u8 = undefined;
+                    _ = try configure(&storage, try std.fmt.bufPrint(&key, "changed-budget-{d}-{d}", .{ round, index }), "", workspace);
+                }
+                var meter: RoundMeter = .{ .storage = &storage };
+                meter.start();
+                const page = try TestingListing.read(&storage, &tmp, .{ .since = since });
+                try meter.stop(.readChangedSessionList);
+                try std.testing.expectEqual(protocol.ListDelta.changed, page.delta);
+                try std.testing.expectEqual(count > protocol.session_list_page_size, page.next != null);
+                const measured = meter.measured.get(.readChangedSessionList).?;
+                try std.testing.expectEqual(round_budgets.get(.readChangedSessionList), measured.rounds);
+                if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
+            }
+        }
+
+        fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
+            var command = try completeConfiguration(key, session, place, "model");
+            const configured = try store.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..change_ring.id_bytes].*;
+        }
+    }.run);
+}
+
+test "Session list changed page refuses a creator cycle among batched seeds beside a healthy chain" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+            const root = try configure(&storage, "cycle-root", workspace);
+            const child = try configure(&storage, "cycle-child", workspace);
+            const left = try configure(&storage, "cycle-left", workspace);
+            const right = try configure(&storage, "cycle-right", workspace);
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &root, &child });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &right, &left });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &left, &right });
+            var used = std.atomic.Value(u64).init(0);
+            // The healthy chain (child, root) and the cycle (left, right) share one batch of seeds. The root's chain
+            // ends, so one cycle test over every row would miss the cycle beside it.
+            try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{ .since = since }, &used, 6));
+        }
+
+        fn configure(store: *Store, key: []const u8, place: []const u8) !change_ring.Id {
+            var command = try completeConfiguration(key, "", place, "model");
+            const configured = try store.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..change_ring.id_bytes].*;
         }
     }.run);
 }

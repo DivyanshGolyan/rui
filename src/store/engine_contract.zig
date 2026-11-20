@@ -2279,6 +2279,12 @@ fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repli
     meter.start();
     std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{ .archive = .archived, .window = .head }, &used, 3)));
     try meter.stop(.readArchivedWindow);
+    // A changed page: one Session is created after the token, so the page names it and its ancestor batch runs in one round.
+    const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+    _ = try replies.keep(configureTestSession(storage, "budget-changed"));
+    meter.start();
+    std.testing.allocator.free(try replies.keep(testingSessionList(storage, tmp, .{ .since = since }, &used, 4)));
+    try meter.stop(.readChangedSessionList);
     meter.start();
     const binding = try replies.keep(storage.failedResponseBinding(session.slice(), continuation.operation_id, continuation.attempt_ordinal));
     try meter.stop(.failedResponseBinding);
