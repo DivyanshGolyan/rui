@@ -75,6 +75,8 @@ Otherwise only main HEAD can be promoted, and Promote qualifies it as below and 
 Promote is the sole caller of the one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues under the label Promote passes (`main-red` on schedule, `promotion-red` by hand), and Promote publishes after it. Its jobs appear as `qualify / <job>`.
 Promote qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, Linux `mysql-wire-integration`, the upgrade check on both systems and the renderer contracts.
 A failing suite, upgrade or contract job bisects each step that failed, on the same runner, by replaying that step's recorded command: once at HEAD, then by binary search over the batch's first-parent commits.
+A batch of one commit is its own culprit, with no replays.
+A Linux bisect stops starting replays 90 minutes after it begins and reports the narrowed range, so a step cut short names a range rather than a commit.
 A failed macOS step is diagnosed from its log alone; its bisect is skipped.
 A step is one suite batch, one upgrade check or one contract; a suite job stops at its first failed batch, and [steps.py](../../tests/ci/steps.py) runs every upgrade check and contract even after one fails.
 Each step's verdict names the first commit where it fails, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdicts are retained with the run.

@@ -60,14 +60,14 @@ class BatchRepository:
     def check(self):
         return self.steps(*(f"{name}=grep -qx good {name}" for name in self.FILES))
 
-    def bisect(self, runner_os="Linux"):
+    def bisect(self, runner_os="Linux", base=None):
         logs = self.root / "logs"
         env = dict(self.env)
         if runner_os is None:
             env.pop("RUNNER_OS")
         else:
             env["RUNNER_OS"] = runner_os
-        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "--base", self.base, "--head", self.commits[-1],
+        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "--base", base or self.base, "--head", self.commits[-1],
                                  "--logs", str(logs)], cwd=self.repo, env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
         verdict = logs / "verdict.json"
@@ -190,6 +190,47 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertFalse(promotion.replays_here({"RUNNER_OS": "macOS"}))
         self.assertTrue(promotion.replays_here({"RUNNER_OS": "Linux"}))
         self.assertTrue(promotion.replays_here({}))
+
+    def test_a_one_commit_batch_is_its_own_culprit_without_replays(self):
+        repository = self.batch(broken=dict(state=6))
+        self.assertEqual(repository.check(), 1)
+        merge = repository.commits[-1]
+        verdict, stdout = repository.bisect(base=repository.commits[-2])
+        [step] = verdict["steps"]
+        self.assertEqual((step["verdict"], step["culprit"], step["replays"]), ("single-commit", merge, []))
+        self.assertIn(f"Promotion bisect: state: the batch holds one commit, {merge}; it is the culprit", stdout)
+        self.assertNotIn("replay at", stdout)
+
+    def test_a_one_commit_batch_calls_no_replay(self):
+        calls = []
+        result = promotion.bisect(["only"], "base", lambda sha: calls.append(sha) or False)
+        self.assertEqual((result["verdict"], result["culprit"], calls), ("single-commit", "only", []))
+
+    def test_the_bisect_stops_starting_replays_at_the_deadline(self):
+        commits = [f"c{i}" for i in range(22)]
+        now = [0]
+        replays = []
+
+        def passes(sha):
+            replays.append(sha)
+            now[0] += 10
+            return False
+
+        result = promotion.bisect(commits, "base", passes, deadline=25, clock=lambda: now[0])
+        self.assertEqual((result["verdict"], len(replays), result["first"], result["last"], result["narrowed"]),
+                         ("capped", 3, "c0", "c4", 5))
+        self.assertEqual(promotion.describe(result, "base", "head"),
+                         f"stopped at the 90-minute cap after 3 replays; the first failing commit is one of the 5 "
+                         f"commits from c0 to c4")
+
+    def test_a_deadline_that_has_passed_starts_no_replay_and_a_later_one_finds_the_culprit(self):
+        commits = [f"c{i}" for i in range(22)]
+        replays = []
+        result = promotion.bisect(commits, "base", lambda sha: replays.append(sha) or False,
+                                  deadline=5, clock=lambda: 5)
+        self.assertEqual((result["verdict"], replays, result["narrowed"]), ("capped", [], 22))
+        found = promotion.bisect(commits, "base", lambda sha: int(sha[1:]) < 3, deadline=5, clock=lambda: 4)
+        self.assertEqual(found["culprit"], "c3")
 
     def test_search_order(self):
         commits = [f"c{i}" for i in range(22)]

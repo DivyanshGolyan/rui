@@ -7,7 +7,8 @@ promoted release. When a job fails, each step it recorded as failed
 recorded command is replayed first at HEAD, to confirm the red reproduces,
 then by binary search over the batch's first-parent commits. `stable` is
 presumed good, since it passed promotion; it is replayed only when the first
-commit of the batch fails. A failure before any recorded step, such as setup,
+commit of the batch fails. A one-commit batch is its culprit without replays,
+and Linux replays stop at BISECT_CAP_SECONDS. A failure before any recorded step, such as setup,
 has nothing to replay. A macOS runner does not replay at all (replays_here):
 its replays cost the most runner-minutes. Replay output goes to files, not the
 job log, so the issue filer reads only the original failure. The verdict never
@@ -19,9 +20,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 from git_command import git
 import steps
+
+# Linux replays stop starting after this much bisect time per job; the Promote 38-45 window's
+# slowest find landed at 80 minutes (its last replay started at 66), so 90 leaves room for a slower runner.
+BISECT_CAP_SECONDS = 90 * 60
 
 
 def replays_here(environ=os.environ):
@@ -47,9 +53,16 @@ def batch(base, head):
     return listed.split() if listed else []
 
 
-def bisect(commits, base, passes):
+def bisect(commits, base, passes, deadline=None, clock=time.monotonic):
+    """Return the batch's first failing commit, or the narrowed range when the deadline stops it.
+
+    A batch of one commit is its own culprit, since `base` passed. No new replay starts once
+    `clock()` reaches `deadline`; the caller shares one deadline across a job's failed steps.
+    """
     if not commits:
         return dict(verdict="empty-batch", replays=[])
+    if len(commits) == 1:
+        return dict(verdict="single-commit", culprit=commits[0], replays=[])
     replays = []
 
     def run(sha):
@@ -57,25 +70,45 @@ def bisect(commits, base, passes):
         replays.append(dict(sha=sha, passed=ok))
         return ok
 
-    if run(commits[-1]):
-        return dict(verdict="not-reproduced", replays=replays)
+    def capped(good, bad):
+        return dict(verdict="capped", first=commits[good + 1], last=commits[bad], narrowed=bad - good,
+                    replays=replays)
+
+    def out_of_time():
+        return deadline is not None and clock() >= deadline
+
     good, bad = -1, len(commits) - 1
+    if out_of_time():
+        return capped(good, bad)
+    if run(commits[bad]):
+        return dict(verdict="not-reproduced", replays=replays)
     while bad - good > 1:
+        if out_of_time():
+            return capped(good, bad)
         middle = (good + bad) // 2
         if run(commits[middle]):
             good = middle
         else:
             bad = middle
-    if bad == 0 and not run(base):
-        return dict(verdict="before-batch", replays=replays)
+    if bad == 0:
+        if out_of_time():
+            return capped(good, bad)
+        if not run(base):
+            return dict(verdict="before-batch", replays=replays)
     return dict(verdict="culprit", culprit=commits[bad], replays=replays)
 
 
 def describe(result, base, head):
     verdict = result["verdict"]
+    if verdict == "single-commit":
+        return f"the batch holds one commit, {result['culprit']}; it is the culprit"
     if verdict == "culprit":
         subject = git("log", "-1", "--format=%s", result["culprit"])
         return f"first fails at {result['culprit']} ({subject})"
+    if verdict == "capped":
+        return (f"stopped at the {BISECT_CAP_SECONDS // 60}-minute cap after {len(result['replays'])} replays; "
+                f"the first failing commit is one of the {result['narrowed']} commits from {result['first']} "
+                f"to {result['last']}")
     return {
         "empty-batch": f"no commits between {base} and {head}",
         "not-reproduced": f"did not fail again at {head}; treat it as a flake until it recurs",
@@ -103,6 +136,7 @@ def main():
     args.logs.mkdir(parents=True, exist_ok=True)
     env = {key: value for key, value in os.environ.items() if key != "GITHUB_STEP_SUMMARY"}
     results, lines = [], []
+    deadline = time.monotonic() + BISECT_CAP_SECONDS
     for index, step in enumerate(failed):
         def passes(sha, step=step, index=index):
             git("checkout", "--quiet", "--force", "--detach", sha)
@@ -114,7 +148,7 @@ def main():
             return code == 0
 
         try:
-            result = bisect(commits, args.base, passes)
+            result = bisect(commits, args.base, passes, deadline=deadline)
         finally:
             git("checkout", "--quiet", "--force", "--detach", args.head)
         result.update(step=step["name"], argv=step["argv"])
