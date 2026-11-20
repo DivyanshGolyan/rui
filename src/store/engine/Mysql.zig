@@ -19,7 +19,6 @@ const is_test = @import("builtin").is_test;
 pub const QueryShape = struct {
     controls: u64 = 0,
     prefix_only: u64 = 0,
-    access_passes: u64 = 0,
     identity_passes: u64 = 0,
     content_queries: u64 = 0,
     reconnects: u64 = 0,
@@ -242,11 +241,8 @@ fn observeContentQuery(context: *anyopaque) void {
     }
 }
 
-pub fn notePass(self: *Mysql, comptime kind: @import("../engine.zig").Pass) void {
-    if (is_test) switch (kind) {
-        .access => self.state.testing_shape.access_passes += 1,
-        .identity => self.state.testing_shape.identity_passes += 1,
-    };
+pub fn noteIdentityPass(self: *Mysql) void {
+    if (is_test) self.state.testing_shape.identity_passes += 1;
 }
 
 pub fn fits(self: *Mysql, comptime S: type, args: *const S.Args, now: i64) Failure!bool {
@@ -863,7 +859,6 @@ test "MySQL content query shape counts causes independently of wire sends" {
     try std.testing.expectEqual(@as(u64, 2), state.testing_shape.content_queries);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.controls);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.prefix_only);
-    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.access_passes);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.identity_passes);
 }
 

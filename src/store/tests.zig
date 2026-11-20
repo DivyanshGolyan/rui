@@ -1231,9 +1231,9 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .activityTool = 4,
     .failedResponseBinding = 1,
     .readSessionReport = 6,
-    .readSessionList = 2, // R1 membership; R2 settings, work, and the whole creator subtree with its descendants' work in one statement. Work is one statement per Session (was 6).
+    .readSessionList = 2, // R1 membership; R2 settings, work, and the whole creator subtree with its descendants' work in one statement. Work and settings are one statement per page (pass_budgets).
     .readArchivedWindow = 1, // One statement serves an Archived page, its rows decorated in the same round.
-    .readChangedSessionList = 2, // Ancestors, then the rows with their work statements in one round. Work is one statement per Session (was 5).
+    .readChangedSessionList = 2, // Ancestors, then the rows with their work and settings statements in one round (pass_budgets).
     .publishRetryCrossings = 1,
     .actionContent = 2,
     .readAction = 1,
@@ -1298,6 +1298,24 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readHostToolSetText = 0,
 });
 
+/// Access passes per entry point, where a point's passes are pinned beside its rounds, on every engine. A pass is one
+/// COM_QUERY on MySQL, which batches every statement of a round into one pass while it fits. On SQLite a statement
+/// repeated in one pass forces the next, so a statement queued once per row costs a pass per row: rounds alone do not
+/// bound that. Null leaves a point's passes unpinned.
+pub const pass_budgets: std.EnumArray(EntryPoint, ?u16) = .initDefault(@as(?u16, null), .{
+    .readSessionList = 2, // R1 the ceiling and page statements; R2 the creator subtree, work_rows and list_rows: all distinct, one pass each round.
+    .readArchivedWindow = 1, // One statement, one pass.
+    // R1 changed_ancestors; R2 as readSessionList. changed_ancestors is one statement per session_list_page_size seeds,
+    // so on SQLite C changed seeds take ceil(C/8) passes in R1: the budget is the C <= 8 case the engine contract drives.
+    .readChangedSessionList = 2,
+});
+
+/// Whether `shape` keeps `point`'s pass budget: exactly its budgeted passes, or any when `point` has none.
+pub fn keepsPassBudget(point: EntryPoint, shape: RoundMeter.QueryShape) bool {
+    const budget = pass_budgets.get(point) orelse return true;
+    return shape.access_passes == budget;
+}
+
 pub const RoundMeter = struct {
     storage: *Store,
     /// Checked by default: no counter may move back over a window, since nothing resets them on an unrepeated leg, so a
@@ -1320,12 +1338,14 @@ pub const RoundMeter = struct {
         prefix_only: u64 = 0,
 
         pub fn snapshot(storage: *Store) QueryShape {
-            if (storage.engine != .mysql) return .{};
+            // The Store counts its Access passes on every engine (Store.testingAccessPasses); SQLite sends no COM_QUERY.
+            const access_passes = storage.testingAccessPasses().*;
+            if (storage.engine == .sqlite) return .{ .access_passes = access_passes };
             const state = storage.engine.mysql.state;
             const shape = state.testing_shape;
             return .{
                 .queries = state.connection.queries,
-                .access_passes = shape.access_passes,
+                .access_passes = access_passes,
                 .identity_passes = shape.identity_passes,
                 .content_queries = shape.content_queries,
                 .controls = shape.controls,
@@ -1504,13 +1524,12 @@ pub const CompareWork = struct {
     status: anyerror!void,
 };
 
-fn readOneWork(a: *reads_domain.ReadAccess, session: []const u8, out: *report_domain.WorkRead) !void {
-    var row: report_domain.WorkRow = undefined;
-    var found: store_access.Found = undefined;
-    a.readInto(report_domain.work_row, .{ .session = session }, &row, &found);
-    try store_access.runNamed(a, report_domain.work_row_failures, error.CorruptStore);
-    if (!found.get()) return error.CorruptStore;
-    try out.decode(&row);
+/// The one-statement work read of `out`'s Session: work_rows bound with its one ref, as the Session list binds a page.
+fn readOneWork(a: *reads_domain.ReadAccess, out: *report_domain.WorkRead) !void {
+    var rows: report_domain.WorkRows = .{};
+    try rows.queue(a, out[0..1]);
+    try store_access.runNamed(a, report_domain.work_rows_failures, error.CorruptStore);
+    try rows.finish();
 }
 
 pub fn compareWorkForTesting(storage: *Store, session: []const u8) !CompareWork {
@@ -1520,7 +1539,7 @@ pub fn compareWorkForTesting(storage: *Store, session: []const u8) !CompareWork 
     defer a.deinit();
     var result: CompareWork = .{ .staged = .{ .session = session }, .one = .{ .session = session }, .status = {} };
     result.status = report_domain.readWorks(&a, (&result.staged)[0..1]);
-    const one_status: anyerror!void = readOneWork(&a, session, &result.one);
+    const one_status: anyerror!void = readOneWork(&a, &result.one);
     if (result.status) |_| {
         try one_status;
         try std.testing.expectEqualDeep(result.staged.inputs, result.one.inputs);

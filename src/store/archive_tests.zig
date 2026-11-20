@@ -1088,17 +1088,32 @@ test "Archived window equals the Archived membership over the archive's edge cas
 
 /// A Store shaped like one at scale, where MySQL costs a keyed probe below a scan: a creator chain `chain_length`
 /// Sessions deep whose every link has answered Turns, so most Turns are finished and positioned, and was archived and
-/// restored, so every link has a Session stop, and a few running Bash
-/// Sessions: every eighth link starts one and archives it, and the last link starts `live`, which stays active.
-/// Statistics are refreshed after the writes.
+/// restored, so every link has a Session stop, and running Bash Sessions: every eighth link starts one and archives
+/// it, and the last link starts `live`, which stays active. A page of eight refs must be a small share of the Store's
+/// Sessions, Turns and Actions, or MySQL rightly scans or hash-joins a table it would read most of. So `finished_bash`
+/// Sessions each run a Bash Action to success and answer after it, as most Sessions at scale have: their Actions are
+/// accepted and their Turns positioned, and the archiving candidates stay a small share too. `idle_sessions`
+/// configure-only Sessions add Session rows cheaply. Statistics are refreshed after the writes.
 const PlanStore = struct {
     const chain_length = 16;
     const answered_turns = 2;
+    const finished_bash = 16;
+    const idle_sessions = 96;
     /// The first Session of the creator chain and the last one, which descends from it through every link.
     root: protocol.Bounded(protocol.max_session_bytes),
     leaf: protocol.Bounded(protocol.max_session_bytes),
     /// The last running Bash Session, not archived: it has a Turn, an Operation and an Action in flight.
     live: protocol.Bounded(protocol.max_session_bytes),
+    /// Every link of the creator chain, in creation order.
+    chain: [chain_length]protocol.Bounded(protocol.max_session_bytes) = undefined,
+
+    /// A full page of eight refs as the Store binds them: `live` and the last seven links of the creator chain.
+    fn page(store: *const PlanStore) [8][]const u8 {
+        var refs: [8][]const u8 = undefined;
+        refs[0] = store.live.slice();
+        for (refs[1..], 0..) |*ref, index| ref.* = store.chain[chain_length - 1 - index].slice();
+        return refs;
+    }
 
     fn populate(storage: *Store, tmp: *std.testing.TmpDir) !PlanStore {
         const root = try testing.configureTestSession(storage, "plan-chain-0");
@@ -1113,6 +1128,7 @@ const PlanStore = struct {
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             result.leaf = reply.accepted.session;
+            result.chain[link - 1] = result.leaf;
             inline for (0..answered_turns) |turn| {
                 const answer = std.fmt.comptimePrint("{s}-answer-{d}", .{ name, turn });
                 try testing.answerTestTurn(storage, tmp, result.leaf.slice(), answer, &.{.{ .encoded = "done", .decoded = "done" }});
@@ -1130,6 +1146,16 @@ const PlanStore = struct {
                 }
             }
         }
+        inline for (0..finished_bash) |index| {
+            @setEvalBranchQuota(100_000);
+            const name = std.fmt.comptimePrint("plan-finished-{d}", .{index});
+            const bash = try runningBash(storage, tmp, name);
+            _ = try storage.settleActionAttempt(bash.binding, .succeeded, "Bash succeeded.", .{});
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try testing.settleAnswerTestTurn(storage, tmp, next, name ++ "-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+        }
+        var key_buffer: [64]u8 = undefined;
+        for (0..idle_sessions) |index| _ = try testing.configureTestSession(storage, try std.fmt.bufPrint(&key_buffer, "plan-idle-{d}", .{index}));
         try @import("mysql_testing.zig").analyzeTables(storage);
         return result;
     }
@@ -1198,7 +1224,10 @@ test "MySQL plans the changed-page ancestor batch through the session key" {
     }.run);
 }
 
-test "MySQL plans a list row's settings through the Session ref, with no base-table scan" {
+// A page's settings rows and work rows are one statement each over eight Session refs, bound as the Store binds them.
+// The IN list holds only bound refs: an IN list holding a UNION made MySQL scan session (see livePageSql). Every
+// session row is read through its key, and every probe is keyed on a row's Session ref or its live Operation.
+test "MySQL plans a page's settings rows through the Session key, with no base-table scan" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             if (case.engine != .mysql) return;
@@ -1209,19 +1238,19 @@ test "MySQL plans a list row's settings through the Session ref, with no base-ta
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            const session = (try PlanStore.populate(&storage, &tmp)).live;
-            var buffer: [32768]u8 = undefined;
-            const plan = try mysql_testing.plan(&storage, session_list_read.list_row_source, .{session.slice()}, &buffer);
-            errdefer std.debug.print("MySQL plan for the list row settings:\n{s}", .{plan});
-            // The first Message, the first awaiting approval and the last Turn are keyed probes of the Session ref. MySQL
-            // names aliases in the plan, so refuse any table scan and require the Turn index the probes use.
+            const store = try PlanStore.populate(&storage, &tmp);
+            const refs = store.page();
+            var buffer: [65536]u8 = undefined;
+            const plan = try mysql_testing.plan(&storage, session_list_read.list_rows_source, .{ refs[0], refs[1], refs[2], refs[3], refs[4], refs[5], refs[6], refs[7] }, &buffer);
+            errdefer std.debug.print("MySQL plan for the page's settings rows:\n{s}", .{plan});
             try expectNoScan(plan, &.{});
+            try expectKeyedOn(plan, "session", "session_ref");
             try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
         }
     }.run);
 }
 
-test "MySQL plans the work row through keyed probes" {
+test "MySQL plans a page's work rows through the Session key and keyed probes" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             if (case.engine != .mysql) return;
@@ -1232,15 +1261,14 @@ test "MySQL plans the work row through keyed probes" {
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            const session = (try PlanStore.populate(&storage, &tmp)).live;
-            var buffer: [32768]u8 = undefined;
-            const plan = try mysql_testing.plan(&storage, report_domain.work_row_source, .{session.slice()}, &buffer);
-            errdefer std.debug.print("MySQL plan for the work row:\n{s}", .{plan});
-            // MySQL reads the key-bound Session, and each probe that follows from it alone such as its latest Turn, while
-            // it optimizes, so those show no access path here; the creator-subtree test plans the same work joins over a
-            // Session read per row, where they show. Every probe left is keyed on the Session ref or the live Operation:
-            // no table is scanned, the pending Message probes seek the Session ref, and the stop probes use their index.
+            const store = try PlanStore.populate(&storage, &tmp);
+            const refs = store.page();
+            var buffer: [131072]u8 = undefined;
+            const plan = try mysql_testing.plan(&storage, report_domain.work_rows_source, .{ refs[0], refs[1], refs[2], refs[3], refs[4], refs[5], refs[6], refs[7] }, &buffer);
+            errdefer std.debug.print("MySQL plan for the page's work rows:\n{s}", .{plan});
             try expectNoScan(plan, &.{});
+            try expectKeyedOn(plan, "work_session", "session_ref");
+            try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
             try expectKeyedOn(plan, "message_admission", "session_ref=");
             try std.testing.expect(std.mem.indexOf(u8, plan, "session_stop_exclusion") != null);
         }

@@ -232,7 +232,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (a.store.engine.batches() and a.failure == null)
                 for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
             if (a.queued != 0 and a.failure == null) {
-                a.store.engine.notePass(.access);
+                if (@import("builtin").is_test) a.store.testingAccessPasses().* += 1;
                 a.store.engine.startPass() catch |err| {
                     a.failure = err;
                 };

@@ -33,6 +33,7 @@ const protocol = @import("../protocol.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const round_budgets = shared_fixtures.round_budgets;
+const pass_budgets = shared_fixtures.pass_budgets;
 const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
 const SessionPinReply = @import("../command_reply.zig").SessionPinReply;
@@ -1413,7 +1414,7 @@ fn sh3_a_list_action_step_fault_keeps_its(case: *store_testing.Case) !void {
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const call = [_]TestingCall{.{ .item_id = "list-actions-item", .name = "bash", .encoded_call_id = "list-actions-call", .decoded_call_id = "list-actions-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
     try settleCallsForTesting(&storage, &tmp, binding, "list-actions-output", &call);
-    var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_row_failures, null, "AS actions_total") };
+    var fault: store_testing.TestingStatementFault = .{ .sql = shared_fixtures.namedStatementForTesting(report_domain.work_rows_failures, null, "AS actions_total") };
     if (storage.engine == .sqlite) {
         fault.arm(storage.sqliteDatabase());
     } else try store_testing.failReadsOf(&storage, "action_operation");
@@ -1687,6 +1688,10 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
                 failed = true;
             };
         }
+        if (!case.rerun and !shared_fixtures.keepsPassBudget(point, measured.shape)) {
+            std.debug.print("{s}: Access passes {d}, budget {d}\n", .{ @tagName(point), measured.shape.access_passes, pass_budgets.get(point).? });
+            failed = true;
+        }
     }
     if (failed) {
         for (std.enums.values(EntryPoint)) |point| {
@@ -1698,6 +1703,8 @@ fn sh110_each_store_entry_point_takes_its_round(case: *store_testing.Case) !void
                 measured.content_rounds,
                 contentRoundBudget(case.engine, point),
             });
+            if (!case.rerun) if (pass_budgets.get(point)) |budget|
+                std.debug.print("  Access passes {d} (budget {d})\n", .{ measured.shape.access_passes, budget });
             if (case.engine == .mysql and !case.rerun) std.debug.print(
                 "  COM_QUERY {d} = Access passes {d} + identity passes {d} + content queries {d} + controls {d} + prefix-only passes {d} (expected {d})\n",
                 .{

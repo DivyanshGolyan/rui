@@ -1049,6 +1049,7 @@ test "store.mysql live content chunks ride the round of their row, and a stop mi
         stopped: bool,
         id: u64 = 0,
         shape: @TypeOf(@as(Mysql.State, undefined).testing_shape) = undefined,
+        access_passes: u64 = 0,
 
         pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
             b.id = try r.identity(.content_id);
@@ -1063,6 +1064,7 @@ test "store.mysql live content chunks ride the round of their row, and a stop mi
             try sink.write(b.bytes[0..7], 0);
             sink.close();
             b.shape = b.storage.engine.mysql.state.testing_shape;
+            b.access_passes = b.storage.testingAccessPasses().*;
             return .done;
         }
     };
@@ -1076,7 +1078,7 @@ test "store.mysql live content chunks ride the round of their row, and a stop mi
         if (stopped) {
             const shape = streamed.shape;
             const after = storage.engine.mysql.state.testing_shape;
-            try std.testing.expectEqual(shape.access_passes, after.access_passes);
+            try std.testing.expectEqual(streamed.access_passes, storage.testingAccessPasses().*);
             try std.testing.expectEqual(shape.controls, after.controls);
             try std.testing.expectEqual(before + 1, storage.engine.mysql.state.connection.queries);
             try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
