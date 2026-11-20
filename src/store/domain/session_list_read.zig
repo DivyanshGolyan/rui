@@ -438,7 +438,7 @@ pub const Scratch = struct {
     archived: ArchivedPage = .{},
     page: ListPage = .{},
     live: LivePages = .{},
-    /// The changed seeds of a since-delta page, in ID order. Its ancestor statements borrow these bytes until their round.
+    /// The changed seeds of a since-delta page, in ID order, found before its ancestor statements queue.
     changed: [change_ring.capacity]change_ring.Id = undefined,
 };
 
@@ -486,23 +486,24 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
 // One statement walks the creator chains of up to session_list_page_size changed seeds. Each chain carries its own
 // origin (the seed), so the cycle test asks each chain separately: a chain that reaches a root must not hide a
 // cycle in a chain batched beside it. Same workspace and archive filters as descendant_page.
+pub const changed_ancestors_source = "WITH RECURSIVE ancestors(origin,session_ref,creator_ref) AS (" ++
+    "SELECT seed.session_ref,session.session_ref,session.creator_ref FROM session JOIN session seed ON seed.creator_ref=session.session_ref " ++
+    "WHERE seed.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR session.workspace=?9)" ++ archive_membership.filterSql("session", "?10") ++
+    " UNION SELECT child.origin,session.session_ref,session.creator_ref FROM session JOIN ancestors child ON child.creator_ref=session.session_ref " ++
+    "WHERE (?9 IS NULL OR session.workspace=?9)" ++ archive_membership.filterSql("session", "?10") ++ ") " ++
+    "SELECT seen.session_ref,NOT EXISTS (SELECT 1 FROM ancestors tail WHERE tail.origin=seen.origin AND (tail.creator_ref IS NULL OR NOT EXISTS " ++
+    "(SELECT 1 FROM ancestors parent WHERE parent.origin=tail.origin AND parent.session_ref=tail.creator_ref))) AS cycle FROM ancestors seen";
 const changed_ancestors = rsql.Read(.{
-    .sql = "WITH RECURSIVE ancestors(origin,session_ref,creator_ref) AS (" ++
-        "SELECT seed.session_ref,session.session_ref,session.creator_ref FROM session JOIN session seed ON seed.creator_ref=session.session_ref " ++
-        "WHERE seed.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR session.workspace=?9)" ++ archive_membership.filterSql("session", "?10") ++
-        " UNION SELECT child.origin,session.session_ref,session.creator_ref FROM session JOIN ancestors child ON child.creator_ref=session.session_ref " ++
-        "WHERE (?9 IS NULL OR session.workspace=?9)" ++ archive_membership.filterSql("session", "?10") ++ ") " ++
-        "SELECT seen.session_ref,NOT EXISTS (SELECT 1 FROM ancestors tail WHERE tail.origin=seen.origin AND (tail.creator_ref IS NULL OR NOT EXISTS " ++
-        "(SELECT 1 FROM ancestors parent WHERE parent.origin=tail.origin AND parent.session_ref=tail.creator_ref))) AS cycle FROM ancestors seen",
+    .sql = changed_ancestors_source,
     .Args = struct {
-        seed0: []const u8,
-        seed1: []const u8,
-        seed2: []const u8,
-        seed3: []const u8,
-        seed4: []const u8,
-        seed5: []const u8,
-        seed6: []const u8,
-        seed7: []const u8,
+        seed0: Bounded(change_ring.id_bytes),
+        seed1: Bounded(change_ring.id_bytes),
+        seed2: Bounded(change_ring.id_bytes),
+        seed3: Bounded(change_ring.id_bytes),
+        seed4: Bounded(change_ring.id_bytes),
+        seed5: Bounded(change_ring.id_bytes),
+        seed6: Bounded(change_ring.id_bytes),
+        seed7: Bounded(change_ring.id_bytes),
         workspace: ?[]const u8,
         archive: session_archive.Filter,
     },
@@ -511,12 +512,11 @@ const changed_ancestors = rsql.Read(.{
     .compound = true,
 });
 
-/// Binds one batch of seeds. Unused slots are empty and match no Session. The slices borrow `seeds`, which the
-/// caller keeps until the round runs.
-fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, archive: session_archive.Filter) changed_ancestors.Args {
-    var slots: [session_list.session_list_page_size][]const u8 = undefined;
-    @memset(&slots, "");
-    for (seeds, slots[0..seeds.len]) |*seed, *slot| slot.* = seed;
+/// Binds one batch of seeds by value, so no seed bytes outlive this call. Unused slots are empty and match no
+/// Session.
+fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, archive: session_archive.Filter) !changed_ancestors.Args {
+    var slots: [session_list.session_list_page_size]Bounded(change_ring.id_bytes) = @splat(.{});
+    for (seeds, slots[0..seeds.len]) |*seed, *slot| slot.* = try .from(seed);
     return .{
         .seed0 = slots[0],
         .seed1 = slots[1],
@@ -574,14 +574,14 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var candidates: ChangedCandidates = .{ .after = after };
     // Every changed seed is named first, then the seeds go in batches of session_list_page_size, one statement per
-    // batch. All statements queue into one round. The batches borrow scratch.changed, which outlives that round.
+    // batch. All statements queue into one round. Each batch binds its seeds by value.
     const seeds = self.changes.changed(since, through, workspace, null, &scratch.changed);
     const scope: ?[]const u8 = if (request.workspace) |*workspace_scope| workspace_scope.slice() else null;
     var first: usize = 0;
     while (first < seeds.len) : (first += session_list.session_list_page_size) {
         const batch = seeds[first..@min(seeds.len, first + session_list.session_list_page_size)];
         for (batch) |*seed| candidates.add(seed);
-        a.readEach(changed_ancestors, changedAncestorArgs(batch, scope, request.archive), std.math.maxInt(u64), &candidates);
+        a.readEach(changed_ancestors, try changedAncestorArgs(batch, scope, request.archive), std.math.maxInt(u64), &candidates);
     }
     if (seeds.len != 0) try runList(a);
     if (candidates.failure) |err| return err;
