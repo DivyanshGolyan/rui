@@ -1810,6 +1810,14 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
         const Seen = struct { reference: change_ring.Id, state_change_at: u64, subtree_state_change_at: u64, descendants: u64, needs_you_descendants: u64, needs_you: bool };
 
         fn run(case: *store_testing.Case) !void {
+            check(case) catch |err| {
+                std.debug.print("SL-8: {t}\n", .{err});
+                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace);
+                return err;
+            };
+        }
+
+        fn check(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
