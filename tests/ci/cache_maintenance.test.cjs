@@ -502,6 +502,10 @@ test('cleanup follows every cache producer, including failed workflows with succ
     const producer = readFileSync(`${directory}/${file}`, 'utf8');
     if (!/uses: (?:\.\/\.github\/actions\/setup|actions\/cache(?:\/save)?@)/.test(producer)) continue;
     if (/^cache-mode: read$/m.test(producer) && producer.match(/^\s*cache-mode:/gm).length === 1) continue;
+    // A producer whose every setup restores only (publish-caches: 'false') saves nothing for cleanup to prune.
+    const setups = producer.match(/uses: \.\/\.github\/actions\/setup$/gm)?.length ?? 0;
+    if (setups > 0 && producer.match(/publish-caches: 'false'/g)?.length === setups
+        && !/uses: actions\/cache(?:\/save)?@/.test(producer)) continue;
     const name = producer.match(/^name: (.+)$/m)[1];
     assert.ok(jobs.workflow_run.includes(name), `${file} needs post-publication cleanup`);
   }

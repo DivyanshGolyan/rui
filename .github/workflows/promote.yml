@@ -43,12 +43,10 @@ on:
 permissions:
   contents: read
 
-# Restore shared compilation inputs without saving them: the manual bisect replays old commits.
-cache-mode: read
-
 concurrency:
-  # One promotion at a time; a second dispatch waits for the first to finish.
-  group: promote
+  # One promotion at a time; a second dispatch waits for the first to finish. A manual bisect
+  # (bisect-step) has its own group, so it never waits on, or holds up, a promotion.
+  group: ${{ inputs.bisect-step != '' && 'promote-bisect' || 'promote' }}
   cancel-in-progress: false
 
 jobs:
@@ -174,7 +172,7 @@ jobs:
     # records and publishes nothing, and the 90-minute replay cap is promotion.py's.
     if: ${{ inputs.bisect-step != '' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     steps:
@@ -188,10 +186,15 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Name the step's build targets
+        id: targets
+        env:
+          STEP: ${{ inputs.bisect-step }}
+        run: echo "targets=$(python3 -B tests/ci/promotion.py bisect-targets --step "$STEP")" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup
         with:
-          # Every target a failed step can name, so the replay's toolchain and fixtures are all present.
-          targets: '["check-full","test-logic","admission-debug-integration","stack-frames","rsql-table"]'
+          # The step's own targets; the setup action installs what setup_requirements says they need. Restore only.
+          targets: ${{ steps.targets.outputs.targets }}
           publish-caches: 'false'
       - name: Bisect the named step across the range
         env:

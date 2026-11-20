@@ -863,6 +863,11 @@ DIAGNOSTIC_INTEGRATIONS = (
 )
 
 
+# The qualification tree whose Go packages measurement-check runs, and the files in it that make a package.
+QUALIFICATION_ROOT = "tests/qualification/"
+QUALIFICATION_GO = (".go", "go.mod", "go.sum")
+
+
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
     graph = graph or tree_graph()
     changed = list(paths)
@@ -928,8 +933,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             native_targets.update(reached - LINUX_ONLY)
             reasons.add("Import graph: the unit roots and fixtures that reach the changed file")
             matched = True
-        if path.startswith("tests/qualification/"):
-            if path.endswith((".go", "go.mod", "go.sum")):
+        if path.startswith(QUALIFICATION_ROOT):
+            if path.endswith(QUALIFICATION_GO):
                 targets.add("measurement-check")
                 native_targets.add("measurement-check")
                 reasons.add("Measurement code: pinned Go package checks")
@@ -1075,8 +1080,8 @@ def revision_contents(paths, base, head):
 DIRECT, GRAPH, BROAD = 0, 1, 2
 EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py"),
                    "rsql-table": ("tests/ci/rsql_table.py", "src/store/rsql_table.zig"),
-                   # select() maps every Go file under tests/qualification to measurement-check by a path rule.
-                   "measurement-check": ("tests/qualification/*.go", "tests/qualification/go.*")}
+                   # The Go packages select() maps to measurement-check by its path rule (QUALIFICATION_GO).
+                   "measurement-check": tuple(f"{QUALIFICATION_ROOT}*{suffix}" for suffix in QUALIFICATION_GO)}
 # The targets whose binaries rsql-table's collect build compiles: every statement and fixture text they
 # reach is a rsql-table input, so a change any of them reaches is one. tests/ci/rsql_table.py runs these.
 STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integration")

@@ -1096,7 +1096,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
         self.assertIn('  workflow_dispatch:', on)
         self.assertNotRegex(on, r'push:|pull_request')
-        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: promote\n  cancel-in-progress: false$')
+        self.assertRegex(text, r"(?m)^concurrency:\n  # .*\n  # .*\n  group: \$\{\{ inputs.bisect-step != '' && 'promote-bisect' \|\| 'promote' \}\}\n  cancel-in-progress: false$")
         batch = job(text, 'batch')
         self.assertIn("github.ref == 'refs/heads/main'", batch)
         self.assertIn("SCHEDULED: ${{ github.event_name == 'schedule' }}", batch)

@@ -22,7 +22,7 @@ from link_table import fingerprint_error
 from select_tests import (ACCEPTANCE_INPUTS, BOOTSTRAP_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, CI_RUNNABLE, CONTENT_RULES, DEPENDENCY_MANIFEST, DIAGNOSTIC_INTEGRATIONS, FIXTURES, ci_policy, documentation, PR_UNIT_ROOTS, changed_dependencies, dependency_entries, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, ROOT, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning, normalize, tooling)
-from select_tests import BROAD, DIRECT, GRAPH, attribute, tree_fixture_literals
+from select_tests import BROAD, DIRECT, EXTRA_OWN_FILES, GRAPH, attribute, tree_fixture_literals
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -1712,7 +1712,7 @@ fi
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml',
-                     'race-sweep.yml', 'promote.yml')
+                     'race-sweep.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1783,6 +1783,12 @@ fi
                     self.assertEqual(pr_job.count("publish-caches: 'false'"), 1)
                     self.assertEqual(pr_job.count('uses: ./.github/actions/setup'), 1)
                     workflow = workflow.replace(pr_job, pr_job.replace("publish-caches: 'false'", ''), 1)
+                if path.name == 'promote.yml':
+                    # The manual bisect replays old commits: its one setup restores and never publishes.
+                    bisect = re.search(r'(?ms)^  bisect:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                    self.assertEqual(bisect.count("publish-caches: 'false'"), 1)
+                    self.assertEqual(bisect.count('uses: ./.github/actions/setup'), 1)
+                    workflow = workflow.replace(bisect, bisect.replace("publish-caches: 'false'", ''), 1)
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -2817,6 +2823,14 @@ class SuspectAttributionTest(unittest.TestCase):
 
     def test_a_go_test_under_qualification_is_its_packages_own_source(self):
         self.assertEqual(self.reach("tests/qualification/measurement/measurement_test.go")["measurement-check"], DIRECT)
+
+    def test_measurement_own_files_are_the_qualification_go_rule(self):
+        own = EXTRA_OWN_FILES["measurement-check"]
+        for path, expected in (("tests/qualification/measurement/measurement_test.go", True),
+                               ("tests/qualification/go.mod", True), ("tests/qualification/run.sh", False),
+                               ("src/measurement.go", False)):
+            with self.subTest(path=path):
+                self.assertEqual(matches(path, own), expected)
 
     def test_the_verify_rui_skill_reaches_no_build_target_its_consumers_are_policy_tests(self):
         # Its scripts are read by tests/ci/test_verify_rui*.py, which the policy suite runs; no fixture or unit root imports them.

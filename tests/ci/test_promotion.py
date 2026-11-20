@@ -1,4 +1,6 @@
 from pathlib import Path
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -252,6 +254,13 @@ class ManualBisectTest(unittest.TestCase):
                     sequences.append((replays, result["verdict"], result.get("culprit")))
                 self.assertEqual(sequences[0], sequences[1])
 
+    def test_each_finished_step_is_saved_before_the_next_one_starts(self):
+        saved = []
+        failed = [dict(name="first", argv=["a"]), dict(name="second", argv=["b"])]
+        promotion.bisect_steps(failed, ["c0", "c1"], "base", "head", lambda index, step, sha: True, deadline=None,
+                               saved=lambda results: saved.append([result["step"] for result in results]))
+        self.assertEqual(saved, [["first"], ["first", "second"]])
+
     def test_two_steps_sharing_one_deadline_give_the_second_step_no_replay(self):
         commits = [f"c{i}" for i in range(22)]
         failed = [dict(name="first", argv=["a"]), dict(name="second", argv=["b"])]
@@ -442,8 +451,10 @@ class SuspectReportTest(unittest.TestCase):
         lines = promotion.suspect_report(failed, entries)
         self.assertEqual(lines[0], f"Promotion suspects: stack-frames: 1. {self.SHA} PR #8, tier b (import or rule): "
                                    "Change (#8); touched alpha")
-        self.assertEqual(lines[1:5], ["--- stack-frames: last 2 lines of the failed step's output ---",
-                                      "boom", "last line", "--- end of excerpt ---"])
+        self.assertEqual(lines[1:5], [
+            "Promotion excerpt: stack-frames: last 2 lines of the failed step's output:",
+            "Promotion excerpt: stack-frames: boom", "Promotion excerpt: stack-frames: last line",
+            "Promotion excerpt: stack-frames: end of excerpt"])
         self.assertEqual(lines[5], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
                                    "read the failed step's log")
 
@@ -493,6 +504,69 @@ class RecordedExcerptTest(unittest.TestCase):
             steps.record_failure("state", ["x"])
             [entry_] = steps.failures(runner / "rui-failed-steps.jsonl")
         self.assertNotIn("excerpt", entry_)
+
+
+class BisectTargetTest(unittest.TestCase):
+    def test_a_step_that_is_not_a_build_target_is_refused_before_any_replay(self):
+        with self.assertRaises(SystemExit) as refused:
+            promotion.bisect_targets("pty")
+        self.assertIn("'pty' is not a build target at HEAD", str(refused.exception))
+
+    def test_a_build_target_names_its_own_setup_targets(self):
+        self.assertEqual(promotion.bisect_targets("stack-frames"), ["stack-frames"])
+
+    def test_the_bisect_targets_subcommand_prints_them_as_json(self):
+        result = subprocess.run([sys.executable, "-B", str(PROMOTION), "bisect-targets", "--step", "stack-frames"],
+                                capture_output=True, text=True, cwd=select_tests.ROOT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["stack-frames"])
+
+
+class UnattributedTest(unittest.TestCase):
+    def test_a_commit_the_selector_cannot_read_stays_listed_last_and_the_rest_still_report(self):
+        def attribute(sha):
+            if sha == "b" * 40:
+                raise ValueError("unreadable tree")
+            return entry(sha, f"Change {sha[0]} (#{ord(sha[0])})", **{"alpha": {"stack-frames": GRAPH}} if sha[0] == "c" else {})
+
+        shas = ["a" * 40, "b" * 40, "c" * 40]
+        note = io.StringIO()
+        with contextlib.redirect_stdout(note):
+            entries = promotion.attributed(shas, attribute)
+        self.assertIn("could not attribute " + "b" * 40, note.getvalue())
+        self.assertEqual([item["sha"] for item in entries], shas)
+        lines = promotion.suspect_report([dict(name="stack-frames", argv=["x"])], entries)
+        self.assertEqual(lines[0], f"Promotion suspects: stack-frames: 1. {'c' * 40} PR #{ord('c')}, "
+                                   "tier b (import or rule): Change c (#99); touched alpha")
+        self.assertEqual(lines[1], f"Promotion suspects: stack-frames: 2. {'b' * 40} no PR number in the subject, "
+                                   "unattributed (the selector could not read this commit): (subject unavailable)")
+
+
+class SelectorTargetLineTest(unittest.TestCase):
+    def test_a_step_that_is_not_a_build_target_says_it_is_not_a_selector_target(self):
+        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"stack-frames": GRAPH}})]
+        lines = promotion.suspect_report([dict(name="pty", argv=["x"])], entries, known={"stack-frames"})
+        self.assertEqual(lines[0], "Promotion suspects: pty: not a selector target; read its log")
+
+    def test_a_build_target_no_commit_reaches_still_names_the_batch(self):
+        entries = [entry("a" * 40, "Change (#3)", **{"alpha": {"stack-frames": GRAPH}})]
+        lines = promotion.suspect_report([dict(name="rsql-table", argv=["x"])], entries, known={"rsql-table"})
+        self.assertEqual(lines[0], "Promotion suspects: rsql-table: none of the 1 batch commits selects rsql-table; "
+                                   "read the failed step's log")
+
+
+class StepRecordTest(unittest.TestCase):
+    def test_a_failed_step_records_the_tail_of_the_output_it_printed(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            env = dict(os.environ, RUNNER_TEMP=scratch)
+            result = subprocess.run([sys.executable, "-B", str(STEPS), "--output-root", str(Path(scratch) / "out"),
+                                     "noisy=echo one; echo two; exit 3", "quiet=true"],
+                                    capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("one", result.stdout)
+            [failure] = steps.failures(Path(scratch) / "rui-failed-steps.jsonl")
+        self.assertEqual(failure["name"], "noisy")
+        self.assertEqual(failure["excerpt"], ["one", "two"])
 
 
 class ManualBisectCommandTest(unittest.TestCase):

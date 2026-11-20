@@ -10,6 +10,7 @@ same command in another commit's tree with that tree's environment. The
 command list in the workflow is the only copy of each command.
 """
 import argparse
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -68,12 +69,19 @@ def main():
         if args.output_root:
             env["STEP_OUTPUT"] = str(args.output_root / name)
         print(f"::group::{name}: {command}", flush=True)
-        code = subprocess.run(argv, env=env).returncode
+        # The output streams to the log as it runs; its last lines go in the record for promotion's suspects report.
+        tail = deque(maxlen=EXCERPT_LINES)
+        process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   errors="replace")
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            tail.append(line)
+        code = process.wait()
         print("::endgroup::", flush=True)
         if code:
             print(f"::error::{name} failed (exit {code})", flush=True)
             failed.append(name)
-            record_failure(name, argv)
+            record_failure(name, argv, "".join(tail))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:
             for name, _ in args.steps:

@@ -37,11 +37,15 @@ BISECT_CAP_SECONDS = 90 * 60
 # The line prefixes the issue filer attaches to a failure (report_issue.py reads both).
 BISECT_PREFIX = "Promotion bisect: "
 SUSPECT_PREFIX = "Promotion suspects: "
+# The tail of a failed step's output, one line per prefix: the suspects report prints it, and the issue filer does not parse it.
+EXCERPT_PREFIX = "Promotion excerpt: "
 TOP_SUSPECTS = 5
+# A commit the selector could not read: it stays listed, ranked after every attributed commit.
+UNATTRIBUTED = "unattributed"
 # What a batch commit can touch that the selector reads: the sources, tests and build the target graph is made of.
 SNAPSHOT = ("src", "tests", "build", "build.zig", "build.zig.zon")
 TIER_LABELS = {select_tests.DIRECT: "tier a (own source)", select_tests.GRAPH: "tier b (import or rule)",
-               select_tests.BROAD: "tier c (fallback)"}
+               select_tests.BROAD: "tier c (fallback)", UNATTRIBUTED: "unattributed (the selector could not read this commit)"}
 
 
 def targets_of(step_name):
@@ -157,13 +161,20 @@ def rank(targets, entries, limit=TOP_SUSPECTS, log=frozenset()):
         matched = {path: hits for path, tokens in entry.get("tokens", {}).items()
                    if (hits := (tokens & log) - shared_away)}
         shared = set().union(*matched.values()) if matched else set()
-        if best is None and not shared:
+        if entry.get("error"):
+            best = UNATTRIBUTED
+        elif best is None and not shared:
             continue
         ranked.append(dict(sha=entry["sha"], subject=entry["subject"], tier=best, log=sorted(shared),
                            files=sorted(set(files) | set(matched)), position=position))
-    ranked.sort(key=lambda suspect: (0 if suspect["log"] else 1, -len(suspect["log"]),
-                                     3 if suspect["tier"] is None else suspect["tier"], -suspect["position"]))
+    ranked.sort(key=lambda suspect: (suspect["tier"] == UNATTRIBUTED, 0 if suspect["log"] else 1,
+                                     -len(suspect["log"]), rank_tier(suspect["tier"]), -suspect["position"]))
     return ranked[:limit]
+
+
+def rank_tier(tier):
+    """Where a tier sorts: the selector's tiers first, a commit with no selector tier after them."""
+    return 3 if tier is None or tier == UNATTRIBUTED else tier
 
 
 def pull_request(subject):
@@ -187,12 +198,12 @@ def suspect_lines(name, targets, ranked, size):
     if size == 0:
         return [f"{SUSPECT_PREFIX}{name}: no commits between the base and head, so nothing to rank"]
     if not ranked and not targets:
-        return [f"{SUSPECT_PREFIX}{name}: not a selector target, so no batch commit can be ranked; read the failed step's log"]
+        return [f"{SUSPECT_PREFIX}{name}: not a selector target; read its log"]
     if not ranked:
         return [f"{SUSPECT_PREFIX}{name}: none of the {size} batch commits selects {', '.join(targets)}; "
                 "read the failed step's log"]
     return [f"{SUSPECT_PREFIX}{name}: {number}. {suspect['sha']} {pull_request(suspect['subject'])}, "
-            f"{reason(suspect)}: {suspect['subject']}; touched {', '.join(suspect['files'])}"
+            f"{reason(suspect)}: {suspect['subject']}" + (f"; touched {', '.join(suspect['files'])}" if suspect["files"] else "")
             for number, suspect in enumerate(ranked, 1)]
 
 
@@ -218,36 +229,51 @@ def snapshot_attribution(sha):
 
         names = sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
         contents = select_tests.revision_contents(paths, parent, sha)
-        try:
-            graph = select_tests.Graph(names, read)
-            available = set(build_files.steps(root))
-            literals = select_tests.fixture_literals_of(graph, read)
-            entry["paths"] = {path: select_tests.attribute(path, graph, available, read, contents=contents,
-                                                           fixture_literals=literals)
-                              for path in paths}
-        except (ValueError, AttributeError, IndexError) as error:
-            # The selector cannot read this commit (an unknown import, or a tree without the functional cores the
-            # graph reads, as before logic_tests.zig): any target may hide behind it, so each is a broad suspect.
-            print(f"{SUSPECT_PREFIX}note: the selector cannot read {sha} ({error!r}); every target is a broad suspect")
-            every = {target: select_tests.BROAD for target in available}
-            entry["paths"] = {path: dict(every) for path in paths}
+        entry["paths"] = attribute_paths(paths, root, names, read, contents)
     return entry
 
 
+def attribute_paths(paths, root, names, read, contents):
+    """{path: {target: tier}} for one commit's changed paths, read from its snapshot at `root`."""
+    graph = select_tests.Graph(names, read)
+    available = set(build_files.steps(root))
+    literals = select_tests.fixture_literals_of(graph, read)
+    return {path: select_tests.attribute(path, graph, available, read, contents=contents, fixture_literals=literals)
+            for path in paths}
+
+
+def attributed(shas, attribute=snapshot_attribution):
+    """One entry per batch commit. A commit whose attribution raises is kept as unattributed; the report still lists the rest."""
+    entries = []
+    for sha in shas:
+        try:
+            entries.append(attribute(sha))
+        except Exception as error:
+            print(f"{SUSPECT_PREFIX}note: could not attribute {sha} ({error!r}); it is listed last as unattributed")
+            entries.append(dict(sha=sha, subject="(subject unavailable)", paths={}, tokens={}, error=repr(error)))
+    return entries
+
+
 def excerpt_lines(name, failed):
+    """The failed step's output tail, each line prefixed so the issue filer's parsers skip it."""
     excerpt = failed.get("excerpt") or []
     if not excerpt:
         return []
-    return [f"--- {name}: last {len(excerpt)} lines of the failed step's output ---", *excerpt, "--- end of excerpt ---"]
+    return [f"{EXCERPT_PREFIX}{name}: last {len(excerpt)} lines of the failed step's output:",
+            *(f"{EXCERPT_PREFIX}{name}: {line}" for line in excerpt),
+            f"{EXCERPT_PREFIX}{name}: end of excerpt"]
 
 
-def suspect_report(failed, entries):
-    """Every line the suspects report prints for the recorded failed steps, given the batch's entries (oldest first)."""
+def suspect_report(failed, entries, known=None):
+    """Every line the suspects report prints for the recorded failed steps, given the batch's entries (oldest first).
+
+    `known` holds the build targets at HEAD; a step name that is not one of them has no target to rank by.
+    """
     if not failed:
         return [f"{SUSPECT_PREFIX}no recorded step failed, so there is nothing to rank; read the job's failed step"]
     lines = []
     for failure in failed:
-        targets = targets_of(failure["name"])
+        targets = [target for target in targets_of(failure["name"]) if known is None or target in known]
         log = log_tokens_of(failure.get("excerpt") or [])
         lines += suspect_lines(failure["name"], targets, rank(targets, entries, log=log), len(entries))
         lines += excerpt_lines(failure["name"], failure)
@@ -256,11 +282,12 @@ def suspect_report(failed, entries):
 
 def suspects(base, head, failed_path):
     failed = steps.failures(failed_path) if failed_path else []
-    entries = []
+    entries, known = [], None
     if failed:
         fetch(base, head)
-        entries = [snapshot_attribution(sha) for sha in batch(base, head)]
-    print("\n".join(suspect_report(failed, entries)))
+        entries = attributed(batch(base, head))
+        known = set(build_files.steps(select_tests.ROOT))
+    print("\n".join(suspect_report(failed, entries, known)))
 
 
 def capped(good, bad, commits, replays):
@@ -339,11 +366,11 @@ def describe(result, base, head):
     }[verdict]
 
 
-def bisect_steps(failed, commits, base, head, replay, deadline, clock=time.monotonic):
+def bisect_steps(failed, commits, base, head, replay, deadline, clock=time.monotonic, saved=None):
     """Bisect each failed step in turn; all of them share one deadline.
 
-    `replay(index, step, sha)` runs the step's command at `sha` and returns whether it passed.
-    Returns the per-step results and their verdict lines.
+    `replay(index, step, sha)` runs the step's command at `sha` and returns whether it passed. `saved(results)`
+    runs after each step finishes, with every result so far. Returns the per-step results and their verdict lines.
     """
     results, lines = [], []
     for index, step in enumerate(failed):
@@ -351,6 +378,8 @@ def bisect_steps(failed, commits, base, head, replay, deadline, clock=time.monot
         result.update(step=step["name"], argv=step["argv"])
         results.append(result)
         lines.append(f"{BISECT_PREFIX}{step['name']}: {describe(result, base, head)}")
+        if saved:
+            saved(results)
     return results, lines
 
 
@@ -372,23 +401,41 @@ def run_bisect(base, head, failed, logs):
         print(f"{step['name']}: replay at {sha}: {'passed' if code == 0 else f'failed (exit {code})'}", flush=True)
         return code == 0
 
+    def save(results):
+        verdict = dict(base=base, head=head, batch=len(commits), steps=results)
+        (logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+
     deadline = time.monotonic() + BISECT_CAP_SECONDS
+    save([])
     try:
-        results, lines = bisect_steps(failed, commits, base, head, replay, deadline)
+        _, lines = bisect_steps(failed, commits, base, head, replay, deadline, saved=save)
     finally:
         git("checkout", "--quiet", "--force", "--detach", head)
-    verdict = dict(base=base, head=head, batch=len(commits), steps=results)
-    (logs / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     print("\n".join(lines))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as output:
             print("\n" + "\n".join(lines) + "\n", file=output)
 
 
+def bisect_targets(step_name):
+    """The build targets a manual bisect replays, refused unless each one is a target at HEAD.
+
+    A step name that is not a build target (a script's step such as pty) has no `zig build` command to replay.
+    """
+    targets = targets_of(step_name)
+    known = set(build_files.steps(select_tests.ROOT))
+    unknown = [target for target in targets if target not in known]
+    if not targets or unknown:
+        named = ", ".join(unknown) or step_name or "(none)"
+        raise SystemExit(f"bisect-step {named!r} is not a build target at HEAD, so there is no zig build command to replay; "
+                         "name the selector targets the failed step ran (its space-separated targets)")
+    return targets
+
+
 def manual_steps(step_name):
     """The failed step a manual bisect replays: its command as run_selected.py would run it."""
     from run_selected import command  # run_selected imports the issue filer, which imports this module
-    return [dict(name=step_name, argv=command(targets_of(step_name)))]
+    return [dict(name=step_name, argv=command(bisect_targets(step_name)))]
 
 
 def manual_bisect(base, head, step_name, logs):
@@ -407,9 +454,13 @@ def main():
     bisect_parser.add_argument("--head", required=True, help="last commit of the batch")
     bisect_parser.add_argument("--step", required=True, help="the failed step's name: its space-separated targets")
     bisect_parser.add_argument("--logs", required=True, type=Path, help="directory for each replay's output")
+    targets_parser = commands.add_parser("bisect-targets", help="print a manual bisect's targets as the setup action takes them")
+    targets_parser.add_argument("--step", required=True, help="the failed step's name: its space-separated targets")
     args = parser.parse_args()
     if args.command == "suspects":
         suspects(args.base, args.head, args.failed)
+    elif args.command == "bisect-targets":
+        print(json.dumps(bisect_targets(args.step)))
     else:
         manual_bisect(args.base, args.head, args.step, args.logs)
 
