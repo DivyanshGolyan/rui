@@ -586,6 +586,117 @@ test "a list row carries its Session's Label, times, first Message, work and pee
     }.run);
 }
 
+test "SL-5: a list row's first Message, first approval and last line are the owners' values, for every Session shape" {
+    try store_testing.forEachEngine(struct {
+        const Shape = enum { live_approval, stopped_approval, person_message, peer_message, bare };
+
+        fn run(case: *store_testing.Case) !void {
+            for (std.enums.values(Shape)) |shape| try check(case, shape);
+        }
+
+        // The row must agree with the owners of each fact: readSessionReport for the first Message and the first
+        // approval, and the activity page for the first approval and the last line. `expect_*` pins that each shape
+        // reaches the fact it is named for, so a shape that reads nothing cannot pass by agreeing with nothing.
+        fn check(case: *store_testing.Case, shape: Shape) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try setup(&storage, &tmp, shape);
+            var listed = try testingListRow(&storage, &tmp, session.slice());
+            defer listed.deinit();
+            const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(report_bytes);
+            var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report_bytes, .{});
+            defer report.deinit();
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(session.slice());
+            const page = try store_core.activityPageForTesting(&storage, request);
+
+            const expect_first = shape != .bare;
+            const expect_approval = shape == .live_approval;
+            const report_first = report.value.object.get("first_message").?;
+            const list_first = listed.get(&.{"first_message"});
+            try std.testing.expectEqual(expect_first, report_first != .null);
+            try expectSameFirst(list_first, report_first);
+
+            const report_action = report.value.object.get("work").?.object.get("first_action").?;
+            const list_action = listed.get(&.{ "work", "first_action" });
+            try std.testing.expectEqual(expect_approval, report_action != .null);
+            try expectSameText(list_action, report_action);
+            const page_action: ?u64 = page.work.work.first_action;
+            try std.testing.expectEqual(page_action, if (list_action == .null) null else try std.fmt.parseInt(u64, list_action.string, 10));
+            try expectSameLastLine(listed.get(&.{"last_line"}), page.work.last_line);
+        }
+
+        fn setup(storage: *Store, tmp: *std.testing.TmpDir, shape: Shape) !protocol.Bounded(protocol.max_session_bytes) {
+            switch (shape) {
+                .live_approval, .stopped_approval => {
+                    // An approval awaiting a decision in a live Turn. Admission takes the oldest pending Message of any
+                    // Session, so this shape's Message is the only one in its store.
+                    const working = try configureTestSessionAsk(storage, "sl5-working");
+                    try submitTestMessage(storage, tmp, "sl5-working-file", "sl5-working-message", working.slice(), "propose");
+                    const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    const calls = [_]TestingCall{.{
+                        .item_id = "sl5-awaiting",
+                        .name = "bash",
+                        .encoded_call_id = "sl5-awaiting",
+                        .decoded_call_id = "sl5-awaiting",
+                        .encoded_arguments = "{\\\"description\\\":\\\"Awaiting\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Awaiting\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    }};
+                    try settleCallsForTesting(storage, tmp, proposing, "sl5-calls", &calls);
+                    if (shape == .stopped_approval) {
+                        var stop = try completeSessionStop("sl5-stop", working.slice());
+                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    }
+                    return working;
+                },
+                .person_message => {
+                    const person = try configureTestSession(storage, "sl5-person");
+                    try submitTestMessage(storage, tmp, "sl5-person-file", "sl5-person-message", person.slice(), "from a person");
+                    return person;
+                },
+                .peer_message => {
+                    const peer = try configureTestSession(storage, "sl5-peer");
+                    const receiver = try configureTestSession(storage, "sl5-receiver");
+                    try submitTestMessage(storage, tmp, "sl5-peer-file", "sl5-peer-message", receiver.slice(), "from a peer");
+                    const peer_position = try store_testing.queryU64(storage, "SELECT next_position FROM session WHERE session_ref=?1", .{peer.slice()});
+                    try store_testing.exec(storage, "UPDATE message_admission SET source_kind=2,sender_session_ref=?1,sender_position=?2 WHERE session_ref=?3", .{ peer.slice(), peer_position, receiver.slice() });
+                    return receiver;
+                },
+                .bare => return configureTestSession(storage, "sl5-bare"),
+            }
+        }
+
+        fn expectSameText(list: std.json.Value, report: std.json.Value) !void {
+            if (report == .null) return std.testing.expect(list == .null);
+            try std.testing.expectEqualStrings(report.string, list.string);
+        }
+
+        fn expectSameFirst(list: std.json.Value, report: std.json.Value) !void {
+            if (report == .null) return std.testing.expect(list == .null);
+            try std.testing.expect(list != .null);
+            for ([_][]const u8{ "position", "admission", "admitted_at" }) |name|
+                try expectSameText(list.object.get(name).?, report.object.get(name).?);
+            const report_sender = report.object.get("sender") orelse .null;
+            const list_sender = list.object.get("sender") orelse .null;
+            if (report_sender == .null) return std.testing.expect(list_sender == .null);
+            try std.testing.expect(list_sender != .null);
+            try expectSameText(list_sender.object.get("session").?, report_sender.object.get("session").?);
+        }
+
+        fn expectSameLastLine(list: std.json.Value, page: anytype) !void {
+            const line = page orelse return std.testing.expect(list == .null);
+            try std.testing.expect(list != .null);
+            try std.testing.expectEqual(line.position, try std.fmt.parseInt(u64, list.object.get("position").?.string, 10));
+            const text = list.object.get("text") orelse .null;
+            if (line.text) |*bytes| try std.testing.expectEqualStrings(bytes.slice(), text.string) else try std.testing.expect(text == .null);
+        }
+    }.run);
+}
+
 test "a page lists only the kinds it asks for, up to its limit" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -664,8 +775,8 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, protocol.session_list_page_size));
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }

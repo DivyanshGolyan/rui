@@ -912,7 +912,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try report_domain.readWorks(a, (&work)[0..1]);
     page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     var last_line: session_list_domain.LastLineRead = undefined;
-    last_line.queue(a, session_ref, page.work.work.first_action);
+    last_line.queue(a, session_ref);
     page.count = @min(rows.len, limit);
     page.more = rows.len > limit;
     var at: [page.items.len]ItemAt = undefined;

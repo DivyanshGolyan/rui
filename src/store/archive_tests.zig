@@ -1129,6 +1129,30 @@ test "MySQL plans the changed-page ancestor batch through the session key" {
     }.run);
 }
 
+test "MySQL plans a list row's settings through the Session ref, with no base-table scan" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            if (case.engine != .mysql) return;
+            const rsql = @import("rsql.zig");
+            const session_list_read = @import("domain/session_list_read.zig");
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const literal = comptime bindLiterals(rsql.sentTemplate(session_list_read.list_row_source).prepared(), &.{"'abcdef'"});
+            var buffer: [16384]u8 = undefined;
+            const plan = try mysql_testing.planText(&storage, literal, &buffer);
+            errdefer std.debug.print("MySQL plan for the list row settings:\n{s}", .{plan});
+            // The first Message, the first awaiting approval and the last Turn are keyed probes of the Session ref. MySQL
+            // names aliases in the plan, so refuse any table scan and require the Turn index the probes use.
+            try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
+        }
+    }.run);
+}
+
 test "MySQL plans each archiving candidate and page through its index" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {

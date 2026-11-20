@@ -332,10 +332,10 @@ test "a list row whose queue read fails answers main's MessageAdmissionReadFaile
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref"), error.SessionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "SELECT session.session_ref,session.archive_seq,session.parent_ref"), error.SessionReadFailed, .queued);
 }
 
-test "a list row that fails to render reports its error before a later row's failed step" {
+test "a list page whose settings read fails reports SessionReadFailed before any row renders" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -349,10 +349,11 @@ test "a list row that fails to render reports its error before a later row's fai
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref") };
+    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "SELECT session.session_ref,session.archive_seq,session.parent_ref") };
     fault.arm(storage.sqliteDatabase());
     defer fault.disarm(storage.sqliteDatabase());
-    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+    // The settings rows are read in the page's first round, so a failed read there wins over a later row's render error.
+    try std.testing.expectError(error.SessionReadFailed, testingSessionList(&storage, &tmp, .{}, &used, 5));
     try std.testing.expect(fault.failed > 0);
 }
 
@@ -406,8 +407,10 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(9, rounds);
-    try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+    try std.testing.expectEqual(7, rounds);
+    // One term per round, measured after the settings rows and the creator-subtree page 1 joined the first WorkRead
+    // round (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
+    try std.testing.expectEqual(8 + 6 + 6 + 4 + 2 + 2 + 1, a.passes);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {

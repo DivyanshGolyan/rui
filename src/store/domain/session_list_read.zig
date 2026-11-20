@@ -25,7 +25,6 @@ const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const tool_set = @import("tool_set.zig");
 const ReadAccess = reads_domain.ReadAccess;
-const FirstCandidates = report_domain.FirstCandidates;
 const WorkRead = report_domain.WorkRead;
 const readWorks = report_domain.readWorks;
 const SessionText = Bounded(session_id.max_reference_bytes);
@@ -74,7 +73,6 @@ pub const list_failures = .{
     .{ workspace_list_page, error.SessionReadFailed },
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
-    .{ list_row_bare, error.SessionReadFailed },
     .{ changed_ancestors, error.SessionReadFailed },
     .{ descendant_page, error.SessionReadFailed },
 } ++ report_domain.report_failures;
@@ -288,9 +286,7 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 const archived_window_limit = session_list.archived_window_size + 1;
 
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
-    "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position," ++
-    "first_content.byte_length AS first_length,first_content.digest AS first_digest," ++
-    "first_content.private AS first_private,first_content.form AS first_form," ++
+    report_domain.first_pick_position_columns ++ "," ++ report_domain.first_pick_content_columns ++ "," ++
     "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
 
 const ArchivedWindowRow = struct {
@@ -309,7 +305,7 @@ const ArchivedWindowRow = struct {
 
 const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
     "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key" ++ report_domain.first_admission_join ++
-    " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id ";
+    report_domain.first_pick_content_join ++ " ";
 
 /// The statement sources, with `@index` marks as written (the MySQL plan test renders them).
 pub const archived_newest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
@@ -440,6 +436,10 @@ pub const Scratch = struct {
     live: LivePages = .{},
     /// The changed seeds of a since-delta page, in ID order, found before its ancestor statements queue.
     changed: [change_ring.capacity]change_ring.Id = undefined,
+    /// The settings rows of one page, read in its first round beside the first WorkRead stage.
+    settings: [session_list.session_list_page_size]SettingsRow = undefined,
+    /// The creator-subtree read of one page: its roots, its page and the WorkReads of its descendants.
+    rollup: RollupRead = .{},
 };
 
 pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, visitor: anytype) !void {
@@ -474,7 +474,7 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     if (live_tab) try mergeLive(live, page);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
-    try readRows(a, request, page.refs[0..page.count], visitor);
+    try readRows(a, request, scratch, page.refs[0..page.count], visitor);
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
     try visitor.tail(if (page.more)
@@ -587,7 +587,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     if (candidates.failure) |err| return err;
     const changed = candidates.refs[0..candidates.count];
     const count = @min(changed.len, session_list.session_list_page_size);
-    try readRows(a, request, changed[0..count], visitor);
+    try readRows(a, request, scratch, changed[0..count], visitor);
     var token: [change_ring.Token.max_bytes]u8 = undefined;
     const next = (change_ring.Token{ .instance = self.instance, .generation = through }).format(&token);
     try visitor.tail(if (changed.len > count)
@@ -672,64 +672,75 @@ const DescendantPage = struct {
     }
 };
 
-fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, works: []WorkRead, totals: []Rollup) !void {
-    @memset(totals, .{});
-    if (references.len == 0) return;
-    var roots: [session_list.session_list_page_size]Bounded(session_id.bytes) = @splat(.{});
-    for (references, 0..) |*reference, index| roots[index].set(reference) catch return error.CorruptStore;
-    var after_origin: ?change_ring.Id = null;
-    var after_member: ?change_ring.Id = null;
+/// One creator-subtree read: the page roots, the page last read, the cursor for the next page, and the WorkReads of
+/// the page's descendants. It lives in the caller's Scratch, apart from the page's own WorkReads.
+const RollupRead = struct {
+    roots: [session_list.session_list_page_size]Bounded(session_id.bytes) = @splat(.{}),
+    page: DescendantPage = .{},
+    after_origin: ?change_ring.Id = null,
+    after_member: ?change_ring.Id = null,
+    works: [session_list.session_list_page_size]report_domain.WorkRead = undefined,
+};
+
+/// Queues the creator-subtree page after the cursor in `read`. The caller runs the round.
+fn queueRollupPage(a: *ReadAccess, request: *const session_list.ListSessions, read: *RollupRead) !void {
+    read.page = .{};
+    a.readEach(descendant_page, .{
+        .root0 = read.roots[0],
+        .root1 = read.roots[1],
+        .root2 = read.roots[2],
+        .root3 = read.roots[3],
+        .root4 = read.roots[4],
+        .root5 = read.roots[5],
+        .root6 = read.roots[6],
+        .root7 = read.roots[7],
+        .workspace = if (request.workspace) |*scope| scope.slice() else null,
+        .digest = if (request.workspace) |*scope| store_core.workspaceDigest(scope.slice()) else null,
+        .archive = request.archive,
+        .after_origin = if (read.after_origin) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
+        .after_member = if (read.after_member) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
+    }, session_list.session_list_page_size + 1, &read.page);
+}
+
+/// Folds the creator subtree into the rollups. Page 1 was read by the caller's first round, so its rows come first;
+/// every later page is queued and run here. The Sessions of a page take their WorkReads in rounds of their own.
+fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, read: *RollupRead, totals: []Rollup) !void {
     while (true) {
-        var page: DescendantPage = .{};
-        a.readEach(descendant_page, .{
-            .root0 = roots[0],
-            .root1 = roots[1],
-            .root2 = roots[2],
-            .root3 = roots[3],
-            .root4 = roots[4],
-            .root5 = roots[5],
-            .root6 = roots[6],
-            .root7 = roots[7],
-            .workspace = if (request.workspace) |*scope| scope.slice() else null,
-            .digest = if (request.workspace) |*scope| store_core.workspaceDigest(scope.slice()) else null,
-            .archive = request.archive,
-            .after_origin = if (after_origin) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
-            .after_member = if (after_member) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
-        }, session_list.session_list_page_size + 1, &page);
-        try runList(a);
-        if (page.failure) |err| return err;
-        const count = @min(page.count, session_list.session_list_page_size);
-        if (count == 0) break;
+        if (read.page.failure) |err| return err;
+        const count = @min(read.page.count, session_list.session_list_page_size);
+        if (count == 0) return;
         var work_count: usize = 0;
-        for (page.rows[0..count]) |*row| {
+        for (read.page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
-            const read = &works[work_count];
-            read.* = .{ .session = row.session_ref.slice() };
-            _ = read.queue(a);
+            const work = &read.works[work_count];
+            work.* = .{ .session = row.session_ref.slice() };
+            _ = work.queue(a);
             work_count += 1;
         }
         if (work_count != 0) {
             try runList(a);
-            for (works[0..work_count]) |*read| try read.advance();
-            try readWorks(a, works[0..work_count]);
+            for (read.works[0..work_count]) |*work| try work.advance();
+            try readWorks(a, read.works[0..work_count]);
         }
         var work_index: usize = 0;
-        for (page.rows[0..count]) |*row| {
+        for (read.page.rows[0..count]) |*row| {
             if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
             var index: usize = 0;
             while (index < references.len and !std.mem.eql(u8, row.origin.slice(), &references[index])) : (index += 1) {}
             if (index == references.len) return error.CorruptStore;
             const total = &totals[index];
-            const read = &works[work_index];
+            const work_read = &read.works[work_index];
             work_index += 1;
-            const work = try read.work(row.created_at.get(), now_ms);
-            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), read, work));
+            const work = try work_read.work(row.created_at.get(), now_ms);
+            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), work_read, work));
             total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
             if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
         }
-        if (page.count <= session_list.session_list_page_size) break;
-        after_origin = page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
-        after_member = page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
+        if (read.page.count <= session_list.session_list_page_size) return;
+        read.after_origin = read.page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
+        read.after_member = read.page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
+        try queueRollupPage(a, request, read);
+        try runList(a);
     }
 }
 
@@ -737,7 +748,7 @@ const settings_columns = "session.session_ref,session.archive_seq,session.parent
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
-    last_line_columns ++ "," ++ clock_columns;
+    last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clock_columns;
 
 const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
@@ -747,23 +758,21 @@ const last_line_columns =
 
 const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT turn_id FROM turn @index(turn_session_latest) " ++
     "WHERE session_ref=session.session_ref AND outcome_code IS NOT NULL ORDER BY turn_id DESC LIMIT 1) " ++
-    "LEFT JOIN action_operation awaiting ON awaiting.action_id=?2 " ++
+    "LEFT JOIN action_operation awaiting ON awaiting.action_id=(" ++ report_domain.firstApprovalSql("session.session_ref") ++ ") " ++
     "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
 
-const list_row = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ report_domain.first_message_columns ++ " FROM session " ++
-        "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref " ++ report_domain.first_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first_action: ?u64, first: u64 },
-    .Row = ListRow,
-    .cardinality = .each,
-});
+/// One Session's settings row. Its first Message and first awaiting approval are correlated joins on the Session
+/// ref, so the statement queues in the same round as the Session's first WorkRead stage. A Session with no first
+/// Message keeps its row, with NULL first-Message columns.
+/// The statement source, with `@index` marks as written (the MySQL plan test renders it).
+pub const list_row_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
+    report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1";
 
-const list_row_bare = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private,NULL AS first_form FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first_action: ?u64 },
+const list_row = rsql.Read(.{
+    .sql = list_row_source,
+    .Args = struct { session: []const u8 },
     .Row = ListRow,
-    .cardinality = .each,
+    .cardinality = .optional,
 });
 
 const ListRow = struct {
@@ -787,6 +796,7 @@ const ListRow = struct {
     last_answer: ?rsql.Blob(1024),
     last_approval_position: ?rsql.Positive,
     last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
+    first_awaiting_action: ?rsql.Positive,
     clock_started_at: ?rsql.Positive,
     clock_approval_entered_at: ?rsql.Positive,
     clock_approval_left_at: ?rsql.Positive,
@@ -801,83 +811,62 @@ const ListRow = struct {
 };
 
 const ListScratch = struct {
-    firsts: [session_list.session_list_page_size]FirstCandidates,
     works: [session_list.session_list_page_size]WorkRead,
     shown: [session_list.session_list_page_size]ShownRow,
-    decoded: ListRow,
     rollups: [session_list.session_list_page_size]Rollup,
 };
 
-noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, visitor: anytype) !void {
+/// One settings row, read in the page's first round: the row, and whether its Session was found.
+const SettingsRow = struct {
+    row: ListRow = undefined,
+    found: store_access.Found = undefined,
+};
+
+/// Reads one page of rows in three stages. The first round queues the creator-subtree page 1, every row's first
+/// WorkRead stage and every row's settings, which need only the Session ref. The rounds after it finish the
+/// WorkReads and the subtree pages. Then the rows are shaped from the settings read.
+noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
-    const scratch = a.store.reportScratch(ListScratch);
-    const firsts = &scratch.firsts;
-    const works = &scratch.works;
+    const list = a.store.reportScratch(ListScratch);
+    const works = &list.works;
     const now = std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange;
-    try readRollups(a, request, references, now, works, scratch.rollups[0..references.len]);
-    for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
-        first.queue(a, reference);
+    const rollups = list.rollups[0..references.len];
+    @memset(rollups, .{});
+    const rollup = &scratch.rollup;
+    // One assignment resets the cursors and the page. Naming `roots` stores the fields' defaults and skips `works`,
+    // which is undefined by default and is written before it is read.
+    rollup.* = .{ .roots = @splat(.{}) };
+    for (references, 0..) |*reference, index| rollup.roots[index].set(reference) catch return error.CorruptStore;
+    if (references.len != 0) try queueRollupPage(a, request, rollup);
+    for (references, works[0..references.len], scratch.settings[0..references.len]) |*reference, *work, *settings| {
         work.* = .{ .session = reference };
         _ = work.queue(a);
+        a.readInto(list_row, .{ .session = reference }, &settings.row, &settings.found);
     }
     try runList(a);
+    try readRollups(a, request, references, now, rollup, rollups);
     for (works[0..references.len]) |*work| try work.advance();
     try readWorks(a, works[0..references.len]);
-    const shown = &scratch.shown;
-    for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
-        row.* = .{ .reference = reference, .first = first.admission(), .work = work };
-    try readRowSettings(a, shown[0..references.len], scratch.rollups[0..references.len], &scratch.decoded, now, visitor);
+    const shown = &list.shown;
+    for (references, works[0..references.len], shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
+    try readRowSettings(a, shown[0..references.len], scratch.settings[0..references.len], rollups, now, visitor);
 }
 
-const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
+const ShownRow = struct { reference: *const change_ring.Id, work: *const WorkRead };
 
-noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, rollups: []const Rollup, decoded: *ListRow, now_ms: u64, visitor: anytype) !void {
-    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = decoded, .rows = rows, .rollups = rollups, .now_ms = now_ms, .visitor = visitor };
-    for (rows) |row| {
-        const work = try row.work.work(0, now_ms);
-        if (row.first == 0)
-            a.readEach(list_row_bare, .{ .session = row.reference, .first_action = work.first_action }, 1, &read)
-        else
-            a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
+/// Shapes each row from its settings read. No round runs here: every statement was queued and run before.
+noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []const SettingsRow, rollups: []const Rollup, now_ms: u64, visitor: anytype) !void {
+    const read_version: change_ring.Token = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
+    for (settings[0..rows.len], 0..) |*slot, index| {
+        if (!slot.found.get()) return error.CorruptStore;
+        var sorted: [tool_name.max_tools][]const u8 = undefined;
+        var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
+        var values = try rowValues(rows, rollups, index, now_ms, &slot.row, &sorted, &last_text);
+        values.read_version = read_version;
+        try visitor.row(&values);
     }
-    const ran = runList(a);
-    if (read.failure) |err| return err;
-    try ran;
-    if (read.shown != rows.len) return error.CorruptStore;
 }
-
-fn RowsRead(comptime Visitor: type) type {
-    return struct {
-        read_version: change_ring.Token,
-        decoded: *ListRow,
-        rows: []const ShownRow,
-        rollups: []const Rollup,
-        now_ms: u64,
-        visitor: Visitor,
-        shown: usize = 0,
-        failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
-
-        pub fn visit(read: *@This(), row: *const ListRow) bool {
-            if (read.failure != null) return false;
-            var sorted: [tool_name.max_tools][]const u8 = undefined;
-            var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
-            var values = rowValues(read.rows, read.rollups, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
-                read.failure = err;
-                return false;
-            };
-            values.read_version = read.read_version;
-            read.visitor.row(&values) catch |err| {
-                read.failure = err;
-                return false;
-            };
-            read.shown += 1;
-            return true;
-        }
-    };
-}
-
-const ErrorOf = @import("../../error_set.zig").Of;
 
 const ClockFacts = struct {
     created_at: u64,
@@ -918,8 +907,11 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
+    // The settings join and WorkRead's first_action read one fact, the oldest approval awaiting a decision. U3 merges
+    // the two reads; until then a disagreement means the Store is corrupt, not that either read may win.
+    if ((if (row.first_awaiting_action) |id| id.get() else null) != work.first_action) return error.CorruptStore;
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
-    const first_message = try report_domain.firstMessage(row, rows[index].first);
+    const first_message = try report_domain.firstMessage(row, if (row.first_admission) |admission| admission.get() else 0);
     const clock = try stateChangeAt(.of(row), rows[index].work, work);
     return .{
         .archive_state = row.archive_state,
@@ -972,7 +964,7 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
 
 const last_line = rsql.Read(.{
     .sql = "SELECT " ++ last_line_columns ++ " FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first_action: ?u64 },
+    .Args = struct { session: []const u8 },
     .Row = struct {
         last_turn_position: ?rsql.Positive,
         last_answer: ?rsql.Blob(1024),
@@ -988,8 +980,8 @@ pub const LastLineRead = struct {
     row: last_line.Row = undefined,
     found: store_access.Found = undefined,
 
-    pub fn queue(self: *LastLineRead, a: *ReadAccess, session: []const u8, first_action: ?u64) void {
-        a.readInto(last_line, .{ .session = session, .first_action = first_action }, &self.row, &self.found);
+    pub fn queue(self: *LastLineRead, a: *ReadAccess, session: []const u8) void {
+        a.readInto(last_line, .{ .session = session }, &self.row, &self.found);
     }
 
     pub fn finish(self: *const LastLineRead, out: *?session_list.SavedLastLine) !void {
