@@ -222,14 +222,18 @@ pub const first_admission_join = " LEFT JOIN message_admission first_bound ON fi
     "WHERE u.session_ref=session.session_ref AND u.turn_id IS NULL ORDER BY u.admission_id LIMIT 1)" ++
     " LEFT JOIN message_admission first_pick ON first_pick.admission_id=(CASE WHEN first_unbound.admission_id IS NULL " ++
     "OR (first_bound.admission_id IS NOT NULL AND first_bound.admission_id<=first_unbound.admission_id) " ++
-    "THEN first_bound.admission_id ELSE first_unbound.admission_id END)";
+    "THEN first_bound.admission_id ELSE first_unbound.admission_id END) AND first_pick.session_ref=session.session_ref";
 /// The admission column of `first_admission_join`: the Session's first Message, or NULL when it has none.
 pub const first_admission_column = "first_pick.admission_id";
 /// The projection of the first Message through `first_admission_join`'s `first_pick`, for a statement whose row is
 /// the Session. The content join is LEFT, so a Session with no first Message keeps its row with NULL columns.
-pub const first_pick_columns = "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position," ++
-    "first_pick.admitted_at AS first_admitted_at,first_pick.sender_session_ref AS first_sender," ++
-    "first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private,first_content.form AS first_form";
+/// The first Message's position and admission, for a row that also names the Message's sender and time.
+pub const first_pick_position_columns = "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position";
+/// The first Message's content metadata, read through `first_pick_content_join`.
+pub const first_pick_content_columns = "first_content.byte_length AS first_length,first_content.digest AS first_digest," ++
+    "first_content.private AS first_private,first_content.form AS first_form";
+pub const first_pick_columns = first_pick_position_columns ++ ",first_pick.admitted_at AS first_admitted_at," ++
+    "first_pick.sender_session_ref AS first_sender," ++ first_pick_content_columns;
 pub const first_pick_content_join = " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id";
 
 pub const first_candidate_source = "SELECT " ++ first_admission_column ++ " AS admission_id FROM session" ++ first_admission_join ++ " WHERE session.session_ref=?1";

@@ -286,9 +286,7 @@ pub fn retryCrossings(a: *ReadAccess, from: u64, now: u64, crossings: *RetryCros
 const archived_window_limit = session_list.archived_window_size + 1;
 
 const archived_columns = "session.archive_seq,session.session_ref,ostop.stopped_at,session.label," ++
-    "first_pick.admission_id AS first_admission,first_pick.admission_position AS first_position," ++
-    "first_content.byte_length AS first_length,first_content.digest AS first_digest," ++
-    "first_content.private AS first_private,first_content.form AS first_form," ++
+    report_domain.first_pick_position_columns ++ "," ++ report_domain.first_pick_content_columns ++ "," ++
     "CASE WHEN first_content.private=0 AND first_content.form=0 THEN substr(@payload(first_content),1,512) END AS first_line";
 
 const ArchivedWindowRow = struct {
@@ -307,7 +305,7 @@ const ArchivedWindowRow = struct {
 
 const archived_window_join = " FROM session @index(session_tab) LEFT JOIN core_command ocmd ON ocmd.command_seq=session.archive_seq " ++
     "LEFT JOIN session_stop ostop ON ostop.command_key=ocmd.command_key" ++ report_domain.first_admission_join ++
-    " LEFT JOIN content first_content ON first_content.content_id=first_pick.content_id ";
+    report_domain.first_pick_content_join ++ " ";
 
 /// The statement sources, with `@index` marks as written (the MySQL plan test renders them).
 pub const archived_newest_source = "SELECT " ++ archived_columns ++ archived_window_join ++
@@ -750,7 +748,7 @@ const settings_columns = "session.session_ref,session.archive_seq,session.parent
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
-    last_line_columns ++ "," ++ clock_columns;
+    last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clock_columns;
 
 const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
@@ -798,6 +796,7 @@ const ListRow = struct {
     last_answer: ?rsql.Blob(1024),
     last_approval_position: ?rsql.Positive,
     last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
+    first_awaiting_action: ?rsql.Positive,
     clock_started_at: ?rsql.Positive,
     clock_approval_entered_at: ?rsql.Positive,
     clock_approval_left_at: ?rsql.Positive,
@@ -835,10 +834,9 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
     const rollups = list.rollups[0..references.len];
     @memset(rollups, .{});
     const rollup = &scratch.rollup;
-    rollup.roots = @splat(.{});
-    rollup.page = .{};
-    rollup.after_origin = null;
-    rollup.after_member = null;
+    // One assignment resets the cursors and the page. Naming `roots` stores the fields' defaults and skips `works`,
+    // which is undefined by default and is written before it is read.
+    rollup.* = .{ .roots = @splat(.{}) };
     for (references, 0..) |*reference, index| rollup.roots[index].set(reference) catch return error.CorruptStore;
     if (references.len != 0) try queueRollupPage(a, request, rollup);
     for (references, works[0..references.len], scratch.settings[0..references.len]) |*reference, *work, *settings| {
@@ -909,6 +907,9 @@ fn rowValues(rows: []const ShownRow, rollups: []const Rollup, index: usize, now_
     const names = try report_domain.sortedToolNames(if (row.tools) |*tools| tools.slice() else null, sorted);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
+    // The settings join and WorkRead's first_action read one fact, the oldest approval awaiting a decision. U3 merges
+    // the two reads; until then a disagreement means the Store is corrupt, not that either read may win.
+    if ((if (row.first_awaiting_action) |id| id.get() else null) != work.first_action) return error.CorruptStore;
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
     const first_message = try report_domain.firstMessage(row, if (row.first_admission) |admission| admission.get() else 0);
     const clock = try stateChangeAt(.of(row), rows[index].work, work);

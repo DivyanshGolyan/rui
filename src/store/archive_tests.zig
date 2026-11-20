@@ -1145,10 +1145,10 @@ test "MySQL plans a list row's settings through the Session ref, with no base-ta
             var buffer: [16384]u8 = undefined;
             const plan = try mysql_testing.planText(&storage, literal, &buffer);
             errdefer std.debug.print("MySQL plan for the list row settings:\n{s}", .{plan});
-            // The first Message, the first awaiting approval and the last turn are keyed probes of the Session ref. A
-            // materialized derived table may be scanned; a base table may not.
-            inline for ([_][]const u8{ "session", "message_admission", "action_operation", "turn", "content", "model_operation", "model_tool_call" }) |table|
-                try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan on " ++ table) == null);
+            // The first Message, the first awaiting approval and the last Turn are keyed probes of the Session ref. MySQL
+            // names aliases in the plan, so refuse any table scan and require the Turn index the probes use.
+            try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
         }
     }.run);
 }

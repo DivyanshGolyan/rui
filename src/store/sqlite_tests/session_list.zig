@@ -408,8 +408,9 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             return err;
         };
     try std.testing.expectEqual(7, rounds);
-    // Measured after the settings rows and the creator-subtree page 1 joined the first WorkRead round (was 36).
-    try std.testing.expectEqual(29, a.passes);
+    // One term per round, measured after the settings rows and the creator-subtree page 1 joined the first WorkRead
+    // round (was 1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6 over nine rounds).
+    try std.testing.expectEqual(8 + 6 + 6 + 4 + 2 + 2 + 1, a.passes);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {
