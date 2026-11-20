@@ -58,7 +58,7 @@ pub fn List(comptime Target: type) type {
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
         pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
         /// The top line and the lines shown by the draw after a wheel scroll.
-        pub const Scroll = struct { top: u32, height: u32 };
+        pub const Scroll = struct { top: u32, height: u32, pointer_row: i16 };
         pub const Edge = enum { above, below };
         pub const Counts = struct { above: u32, below: u32 };
         pub const Edges = struct { userdata: *const anyopaque, lineFn: *const fn (*const anyopaque, Edge, Range, Counts, std.mem.Allocator) std.mem.Allocator.Error!?Line };
@@ -71,6 +71,8 @@ pub fn List(comptime Target: type) type {
         /// A wheel event asked for a scroll report; `wheel_drawn` is set once a draw has applied it.
         wheel_due: bool = false,
         wheel_drawn: bool = false,
+        /// The pointer row of the last wheel event, reported with the scroll: the List takes the wheel before its holder sees it.
+        wheel_row: i16 = 0,
         /// Whether the last draw moved the list by a wheel scroll rather than a selection or a trim.
         wheel_applied: bool = false,
         edges: ?Edges = null,
@@ -121,7 +123,10 @@ pub fn List(comptime Target: type) type {
             // The wheel's shown rows are reported after the draw applies it (scrollReport), never from here:
             // the content surface's own handler consumes the wheel, and the top moves only at the next draw.
             try self.list.handleEvent(ctx, input);
-            if (mouse.button == .wheel_up or mouse.button == .wheel_down) self.wheel_due = true;
+            if (mouse.button == .wheel_up or mouse.button == .wheel_down) {
+                self.wheel_due = true;
+                self.wheel_row = mouse.row;
+            }
         }
 
         /// The shown rows after a wheel scroll, once a draw has applied it. Returns null until then, and once per scroll.
@@ -129,7 +134,7 @@ pub fn List(comptime Target: type) type {
             if (!self.wheel_drawn) return null;
             self.wheel_due = false;
             self.wheel_drawn = false;
-            return .{ .top = self.list.scroll.top, .height = self.shown.end -| self.shown.first };
+            return .{ .top = self.list.scroll.top, .height = self.shown.end -| self.shown.first, .pointer_row = self.wheel_row };
         }
 
         const Lazy = struct {

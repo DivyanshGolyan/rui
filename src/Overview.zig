@@ -653,13 +653,10 @@ fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!vo
     ctx.redraw = ctx.redraw or self.state.presentation_revision != revision;
 }
 
-/// A wheel scroll moved the list, as the draw after it shows. The core learns which rows are shown, so the Archived
-/// window reads the edge the list reaches; the top row becomes the anchor, so a trim above it moves nothing on screen.
+/// A wheel scroll moved the list, as the draw after it shows. The shell reports the lines; the core maps them to rows.
 fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.state.archive != .archived or top >= self.state.order.items.len) return;
-    const row = self.state.rows.items[self.state.order.items[top]];
-    self.app_sessions.anchor = .{ .target = .{ .open = row.reference }, .index = top, .row = 0 };
+    if (self.state.archive != .archived) return;
     try self.appNext(ctx, try self.event(.{ .viewport = .{ .first = top, .end = top + height } }));
     ctx.redraw = true;
 }
@@ -4505,6 +4502,53 @@ fn sui4NestedKeys() !void {
         try std.testing.expect(!overview.root.input.layer.settingsOpen());
         try std.testing.expectEqual(selected, overview.state.selected);
     }
+}
+
+test "a wheel over the Archived list reports one viewport, after the draw that applies it" {
+    const Window = struct {
+        // One archived row, so the Archived list has a row for the viewport to name.
+        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            _ = self;
+            _ = requests;
+            _ = cursor;
+            const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.window = Window.window;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 8 }, .cell_size = .{} };
+    const frame = try overview.root.widget().draw(draw);
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} });
+    // The wheel is not reported until a draw applies it.
+    try std.testing.expect(overview.state.viewport == null);
+    _ = try overview.root.widget().draw(draw);
+    try overview.root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(overview.state.viewport != null);
+    // The report is taken once per scroll: a later tick without a wheel reports nothing again.
+    overview.state.viewport = null;
+    try overview.root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(overview.state.viewport == null);
 }
 
 test "overview Archived window effect runs one job and its reply becomes the window event" {

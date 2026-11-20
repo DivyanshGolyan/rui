@@ -6772,6 +6772,18 @@ test "archived window: a trim that drops the selected row, then Down, selects fr
     try std.testing.expectEqual(shown_top, selectedAt(&state));
 }
 
+test "archived window: a viewport's lines map to rows past a pinned gap" {
+    var refs: [1200][6]u8 = undefined;
+    var host: [1200]Listed = undefined;
+    var state = try archivedWheelFixture(&refs, &host);
+    defer state.deinit();
+    // A gap at line 3 moves the rows from row 3 on down one line, as the list draws them.
+    state.pin_end = 3;
+    // Lines 2..5 are rows 2, the gap, 3 and 4: the viewport's ends are rows 2 and 4, not lines 2 and 5.
+    _ = try step(&state, .{ .viewport = .{ .first = 2, .end = 6 } });
+    try std.testing.expectEqual(Focus{ .first = 2, .end = 5 }, archivedFocus(&state));
+}
+
 test "the Archived view lists Sessions flat in the Host's order, with no nesting and no pins first" {
     // A window row carries no pin and no creator (its wire row has neither), so none can reorder or nest it.
     const parent = session("p00001", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "parent", .archive_state = .archived, .archive_seq = 30 });
