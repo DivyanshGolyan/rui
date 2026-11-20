@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests/integration"))
 from host_process import wait_for
 
 SCRIPT = pathlib.Path(__file__).with_name("case_deadline.py")
