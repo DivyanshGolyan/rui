@@ -1162,23 +1162,12 @@ const Retained = enum { assignments, saved, saved_kept };
 /// Which notice a `host set`/`host unset` of this settings path gets; `restartable` is
 /// whether the running Host reports a settings digest.
 fn savedRetention(path: []const u8, restartable: bool) Retained {
-    const capacity = "execution.activeCapacity";
-    const reaches = std.mem.eql(u8, path, capacity) or
-        (path.len < capacity.len and std.mem.startsWith(u8, capacity, path) and capacity[path.len] == '.');
-    return if (reaches or !restartable) .saved_kept else .saved;
+    return if (!restartable or host_start.restartKeeps(path)) .saved_kept else .saved;
 }
 
 test "a saved edit restart would not apply gets the pause-then-start notice" {
-    for ([_]struct { []const u8, bool, Retained }{
-        .{ "execution.activeCapacity", true, .saved_kept },
-        .{ "execution", true, .saved_kept },
-        .{ "execution.backgroundAfterMs", true, .saved },
-        .{ "execution.active", true, .saved },
-        .{ "exec", true, .saved },
-        .{ "providers.openai", true, .saved },
-        .{ "providers.openai", false, .saved_kept },
-        .{ "execution.backgroundAfterMs", false, .saved_kept },
-    }) |case| try std.testing.expectEqual(case[2], savedRetention(case[0], case[1]));
+    try std.testing.expectEqual(.saved_kept, savedRetention("providers", false));
+    try std.testing.expectEqual(.saved, savedRetention("providers", true));
     var notice: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer notice.deinit();
     try writeRetainedHostNotice(&notice.writer, "/s", .saved_kept);
