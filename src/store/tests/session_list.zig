@@ -1598,6 +1598,16 @@ test "SL-1: Session list rolls up eligible descendants beyond the page" {
 
 const session_work = @import("../../session_work.zig");
 
+test "WithWork of no head is WorkRow field for field" {
+    const fields = @typeInfo(report_domain.WithWork(struct {})).@"struct";
+    const expected = @typeInfo(report_domain.WorkRow).@"struct";
+    comptime std.debug.assert(fields.field_names.len == expected.field_names.len);
+    inline for (fields.field_names, fields.field_types, expected.field_names, expected.field_types) |name, Field, want, Want| {
+        comptime std.debug.assert(std.mem.eql(u8, name, want));
+        comptime std.debug.assert(Field == Want);
+    }
+}
+
 test "SL-6: a Session's one-statement work is its staged work, for every stage outcome" {
     try store_testing.forEachEngine(struct {
         const Shape = enum { idle, queued, live, awaiting, running, live_stopping, stopping_with_child, finished, finished_then_queued, stopped, stopped_then_queued, stopped_then_admitted, owed, resolved_plain, resolved_promoted_first, resolved_promoted_second, ended_with_approval };

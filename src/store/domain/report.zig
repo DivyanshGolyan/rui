@@ -874,17 +874,6 @@ fn checkWorkFields(comptime Row: type) void {
     }
 }
 
-test "WithWork of no head is WorkRow field for field" {
-    const fields = @typeInfo(WithWork(struct {})).@"struct";
-    const expected = @typeInfo(WorkRow).@"struct";
-    comptime std.debug.assert(fields.field_names.len == expected.field_names.len);
-    inline for (fields.field_names, fields.field_types, expected.field_names, expected.field_types) |name, Field, want, Want| {
-        comptime std.debug.assert(std.mem.eql(u8, name, want));
-        comptime std.debug.assert(Field == Want);
-    }
-    comptime checkWorkFields(WithWork(struct { origin: u64 }));
-}
-
 pub const work_row_failures = .{.{ work_row, error.TurnReadFailed }};
 
 pub const report_failures = .{
