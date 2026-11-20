@@ -643,3 +643,117 @@ test "creation receipt corruption work is bounded by ordinal range in SQLite ste
         }
     }
 }
+
+test "SL-7: a damaged work stage is refused the same way by the one-statement and staged reads" {
+    // Each damage is one stage's column set to a value its CHECK or the decoder refuses. The check-constraint edits
+    // need ignore_check_constraints, as the settings test above does. The staged read's error is the expectation, so
+    // a damage that reads nothing cannot pass by agreeing with nothing (expectError fails on success).
+    const Damage = enum { resolved_without_code, in_flight_without_attempt, waiting_without_schedule, ended_without_outcome_time, unknown_outcome, running_without_call, excluded_without_position, queued_with_zero_admission_time, running_unauthorized };
+    for (std.enums.values(Damage)) |damage| {
+        errdefer std.debug.print("SL-7 damage {t} failed\n", .{damage});
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try damaged(&storage, &tmp, damage);
+        const compared = try tests.compareWorkForTesting(&storage, session.slice());
+        switch (damage) {
+            // TurnOutcome.decode reads an unknown code as a failed outcome, not a refusal: both reads agree on it.
+            .unknown_outcome => {
+                try compared.status;
+                const outcome = compared.staged.outcome() orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqualStrings("bogus", outcome.code);
+            },
+            // derive does not refuse a running Action that is not authorized: both reads succeed and agree on it. The brief
+            // expected a CorruptStore here; the finding is reported, and the case pins the agreement rather than a refusal.
+            .running_unauthorized => try compared.status,
+            else => try std.testing.expectError(error.CorruptStore, compared.status),
+        }
+    }
+}
+
+fn damaged(storage: *Store, tmp: *std.testing.TmpDir, damage: anytype) !protocol.Bounded(protocol.max_session_bytes) {
+    const Damage = @TypeOf(damage);
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+    defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF") catch unreachable;
+    switch (@as(Damage, damage)) {
+        .resolved_without_code => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-resolved");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET resolution_code=NULL,last_failure_code=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .in_flight_without_attempt => {
+            const session = try liveSession(storage, tmp, "sl7-in-flight");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET attempt_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .waiting_without_schedule => {
+            const session = try liveSession(storage, tmp, "sl7-waiting");
+            try store_testing.sqlite_only.exec(storage, "UPDATE model_operation SET retry_due_at_ms=5,retry_scheduled_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .ended_without_outcome_time => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-ended");
+            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_at=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .unknown_outcome => {
+            const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-unknown");
+            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_code='bogus' WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .running_without_call => {
+            const session = try TestingWorkShape.running.make(storage, tmp, "sl7-call");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+            defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON") catch unreachable;
+            try store_testing.sqlite_only.exec(storage, "DELETE FROM model_tool_call WHERE operation_id=(SELECT parent_operation_id FROM action_operation WHERE attempt_ordinal=1)", .{});
+            return session;
+        },
+        .excluded_without_position => {
+            const session = try TestingWorkShape.stopped.make(storage, tmp, "sl7-excluded");
+            try store_testing.sqlite_only.exec(storage, "UPDATE session_stop SET position=NULL WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        // admitted_at is NOT NULL in this STRICT schema, so a NULL cannot be stored; 0 breaks its CHECK instead.
+        .queued_with_zero_admission_time => {
+            const session = try configureTestSession(storage, "sl7-queued");
+            try submitTestMessage(storage, tmp, "sl7-queued-file", "sl7-queued-message", session.slice(), "queued");
+            try store_testing.sqlite_only.exec(storage, "UPDATE message_admission SET admitted_at=0 WHERE session_ref=?1", .{session.slice()});
+            return session;
+        },
+        .running_unauthorized => {
+            const session = try TestingWorkShape.running.make(storage, tmp, "sl7-unauthorized");
+            try store_testing.sqlite_only.exec(storage, "UPDATE action_operation SET authorized=0 WHERE attempt_ordinal=1", .{});
+            return session;
+        },
+    }
+}
+
+fn liveSession(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try tests.configureTestSessionAsk(storage, name);
+    try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "propose");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    return session;
+}
+
+test "the work row plans every stage as a keyed search" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const c = sqlite.c;
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ report_domain.work_row.sql);
+    defer _ = c.sqlite3_finalize(statement);
+    // No stage scans a table. The three temporary sorts each order one Operation's or one Turn's rows, as the staged
+    // probes they mirror do: the running Action (work_oldest's ORDER BY attempt_at), the background result (WorkActions'
+    // action_results union) and the latest Turn's stop (WorkLatest's stopped_at). Any other sort is a plan change.
+    var temp_sorts: usize = 0;
+    while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
+        const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
+        try std.testing.expect(!std.mem.startsWith(u8, detail, "SCAN "));
+        if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) temp_sorts += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), temp_sorts);
+}
