@@ -172,6 +172,13 @@ fn FixtureArgs(comptime T: type) type {
 }
 
 fn send(comptime sql: []const u8, fixture_args: anytype) !void {
+    try sendAfter("", sql, fixture_args);
+}
+
+/// Sends `prefix` then `sql`'s MySQL template with each slot written by the Store's own literal writer: an argument
+/// repeated in the text binds the same value at each use, and the clock and served-provider slots bind as the Store
+/// binds them. The statement streams at its exact length.
+fn sendAfter(comptime prefix: []const u8, comptime sql: []const u8, fixture_args: anytype) !void {
     var args: FixtureArgs(@TypeOf(fixture_args)) = undefined;
     inline for (fixture_args, 0..) |value, index| {
         args[index] = if (@TypeOf(value) == testing.Blob) .{ .bytes = value.bytes } else value;
@@ -180,8 +187,9 @@ fn send(comptime sql: []const u8, fixture_args: anytype) !void {
     const Args = @TypeOf(args);
     const served = protocol.routesAll(.endpoint);
     const bound: literal.Bound = .{ .now = 0, .served = &served };
-    const length = try literal.length(template, Args, &args, bound);
+    const length = prefix.len + try literal.length(template, Args, &args, bound);
     const writer = try root.beginQuery(length);
+    writer.writeAll(prefix) catch {};
     literal.write(template, Args, &args, bound, writer) catch {};
     try root.endQuery();
 }
@@ -271,6 +279,15 @@ pub fn rawExec(storage: *Store, sql: []const u8) !void {
     try run(sql);
 }
 
+/// Refreshes the optimizer statistics of every base table in the Store's database, so a plan read next is costed on
+/// the rows the Store holds now rather than on the statistics of the empty tables the Store opened with.
+pub fn analyzeTables(storage: *Store) !void {
+    try rawExec(storage, "SET @rui_analyze=(SELECT CONCAT('ANALYZE TABLE ',GROUP_CONCAT(CONCAT('`',table_name,'`'))) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE')");
+    try rawExec(storage, "PREPARE rui_analyze FROM @rui_analyze");
+    try rawExec(storage, "EXECUTE rui_analyze");
+    try rawExec(storage, "DEALLOCATE PREPARE rui_analyze");
+}
+
 /// Test-only: every row of `table` as SELECT * returns it, field bytes (null for SQL NULL), in the server's order.
 pub fn tableRows(storage: *Store, arena: std.mem.Allocator, table: []const u8) !testing.TableRows {
     mutex.lockUncancelable(std.testing.io);
@@ -330,36 +347,55 @@ pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     return readU64(&root);
 }
 
-/// The MySQL plan of `sql` as EXPLAIN FORMAT=TREE lines, each ended by a newline, written into `out`.
-pub fn planText(storage: *Store, sql: []const u8, out: []u8) ![]const u8 {
+/// The MySQL plan of the Store statement `sql` bound to `args` (one value per `?N`, in order), as EXPLAIN FORMAT=TREE
+/// lines, each ended by a newline, written into `out`. The statement is bound as the Store sends it (`sendAfter`).
+pub fn plan(storage: *Store, comptime sql: []const u8, args: anytype, out: []u8) ![]const u8 {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
     try use(storage);
-    var statement: [8192]u8 = undefined;
-    try root.query(try std.fmt.bufPrint(&statement, "EXPLAIN FORMAT=TREE {s}", .{sql}));
-    return readPlan(&root, out);
+    try sendAfter("EXPLAIN FORMAT=TREE ", sql, args);
+    const text = try readPlan(&root, out);
+    // A key that names no row is a const-table miss: MySQL plans no access path at all, so the plan proves nothing
+    // about the statement's probes. Bind a row that exists.
+    if (std.mem.startsWith(u8, text, "-> Zero rows")) {
+        std.debug.print("MySQL planned no access path, since a bound key names no row:\n{s}", .{text});
+        return error.PlanBindsNoRow;
+    }
+    return text;
 }
 
+/// Reads every plan row into `out`, each ended by a newline. EXPLAIN FORMAT=TREE sends the whole tree as one value of any
+/// length, so the value streams straight into `out`; the result is always drained, so a refused or oversized plan
+/// leaves the connection ready for the next statement.
 fn readPlan(source: *wire.Connection, out: []u8) ![]const u8 {
-    const Row = struct { line: Bounded(16384) };
-    var columns: rows.Columns(Row) = undefined;
     var length: usize = 0;
+    var failure: ?anyerror = null;
+    var rows_seen: usize = 0;
     while (!source.isReady()) switch (try source.next()) {
-        .columns => |n| columns = try rows.readColumns(Row, source, n),
         .row => {
-            var row: Row = undefined;
-            try rows.decodeRow(Row, &columns, source, &row);
-            const line = row.line.slice();
-            if (length + line.len + 1 > out.len) return error.PlanTooLong;
-            @memcpy(out[length..][0..line.len], line);
-            length += line.len;
-            out[length] = '\n';
-            length += 1;
+            if (rows_seen != 0) length = appendPlan(out, length, "\n", &failure);
+            rows_seen += 1;
         },
-        .err => return error.QueryFailed,
+        .bytes => |bytes| length = appendPlan(out, length, bytes, &failure),
+        .err => |err| {
+            // A refused plan names the server's own reason, so a failing plan test can be diagnosed from its output.
+            std.debug.print("MySQL refused the plan: {d} {s}\n", .{ err.code, err.message });
+            failure = failure orelse error.QueryFailed;
+        },
         else => {},
     };
+    if (rows_seen != 0) length = appendPlan(out, length, "\n", &failure);
+    if (failure) |err| return err;
     return out[0..length];
+}
+
+fn appendPlan(out: []u8, length: usize, bytes: []const u8, failure: *?anyerror) usize {
+    if (length + bytes.len > out.len) {
+        failure.* = failure.* orelse error.PlanTooLong;
+        return length;
+    }
+    @memcpy(out[length..][0..bytes.len], bytes);
+    return length + bytes.len;
 }
 
 pub fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
