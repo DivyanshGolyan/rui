@@ -42,6 +42,7 @@ class BatchRepository:
         self.commits.append(self.git("rev-parse", "HEAD"))
         self.env = dict(os.environ, RUNNER_TEMP=str(self.root / "runner"))
         self.env.pop("GITHUB_STEP_SUMMARY", None)
+        self.env["RUNNER_OS"] = "Linux"
         (self.root / "runner").mkdir()
 
     def git(self, *args):
@@ -59,10 +60,15 @@ class BatchRepository:
     def check(self):
         return self.steps(*(f"{name}=grep -qx good {name}" for name in self.FILES))
 
-    def bisect(self):
+    def bisect(self, runner_os="Linux"):
         logs = self.root / "logs"
+        env = dict(self.env)
+        if runner_os is None:
+            env.pop("RUNNER_OS")
+        else:
+            env["RUNNER_OS"] = runner_os
         result = subprocess.run([sys.executable, "-B", str(PROMOTION), "--base", self.base, "--head", self.commits[-1],
-                                 "--logs", str(logs)], cwd=self.repo, env=self.env, capture_output=True, text=True)
+                                 "--logs", str(logs)], cwd=self.repo, env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
         verdict = logs / "verdict.json"
         return (json.loads(verdict.read_text()) if verdict.exists() else None), result.stdout
@@ -152,6 +158,38 @@ class PromotionBisectTest(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertEqual(repository.steps("first=true", "second=true"), 0)
         self.assertEqual(repository.steps("same=true", "same=true"), 2)
+
+    def test_a_macos_runner_skips_the_replays_and_leaves_no_verdict(self):
+        repository = self.batch(broken=dict(state=2))
+        self.assertEqual(repository.check(), 1)
+        verdict, stdout = repository.bisect(runner_os="macOS")
+        self.assertIsNone(verdict)
+        self.assertIn("skipped the bisect on macOS", stdout)
+        self.assertNotIn("Promotion bisect:", stdout)
+        self.assertFalse((repository.root / "logs").exists())
+        self.assertEqual(repository.git("rev-parse", "HEAD"), repository.commits[-1])
+
+    def test_a_macos_runner_with_nothing_recorded_says_so_first(self):
+        repository = self.batch()
+        verdict, stdout = repository.bisect(runner_os="macOS")
+        self.assertIsNone(verdict)
+        self.assertIn("nothing to replay", stdout)
+        self.assertNotIn("skipped", stdout)
+
+    def test_linux_and_unset_runner_os_still_bisect(self):
+        for runner_os in ("Linux", None):
+            with self.subTest(runner_os=runner_os):
+                repository = self.batch(broken=dict(state=3))
+                self.assertEqual(repository.check(), 1)
+                verdict, stdout = repository.bisect(runner_os=runner_os)
+                [step] = verdict["steps"]
+                self.assertEqual(step["culprit"], repository.commits[3])
+                self.assertIn("Promotion bisect: state: first fails", stdout)
+
+    def test_replays_here_is_false_only_on_macos(self):
+        self.assertFalse(promotion.replays_here({"RUNNER_OS": "macOS"}))
+        self.assertTrue(promotion.replays_here({"RUNNER_OS": "Linux"}))
+        self.assertTrue(promotion.replays_here({}))
 
     def test_search_order(self):
         commits = [f"c{i}" for i in range(22)]
