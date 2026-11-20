@@ -903,7 +903,7 @@ test "SL-9: a list page matches each row's work and settings to its own Session,
                 const shape: shared_fixtures.TestingWorkShape = @fromBackingInt(@intCast(index % kinds.len));
                 const session = try shape.make(&storage, &tmp, std.fmt.comptimePrint("sl9-{d}", .{index}));
                 refs[index] = session.slice()[0..change_ring.id_bytes].*;
-                try store_testing.exec(&storage, "UPDATE session SET label=?1 WHERE session_ref=?2", .{ std.fmt.comptimePrint("sl9-{d}", .{index}), session.slice() });
+                try store_testing.exec(&storage, "UPDATE session SET label=?1 WHERE session_ref=?2", .{ @as([]const u8, std.fmt.comptimePrint("sl9-{d}", .{index})), session.slice() });
             }
             // In ref order: both engines are expected to return an IN list's rows in key order [inferred], so a page in
             // reversed or interleaved ref order is one that a match by position would get wrong.
@@ -929,8 +929,8 @@ test "SL-9: a list page matches each row's work and settings to its own Session,
         /// checks every row against its own Session.
         fn expectPage(storage: *Store, tmp: *std.testing.TmpDir, refs: *const [page]change_ring.Id, shown: []const usize) !void {
             // Creation order is unique, so every Session moves clear of the values it takes next first.
-            for (refs, 0..) |*ref, index| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ 3000 + index, ref });
-            for (shown, 0..) |index, at| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ 2001 + at, &refs[index] });
+            for (refs, 0..) |*ref, index| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ @as(u64, 3000 + index), ref });
+            for (shown, 0..) |index, at| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ @as(u64, 2001 + at), &refs[index] });
             var used = std.atomic.Value(u64).init(0);
             const bytes = try testingSessionList(storage, tmp, .{ .after = 2000, .ceiling = 2000 + shown.len }, &used, 9);
             defer std.testing.allocator.free(bytes);
