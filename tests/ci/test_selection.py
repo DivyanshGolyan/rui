@@ -1983,6 +1983,7 @@ class FullCheckPartitionTest(unittest.TestCase):
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2; exec "$@"; fi
 if [ "$(basename "${1:-}")" = store_shards.py ]; then shift 2; exec "$1"; fi
+if [ "$(basename "${1:-}")" = case_deadline.py ]; then shift 2; exec "$@"; fi
 fixture=$(basename "${1:-$0}")
 base_fixture=$fixture
 case "$fixture" in
