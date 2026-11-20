@@ -302,8 +302,19 @@ fn admitFromSession(
     answer: *const StoredAnswer,
 ) !u64 {
     try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
+    // A Session without a creator whose first Message comes from another Session was started by it
+    // (Divyansh, 2026-11-20): the authenticated sender becomes its creator, with no lifecycle parent.
+    // The write runs before the admission is queued, so "first" sees only earlier admissions.
+    if (!std.mem.eql(u8, &sender.ref, &target.ref)) a.write(name_first_sender_creator, .{ .target = target.*, .sender = &sender.ref });
     return sourced_input.queue(a, target, .{ .peer = .{ .key = key, .session = sender.* } }, content_id);
 }
+
+const name_first_sender_creator = rsql.Write(.{
+    .sql = "UPDATE session SET creator_ref=?2 WHERE session_ref=@session(?1) AND creator_ref IS NULL " ++
+        "AND NOT EXISTS(SELECT 1 FROM message_admission prior WHERE prior.session_ref=session.session_ref)",
+    .Args = struct { target: rsql.SessionHead, sender: []const u8 },
+    .expect = .{ .at_most = 1 },
+});
 
 fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
     if (configured) |applied| {
@@ -579,13 +590,6 @@ pub const SubmitMessage = struct {
         else
             null;
         if (rejection) |code| return t.refuse(r, code, null);
-        // A Session started by another Session's Action was created by that Session. An explicit
-        // parent names the creator itself; without one, the authenticated sender is the creator,
-        // with no lifecycle attachment.
-        if (command.configuration.?.parent.state != .value) if (t.reads().sender) |found| {
-            creation.creator = found.session.ref;
-            creation.attach_parent = false;
-        };
         t.later = .{ .saved = undefined };
         return (try t.validate(r, null)).?;
     }

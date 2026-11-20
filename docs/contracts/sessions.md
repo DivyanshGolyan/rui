@@ -7,10 +7,9 @@
 
 ### Session provenance
 
-A Session's nullable `creator` identifies the Session supplied by validated creation `parent` input, or, without one, the authenticated Session sender of the creating Message.
-The Store saves it once as `session.creator_ref` for both attached and detached creation.
-Other creation without a parent leaves it null.
-Store format 88 fills a null creator once from the Session sender of each Session's first admitted Message, when that sender is another Session (Divyansh, 2026-11-20); a Session whose first Message came from a person stays without a creator.
+A Session's nullable `creator` identifies the Session supplied by validated creation `parent` input.
+Without parent input, the authenticated Session sender of the Session's first admitted Message is its creator, whether that Message created the Session (`rui session start` from an agent's Bash) or followed an empty creation (Divyansh, 2026-11-20); a first Message from a person leaves it null, and later Messages never set it.
+The Store saves it once as `session.creator_ref`, at creation from parent input or with that first Message's admission, for both attached and detached Sessions; a sender creator brings no lifecycle parent.
 A non-null creator is another existing Session's canonical six-character reference.
 Subsequent configuration and command replay preserve the original creator.
 
@@ -21,8 +20,8 @@ A creator alone grants none of those effects.
 [Agent identity and peer composition](model-io.md#agent-identity-and-peer-composition) owns those lifecycle rules.
 
 [Store format and upgrades](store.md#store-format-and-upgrades) owns migration of historical provenance.
-Existing parent links provide a known creator; an older detached Session's unknown creator remains null.
-Peer Message senders, Labels, and shared Workspaces never establish a creator.
+Existing parent links provide a known creator, and format 88 applies the first-Message sender rule to Sessions saved before it.
+Labels, shared Workspaces and peer Messages after the first never establish a creator.
 [Session listing](cli.md#session-listing) and [public Session activity](inspection.md#public-session-activity) expose this saved fact.
 
 ### Stops and terminal outcomes
@@ -184,7 +183,7 @@ A crash reopens committed queue/selection facts without inventing a terminal out
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Creator provenance](#session-provenance) on listing and Activity | `protocol_reply.zig`: `Session list facts own complete rows and render semantic output after scratch reuse` and `Session list facts reject malformed metadata and consequential ambiguity`; `activity_golden_tests.zig`: `activity golden every kind`; `clients/ts/test/unit.test.ts`: `session summaries preserve independent creator and parent references and nulls`. | These check public creator values and decoding, not creation, lifecycle effects, migration, or native restart. Creator persistence and backfill need separate Store evidence. |
+| [Creator provenance](#session-provenance) on listing and Activity | `protocol_reply.zig`: `Session list facts own complete rows and render semantic output after scratch reuse` and `Session list facts reject malformed metadata and consequential ambiguity`; `activity_golden_tests.zig`: `activity golden every kind`; `clients/ts/test/unit.test.ts`: `session summaries preserve independent creator and parent references and nulls`. | These check public creator values and decoding, not creation, lifecycle effects, migration, or native restart. Creator persistence and backfill need separate Store evidence. `creator_tests.zig` `session creator names the Session that sent a creatorless Session's first Message` covers sender start, configure then peer send, person first, and a parent other than the sender, with replay; `sqlite_tests/migration.zig` `schema 88 creator migration names the Session that sent each Session's first Message` covers the format 88 backfill. |
 
 ### Durable controls
 

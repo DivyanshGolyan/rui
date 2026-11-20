@@ -91,8 +91,8 @@ There is no separate inbox, callback or resident waiter for a future reply.
 A Session created with validated parent input records its creator in immutable `session.creator_ref`, whether attached or detached.
 An attached `start_agent` child also records its lifecycle **parent** in `session.parent_ref`, never itself.
 A detached child retains creator provenance with no lifecycle parent.
-A Session created by a creating Message whose sender the Host authenticated, without parent input, records that sender as its creator and no lifecycle parent, so an agent that starts a chat from Bash is its creator.
-Other creation without parent input records neither fact.
+Without parent input, the authenticated sender of a Session's first admitted Message becomes its creator, with no lifecycle parent, so an agent that starts a chat from Bash is its creator ([Session provenance](sessions.md#session-provenance)).
+Creation without parent input records no lifecycle parent.
 [Session provenance](sessions.md#session-provenance) owns creator identity; the following stop, ending-Message, and forwarding rules follow lifecycle parent links alone.
 When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
 The Host runs each owed stop before any core tool call, as that child's own ordinary Session stop, which settles the owed row and passes the stop on to the child's own children.

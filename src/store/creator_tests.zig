@@ -170,14 +170,34 @@ test "session creator Configure and Message births preserve origin across archiv
     }.run);
 }
 
-test "session creator names the authenticated sender of a creating Message without parent input" {
+test "session creator names the Session that sent a creatorless Session's first Message" {
     try testing.forEachEngine(struct {
+        fn send(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, target: []const u8, configuration: ?wire_request.Configuration, sender: ?[]const u8, handle: anytype) !protocol.Bounded(protocol.max_session_bytes) {
+            const file = try tmp.dir.createFile(std.testing.io, key, .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, "work on this");
+            var message = try testing.completeMessage(key, target, file, "work on this");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            if (configuration) |value| message.configuration = value;
+            if (sender) |reference| {
+                message.sender = .{};
+                try message.sender.?.store.set(storage.storeId());
+                try message.sender.?.session.set(reference);
+                message.sender_handle = handle;
+            }
+            const first = storage.submitMessageWithModel(&message, null, .{});
+            try std.testing.expect(first == .accepted);
+            // Replay keeps the saved outcome and changes no creator.
+            try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}).accepted.replayed);
+            return first.accepted.session;
+        }
+
         fn run(case: *testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
+            const other = try testing.configureTestSession(&storage, "creator-other");
             const sender_id = try testing.configureTestSession(&storage, "creator-sender");
             const sender = sender_id.slice();
             var tools: wire_request.ConfigureCommand = .{};
@@ -187,43 +207,32 @@ test "session creator names the authenticated sender of a creating Message witho
             tools.configuration.permission_mode.state = .value;
             try tools.configuration.permission_mode.value.set("bypass");
             try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
-            try testing.submitTestMessage(&storage, &tmp, "creator-sender-seed", "creator-sender-seed", sender, "start a chat");
+            try testing.submitTestMessage(&storage, &tmp, "creator-sender-seed", "creator-sender-seed", sender, "start chats");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try fixtures.settleTwoActionsForTesting(&storage, &tmp, model, "creator-sender-calls");
             const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             var input: @import("domain/action.zig").ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
+            const handle = input.sender_handle;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            const plain = (try testing.completeConfiguration("unused", "", workspace, "model-a")).configuration;
 
-            // `rui session start` from the sender's Bash: a creating Message with its Host-issued handle.
-            const file = try tmp.dir.createFile(std.testing.io, "creator-started", .{ .read = true });
-            try file.writeStreamingAll(std.testing.io, "work on this");
-            var started = try testing.completeMessage("creator-started", "", file, "work on this");
-            defer started.removeTemporaryContent(std.testing.io) catch unreachable;
-            started.configuration = (try testing.completeConfiguration("unused-started", "", workspace, "model-a")).configuration;
-            started.sender = .{};
-            try started.sender.?.store.set(storage.storeId());
-            try started.sender.?.session.set(sender);
-            started.sender_handle = input.sender_handle;
-            const accepted = storage.submitMessageWithModel(&started, null, .{});
-            try std.testing.expect(accepted == .accepted);
-            const child = accepted.accepted.session;
-            try expectOrigin(&storage, child.slice(), sender, null, .all, true);
-            try std.testing.expect(storage.submitMessageWithModel(&started, null, .{}).accepted.replayed);
-            try expectOrigin(&storage, child.slice(), sender, null, .all, true);
-
-            // An explicit parent still names the creator and attaches the child.
-            const parented_file = try tmp.dir.createFile(std.testing.io, "creator-parented", .{ .read = true });
-            try parented_file.writeStreamingAll(std.testing.io, "attached work");
-            var parented = try testing.completeMessage("creator-parented", "", parented_file, "attached work");
-            defer parented.removeTemporaryContent(std.testing.io) catch unreachable;
-            parented.configuration = (try childCommand("unused-parented", sender)).configuration;
-            parented.sender = started.sender;
-            parented.sender_handle = input.sender_handle;
-            const attached = storage.submitMessageWithModel(&parented, null, .{});
-            try std.testing.expect(attached == .accepted);
-            try expectOrigin(&storage, attached.accepted.session.slice(), sender, sender, .all, true);
+            // `rui session start` from the sender's Bash, without --parent: creator, no lifecycle parent.
+            const started = try send(&storage, &tmp, "creator-started", "", plain, sender, handle);
+            try expectOrigin(&storage, started.slice(), sender, null, .all, true);
+            // Created by configure (no sender), then first messaged by the sender: the same rule.
+            const configured = try testing.configureTestSession(&storage, "creator-configured");
+            _ = try send(&storage, &tmp, "creator-configured-first", configured.slice(), null, sender, handle);
+            try expectOrigin(&storage, configured.slice(), sender, null, .all, true);
+            // A person's first Message leaves no creator, and a later peer Message adds none.
+            const personal = try testing.configureTestSession(&storage, "creator-personal");
+            _ = try send(&storage, &tmp, "creator-personal-first", personal.slice(), null, null, null);
+            _ = try send(&storage, &tmp, "creator-personal-later", personal.slice(), null, sender, handle);
+            try expectOrigin(&storage, personal.slice(), null, null, .all, true);
+            // An explicit parent other than the sender stays the creator and attaches the child.
+            const parented = try send(&storage, &tmp, "creator-parented", "", (try childCommand("unused-parented", other.slice())).configuration, sender, handle);
+            try expectOrigin(&storage, parented.slice(), other.slice(), other.slice(), .all, true);
         }
     }.run);
 }
