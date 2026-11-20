@@ -8,9 +8,10 @@ recorded command is replayed first at HEAD, to confirm the red reproduces,
 then by binary search over the batch's first-parent commits. `stable` is
 presumed good, since it passed promotion; it is replayed only when the first
 commit of the batch fails. A failure before any recorded step, such as setup,
-has nothing to replay. Replay output goes to files, not the job log, so the
-issue filer reads only the original failure. The verdict never turns a
-promotion green.
+has nothing to replay. A macOS runner does not replay at all (replays_here):
+its replays cost the most runner-minutes. Replay output goes to files, not the
+job log, so the issue filer reads only the original failure. The verdict never
+turns a promotion green.
 """
 import argparse
 import json
@@ -21,6 +22,14 @@ import sys
 
 from git_command import git
 import steps
+
+
+def replays_here(environ=os.environ):
+    """False on a macOS runner. Promote runs 38 to 45 spent 569 of their 1,575 bisect minutes
+    there, mostly replays of full-callers and full-execution that ran for over an hour and
+    often failed for the machine's own reasons. Outside GitHub Actions, RUNNER_OS is unset and
+    the replay runs."""
+    return environ.get("RUNNER_OS") != "macOS"
 
 
 def fetch(base, head):
@@ -84,6 +93,10 @@ def main():
     failed = steps.failures(args.failed) if args.failed else []
     if not failed:
         print("Promotion bisect: no recorded step failed, so there is nothing to replay; read the job's failed step")
+        return
+    if not replays_here():
+        # The issue filer attaches "Promotion bisect:" lines to the failure, so this one keeps that prefix.
+        print("Promotion bisect: skipped on macOS; read the failed step's log")
         return
     fetch(args.base, args.head)
     commits = batch(args.base, args.head)
