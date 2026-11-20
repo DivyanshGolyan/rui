@@ -739,7 +739,9 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     }.run);
 }
 
-test "Session list changed page round budget is the same for 1, 9 and 64 changed Sessions" {
+// 65 and 130 changed Sessions need more than eight ancestor statements, so the read Access sends extra passes inside
+// the one round; the round count must not change.
+test "Session list changed page round budget is the same for 1, 9, 64, 65 and 130 changed Sessions" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             if (case.rerun) return;
@@ -750,7 +752,7 @@ test "Session list changed page round budget is the same for 1, 9 and 64 changed
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            for ([_]usize{ 1, 9, 64 }, 0..) |count, round| {
+            for ([_]usize{ 1, 9, 64, 65, 130 }, 0..) |count, round| {
                 const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
                 for (0..count) |index| {
                     var key: [32]u8 = undefined;

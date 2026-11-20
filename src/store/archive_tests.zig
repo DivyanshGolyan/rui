@@ -1120,7 +1120,10 @@ test "MySQL plans the changed-page ancestor batch through the session key" {
             var buffer: [16384]u8 = undefined;
             const plan = try mysql_testing.planText(&storage, sql, &buffer);
             errdefer std.debug.print("MySQL plan for the changed-page ancestor batch:\n{s}", .{plan});
-            try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            // MySQL materializes the recursive CTE and scans that temporary result (`seen`, `tail`, `parent`, `child`); only a
+            // scan of the session table itself would grow with the Store.
+            for ([_][]const u8{ "Table scan on session", "Table scan on seed" }) |scan|
+                try std.testing.expect(std.mem.indexOf(u8, plan, scan) == null);
             try std.testing.expect(std.mem.indexOf(u8, plan, "PRIMARY") != null);
         }
     }.run);
