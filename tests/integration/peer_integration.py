@@ -617,7 +617,9 @@ def stdin_start_contract():
         assert stopped["answer"]["status"] == "accepted", stopped
         assert fixture.observe(store, "first")["result"] == {"status": "cancelled", "code": "session_stopped"}
         socket = pathlib.Path(host.rui_ready_fields["socket"])
-        fixture.stop_host(host)
+        # A crashed Host leaves its socket behind; the offline cases below need that stale socket,
+        # so crash it rather than stop it (stop_host retires the socket since #1896).
+        fixture.crash_host(host, state, "stdin-start-crash")
         host = None
         assert socket.is_socket(), socket
         for arguments in (
