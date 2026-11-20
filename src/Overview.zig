@@ -127,7 +127,8 @@ pub const HostRead = struct {
 pub const Operations = struct {
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self) HostLaunch,
-    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
+    list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, protocol.SessionArchiveFilter, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
+    window: *const fn (*Self, client.Requests, session_list.ArchivedCursor, *protocol_reply.ArchivedWindowPage) anyerror!?protocol_reply.ReadFailure,
     first_line: *const fn (*Self, client.Requests, []const u8, u64, content_value.Value, []u8) anyerror!protocol_reply.ActivityPrefixReply,
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
@@ -137,7 +138,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .window = windowPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
 
 pub const Left = struct {
     session: view.Reference,
@@ -283,6 +284,7 @@ const Job = union(enum) {
     host,
     start_host,
     list,
+    archived: view.ArchivedRead,
     lines: view.Reads,
     create: CreationSnapshot,
     stop: view.Reference,
@@ -295,7 +297,7 @@ const Job = union(enum) {
 
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
-            .host, .list, .lines, .models => .cancel_read,
+            .host, .list, .archived, .lines, .models => .cancel_read,
             .start_host, .create, .stop, .archive, .pin, .defaults => .settle_effect,
         };
     }
@@ -313,6 +315,7 @@ const Answer = union(enum) {
     host: HostRead,
     start_host: struct { read: HostRead, launch: HostLaunch },
     page: protocol_reply.SessionListPage,
+    archived: protocol_reply.ArchivedWindowPage,
     lines: [view.max_first_line_reads]Line,
     reply: Reply,
     menu: model_picker.Menu,
@@ -383,7 +386,8 @@ job_count: usize = 0,
 job: Job = .list,
 answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
-traversal_archive: protocol.SessionArchiveFilter = .active,
+/// The walk in flight began with a since token: a full answer to it is re-walked by the core.
+walk_since: bool = false,
 scratch: ?std.Io.File = null,
 
 opened: view.Reference = undefined,
@@ -579,6 +583,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
+            // A wheel scroll reports the rows it shows once a draw has applied it.
+            if (self.app_sessions.scrollReport()) |scroll| try appScrolled(self, ctx, scroll.top, scroll.height);
             const presentation = try self.eventResult(.{ .presentation_tick = .{
                 .now_ms = self.animationMs(),
                 .list_visible = if (self.root.size.width == 0) null else self.root.size.width >= Root.split_at or self.root.session == null,
@@ -645,6 +651,14 @@ fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!vo
     const revision = self.state.presentation_revision;
     try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = over } }));
     ctx.redraw = ctx.redraw or self.state.presentation_revision != revision;
+}
+
+/// A wheel scroll moved the list, as the draw after it shows. The shell reports the lines; the core maps them to rows.
+fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.state.archive != .archived) return;
+    try self.appNext(ctx, try self.event(.{ .viewport = .{ .first = top, .end = top + height } }));
+    ctx.redraw = true;
 }
 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
@@ -1320,14 +1334,16 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .open_settings => next = .open_settings,
         .focus_chat => next = .focus_chat,
         .new_session => next = .new_session,
-        .list => |since| {
-            self.traversal = .init(since);
-            self.traversal_archive = self.state.listing_archive.?;
+        .list => |request| {
+            self.traversal = .init(request.since);
+            self.traversal.archive = request.archive;
+            self.walk_since = request.since != null;
             if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
             if (self.state.listed_at_ms == null) self.queueHost();
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
+        .read_archived => |read| self.queue(.{ .archived = read }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => {
@@ -1408,7 +1424,11 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
         },
         .list => {
             self.answer = .{ .page = undefined };
-            if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
+            if (try self.ops.list(self, requests, self.traversal.cursor, self.traversal.archive, &self.answer.page)) |failure| return failure.err();
+        },
+        .archived => |read| {
+            self.answer = .{ .archived = undefined };
+            if (try self.ops.window(self, requests, read.from, &self.answer.archived)) |failure| return failure.err();
         },
         .lines => |reads| {
             self.answer = .{ .lines = @splat(.{}) };
@@ -1501,9 +1521,15 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
-            const page: view.Page = .of(&self.traversal, &answer.page, &rows);
+            const page: view.Page = .of(&self.traversal, &answer.page, &rows, self.walk_since);
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
+        },
+        .archived => |read| {
+            outcome catch return self.event(.{ .archived = .{ .read = read, .page = null } });
+            var rows: [session_list.archived_window_size]view.Listed = undefined;
+            const page = view.ArchivedPage.of(&answer.archived, &rows);
+            return self.event(.{ .archived = .{ .read = read, .page = page } });
         },
         .lines => |reads| for (reads.slice(), answer.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
@@ -1909,7 +1935,7 @@ fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
     return process_memory.read(&processes, std.c.getpid(), if (self.host_process) |host| host.pid else null);
 }
 
-fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
     const Sink = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1923,8 +1949,33 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     const file = self.scratch.?;
     var sink: Sink = .{ .io = self.init.io, .file = file };
     var buffer: client.ReplyBuffer = .{};
-    const reply = try requests.listSessionsFiltered(self.options.store, null, self.traversal_archive, cursor, &sink, &buffer);
+    // The filter was chosen by the core once per walk: a delta also asks for the archived Sessions that
+    // changed, so the window can take them; they are routed, never held as roster rows.
+    const reply = try requests.listSessionsFiltered(self.options.store, null, archive, cursor, &sink, &buffer);
     switch (try protocol_reply.SessionListReply.decode(self.init.io, file, null, cursor, reply)) {
+        .page => |value| page.* = value,
+        .failure => |failure| return failure,
+    }
+    return null;
+}
+
+/// One Archived window page: a single round trip, one job.
+fn windowPage(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+    const Sink = struct {
+        io: std.Io,
+        file: std.Io.File,
+        at: u64 = 0,
+
+        pub fn feed(sink: *@This(), bytes: []const u8) !void {
+            try sink.file.writePositionalAll(sink.io, bytes, sink.at);
+            sink.at += bytes.len;
+        }
+    };
+    const file = self.scratch.?;
+    var sink: Sink = .{ .io = self.init.io, .file = file };
+    var buffer: client.ReplyBuffer = .{};
+    const reply = try requests.listArchivedWindow(self.options.store, cursor, &sink, &buffer);
+    switch (try protocol_reply.ArchivedWindowReply.decode(self.init.io, file, cursor, reply)) {
         .page => |value| page.* = value,
         .failure => |failure| return failure,
     }
@@ -1989,6 +2040,8 @@ const test_now_s: u64 = 1_800_000_000;
 const Seen = struct {
     hosts: usize = 0,
     lists: usize = 0,
+    /// Answers every roster walk in full, so a removed Session leaves the roster (a changed answer never removes one).
+    full_answers: bool = false,
     since: ?protocol.SinceToken = null,
     line: struct { session: view.Reference = @splat(0), position: u64 = 0 } = .{},
     creates: usize = 0,
@@ -2058,12 +2111,20 @@ const fake_operations: Operations = .{
             return .{ .observation = .{ .ready = .{ .facts = .{ .instance = @splat(1), .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } } } };
         }
     }.host,
+    .window = struct {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            page.* = .{};
+            return null;
+        }
+    }.window,
     .list = struct {
-        fn list(self: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
-            Seen.now.archive_filter = self.traversal_archive;
+            Seen.now.archive_filter = archive;
             Seen.now.since = cursor.since;
-            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
+            // A walk with a since token is answered as a change, as the Host answers a token it still holds.
+            const delta: protocol.ListDelta = if (cursor.since != null and !Seen.now.full_answers) .changed else .full;
+            page.* = .{ .count = Seen.now.listed, .delta = delta, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
                 const since = test_now_s - 10 - at;
                 row.* = .{ .read_version = page.since, .work = fixtureSessionWork(.{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 }) };
@@ -2907,7 +2968,7 @@ fn readFailure(code: []const u8) protocol_reply.ReadFailure {
 test "a canonical Store failure in a listing ends the overview" {
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -3039,7 +3100,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
 
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -3062,8 +3123,8 @@ test "a terminal that answers the program status probe gets each Session's recor
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished = false;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (finished) page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 });
             return null;
         }
@@ -3137,8 +3198,8 @@ test "a Session's record takes its new name when only its Label changes" {
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var label: ?[]const u8 = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (label) |text| {
                 page.rows[0].label = .{};
                 page.rows[0].label.?.set(text) catch unreachable;
@@ -3179,8 +3240,8 @@ test "each later finish, and each later wait, is a record again though no listin
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var read: ?protocol.SessionWork = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (read) |listed| page.rows[0].work = listed;
             return null;
         }
@@ -3234,8 +3295,8 @@ test "a later Turn's finish the conversation read first is still a record when t
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished_turn: u64 = 1;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn });
             return null;
         }
@@ -3270,8 +3331,8 @@ test "a finish the conversation opened on is no done record when a listing reads
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     const Listing = struct {
         var finished_turn: ?u64 = null;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             if (finished_turn) |finished| page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished });
             return null;
         }
@@ -3444,7 +3505,7 @@ const HostRecovery = struct {
 
 test "Host line appears once in overview and chat at wide and narrow widths, never from list failure" {
     const UnavailableList = struct {
-        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return error.ConnectionRefused;
         }
     };
@@ -3853,7 +3914,7 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     try std.testing.expectEqual(HostState.stopped, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     overview.state.listing = true;
-    overview.state.listing_archive = overview.state.archive;
+    overview.state.listing_wanted = true;
     try std.testing.expect(try overview.event(.{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 } } } } }) == null);
     try std.testing.expect(!overview.state.holdsHost());
     try std.testing.expectEqual(HostState.paused, overview.hostState());
@@ -4174,7 +4235,7 @@ test "a conversation that fails to open still names unconfirmed creation on depa
 test "a listing failure under a conversation ends the overview once the terminal is restored" {
     var ops = fake_operations;
     ops.list = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return readFailure("canonical_store_failure");
         }
     }.list;
@@ -4443,11 +4504,103 @@ fn sui4NestedKeys() !void {
     }
 }
 
+test "a wheel over the Archived list reports one viewport, after the draw that applies it" {
+    const Window = struct {
+        // One archived row, so the Archived list has a row for the viewport to name.
+        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            _ = self;
+            _ = requests;
+            _ = cursor;
+            const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.window = Window.window;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 8 }, .cell_size = .{} };
+    const frame = try overview.root.widget().draw(draw);
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} });
+    // The wheel is not reported until a draw applies it.
+    try std.testing.expect(overview.state.viewport == null);
+    _ = try overview.root.widget().draw(draw);
+    try overview.root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(overview.state.viewport != null);
+    // The report is taken once per scroll: a later tick without a wheel reports nothing again.
+    overview.state.viewport = null;
+    try overview.root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(overview.state.viewport == null);
+}
+
+test "overview Archived window effect runs one job and its reply becomes the window event" {
+    const Window = struct {
+        var calls: usize = 0;
+        var last: session_list.ArchivedCursor = .head;
+
+        // The slim row is written in the wire shape and decoded with the window reply's own row decoder: a
+        // parts-form first Message with no inline line, so the overview must read its line by position.
+        fn window(self: *Self, requests: client.Requests, cursor: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            _ = self;
+            _ = requests;
+            calls += 1;
+            last = cursor;
+            const identity: content_value.Reference = .{ .length = 7, .digest = @splat(0x5c) };
+            const wire: protocol.ArchivedRow.Fields = .{ .reference = "k7m2qx", .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 9, .content = .{ .parts = .{ .identity = identity, .owner = .{ .message = 9 } } }, .line = null } };
+            var json: [protocol.ArchivedRow.Fields.max_json_bytes]u8 = undefined;
+            var out = std.Io.Writer.fixed(&json);
+            try wire.writeJson(&out);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = try std.json.parseFromSliceLeaky(protocol_reply.ArchivedRowRead, arena.allocator(), out.buffered(), .{});
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.window = Window.window;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .archived } }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Window.calls);
+    try std.testing.expectEqual(session_list.ArchivedCursor.head, Window.last);
+    try std.testing.expect(overview.state.find("k7m2qx".*) != null);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.order.items.len);
+    try std.testing.expect(!overview.state.archived.inflight);
+    try std.testing.expect(overview.state.archived.at_head);
+    // The parts-form row's line was read once, at the position the wire row carried (its admission differs from the live row's, so the line is read again).
+    try std.testing.expectEqualSlices(u8, "k7m2qx", &Seen.now.line.session);
+    try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
+}
+
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            _ = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, archive, page);
             for (page.rows[0..page.count]) |*row| {
                 row.archive_state = archive_state;
                 row.work.state = switch (archive_state) {
@@ -4460,8 +4613,19 @@ test "overview archive effects preserve server filter, pending visibility, and r
             return null;
         }
     };
+    // The Archived window answers the one archived Session the listing names, as the Host's window would.
+    const Windowing = struct {
+        fn window(_: *Self, _: client.Requests, _: session_list.ArchivedCursor, page: *protocol_reply.ArchivedWindowPage) !?protocol_reply.ReadFailure {
+            page.* = .{ .count = 0 };
+            if (Listing.archive_state != .archived) return null;
+            page.* = .{ .count = 1, .first = 42, .last = 42, .more_above = false, .more_below = false };
+            page.rows[0] = .{ .reference = .{ .value = protocol.Bounded(protocol.max_session_bytes).from("k7m2qx") catch unreachable }, .archive_seq = 42, .stopped_at = test_now_s, .label = null, .first = .{ .position = 3, .admission = 4, .content = .{ .text = .{ .length = 1, .digest = @splat(0x1) } }, .line = null } };
+            return null;
+        }
+    };
     var ops = fake_operations;
     ops.list = Listing.list;
+    ops.window = Windowing.window;
     Listing.archive_state = .active;
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
@@ -4489,7 +4653,8 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
+    // Roster deltas ask for changed archived Sessions too (the window takes them); the window itself is a read.
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .stopped, .input = .unarchive } });
     try std.testing.expect(try rig.settle() == null);
@@ -4500,10 +4665,11 @@ test "overview archive effects preserve server filter, pending visibility, and r
     Listing.archive_state = .active;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+    // The restored Session is a live roster row now: the roster keeps it while the window lets it go.
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
@@ -5089,6 +5255,7 @@ test "SUI-41 sidebar stays live and wheels route to their pane" {
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
     Seen.now.listed = 2;
+    Seen.now.full_answers = true;
     overview.state.next_list_ms = 0;
     const revision = overview.state.presentation_revision;
     _ = try service(overview);
@@ -5270,6 +5437,7 @@ test "App list clicks validate present and removed targets with open and closed 
             defer rig.close();
             const overview = rig.overview;
             Seen.now.listed = 2;
+            Seen.now.full_answers = true;
             try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
             try std.testing.expect(try rig.settle() == null);
             defer {
@@ -5513,6 +5681,7 @@ fn sui4SettingsEntry() !void {
             defer rig.close();
             const overview = rig.overview;
             Seen.now.listed = 2;
+            Seen.now.full_answers = true;
             try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
             try std.testing.expect(try rig.settle() == null);
             defer {
@@ -7154,7 +7323,7 @@ const EmptySessionOwner = struct {
         count += 1;
     }
 
-    fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+    fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
         generation += 1;
         page.* = .{ .count = count, .delta = .full, .since = .{ .instance = @splat(1), .generation = generation } };
         for (rows[0..count], page.rows[0..count]) |row, *listed| {
@@ -8253,8 +8422,8 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
 
 test "overview redraw deadline includes quota header with failed row off screen" {
     const Listing = struct {
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            const failure = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, archive, page);
             const row = &page.rows[page.count - 1];
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
@@ -8498,7 +8667,7 @@ test "wide launch draws late listing after presentation deadline without flashin
 
 test "wide launch waits for listing and opens the newest empty Session without creation" {
     const Listing = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             page.* = .{ .count = 5, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
             for (page.rows[0..5], 0..) |*row, i| {
                 row.* = .{ .created_at = @intCast(10 + i), .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
@@ -8540,7 +8709,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
 
 test "named launch waits for sign-in before choosing its binding" {
     const Listing = struct {
-        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             page.* = .{ .count = 1, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
             const row = &page.rows[0];
             row.* = .{ .created_at = 10, .read_version = page.since, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
@@ -8727,7 +8896,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
 
 test "wide launch shows stopped Host recovery and failed listing" {
     const Listing = struct {
-        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: protocol.SessionArchiveFilter, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             return error.ConnectionRefused;
         }
     };
@@ -8765,8 +8934,8 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
             files += 1;
             return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
         }
-        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
-            const failure = try fake_operations.list(self, requests, cursor, page);
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, archive, page);
             for (page.rows[0..4], labels, 0..) |*row, label, at| {
                 row.label = try protocol.Bounded(100).from(label);
                 const since = test_now_s - 10;

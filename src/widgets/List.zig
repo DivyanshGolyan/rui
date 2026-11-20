@@ -57,6 +57,8 @@ pub fn List(comptime Target: type) type {
         pub const Span = struct { row: i17, height: u16, target: ?Target, alternate_target: ?Target = null, regions: []const Region = &.{} };
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
         pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
+        /// The top line and the lines shown by the draw after a wheel scroll.
+        pub const Scroll = struct { top: u32, height: u32, pointer_row: i16 };
         pub const Edge = enum { above, below };
         pub const Counts = struct { above: u32, below: u32 };
         pub const Edges = struct { userdata: *const anyopaque, lineFn: *const fn (*const anyopaque, Edge, Range, Counts, std.mem.Allocator) std.mem.Allocator.Error!?Line };
@@ -66,6 +68,13 @@ pub fn List(comptime Target: type) type {
         selected: ?u32 = null,
         anchor: ?struct { index: u32, row: u16 } = null,
         on_presence: ?Presence = null,
+        /// A wheel event asked for a scroll report; `wheel_drawn` is set once a draw has applied it.
+        wheel_due: bool = false,
+        wheel_drawn: bool = false,
+        /// The pointer row of the last wheel event, reported with the scroll: the List takes the wheel before its holder sees it.
+        wheel_row: i16 = 0,
+        /// Whether the last draw moved the list by a wheel scroll rather than a selection or a trim.
+        wheel_applied: bool = false,
         edges: ?Edges = null,
         on_press: ?Press = null,
         base_style: vaxis.Style = .{},
@@ -80,9 +89,24 @@ pub fn List(comptime Target: type) type {
         shown_at: []const Span = &.{},
         last_size: ?vxfw.Size = null,
         hover: Hover = .{},
+        /// The list row where the rows' surface starts: the above marker's height at the last draw.
+        content_row: u16 = 0,
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+        }
+
+        /// The rows' surface below the above marker. The hit test hands it mouse rows from its own top, so it moves
+        /// them to the list's rows (where shown_at, hover and the wheel's pointer row are kept) before the list sees them.
+        fn contentWidget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = contentEvent, .drawFn = draw };
+        }
+
+        fn contentEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            var moved = input;
+            if (moved == .mouse) moved.mouse.row += @intCast(self.content_row);
+            return event(raw, ctx, moved);
         }
 
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -111,7 +135,21 @@ pub fn List(comptime Target: type) type {
                 }
                 return;
             }
+            // The wheel's shown rows are reported after the draw applies it (scrollReport), never from here:
+            // the content surface's own handler consumes the wheel, and the top moves only at the next draw.
             try self.list.handleEvent(ctx, input);
+            if (mouse.button == .wheel_up or mouse.button == .wheel_down) {
+                self.wheel_due = true;
+                self.wheel_row = mouse.row;
+            }
+        }
+
+        /// The shown rows after a wheel scroll, once a draw has applied it. Returns null until then, and once per scroll.
+        pub fn scrollReport(self: *Self) ?Scroll {
+            if (!self.wheel_drawn) return null;
+            self.wheel_due = false;
+            self.wheel_drawn = false;
+            return .{ .top = self.list.scroll.top, .height = self.shown.end -| self.shown.first, .pointer_row = self.wheel_row };
         }
 
         const Lazy = struct {
@@ -286,6 +324,11 @@ pub fn List(comptime Target: type) type {
 
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
+            // A wheel's pending lines are applied by this draw; the anchor then follows the new top, not the old one.
+            self.wheel_applied = self.list.scroll.pending_lines != 0;
+            defer if (self.wheel_due) {
+                self.wheel_drawn = true;
+            };
             if (self.selected) |selected| std.debug.assert(selected < self.rows.count);
             const size = ctx.max.size();
             const previously_shown = self.shown;
@@ -328,7 +371,8 @@ pub fn List(comptime Target: type) type {
                     window = try self.measure(&building, window.first + 1, size.height, true);
                 }
             }
-            if (self.anchor) |anchor| {
+            if (self.anchor != null and !self.wheel_applied) {
+                const anchor = self.anchor.?;
                 // Keep the captured physical row, including marker rows and mixed heights.
                 // A boundary can make the exact offset impossible; choose the closest one.
                 var best = window;
@@ -395,7 +439,8 @@ pub fn List(comptime Target: type) type {
                 span.* = .{ .row = y + above_rows, .height = drawn.size.height, .target = target, .alternate_target = row.row.?.alternate_target, .regions = regions };
                 y += drawn.size.height;
             }
-            var surface: vxfw.Surface = .{ .widget = self.list.widget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };
+            self.content_row = above_rows;
+            var surface: vxfw.Surface = .{ .widget = self.contentWidget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };
             self.shown_at = spans;
             self.hover.targets = hover_targets.items;
             if (above_rows + below_rows > 0) {
@@ -668,6 +713,86 @@ test "List wheel scrolls without changing selection and presses match the visibl
         }
     }
     try std.testing.expect(checked);
+}
+
+test "List reports a wheel scroll after the draw applies it, even when the content surface takes the wheel" {
+    const rows: []const TestRow = &Testing.mixed;
+    var list: TestList = .{ .rows = .of(&rows), .belowFn = Testing.below };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = Testing.context(arena.allocator(), 4);
+    const drawn = try list.widget().draw(ctx);
+    try std.testing.expectEqual(@as(?TestList.Scroll, null), list.scrollReport());
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    // The App's hit test sends the wheel to the widget the content surface draws with, as it would on screen.
+    try Testing.content(drawn).widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+    try std.testing.expect(events.consume_event);
+    // Nothing is reported before the draw that moves the top.
+    try std.testing.expectEqual(@as(?TestList.Scroll, null), list.scrollReport());
+    _ = try list.widget().draw(ctx);
+    const report = list.scrollReport() orelse return error.TestExpectedEqual;
+    try std.testing.expect(report.top > 0);
+    try std.testing.expectEqual(list.list.scroll.top, report.top);
+    try std.testing.expectEqual(list.shown.end -| list.shown.first, report.height);
+    // One report per scroll.
+    try std.testing.expectEqual(@as(?TestList.Scroll, null), list.scrollReport());
+}
+
+test "List wheel moves past an anchored top row, and the anchor then follows the new top" {
+    const rows: []const TestRow = &Testing.mixed;
+    var list: TestList = .{ .rows = .of(&rows), .belowFn = Testing.below };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = Testing.context(arena.allocator(), 4);
+    _ = try list.widget().draw(ctx);
+    // The shell anchors the top row it shows; a wheel scroll must still move the list past it, not snap back to it.
+    list.anchor = .{ .index = list.list.scroll.top, .row = 0 };
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try Testing.content(try list.widget().draw(ctx)).widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+    _ = try list.widget().draw(ctx);
+    try std.testing.expect(list.list.scroll.top > 0);
+}
+
+test "List under an above marker maps the rows surface's mouse rows to the rows on screen" {
+    var rows_data: [12]TestRow = undefined;
+    const labels = [_][]const u8{ "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L" };
+    var lines: [12][1]TestLine = undefined;
+    for (&rows_data, &lines, labels, 0..) |*row, *line, label, index| {
+        line[0] = &.{.{ .text = label }};
+        row.* = .{ .lines = &line.*, .target = @intCast(index) };
+    }
+    const rows: []const TestRow = &rows_data;
+    var pressed: Testing.Pressed = .{};
+    var list: TestList = .{ .rows = .of(&rows), .aboveFn = Testing.below, .belowFn = Testing.below, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = Testing.context(arena.allocator(), 5);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    // Wheel down until the above marker shows: the rows surface then starts one row below the list's top.
+    var drawn = try list.widget().draw(ctx);
+    while (list.content_row == 0) {
+        try Testing.content(drawn).widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 0, .button = .wheel_down, .type = .press, .mods = .{} } });
+        drawn = try list.widget().draw(ctx);
+        _ = list.scrollReport();
+    }
+    const rows_surface = Testing.content(drawn);
+    try std.testing.expect(rows_surface.widget.eventHandler != list.widget().eventHandler);
+    // The App hands the rows surface rows from its own top; each must reach the row drawn there on screen.
+    for (0..rows_surface.size.height) |local| {
+        const screen: i17 = @as(i17, @intCast(local)) + list.content_row;
+        const span = for (list.shown_at) |span| {
+            if (screen >= span.row and screen < span.row + span.height) break span;
+        } else return error.TestExpectedEqual;
+        pressed.target = null;
+        events.consume_event = false;
+        try rows_surface.widget.handleEvent(&events, Testing.left(@intCast(local)));
+        try std.testing.expectEqual(span.target, pressed.target);
+        try rows_surface.widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = @intCast(local), .button = .wheel_down, .type = .press, .mods = .{} } });
+        _ = try list.widget().draw(ctx);
+        const report = list.scrollReport() orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(i16, @intCast(screen)), report.pointer_row);
+        drawn = try list.widget().draw(ctx);
+    }
 }
 
 test "List preserves each segment foreground while selecting every line and blank cell" {

@@ -15,6 +15,7 @@ const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
 const test_poll = @import("test_poll");
 pub const protocol_reply = @import("protocol_reply.zig");
+const session_list = @import("session_list.zig");
 
 pub const Step = enum {
     store,
@@ -214,6 +215,24 @@ pub const Requests = struct {
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try appendListSessions(&body, paths.store_identity.slice(), workspace, archive, cursor);
+        const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
+    /// One Archived window page: `window` is `head`, `tail`, `below` or `above`, and the reply is read
+    /// with `protocol_reply.ArchivedWindowPage.read`.
+    pub fn listArchivedWindow(self: Requests, store_path: []const u8, window: session_list.ArchivedCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        var text: [session_list.archived_cursor_text_bytes]u8 = undefined;
+        try body.appendShape(protocol.list_sessions_request.head, .{ paths.store_identity.slice(), @as(?[]const u8, null) });
+        try body.appendShape(protocol.list_sessions_request.archive, .{protocol.SessionArchiveFilter.archived});
+        try body.appendShape(protocol.list_sessions_request.cursor, .{ @as(u64, 0), @as(u64, 0) });
+        try body.appendShape(protocol.list_sessions_request.window, .{session_list.formatArchivedCursor(window, &text)});
+        try body.appendShape(protocol.list_sessions_request.tail, .{});
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);

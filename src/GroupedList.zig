@@ -110,7 +110,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             self.anchor = null;
             self.anchor_after_scroll = null;
             if (mouse.button == .wheel_up or mouse.button == .wheel_down or mouse.button == .wheel_left or mouse.button == .wheel_right) {
-                self.anchor_after_scroll = mouse.row;
                 try self.inner.widget().handleEvent(ctx, input);
                 return;
             }
@@ -124,6 +123,31 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         else => {},
     }
     try self.inner.widget().handleEvent(ctx, input);
+}
+
+/// The shown rows after a wheel scroll, once a draw has applied it (see List.scrollReport). The pointer's anchor
+/// moves with the scroll: the Session under the pointer, or the nearest one shown, so the next draw keeps it.
+pub fn scrollReport(self: *Self) ?List.Scroll {
+    const report = self.inner.scrollReport() orelse return null;
+    self.recaptureAt(report.pointer_row);
+    return report;
+}
+
+/// Anchors the Session shown under `row`, or else the nearest shown Session with a target (headings and the pinned
+/// gap hold none). No shown Session leaves no anchor.
+fn recaptureAt(self: *Self, row: i32) void {
+    self.anchor = null;
+    var best: ?struct { offset: usize, distance: i32 } = null;
+    for (self.shown_at, 0..) |span, offset| {
+        if (span.target == null) continue;
+        const bottom = span.row + span.height - 1;
+        const distance: i32 = if (row < span.row) span.row - row else if (row > bottom) row - bottom else 0;
+        if (best == null or distance < best.?.distance) best = .{ .offset = offset, .distance = distance };
+        if (distance == 0) break;
+    }
+    const pick = best orelse return;
+    const span = self.shown_at[pick.offset];
+    self.anchor = .{ .target = span.target.?, .index = self.shown.first + @as(u32, @intCast(pick.offset)), .row = span.row };
 }
 
 pub fn followSelection(self: *Self) void {
@@ -636,14 +660,17 @@ fn anchorRecaptureCase() !void {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
-        _ = try list.widget().draw(ctx);
+        const first = try list.widget().draw(ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
         if (keyboard) {
             list.selected = 7;
             list.followSelection();
+            _ = try list.widget().draw(ctx);
         } else {
-            try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+            try deliverWheel(arena.allocator(), first, &events, 1, 1);
+            _ = try list.widget().draw(ctx);
+            _ = list.scrollReport() orelse return error.TestExpectedEqual;
         }
         _ = try list.widget().draw(ctx);
         try std.testing.expect(list.shown.first > 0);
@@ -660,9 +687,62 @@ fn anchorRecaptureCase() !void {
     };
 }
 
+/// Delivers a wheel the way vxfw's App does: the hit test's deepest widget under the pointer first, then each
+/// ancestor until one consumes the event.
+fn deliverWheel(allocator: std.mem.Allocator, surface: vxfw.Surface, events: *vxfw.EventContext, row: u16, col: u16) !void {
+    var hits: std.ArrayList(vxfw.HitResult) = .empty;
+    defer hits.deinit(allocator);
+    try surface.hitTest(allocator, &hits, .{ .row = row, .col = col });
+    while (hits.pop()) |hit| {
+        try hit.widget.handleEvent(events, .{ .mouse = .{ .row = @intCast(hit.local.row), .col = @intCast(hit.local.col), .button = .wheel_down, .type = .press, .mods = .{} } });
+        if (events.consume_event) return;
+    }
+}
+
+fn anchorHeadingCase() !void {
+    const Fixture = struct {
+        rows: []const Row,
+        fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            return self.rows[index];
+        }
+        fn find(raw: *const anyopaque, target: Target) ?u32 {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            for (self.rows, 0..) |row, index| {
+                if (row.target) |item| if (std.meta.eql(item, target)) return @intCast(index);
+            }
+            return null;
+        }
+    };
+    var rows: [9]Row = undefined;
+    rows[0] = .{ .segments = &.{.{ .text = "heading", .style = .{} }} };
+    for (rows[1..], 1..) |*row, index| row.* = .{ .segments = &.{.{ .text = "row", .style = .{} }}, .target = .{ .open = numbered(index) } };
+    var fixture: Fixture = .{ .rows = &rows };
+    var list: Self = .{ .rows = .{ .userdata = &fixture, .count = rows.len, .rowFn = Fixture.at, .findFn = Fixture.find } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
+    const first = try list.widget().draw(ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    // The pointer is over the heading, which holds no Session: no anchor until a wheel scroll.
+    try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+    try std.testing.expect(list.anchor == null);
+    try deliverWheel(arena.allocator(), first, &events, 0, 1);
+    _ = try list.widget().draw(ctx);
+    _ = list.scrollReport() orelse return error.TestExpectedEqual;
+    // The anchor is the nearest shown Session, and the next draw keeps it on its row.
+    const anchor = list.anchor orelse return error.TestExpectedEqual;
+    _ = try list.widget().draw(ctx);
+    const physical = for (list.shown_at) |span| {
+        if (span.target) |target| if (std.meta.eql(target, anchor.target)) break span.row;
+    } else return error.TestExpectedEqual;
+    try std.testing.expectEqual(anchor.row, physical);
+}
+
 test "SUI-105 GroupedList preserves the pointer anchor across changes" {
     try anchorStationaryCase();
     try anchorRecaptureCase();
+    try anchorHeadingCase();
 }
 
 test "SUI-106 GroupedList shows release flash with selection" {
