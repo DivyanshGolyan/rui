@@ -1567,10 +1567,17 @@ def main():
             saved = subprocess.run([RUI, "host", "set", "--store", str(held_store), "execution.activeCapacity", "7"],
                 env=env, capture_output=True, text=True, timeout=30)
             assert saved.returncode == 0 and saved.stdout == "", saved
-            assert saved.stderr == "\nrui: saved; the running Host keeps its old settings until a new Host starts. " + remedy, saved.stderr
+            # Restart keeps a Host's capacity, so a saved capacity still needs pause then start.
+            assert saved.stderr == ("\nrui: saved; the running Host keeps its old settings until a new Host starts, "
+                                    "and rui host restart keeps them too. " + remedy), saved.stderr
             unset = subprocess.run([RUI, "host", "unset", "--store", str(held_store), "execution.activeCapacity"],
                 env=env, capture_output=True, text=True, timeout=30)
             assert unset.returncode == 0 and unset.stdout == "" and unset.stderr == saved.stderr, unset
+            other = subprocess.run([RUI, "host", "set", "--store", str(held_store), "execution.backgroundAfterMs", "45000"],
+                env=env, capture_output=True, text=True, timeout=30)
+            assert other.returncode == 0 and other.stdout == "", other
+            # A foreground Host reports no settings digest, so restart would leave it as it is.
+            assert other.stderr == saved.stderr, other.stderr
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:

@@ -278,6 +278,8 @@ pub const HostInfo = struct {
     paused: bool,
     routes: protocol.Routes,
     doublewrite: ?[]const u8,
+    /// SHA-256 of the frozen settings frame a detached Host started with; null for a foreground Host.
+    settings_digest: ?@import("host_settings_handoff.zig").Digest,
 };
 
 pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
@@ -287,6 +289,7 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     const shape = protocol.host_info_reply;
     try response.appendShape(shape.head, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused });
     if (info.doublewrite) |value| try response.appendShape(shape.doublewrite, .{value});
+    if (info.settings_digest) |digest| try response.appendShape(shape.settings_digest, .{digest});
     try response.appendShape(shape.tail, .{ routes.codex, routes.openai, routes.chatgpt });
 }
 
@@ -447,13 +450,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null };
+    const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null, .settings_digest = null };
     try host_info.render(renderHostInfo, .{worst_info});
     const shape = protocol.host_info_reply;
     try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);
     host_info.len = 0;
     var with_diagnostic = worst_info;
     with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));
+    with_diagnostic.settings_digest = @splat(0xff);
     try host_info.render(renderHostInfo, .{with_diagnostic});
     try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 

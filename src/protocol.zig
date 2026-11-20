@@ -267,6 +267,7 @@ pub fn HostInfoWith(comptime Providers: type) type {
         custody_occupied: []const u8,
         paused: bool,
         innodb_doublewrite: ?[]const u8 = null,
+        settings_digest: ?[]const u8 = null,
         capabilities: struct {
             bash: bool,
             providers: Providers,
@@ -2640,8 +2641,9 @@ pub const max_mutation_response_bytes = blk: {
 pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
     pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
+    pub const settings_digest = .{ ",\"settings_digest\":\"", Hole{ .hex = 32 }, "\"" };
     pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\",\"chatgpt\":\"", Hole{ .tag = Route }, "\"}}}" };
-    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(tail);
+    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(tail);
 };
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;

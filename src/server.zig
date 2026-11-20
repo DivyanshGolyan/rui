@@ -1015,6 +1015,7 @@ pub noinline fn serve(
         descriptor_requirement.total,
         descriptor_observation.soft_limit,
         descriptor_limit_text,
+        tuning.settings_digest,
         &diagnostics,
         diagnostic_open_error,
         &readiness_owned,
@@ -1041,6 +1042,7 @@ fn serveOpened(
     descriptor_requirement: usize,
     descriptor_soft_limit: ?usize,
     descriptor_limit_text: []const u8,
+    settings_digest: ?@import("host_settings_handoff.zig").Digest,
     diagnostics: *?HostDiagnostics,
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
@@ -1082,6 +1084,7 @@ fn serveOpened(
         .allocator = allocator,
         .intake_capacity = intake_capacity,
         .descriptor_soft_limit = descriptor_soft_limit,
+        .settings_digest = settings_digest,
         .lease = lease,
         .store = storage,
         .hooks = hooks,
@@ -1804,6 +1807,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .paused = host.turns_paused.load(.acquire),
                 .routes = host.providers.routes(),
                 .doublewrite = host.store.admissionDiagnostic().doublewrite,
+                .settings_digest = host.settings_digest,
             }});
         },
         .host_pause => |pause| {
@@ -4378,7 +4382,7 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     const protocol_reply = @import("protocol_reply.zig");
     var response: protocol.ResponseBuffer = .{};
     const id = "0123456789abcdef0123456789abcdef";
-    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = "OFF" };
+    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = "OFF", .settings_digest = null };
     try response.render(host_reply.renderHostInfo, .{info});
     const status = try protocol_reply.parseHostInfo(response.slice(), id);
     try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
@@ -4388,7 +4392,7 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
     const shape = protocol.host_info_reply;
-    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.settings_digest) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {

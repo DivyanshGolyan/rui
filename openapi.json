@@ -5165,6 +5165,10 @@
             "maxLength": 32,
             "x-rui-max-bytes": 32
           },
+          "settings_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "capabilities": {
             "type": "object",
             "properties": {

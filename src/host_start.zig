@@ -1478,6 +1478,25 @@ test "Host start refused JSON input allocations erase secret bytes before releas
     try std.testing.expect(!observer.stale);
 }
 
+/// Whether a saved edit of this settings path reaches a value `restartSources` pins to
+/// the running Host's own (Active Capacity), so a restart would not apply it.
+pub fn restartKeeps(path: []const u8) bool {
+    const capacity = hs.path("execution.activeCapacity");
+    return std.mem.eql(u8, path, capacity) or
+        (path.len < capacity.len and std.mem.startsWith(u8, capacity, path) and capacity[path.len] == '.');
+}
+
+test "restart keeps a saved edit only where it reaches the pinned capacity" {
+    for ([_]struct { []const u8, bool }{
+        .{ hs.path("execution.activeCapacity"), true },
+        .{ "execution", true },
+        .{ hs.path("execution.backgroundAfterMs"), false },
+        .{ "execution.active", false },
+        .{ "exec", false },
+        .{ "providers", false },
+    }) |case| try std.testing.expectEqual(case[1], restartKeeps(case[0]));
+}
+
 pub fn capacityAssignment(value: usize, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, hs.path("execution.activeCapacity") ++ "={d}", .{value});
 }
