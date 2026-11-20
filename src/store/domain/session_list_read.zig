@@ -766,9 +766,12 @@ const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT 
 /// One Session's settings row. Its first Message and first awaiting approval are correlated joins on the Session
 /// ref, so the statement queues in the same round as the Session's first WorkRead stage. A Session with no first
 /// Message keeps its row, with NULL first-Message columns.
+/// The statement source, with `@index` marks as written (the MySQL plan test renders it).
+pub const list_row_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
+    report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1";
+
 const list_row = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
-        report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .sql = list_row_source,
     .Args = struct { session: []const u8 },
     .Row = ListRow,
     .cardinality = .optional,
