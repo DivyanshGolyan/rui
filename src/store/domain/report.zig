@@ -763,7 +763,9 @@ const work_live_operation = "(CASE WHEN work_turn.outcome_code IS NULL THEN work
 // The Session's stop cutoff, 0 with no stop. The stop cutoff owner is command.sessionStopCutoffSql.
 const work_cutoff = "coalesce((" ++ command_domain.sessionStopCutoffSql(work_session_ref) ++ "),0)";
 
-pub const work_row_source = "SELECT " ++ latestColumnsSql("work_turn", "work_operation", work_session_ref) ++ "," ++
+/// The work select list over the outer Session alias `work_session` and the keyed joins in work_joins. work_row and the
+/// Session list's creator-subtree read render it, so one owner spells a Session's work columns.
+pub const work_columns = latestColumnsSql("work_turn", "work_operation", work_session_ref) ++ "," ++
     "(" ++ firstApprovalSql(work_session_ref) ++ ") AS first_action," ++
     actionProbeSql("count(*)", work_live_operation, "a.action_id IS NOT NULL") ++ " AS actions_total," ++
     actionProbeSql("count(*)", work_live_operation, unresolved_action) ++ " AS actions_unresolved," ++
@@ -779,17 +781,19 @@ pub const work_row_source = "SELECT " ++ latestColumnsSql("work_turn", "work_ope
     "work_queued.admission_id AS queued_admission,work_queued.admitted_at AS queued_at,work_queued.admission_position AS queued_position," ++
     "work_excluded.admission_id AS excluded_admission," ++
     "work_stop.command_key IS NOT NULL AS stop_found,work_stop.position AS stop_position,work_stop.stopped_at AS stop_at," ++
-    "work_session.obligation_since AS owed_since " ++
-    "FROM session work_session " ++
-    "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.turn_id " ++ latestTurnFromSql(work_session_ref) ++ ") " ++
+    "work_session.obligation_since AS owed_since";
+
+/// The keyed joins work_columns reads, after `FROM session work_session` or a join that names `work_session`.
+pub const work_joins = "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.turn_id " ++ latestTurnFromSql(work_session_ref) ++ ") " ++
     "LEFT JOIN model_operation work_operation ON work_operation.operation_id=work_turn.operation_id " ++
     "LEFT JOIN action_operation work_running ON work_running.action_id=(" ++ oldestRunningSql("a.action_id", work_live_operation) ++ ") " ++
     "LEFT JOIN model_tool_call work_running_call ON work_running_call.operation_id=work_running.parent_operation_id " ++
     "AND work_running_call.call_ordinal=work_running.call_ordinal " ++
     "LEFT JOIN message_admission work_queued ON work_queued.admission_id=(" ++ pendingAfterSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
     "LEFT JOIN message_admission work_excluded ON work_excluded.admission_id=(" ++ excludedByCutoffSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
-    "LEFT JOIN session_stop work_stop ON work_stop.command_key=(" ++ stopAfterSql("command_key", work_session_ref, "work_excluded.admission_id") ++ ") " ++
-    "WHERE work_session.session_ref=?1";
+    "LEFT JOIN session_stop work_stop ON work_stop.command_key=(" ++ stopAfterSql("command_key", work_session_ref, "work_excluded.admission_id") ++ ") ";
+
+pub const work_row_source = "SELECT " ++ work_columns ++ " FROM session work_session " ++ work_joins ++ "WHERE work_session.session_ref=?1";
 
 /// One Session's work, every stage at once. It is optional and wide, so it is read with readInto into Scratch.
 pub const work_row = rsql.Read(.{
@@ -840,6 +844,46 @@ pub const WorkRow = struct {
     stop_at: ?u64,
     owed_since: ?u64,
 };
+
+/// `Head`'s fields followed by WorkRow's fields in order: the row of a statement that selects its own columns, then
+/// work_columns. rsql's column-order check ties the field order to the select list.
+pub fn WithWork(comptime Head: type) type {
+    const head = @typeInfo(Head).@"struct";
+    const work = @typeInfo(WorkRow).@"struct";
+    const count = head.field_names.len + work.field_names.len;
+    var names: [count][]const u8 = undefined;
+    var types: [count]type = undefined;
+    for (head.field_names, head.field_types, 0..) |name, Field, index| {
+        names[index] = name;
+        types[index] = Field;
+    }
+    for (work.field_names, work.field_types, head.field_names.len..) |name, Field, index| {
+        names[index] = name;
+        types[index] = Field;
+    }
+    const attrs: [count]std.lang.Type.Struct.FieldAttributes = @splat(.{});
+    return @Struct(.auto, null, &names, &types, &attrs);
+}
+
+/// Asserts at compile time that `Row` carries every WorkRow field at WorkRow's type, so WorkRead.decode reads a
+/// WithWork row exactly as it reads a WorkRow.
+fn checkWorkFields(comptime Row: type) void {
+    const work = @typeInfo(WorkRow).@"struct";
+    for (work.field_names, work.field_types) |name, Field| {
+        if (!@hasField(Row, name) or @FieldType(Row, name) != Field) @compileError(@typeName(Row) ++ " lacks the work field " ++ name);
+    }
+}
+
+test "WithWork of no head is WorkRow field for field" {
+    const fields = @typeInfo(WithWork(struct {})).@"struct";
+    const expected = @typeInfo(WorkRow).@"struct";
+    comptime std.debug.assert(fields.field_names.len == expected.field_names.len);
+    inline for (fields.field_names, fields.field_types, expected.field_names, expected.field_types) |name, Field, want, Want| {
+        comptime std.debug.assert(std.mem.eql(u8, name, want));
+        comptime std.debug.assert(Field == Want);
+    }
+    comptime checkWorkFields(WithWork(struct { origin: u64 }));
+}
 
 pub const work_row_failures = .{.{ work_row, error.TurnReadFailed }};
 
@@ -1062,11 +1106,12 @@ pub const WorkRead = struct {
         w.inputs.first_action = optional(first);
     }
 
-    /// Replays the staged read over one `work_row` row. Each stage keeps the slice of the row its own statement would
-    /// have returned, through the same keep and step, so the transitions and refusals are the staged machine's. A
-    /// missing row is the caller's refusal. The actions and owed "no row" refusals cannot occur: their aggregate or
+    /// Replays the staged read over one row that carries the work columns: a `work_row` row or any WithWork row. Each
+    /// stage keeps the slice of the row its own statement would have returned, through the same keep and step, so the
+    /// transitions and refusals are the staged machine's. A missing row is the caller's refusal. The actions and owed "no row" refusals cannot occur: their aggregate or
     /// scalar always returns a row, so the decoder has no branch for them.
-    pub fn decode(w: *WorkRead, row: *const WorkRow) error{ CorruptStore, ActionReadFailed }!void {
+    pub fn decode(w: *WorkRead, row: anytype) error{ CorruptStore, ActionReadFailed }!void {
+        comptime checkWorkFields(@TypeOf(row.*));
         std.debug.assert(w.stage == .latest and w.ahead == null);
         while (w.stage != .done) {
             var count: reads_domain.RowCount = .{};
@@ -1099,7 +1144,7 @@ pub const WorkRead = struct {
         _ = reads_domain.countRow(count, w, &stage_row);
     }
 
-    fn latestRow(row: *const WorkRow) error{CorruptStore}!WorkLatestRow {
+    fn latestRow(row: anytype) error{CorruptStore}!WorkLatestRow {
         return .{
             .turn_id = row.turn_id orelse return error.CorruptStore,
             .operation_id = row.operation_id orelse return error.CorruptStore,
@@ -1122,7 +1167,7 @@ pub const WorkRead = struct {
         };
     }
 
-    fn actionsRow(row: *const WorkRow) error{CorruptStore}!WorkActionsRow {
+    fn actionsRow(row: anytype) error{CorruptStore}!WorkActionsRow {
         return .{
             .total = row.actions_total orelse return error.CorruptStore,
             .unresolved = row.actions_unresolved orelse return error.CorruptStore,
@@ -1135,7 +1180,7 @@ pub const WorkRead = struct {
         };
     }
 
-    fn oldestRow(row: *const WorkRow) error{CorruptStore}!WorkOldestRow {
+    fn oldestRow(row: anytype) error{CorruptStore}!WorkOldestRow {
         return .{
             .attempt_at = row.running_at orelse return error.CorruptStore,
             .description = row.running_description,
@@ -1143,25 +1188,25 @@ pub const WorkRead = struct {
         };
     }
 
-    fn queuedRow(row: *const WorkRow) error{CorruptStore}!work_queued.Row {
+    fn queuedRow(row: anytype) error{CorruptStore}!work_queued.Row {
         return .{
             .admitted_at = try requiredPositive(row.queued_at),
             .admission_position = try requiredPositive(row.queued_position),
         };
     }
 
-    fn excludedRow(row: *const WorkRow) error{CorruptStore}!work_excluded.Row {
+    fn excludedRow(row: anytype) error{CorruptStore}!work_excluded.Row {
         return .{ .admission_id = try requiredPositive(row.excluded_admission) };
     }
 
-    fn stopRow(row: *const WorkRow) error{CorruptStore}!work_stop.Row {
+    fn stopRow(row: anytype) error{CorruptStore}!work_stop.Row {
         return .{
             .position = try requiredPositive(row.stop_position),
             .stopped_at = try requiredPositive(row.stop_at),
         };
     }
 
-    fn owedRow(row: *const WorkRow) error{CorruptStore}!obligation.read.Row {
+    fn owedRow(row: anytype) error{CorruptStore}!obligation.read.Row {
         return .{ .owed_since = try optionalPositive(row.owed_since) };
     }
 };
