@@ -3,8 +3,9 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
+
+from host_process import wait_for
 
 SCRIPT = pathlib.Path(__file__).with_name("case_deadline.py")
 
@@ -28,15 +29,15 @@ class CaseDeadlineTest(unittest.TestCase):
             self.assertEqual(result.returncode, 124, result)
             self.assertIn("still running after 1s", result.stderr)
             pid = int(marker.read_text())
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
+
+            def gone():
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("the case's background child outlived the deadline")
+                    return True
+                return False
+
+            wait_for(gone, "the case's background child stopped with its group", timeout=10)
 
 
 if __name__ == "__main__":
