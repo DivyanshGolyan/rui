@@ -693,7 +693,6 @@ fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime ses
         .Args = Args,
         .Row = WorkActionsRow,
         .cardinality = .each,
-        .compound = true,
     });
 }
 
