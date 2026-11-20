@@ -1,6 +1,6 @@
 ---
 name: rui-ci-triage
-description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission, scheduled or manual Promote, or Release fails, or a job stalls, times out or shows cancelled.
+description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission, scheduled or manual Promote, or Release fails, or a job stalls, times out or shows cancelled. Also use for questions about Promote's history or health (why promotions keep failing, green rate, no release for a while): triage the newest red run first, then quote rates from job-level results, not run conclusions.
 ---
 
 # rui-ci-triage
