@@ -962,7 +962,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
 
 test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
-    var page: @import("SignIn.zig") = .{};
+    var page: @import("SignIn.zig") = .{ .style = .{ .bg = .{ .rgb = .{ 0xf4, 0xef, 0xe2 } } } };
     var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
@@ -974,6 +974,12 @@ test "Sign-in is centered above the covered screen across every small bound" {
             try std.testing.expect(surface.children[0].surface.widget.eql(background.widget()));
             const cover = surface.children[1].surface;
             if (width == 0 or height == 0) continue;
+            // The cover owns every cell, so no covered text reads around the dialog.
+            try std.testing.expectEqual(@as(usize, width * height), cover.buffer.len);
+            for (cover.buffer) |cell| {
+                try std.testing.expect(cell.style.eql(page.style));
+                try std.testing.expect(cell.char.grapheme.len == 0 or std.mem.eql(u8, cell.char.grapheme, " "));
+            }
             const dialog = cover.children[0];
             try std.testing.expectEqual(@as(i17, @intCast((width - dialog.surface.size.width) / 2)), dialog.origin.col);
             try std.testing.expectEqual(@as(i17, @intCast((height - dialog.surface.size.height) / 2)), dialog.origin.row);
