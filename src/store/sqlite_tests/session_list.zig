@@ -810,11 +810,13 @@ test "the creator subtree plans its descendants' work as keyed searches" {
     const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ session_list_read_domain.descendant_work.sql);
     defer _ = c.sqlite3_finalize(statement);
     // Only the recursive CTE's own rows are scanned: the walk's queue and its members. Every Session, Turn, Operation,
-    // Action and Message is a keyed search. TEMP_SORTS_REASON
+    // Action and Message is a keyed search (the walk's `parent` and `member` scans read the materialized CTE, and the
+    // cycle probe searches it through an automatic index). The three temporary sorts are work_row's own, one per
+    // descendant: the running Action, the newest background result and the latest Turn's stop. The recursive UNION
+    // adds none, and the walk has no ORDER BY. Any other sort is a plan change.
     var temp_sorts: usize = 0;
     while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
         const detail = std.mem.span(c.sqlite3_column_text(statement, 3));
-        std.debug.print("plan: {s}\n", .{detail});
         if (std.mem.startsWith(u8, detail, "SCAN ")) {
             const scanned = detail["SCAN ".len..];
             const name = scanned[0 .. std.mem.indexOfScalar(u8, scanned, ' ') orelse scanned.len];
@@ -827,5 +829,5 @@ test "the creator subtree plans its descendants' work as keyed searches" {
         }
         if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) temp_sorts += 1;
     }
-    try std.testing.expectEqual(@as(usize, 999), temp_sorts);
+    try std.testing.expectEqual(@as(usize, 3), temp_sorts);
 }
