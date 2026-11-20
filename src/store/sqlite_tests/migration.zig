@@ -737,8 +737,8 @@ fn copySession(comptime reference: []const u8, comptime seq: []const u8) []const
         "SELECT '" ++ reference ++ "',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,created_at,next_position," ++ seq ++ ",workspace_digest,workspace_key FROM session WHERE session_ref='rhvzwc';";
 }
 
-fn admission(comptime key: []const u8, comptime seq: []const u8, comptime session: []const u8, comptime sender: ?[]const u8) []const u8 {
-    const command = "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('" ++ key ++ "',1,'" ++ session ++ "',zeroblob(32),1,'',0,0," ++ seq ++ ");";
+fn admission(comptime zero_digest: []const u8, comptime key: []const u8, comptime seq: []const u8, comptime session: []const u8, comptime sender: ?[]const u8) []const u8 {
+    const command = "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('" ++ key ++ "',1,'" ++ session ++ "'," ++ zero_digest ++ ",1,'',0,0," ++ seq ++ ");";
     const from = if (sender) |peer| "'" ++ peer ++ "'," ++ seq ++ ",2" else "NULL,NULL,1";
     return command ++ "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at,sender_session_ref,sender_position,source_kind) VALUES(" ++
         seq ++ ",'" ++ session ++ "','" ++ key ++ "',(SELECT MIN(content_id) FROM content),1793781800," ++ from ++ ");";
@@ -747,13 +747,16 @@ fn admission(comptime key: []const u8, comptime seq: []const u8, comptime sessio
 // Format 87 Sessions covering every creator case: started by another Session (peer01), started by a
 // person and later messaged by a Session (pers01), first Message sent to itself (sefx01), no Message
 // (empt01), and a saved creator that differs from the first sender (kept01).
-const format_87_fixture_sql = copySession("peer01", "101") ++ copySession("pers01", "102") ++ copySession("sefx01", "103") ++
-    copySession("empt01", "104") ++ copySession("kept01", "105") ++
-    "UPDATE session SET creator_ref='rhvzwc' WHERE session_ref='kept01';" ++
-    admission("cb-peer-1", "901", "peer01", "rhvzwc") ++ admission("cb-peer-2", "902", "peer01", null) ++
-    admission("cb-pers-1", "903", "pers01", null) ++ admission("cb-pers-2", "904", "pers01", "rhvzwc") ++
-    admission("cb-self-1", "905", "sefx01", "sefx01") ++
-    admission("cb-kept-1", "906", "kept01", "peer01");
+// `zero_digest` is the dialect's 32 zero bytes; the MySQL migration check loads the same fixture.
+pub fn format87FixtureSql(comptime zero_digest: []const u8) []const u8 {
+    return copySession("peer01", "101") ++ copySession("pers01", "102") ++ copySession("sefx01", "103") ++
+        copySession("empt01", "104") ++ copySession("kept01", "105") ++
+        "UPDATE session SET creator_ref='rhvzwc' WHERE session_ref='kept01';" ++
+        admission(zero_digest, "cb-peer-1", "901", "peer01", "rhvzwc") ++ admission(zero_digest, "cb-peer-2", "902", "peer01", null) ++
+        admission(zero_digest, "cb-pers-1", "903", "pers01", null) ++ admission(zero_digest, "cb-pers-2", "904", "pers01", "rhvzwc") ++
+        admission(zero_digest, "cb-self-1", "905", "sefx01", "sefx01") ++
+        admission(zero_digest, "cb-kept-1", "906", "kept01", "peer01");
+}
 
 test "schema 88 creator migration names the Session that sent each Session's first Message" {
     var tmp = std.testing.tmpDir(.{});
@@ -778,7 +781,7 @@ test "schema 88 creator migration names the Session that sent each Session's fir
     try sqlite.bindText(meta, 1, protocol.wire_version);
     try sqlite.bindText(meta, 2, root);
     try sqlite.expectDone(meta);
-    try sqlite.exec(raw, format_87_fixture_sql);
+    try sqlite.exec(raw, comptime format87FixtureSql("zeroblob(32)") ++ "");
     try sqlite.exec(raw, "CREATE TEMP TABLE before_creators AS SELECT session_ref,creator_ref FROM session WHERE session_ref NOT IN ('peer01','pers01','sefx01','empt01','kept01')");
     try store_schema.openExisting(std.testing.io, raw, root, null, null);
     try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
