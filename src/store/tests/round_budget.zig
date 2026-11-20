@@ -34,6 +34,8 @@ const configureTestSessionAsk = shared_fixtures.configureTestSessionAsk;
 const expectContent = shared_fixtures.expectContent;
 const nextTestingItem = shared_fixtures.nextTestingItem;
 const round_budgets = shared_fixtures.round_budgets;
+const pass_budgets = shared_fixtures.pass_budgets;
+const keepsPassBudget = shared_fixtures.keepsPassBudget;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const settleCallsForTestingWithFaults = shared_fixtures.settleCallsForTestingWithFaults;
 const testingAgentSpec = shared_fixtures.testingAgentSpec;
@@ -168,6 +170,19 @@ test "MySQL round shape subtracts the entry baseline from every component" {
     try std.testing.expectEqual(@as(u64, 1), delta.prefix_only);
     try std.testing.expectEqual(@as(u64, 9), delta.queries);
     try std.testing.expectEqual(delta.expected(), delta.queries);
+}
+
+// SH-110's pass check, over its whole domain: a pinned point keeps its budget at exactly its passes, one more or one fewer
+// fails it, and an unpinned point is not checked. The MySQL leg that applies it needs a live server.
+test "SH-110 a pass budget holds only at its exact passes, and pins every Session list entry point" {
+    for ([_]EntryPoint{ .readSessionList, .readArchivedWindow, .readChangedSessionList }) |point| {
+        const budget = pass_budgets.get(point) orelse return error.ListPointUnpinned;
+        try std.testing.expect(keepsPassBudget(point, .{ .access_passes = budget }));
+        try std.testing.expect(!keepsPassBudget(point, .{ .access_passes = budget + 1 }));
+        try std.testing.expect(!keepsPassBudget(point, .{ .access_passes = budget - 1 }));
+    }
+    try std.testing.expect(pass_budgets.get(.configure) == null);
+    try std.testing.expect(keepsPassBudget(.configure, .{ .access_passes = 99 }));
 }
 
 test "creating configuration with a receipt keeps the configure round budget" {

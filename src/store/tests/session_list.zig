@@ -884,6 +884,70 @@ test "a list page's rows share their rounds, so eight rows take as many as one" 
     }.run);
 }
 
+test "SL-9: a list page matches each row's work and settings to its own Session, for every page size and order" {
+    try store_testing.forEachEngine(struct {
+        const page = protocol.session_list_page_size;
+        // The work state each shape lists as, independent of the read under test.
+        const kinds = [_][]const u8{ "idle", "finished", "stopped", "approval" };
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Each Session has its own label and one of four work shapes, so a row shaped from another Session's
+            // settings or work shows another label or state.
+            var refs: [page]change_ring.Id = undefined;
+            inline for (0..page) |index| {
+                const shape: shared_fixtures.TestingWorkShape = @fromBackingInt(@intCast(index % kinds.len));
+                const session = try shape.make(&storage, &tmp, std.fmt.comptimePrint("sl9-{d}", .{index}));
+                refs[index] = session.slice()[0..change_ring.id_bytes].*;
+                try store_testing.exec(&storage, "UPDATE session SET label=?1 WHERE session_ref=?2", .{ std.fmt.comptimePrint("sl9-{d}", .{index}), session.slice() });
+            }
+            // In ref order: both engines are expected to return an IN list's rows in key order [inferred], so a page in
+            // reversed or interleaved ref order is one that a match by position would get wrong.
+            var by_ref: [page]usize = undefined;
+            for (&by_ref, 0..) |*slot, index| slot.* = index;
+            std.mem.sort(usize, &by_ref, @as(*const [page]change_ring.Id, &refs), struct {
+                fn less(ids: *const [page]change_ring.Id, left: usize, right: usize) bool {
+                    return std.mem.order(u8, &ids[left], &ids[right]) == .lt;
+                }
+            }.less);
+            for (1..page + 1) |count| for ([_]enum { reversed, interleaved }{ .reversed, .interleaved }) |order| {
+                errdefer std.debug.print("SL-9 failed for {d} rows in {t} order\n", .{ count, order });
+                var shown: [page]usize = undefined;
+                for (shown[0..count], 0..) |*slot, at| slot.* = switch (order) {
+                    .reversed => by_ref[count - 1 - at],
+                    .interleaved => by_ref[if (at < (count + 1) / 2) 2 * at else 2 * (at - (count + 1) / 2) + 1],
+                };
+                try expectPage(&storage, &tmp, &refs, shown[0..count]);
+            };
+        }
+
+        /// Lists exactly the Sessions `shown`, in that order (it sets their creation order inside a cursor window), and
+        /// checks every row against its own Session.
+        fn expectPage(storage: *Store, tmp: *std.testing.TmpDir, refs: *const [page]change_ring.Id, shown: []const usize) !void {
+            // Creation order is unique, so every Session moves clear of the values it takes next first.
+            for (refs, 0..) |*ref, index| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ 3000 + index, ref });
+            for (shown, 0..) |index, at| try store_testing.exec(storage, "UPDATE session SET created_seq=?1 WHERE session_ref=?2", .{ 2001 + at, &refs[index] });
+            var used = std.atomic.Value(u64).init(0);
+            const bytes = try testingSessionList(storage, tmp, .{ .after = 2000, .ceiling = 2000 + shown.len }, &used, 9);
+            defer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const rows = parsed.value.object.get("sessions").?.array.items;
+            try std.testing.expectEqual(shown.len, rows.len);
+            for (rows, shown) |row, index| {
+                var label: [16]u8 = undefined;
+                try std.testing.expectEqualStrings(&refs[index], row.object.get("reference").?.string);
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&label, "sl9-{d}", .{index}), row.object.get("label").?.string);
+                try std.testing.expectEqualStrings(kinds[index % kinds.len], row.object.get("work").?.object.get("state").?.object.get("kind").?.string);
+            }
+        }
+    }.run);
+}
+
 test "creating a Session takes the same work however many Sessions exist, in rounds" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

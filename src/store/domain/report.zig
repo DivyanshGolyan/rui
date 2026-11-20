@@ -507,13 +507,13 @@ comptime {
     if (Quota.max_bytes > store_schema.content_chunk_bytes) @compileError("a quota diagnostic is more than one content chunk");
 }
 
-/// The latest Turn's FROM and WHERE for the Session ref `session`: WorkLatest and the work_row's latest probe render it.
+/// The latest Turn's FROM and WHERE for the Session ref `session`: WorkLatest and work_rows' latest probe render it.
 fn latestTurnFromSql(comptime session: []const u8) []const u8 {
     return "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
         "WHERE t.session_ref=" ++ session ++ " ORDER BY t.turn_id DESC LIMIT 1";
 }
 
-// The stage rules, each spelled once. The staged statements render them and so do the work_row probes, so the two
+// The stage rules, each spelled once. The staged statements render them and so do the work_rows probes, so the two
 // reads cannot disagree on what an Action, a result, a Message or a stop is.
 
 const unresolved_action = "a.resolution_code IS NULL";
@@ -549,7 +549,7 @@ fn resultLatestSql(comptime columns: []const u8, comptime session: []const u8, c
 /// one probe per branch reads resolved_at, plus the foreground position the bound needs. The foreground probes walk
 /// action_operation_session_results in acceptance order; action_operation_background_results is in background order, so
 /// the one background probe sorts its Operation's background results. A result has a resolved_at (an accepted Action is
-/// resolved), so a NULL from the background probe means no newer background result. WorkActions and the work_row render
+/// resolved), so a NULL from the background probe means no newer background result. WorkActions and the work_rows render
 /// it, so both name the latest Resolution the same way.
 fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []const u8) []const u8 {
     const foreground_position = "(" ++ resultLatestSql("acceptance_position", session, operation, false) ++ ")";
@@ -558,11 +558,11 @@ fn latestResolutionAtSql(comptime session: []const u8, comptime operation: []con
     return "coalesce((" ++ newer_background ++ "),(" ++ resultLatestSql("resolved_at", session, operation, false) ++ "))";
 }
 
-/// The decided Action's session_revision join: the revision its permission_revision names. WorkActions and the work_row
+/// The decided Action's session_revision join: the revision its permission_revision names. WorkActions and the work_rows
 /// render it, as a LEFT JOIN and a JOIN, so one owner spells the join.
 const session_revision_of_action = "session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision";
 
-/// The oldest Action running on `operation`, joined to its call. The staged WorkOldest and the work_row probe render it.
+/// The oldest Action running on `operation`, joined to its call. The staged WorkOldest and the work_rows probe render it.
 fn oldestRunningSql(comptime columns: []const u8, comptime operation: []const u8) []const u8 {
     return "SELECT " ++ columns ++ " FROM action_operation a JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "WHERE a.parent_operation_id=" ++ operation ++ " AND " ++ running_action ++ " ORDER BY a.attempt_at,a.action_id LIMIT 1";
@@ -589,7 +589,7 @@ fn stopAfterSql(comptime columns: []const u8, comptime session: []const u8, comp
 const work_latest = WorkLatest(struct { session: []const u8 }, "?1");
 
 /// The latest-Turn select list over the Turn alias `turn` and its Operation alias `operation`, for the Session ref
-/// `session`. WorkLatest and the one-statement work_row render it, so both reads share one set of columns.
+/// `session`. WorkLatest and the one-statement work_rows render it, so both reads share one set of columns.
 fn latestColumnsSql(comptime turn: []const u8, comptime operation: []const u8, comptime session: []const u8) []const u8 {
     const t = turn ++ ".";
     const o = operation ++ ".";
@@ -763,7 +763,7 @@ const work_live_operation = "(CASE WHEN work_turn.outcome_code IS NULL THEN work
 // The Session's stop cutoff, 0 with no stop. The stop cutoff owner is command.sessionStopCutoffSql.
 const work_cutoff = "coalesce((" ++ command_domain.sessionStopCutoffSql(work_session_ref) ++ "),0)";
 
-/// The work select list over the outer Session alias `work_session` and the keyed joins in work_joins. work_row and the
+/// The work select list over the outer Session alias `work_session` and the keyed joins in work_joins. work_rows and the
 /// Session list's creator-subtree read render it, so one owner spells a Session's work columns.
 pub const work_columns = latestColumnsSql("work_turn", "work_operation", work_session_ref) ++ "," ++
     "(" ++ firstApprovalSql(work_session_ref) ++ ") AS first_action," ++
@@ -793,15 +793,72 @@ pub const work_joins = "LEFT JOIN turn work_turn ON work_turn.turn_id=(SELECT t.
     "LEFT JOIN message_admission work_excluded ON work_excluded.admission_id=(" ++ excludedByCutoffSql("admission_id", work_session_ref, work_cutoff) ++ ") " ++
     "LEFT JOIN session_stop work_stop ON work_stop.command_key=(" ++ stopAfterSql("command_key", work_session_ref, "work_excluded.admission_id") ++ ") ";
 
-pub const work_row_source = "SELECT " ++ work_columns ++ " FROM session work_session " ++ work_joins ++ "WHERE work_session.session_ref=?1";
+/// The Session refs one work_rows statement binds: a Session list page.
+pub const work_rows_slots = session_list.session_list_page_size;
 
-/// One Session's work, every stage at once. It is optional and wide, so it is read with readInto into Scratch.
-pub const work_row = rsql.Read(.{
-    .sql = work_row_source,
-    .Args = struct { session: []const u8 },
-    .Row = WorkRow,
-    .cardinality = .optional,
+/// The statement source, with no `@index` marks (the plan tests render it).
+pub const work_rows_source = "SELECT work_session.session_ref AS work_ref," ++ work_columns ++ " FROM session work_session " ++ work_joins ++
+    "WHERE work_session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
+
+const RefSlot = Bounded(change_ring.id_bytes);
+
+/// Up to work_rows_slots Sessions' work, every stage at once: one row per Session found, in no promised order, each
+/// carrying its own ref. Unused slots are empty and match no Session. WorkRows queues it and matches each row to its
+/// Session; a single Session binds one slot.
+pub const work_rows = rsql.Read(.{
+    .sql = work_rows_source,
+    .Args = struct { session0: RefSlot, session1: RefSlot, session2: RefSlot, session3: RefSlot, session4: RefSlot, session5: RefSlot, session6: RefSlot, session7: RefSlot },
+    .Row = WithWork(struct { work_ref: SessionText }),
+    .cardinality = .each,
 });
+
+/// The work of up to work_rows_slots Sessions in one work_rows statement. Each row decodes into `decoded` (it is over
+/// 1 KiB) and is replayed at once into the WorkRead whose Session ref it carries, so only the WorkReads outlive it. A row
+/// for a Session that was not asked for, or a second row for one, is CorruptStore; so is a Session with no row (finish).
+/// `reads` is borrowed from queue until the statement's round runs.
+pub const WorkRows = struct {
+    decoded: work_rows.Row = undefined,
+    reads: []WorkRead = &.{},
+    found: [work_rows_slots]bool = @splat(false),
+    failure: ?error{ CorruptStore, ActionReadFailed } = null,
+
+    /// Queues the work of `reads`, each a fresh WorkRead of its Session ref. Binds the refs by value, so no ref bytes
+    /// outlive this call. An empty `reads` queues nothing, so it adds no statement to the round.
+    pub fn queue(rows: *WorkRows, a: *ReadAccess, reads: []WorkRead) error{CorruptStore}!void {
+        std.debug.assert(reads.len <= work_rows_slots);
+        rows.reads = reads;
+        rows.found = @splat(false);
+        rows.failure = null;
+        if (reads.len == 0) return;
+        var args: work_rows.Args = undefined;
+        inline for (@typeInfo(work_rows.Args).@"struct".field_names, 0..) |name, index|
+            @field(args, name) = if (index < reads.len) RefSlot.from(reads[index].session) catch return error.CorruptStore else .{};
+        a.readEach(work_rows, args, std.math.maxInt(u64), rows);
+    }
+
+    pub fn visit(rows: *WorkRows, row: *const work_rows.Row) bool {
+        rows.take(row) catch |err| {
+            rows.failure = err;
+            return false;
+        };
+        return true;
+    }
+
+    fn take(rows: *WorkRows, row: *const work_rows.Row) error{ CorruptStore, ActionReadFailed }!void {
+        const index = for (rows.reads, 0..) |*read, index| {
+            if (std.mem.eql(u8, read.session, row.work_ref.slice())) break index;
+        } else return error.CorruptStore;
+        if (rows.found[index]) return error.CorruptStore;
+        rows.found[index] = true;
+        try rows.reads[index].decode(row);
+    }
+
+    /// The read's outcome once its round ran: a refused row first, then a Session with no row.
+    pub fn finish(rows: *const WorkRows) error{ CorruptStore, ActionReadFailed }!void {
+        if (rows.failure) |err| return err;
+        for (rows.found[0..rows.reads.len]) |found| if (!found) return error.CorruptStore;
+    }
+};
 
 pub const WorkRow = struct {
     turn_id: ?rsql.Positive,
@@ -884,7 +941,7 @@ fn checkWorkFields(comptime Row: type) void {
     }
 }
 
-pub const work_row_failures = .{.{ work_row, error.TurnReadFailed }};
+pub const work_rows_failures = .{.{ work_rows, error.TurnReadFailed }};
 
 pub const report_failures = .{
     .{ first_candidate, error.SessionReadFailed },
@@ -1105,7 +1162,7 @@ pub const WorkRead = struct {
         w.inputs.first_action = optional(first);
     }
 
-    /// Replays the staged read over one row that carries the work columns: a `work_row` row or any WithWork row. Each
+    /// Replays the staged read over one row that carries the work columns: a `work_rows` row or any WithWork row. Each
     /// stage keeps the slice of the row its own statement would have returned, through the same keep and step, so the
     /// transitions and refusals are the staged machine's. A missing row is the caller's refusal. The actions and owed
     /// "no row" refusals cannot occur: their aggregate or scalar always returns a row, so the decoder has no branch for

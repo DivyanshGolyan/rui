@@ -1129,7 +1129,21 @@ test "MySQL plans the changed-page ancestor batch through the session key" {
     }.run);
 }
 
-test "MySQL plans a list row's settings through the Session ref, with no base-table scan" {
+// A page's refs as eight distinct literals, so the IN list is planned as the eight key lookups a full page binds.
+const page_refs: []const []const u8 = &.{ "'abcde0'", "'abcde1'", "'abcde2'", "'abcde3'", "'abcde4'", "'abcde5'", "'abcde6'", "'abcde7'" };
+
+/// Fills session with enough Sessions that reading it whole costs more than a page's eight key lookups, as on a Store in
+/// use, and refreshes its statistics. On a nearly empty session MySQL's cost model may rightly prefer one scan of its
+/// single page to eight lookups [inferred, not run here], so a plan read there would say nothing about a live Store.
+/// Eight equal literals would dodge the question: MySQL plans them as one lookup.
+fn fillSessionsForPlan(storage: *Store) !void {
+    const mysql_testing = @import("mysql_testing.zig");
+    var key: [32]u8 = undefined;
+    for (0..256) |index| _ = try testing.configureTestSession(storage, try std.fmt.bufPrint(&key, "plan-fill-{d}", .{index}));
+    try mysql_testing.rawExec(storage, "ANALYZE TABLE session");
+}
+
+test "MySQL plans a page's settings rows through the Session key, with no base-table scan" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             if (case.engine != .mysql) return;
@@ -1141,19 +1155,23 @@ test "MySQL plans a list row's settings through the Session ref, with no base-ta
             var storage: Store = undefined;
             try testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            const literal = comptime bindLiterals(rsql.sentTemplate(session_list_read.list_row_source).prepared(), &.{"'abcdef'"});
+            try fillSessionsForPlan(&storage);
+            const literal = comptime bindLiterals(rsql.sentTemplate(session_list_read.list_rows_source).prepared(), page_refs);
             var buffer: [16384]u8 = undefined;
             const plan = try mysql_testing.planText(&storage, literal, &buffer);
-            errdefer std.debug.print("MySQL plan for the list row settings:\n{s}", .{plan});
-            // The first Message, the first awaiting approval and the last Turn are keyed probes of the Session ref. MySQL
-            // names aliases in the plan, so refuse any table scan and require the Turn index the probes use.
+            errdefer std.debug.print("MySQL plan for the page's settings rows:\n{s}", .{plan});
+            // The IN list holds only bound refs, so session is read through its key (an IN list holding a UNION made
+            // MySQL scan session; see livePageSql). The first Message, the first awaiting approval and the last Turn are
+            // keyed probes of each row's ref. MySQL names aliases in the plan, so refuse any table scan and require the
+            // session key and the Turn index the probes use.
             try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "PRIMARY") != null);
             try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
         }
     }.run);
 }
 
-test "MySQL plans the work row through keyed probes" {
+test "MySQL plans a page's work rows through the Session key and keyed probes" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {
             if (case.engine != .mysql) return;
@@ -1165,13 +1183,16 @@ test "MySQL plans the work row through keyed probes" {
             const report_domain = @import("domain/report.zig");
             const rsql = @import("rsql.zig");
             const mysql_testing = @import("mysql_testing.zig");
-            const literal = comptime bindLiterals(rsql.sentTemplate(report_domain.work_row_source).prepared(), &.{"'abcdef'"});
+            try fillSessionsForPlan(&storage);
+            const literal = comptime bindLiterals(rsql.sentTemplate(report_domain.work_rows_source).prepared(), page_refs);
             var buffer: [32768]u8 = undefined;
             const plan = try mysql_testing.planText(&storage, literal, &buffer);
-            errdefer std.debug.print("MySQL plan for the work row:\n{s}", .{plan});
-            // Every stage's probe is keyed on the Session ref or the live Operation, so no table is scanned, and the two
-            // indexes the latest Turn and the pending Message probes use are present.
+            errdefer std.debug.print("MySQL plan for the page's work rows:\n{s}", .{plan});
+            // The page's Sessions are read through the session key, and every stage's probe is keyed on a row's Session
+            // ref or its live Operation, so no table is scanned, and the two indexes the latest Turn and the pending
+            // Message probes use are present.
             try std.testing.expect(std.mem.indexOf(u8, plan, "Table scan") == null);
+            try std.testing.expect(std.mem.indexOf(u8, plan, "PRIMARY") != null);
             try std.testing.expect(std.mem.indexOf(u8, plan, "turn_session_latest") != null);
             try std.testing.expect(std.mem.indexOf(u8, plan, "message_admission_session_pending") != null);
         }

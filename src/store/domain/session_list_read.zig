@@ -71,10 +71,10 @@ pub const list_failures = .{
     .{ live_action_page, error.SessionReadFailed },
     .{ workspace_list_page, error.SessionReadFailed },
     .{ workspace_key, error.SessionReadFailed },
-    .{ list_row, error.SessionReadFailed },
+    .{ list_rows, error.SessionReadFailed },
     .{ changed_ancestors, error.SessionReadFailed },
     .{ descendant_work, error.SessionReadFailed },
-} ++ report_domain.work_row_failures;
+} ++ report_domain.work_rows_failures;
 
 fn runList(a: *ReadAccess) !void {
     return store_access.runNamed(a, list_failures, error.CorruptStore);
@@ -435,10 +435,10 @@ pub const Scratch = struct {
     live: LivePages = .{},
     /// The changed seeds of a since-delta page, in ID order, found before its ancestor statements queue.
     changed: [change_ring.capacity]change_ring.Id = undefined,
-    /// The settings rows of one page, read in its first round beside its one-statement work rows.
-    settings: [session_list.session_list_page_size]SettingsRow = undefined,
-    /// The one-statement work rows of one page, read in its row round beside its settings rows.
-    work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
+    /// The settings rows of one page, read in its row round beside its work rows.
+    list_rows: ListRows = .{},
+    /// The work rows of one page, read in its row round beside its settings rows and decoded as they arrive.
+    work_rows: report_domain.WorkRows = .{},
     /// The creator-subtree fold of one page: the descendant row being decoded, its WorkRead and the page's totals.
     subtree: SubtreeFold = .{},
 };
@@ -581,7 +581,8 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var candidates: ChangedCandidates = .{ .after = after };
     // Every changed seed is named first, then the seeds go in batches of session_list_page_size, one statement per
-    // batch. All statements queue into one round. Each batch binds its seeds by value.
+    // batch. All statements queue into one round, but a statement repeated in one pass forces the next, so C seeds
+    // take ceil(C/8) passes (tests.pass_budgets pins the C <= 8 case). Each batch binds its seeds by value.
     const seeds = self.changes.changed(since, through, workspace, null, &scratch.changed);
     const scope: ?[]const u8 = if (request.workspace) |*workspace_scope| workspace_scope.slice() else null;
     var first: usize = 0;
@@ -624,7 +625,7 @@ fn clockColumnsSql(comptime session: []const u8) []const u8 {
 
 /// The creator subtree of up to session_list_page_size page roots, every descendant with its own clock facts and
 /// work columns, in one statement. Each descendant row carries its origin (the page root it descends from); root rows
-/// are dropped, since the roots' work is the page's own work_row. The walk is unbounded and has no order: the fold
+/// are dropped, since the roots' work is the page's own work_rows read. The walk is unbounded and has no order: the fold
 /// is a max and two counts, and a truncated walk would report wrong counts. Each row carries its root's creator, and a
 /// row that is that creator flags a cycle: the root's creator is in its own subtree. Every creator cycle the walk can
 /// reach runs through a root, and it shows on a non-root row, because a Session is never its own creator (schema CHECK).
@@ -745,18 +746,22 @@ const last_line_joins = " LEFT JOIN turn last_turn ON last_turn.turn_id=(SELECT 
     "LEFT JOIN action_operation awaiting ON awaiting.action_id=(" ++ report_domain.firstApprovalSql("session.session_ref") ++ ") " ++
     "LEFT JOIN model_tool_call awaiting_call ON awaiting_call.operation_id=awaiting.parent_operation_id AND awaiting_call.call_ordinal=awaiting.call_ordinal ";
 
-/// One Session's settings row. Its first Message and first awaiting approval are correlated joins on the Session
-/// ref, so the statement queues in the same round as the Session's first WorkRead stage. A Session with no first
-/// Message keeps its row, with NULL first-Message columns.
+/// The settings rows of up to session_list_page_size Sessions: one row per Session found, in no promised order, each
+/// carrying its own ref. Unused slots are empty and match no Session. Its first Message and first awaiting approval
+/// are correlated joins on each row's Session ref, so the statement queues in the page's row round. A Session with no
+/// first Message keeps its row, with NULL first-Message columns. The IN list holds only bound refs (MySQL seeks the
+/// session key for each; an IN list holding a UNION made it scan session, see livePageSql).
 /// The statement source, with `@index` marks as written (the MySQL plan test renders it).
-pub const list_row_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
-    report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref=?1";
+pub const list_rows_source = "SELECT " ++ settings_columns ++ report_domain.first_pick_columns ++ " FROM session" ++ report_domain.first_admission_join ++
+    report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
 
-const list_row = rsql.Read(.{
-    .sql = list_row_source,
-    .Args = struct { session: []const u8 },
+const RefSlot = Bounded(change_ring.id_bytes);
+
+pub const list_rows = rsql.Read(.{
+    .sql = list_rows_source,
+    .Args = struct { session0: RefSlot, session1: RefSlot, session2: RefSlot, session3: RefSlot, session4: RefSlot, session5: RefSlot, session6: RefSlot, session7: RefSlot },
     .Row = ListRow,
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
 const ListRow = struct {
@@ -800,26 +805,67 @@ const ListScratch = struct {
     rollups: [session_list.session_list_page_size]Rollup,
 };
 
-/// One settings row, read in the page's first round: the row, and whether its Session was found.
-const SettingsRow = struct {
-    row: ListRow = undefined,
-    found: store_access.Found = undefined,
-};
+/// The settings rows of one page in one list_rows statement. Each row decodes into `decoded` (it is over 1 KiB) and is
+/// copied into the slot of the Session ref it carries. A row for a Session that was not asked for, or a second row for
+/// one, is CorruptStore; so is a Session with no row (finish). `references` is borrowed from queue until the page's rows
+/// are shaped.
+const ListRows = struct {
+    decoded: ListRow = undefined,
+    rows: [session_list.session_list_page_size]ListRow = undefined,
+    found: [session_list.session_list_page_size]bool = @splat(false),
+    references: []const change_ring.Id = &.{},
+    failure: ?error{CorruptStore} = null,
 
-/// One Session's one-statement work row, read in a list round beside its settings row, and whether its Session was found.
-const WorkRowSlot = struct {
-    row: report_domain.WorkRow = undefined,
-    found: store_access.Found = undefined,
+    /// Queues the settings of `references`. An empty page queues nothing, so it adds no statement to the round.
+    fn queue(rows: *ListRows, a: *ReadAccess, references: []const change_ring.Id) !void {
+        rows.references = references;
+        rows.found = @splat(false);
+        rows.failure = null;
+        if (references.len == 0) return;
+        const slots = try refSlots(references);
+        a.readEach(list_rows, .{
+            .session0 = slots[0],
+            .session1 = slots[1],
+            .session2 = slots[2],
+            .session3 = slots[3],
+            .session4 = slots[4],
+            .session5 = slots[5],
+            .session6 = slots[6],
+            .session7 = slots[7],
+        }, std.math.maxInt(u64), rows);
+    }
+
+    pub fn visit(rows: *ListRows, row: *const ListRow) bool {
+        const index = for (rows.references, 0..) |*reference, index| {
+            if (std.mem.eql(u8, reference, row.session_ref.slice())) break index;
+        } else {
+            rows.failure = error.CorruptStore;
+            return false;
+        };
+        if (rows.found[index]) {
+            rows.failure = error.CorruptStore;
+            return false;
+        }
+        rows.found[index] = true;
+        rows.rows[index] = row.*;
+        return true;
+    }
+
+    /// The read's outcome once its round ran: a refused row first, then a Session with no row.
+    fn finish(rows: *const ListRows) error{CorruptStore}!void {
+        if (rows.failure) |err| return err;
+        for (rows.found[0..rows.references.len]) |found| if (!found) return error.CorruptStore;
+    }
 };
 
 /// Reads one page of rows in one round: the creator subtree of every row with its descendants' work, streamed into
-/// the subtree fold, every row's one-statement work row and every row's settings, which need only the Session ref.
-/// Then the rows are shaped from the settings read.
+/// the subtree fold, then the page's work rows and settings rows, one statement each over the page's refs. Each row is
+/// matched to its Session by the ref it carries. Then the rows are shaped from the settings read.
 noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
     const list = a.store.reportScratch(ListScratch);
-    const works = &list.works;
+    const works = list.works[0..references.len];
     const now = std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange;
     const rollups = list.rollups[0..references.len];
     @memset(rollups, .{});
@@ -831,32 +877,27 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
     subtree.now_ms = now;
     subtree.failure = null;
     if (references.len != 0) a.readEach(descendant_work, try subtreeArgs(request, references), std.math.maxInt(u64), subtree);
-    for (references, scratch.work_rows[0..references.len], scratch.settings[0..references.len]) |*reference, *slot, *settings| {
-        a.readInto(report_domain.work_row, .{ .session = reference }, &slot.row, &slot.found);
-        a.readInto(list_row, .{ .session = reference }, &settings.row, &settings.found);
-    }
+    for (references, works) |*reference, *work| work.* = .{ .session = reference };
+    try scratch.work_rows.queue(a, works);
+    try scratch.list_rows.queue(a, references);
     try runList(a);
-    for (references, works[0..references.len], scratch.work_rows[0..references.len]) |*reference, *work, *slot| {
-        if (!slot.found.get()) return error.CorruptStore;
-        work.* = .{ .session = reference };
-        try work.decode(&slot.row);
-    }
+    try scratch.work_rows.finish();
     if (subtree.failure) |err| return err;
+    try scratch.list_rows.finish();
     const shown = &list.shown;
-    for (references, works[0..references.len], shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
-    try readRowSettings(a, shown[0..references.len], scratch.settings[0..references.len], rollups, now, visitor);
+    for (references, works, shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
+    try readRowSettings(a, shown[0..references.len], scratch.list_rows.rows[0..references.len], rollups, now, visitor);
 }
 
 const ShownRow = struct { reference: *const change_ring.Id, work: *const WorkRead };
 
 /// Shapes each row from its settings read. No round runs here: every statement was queued and run before.
-noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []const SettingsRow, rollups: []const Rollup, now_ms: u64, visitor: anytype) !void {
+noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, settings: []const ListRow, rollups: []const Rollup, now_ms: u64, visitor: anytype) !void {
     const read_version: change_ring.Token = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
-    for (settings[0..rows.len], 0..) |*slot, index| {
-        if (!slot.found.get()) return error.CorruptStore;
+    for (settings[0..rows.len], 0..) |*row, index| {
         var sorted: [tool_name.max_tools][]const u8 = undefined;
         var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
-        var values = try rowValues(rows, rollups, index, now_ms, &slot.row, &sorted, &last_text);
+        var values = try rowValues(rows, rollups, index, now_ms, row, &sorted, &last_text);
         values.read_version = read_version;
         try visitor.row(&values);
     }
