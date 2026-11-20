@@ -726,7 +726,7 @@ const SubtreeFold = struct {
 const settings_columns = "session.session_ref,session.archive_seq,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
-    "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
+    "(" ++ report_domain.personMessageSql("session.session_ref") ++ ") AS from_person_at," ++
     last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clockColumnsSql("session.session_ref") ++ ",";
 
 const last_line_columns =
@@ -750,7 +750,7 @@ pub const list_rows_source = "SELECT " ++ settings_columns ++ report_domain.firs
     report_domain.first_pick_content_join ++ last_line_joins ++ " WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8)";
 
 pub const list_rows = rsql.Read(.{
-    .sql = list_rows_source,
+    .sql = page_slots.statement(list_rows_source),
     .Args = page_slots.Args,
     .Row = ListRow,
     .cardinality = .each,

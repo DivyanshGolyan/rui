@@ -258,11 +258,15 @@ pub const FirstCandidates = struct {
     }
 };
 
-pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
-    "WHERE session_ref=?1 AND " ++ sourced_input.personSql("message_admission") ++ " ORDER BY admission_position DESC LIMIT 1";
+/// The newest person Message's admission time of the Session `session` names (a bound parameter or an outer column),
+/// so a page statement correlates it on each row's Session rather than on a parameter bound once.
+pub fn personMessageSql(comptime session: []const u8) []const u8 {
+    return "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
+        "WHERE session_ref=" ++ session ++ " AND " ++ sourced_input.personSql("message_admission") ++ " ORDER BY admission_position DESC LIMIT 1";
+}
 
 pub const person_message = rsql.Read(.{
-    .sql = person_message_sql,
+    .sql = personMessageSql("?1"),
     .Args = struct { session: []const u8 },
     .Row = struct { admitted_at: rsql.Positive },
     .cardinality = .optional,
@@ -802,7 +806,7 @@ pub const work_rows_source = "SELECT work_session.session_ref AS work_ref," ++ w
 /// its own ref. Unused slots are empty and match no Session. WorkRows queues it and matches each row to its Session
 /// through page_slots; a single Session binds one slot.
 pub const work_rows = rsql.Read(.{
-    .sql = work_rows_source,
+    .sql = page_slots.statement(work_rows_source),
     .Args = page_slots.Args,
     .Row = WithWork(struct { work_ref: SessionText }),
     .cardinality = .each,

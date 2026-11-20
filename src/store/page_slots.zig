@@ -16,6 +16,25 @@ comptime {
     if (@typeInfo(Args).@"struct".field_names.len != page_size) @compileError("a page statement binds one slot per Session of a page");
 }
 
+/// A page statement's source, refused at compile time unless it names each slot parameter exactly once. A shared
+/// fragment that names `?1` itself (written for a one-Session read) would read every row's fact for the page's first
+/// Session; a page statement correlates every fragment on its own row instead.
+pub fn statement(comptime sql: []const u8) []const u8 {
+    @setEvalBranchQuota(sql.len * page_size * 4 + 1000);
+    inline for (1..page_size + 1) |n| {
+        const name = std.fmt.comptimePrint("?{d}", .{n});
+        var count: usize = 0;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, sql, at, name)) |found| : (at = found + name.len) {
+            const next = found + name.len;
+            if (next < sql.len and std.ascii.isDigit(sql[next])) continue;
+            count += 1;
+        }
+        if (count != 1) @compileError(std.fmt.comptimePrint("a page statement names {s} {d} times; correlate shared fragments on the row's Session", .{ name, count }));
+    }
+    return sql;
+}
+
 /// Up to page_size Session refs as by-value statement slots; unused slots are empty.
 pub fn refSlots(refs: []const change_ring.Id) error{CorruptStore}![page_size]RefSlot {
     var slots: PageSlots(error{CorruptStore}) = .{};
