@@ -1338,9 +1338,8 @@ pub const RoundMeter = struct {
         prefix_only: u64 = 0,
 
         pub fn snapshot(storage: *Store) QueryShape {
-            // SQLite sends no COM_QUERY; it counts only its Access passes, where a statement repeated in one pass forces
-            // the next, as MySQL's batch room does not.
-            if (storage.engine == .sqlite) return .{ .access_passes = storage.engine.sqlite.testing_access_passes };
+            // SQLite sends no COM_QUERY; the Store counts its Access passes on every engine (Store.testingAccessPasses).
+            if (storage.engine == .sqlite) return .{ .access_passes = storage.testingAccessPasses().* };
             const state = storage.engine.mysql.state;
             const shape = state.testing_shape;
             return .{
