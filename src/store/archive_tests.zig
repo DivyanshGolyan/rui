@@ -1178,6 +1178,44 @@ test "MySQL plans the work row through keyed probes" {
     }.run);
 }
 
+// The creator subtree with its descendants' work is one statement for up to eight roots. Its literals follow the
+// argument slots in text order: eight roots, then the seed member's workspace, digest and workspace slots and its two
+// archive slots, then the recursive member's two archive slots; the work columns bind no argument. MySQL materializes
+// the recursive CTE and scans that temporary result; every Session, Turn, Operation, Action and Message is a keyed probe.
+test "MySQL plans the creator subtree's work through keyed probes" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            if (case.engine != .mysql) return;
+            const rsql = @import("rsql.zig");
+            const session_list_read = @import("domain/session_list_read.zig");
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const sql = comptime bindLiterals(rsql.sentTemplate(session_list_read.descendant_work_source).prepared(), &.{
+                "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'", "'abcdef'",
+                "NULL",     "NULL",     "NULL",     "'active'", "'active'", "'active'", "'active'",
+            });
+            comptime std.debug.assert(std.mem.indexOfScalar(u8, sql, '?') == null);
+            var buffer: [65536]u8 = undefined;
+            const plan = try mysql_testing.planText(&storage, sql, &buffer);
+            errdefer std.debug.print("MySQL plan for the creator subtree's work:\n{s}", .{plan});
+            var rest = plan;
+            while (std.mem.indexOf(u8, rest, "Table scan on ")) |at| {
+                rest = rest[at + "Table scan on ".len ..];
+                const alias = rest[0 .. std.mem.indexOfAny(u8, rest, " \n") orelse rest.len];
+                var allowed = false;
+                for ([_][]const u8{ "member", "parent", "descendants" }) |name| allowed = allowed or std.mem.eql(u8, alias, name);
+                try std.testing.expect(allowed);
+            }
+            for ([_][]const u8{ "session_creator", "turn_session_latest", "message_admission_session_pending" }) |index|
+                try std.testing.expect(std.mem.indexOf(u8, plan, index) != null);
+        }
+    }.run);
+}
+
 test "MySQL plans each archiving candidate and page through its index" {
     try testing.forEachEngine(struct {
         fn run(case: *testing.Case) !void {

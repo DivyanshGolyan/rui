@@ -73,7 +73,7 @@ pub const list_failures = .{
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
     .{ changed_ancestors, error.SessionReadFailed },
-    .{ descendant_page, error.SessionReadFailed },
+    .{ descendant_work, error.SessionReadFailed },
 } ++ report_domain.work_row_failures;
 
 fn runList(a: *ReadAccess) !void {
@@ -437,11 +437,10 @@ pub const Scratch = struct {
     changed: [change_ring.capacity]change_ring.Id = undefined,
     /// The settings rows of one page, read in its first round beside its one-statement work rows.
     settings: [session_list.session_list_page_size]SettingsRow = undefined,
-    /// The one-statement work rows of one page, read in its first round beside its settings rows. Once decoded, the
-    /// same slots carry the rows of each descendant page, one page's rows per round.
+    /// The one-statement work rows of one page, read in its row round beside its settings rows.
     work_rows: [session_list.session_list_page_size]WorkRowSlot = undefined,
-    /// The creator-subtree read of one page: its roots, its two page buffers and the WorkRead of one descendant.
-    rollup: RollupRead = .{},
+    /// The creator-subtree fold of one page: the descendant row being decoded, its WorkRead and the page's totals.
+    subtree: SubtreeFold = .{},
 };
 
 pub fn readSessionList(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, visitor: anytype) !void {
@@ -487,7 +486,7 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
 
 // One statement walks the creator chains of up to session_list_page_size changed seeds. Each chain carries its own
 // origin (the seed), so the cycle test asks each chain separately: a chain that reaches a root must not hide a
-// cycle in a chain batched beside it. Same workspace and archive filters as descendant_page.
+// cycle in a chain batched beside it. Same workspace and archive filters as descendant_work.
 pub const changed_ancestors_source = "WITH RECURSIVE ancestors(origin,session_ref,creator_ref) AS (" ++
     "SELECT seed.session_ref,session.session_ref,session.creator_ref FROM session JOIN session seed ON seed.creator_ref=session.session_ref " ++
     "WHERE seed.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR session.workspace=?9)" ++ archive_membership.filterSql("session", "?10") ++
@@ -517,8 +516,7 @@ const changed_ancestors = rsql.Read(.{
 /// Binds one batch of seeds by value, so no seed bytes outlive this call. Unused slots are empty and match no
 /// Session.
 fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, archive: session_archive.Filter) !changed_ancestors.Args {
-    var slots: [session_list.session_list_page_size]Bounded(change_ring.id_bytes) = @splat(.{});
-    for (seeds, slots[0..seeds.len]) |*seed, *slot| slot.* = try .from(seed);
+    const slots = try refSlots(seeds);
     return .{
         .seed0 = slots[0],
         .seed1 = slots[1],
@@ -531,6 +529,13 @@ fn changedAncestorArgs(seeds: []const change_ring.Id, workspace: ?[]const u8, ar
         .workspace = workspace,
         .archive = archive,
     };
+}
+
+/// Up to session_list_page_size Session refs as by-value statement slots; unused slots are empty.
+fn refSlots(refs: []const change_ring.Id) ![session_list.session_list_page_size]Bounded(change_ring.id_bytes) {
+    var slots: [session_list.session_list_page_size]Bounded(change_ring.id_bytes) = @splat(.{});
+    for (refs, slots[0..refs.len]) |*ref, *slot| slot.* = try .from(ref);
+    return slots;
 }
 
 const ChangedCandidates = struct {
@@ -598,48 +603,60 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
         .{ .last = .{ .delta = .changed, .since = next } });
 }
 
-const clock_columns =
-    "(SELECT COALESCE((SELECT e.recorded_at FROM conversation_entry e WHERE e.source_admission_id=t.first_admission_id AND e.entry_kind=1)," ++
-    "CASE WHEN m.turn_id IS NULL AND (SELECT o.purpose FROM model_operation o WHERE o.turn_id=t.turn_id ORDER BY o.operation_id DESC LIMIT 1)=1 THEN m.admitted_at END) " ++
-    "FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
-    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1)) AS clock_started_at," ++
-    "(SELECT max(o.resolved_at) FROM model_operation o JOIN turn t ON t.turn_id=o.turn_id " ++
-    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
-    "AND EXISTS (SELECT 1 FROM action_operation a WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) AS clock_approval_entered_at," ++
-    "(SELECT max((SELECT max(COALESCE(a.decided_at,a.resolved_at)) FROM action_operation a " ++
-    "WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) FROM model_operation o " ++
-    "WHERE o.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
-    "AND NOT EXISTS (SELECT 1 FROM action_operation pending WHERE pending.parent_operation_id=o.operation_id " ++
-    "AND pending.approval_position IS NOT NULL AND pending.authorized=0 AND pending.resolution_code IS NULL)) AS clock_approval_left_at,";
+/// The clock facts of the Session whose ref is the SQL expression `session`: its latest Turn's start and its approval
+/// entry and exit times. The list row renders it over `session.session_ref` and the creator-subtree read over each
+/// descendant's own ref.
+fn clockColumnsSql(comptime session: []const u8) []const u8 {
+    const latest_turn = "(SELECT turn_id FROM turn WHERE session_ref=" ++ session ++ " ORDER BY turn_id DESC LIMIT 1)";
+    return "(SELECT COALESCE((SELECT e.recorded_at FROM conversation_entry e WHERE e.source_admission_id=t.first_admission_id AND e.entry_kind=1)," ++
+        "CASE WHEN m.turn_id IS NULL AND (SELECT o.purpose FROM model_operation o WHERE o.turn_id=t.turn_id ORDER BY o.operation_id DESC LIMIT 1)=1 THEN m.admitted_at END) " ++
+        "FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+        "WHERE t.turn_id=" ++ latest_turn ++ ") AS clock_started_at," ++
+        "(SELECT max(o.resolved_at) FROM model_operation o JOIN turn t ON t.turn_id=o.turn_id " ++
+        "WHERE t.turn_id=" ++ latest_turn ++ " " ++
+        "AND EXISTS (SELECT 1 FROM action_operation a WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) AS clock_approval_entered_at," ++
+        "(SELECT max((SELECT max(COALESCE(a.decided_at,a.resolved_at)) FROM action_operation a " ++
+        "WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) FROM model_operation o " ++
+        "WHERE o.turn_id=" ++ latest_turn ++ " " ++
+        "AND NOT EXISTS (SELECT 1 FROM action_operation pending WHERE pending.parent_operation_id=o.operation_id " ++
+        "AND pending.approval_position IS NOT NULL AND pending.authorized=0 AND pending.resolution_code IS NULL)) AS clock_approval_left_at";
+}
 
-const descendant_page = rsql.Read(.{
-    .sql = "WITH RECURSIVE descendants(origin,session_ref,workspace_digest,workspace) AS (" ++
-        "SELECT session.session_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
-        "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archive_membership.filterSql("session", "?11") ++
-        " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
-        "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
-        "WHERE 1=1" ++ archive_membership.filterSql("session", "?11") ++ ") " ++
-        "SELECT member.origin,session.session_ref,session.created_at," ++ clock_columns[0 .. clock_columns.len - 1] ++
-        ",EXISTS(SELECT 1 FROM session root WHERE root.session_ref=member.origin AND root.creator_ref IN " ++
-        "(SELECT cycle_member.session_ref FROM descendants cycle_member WHERE cycle_member.origin=member.origin)) AS cycle " ++
-        "FROM session JOIN descendants member ON member.session_ref=session.session_ref " ++
-        "WHERE member.origin>?12 OR (member.origin=?12 AND session.session_ref>?13) ORDER BY member.origin,session.session_ref LIMIT 9",
+/// The creator subtree of up to session_list_page_size page roots, every descendant with its own clock facts and
+/// work columns, in one statement. Each descendant row carries its origin (the page root it descends from); root rows
+/// are dropped, since the roots' work is the page's own work_row. The walk is unbounded and has no order: the fold
+/// is a max and two counts, and a truncated walk would report wrong counts. Each row carries its root's creator, and a
+/// row that is that creator flags a cycle: the root's creator is in its own subtree. Every creator cycle the walk can
+/// reach runs through a root, and it shows on a non-root row, because a Session is never its own creator (schema CHECK).
+/// The statement source, with `@index` marks as written (the plan tests render it).
+pub const descendant_work_source = "WITH RECURSIVE descendants(origin,root_creator,session_ref,workspace_digest,workspace) AS (" ++
+    "SELECT session.session_ref,session.creator_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
+    "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archive_membership.filterSql("session", "?11") ++
+    " UNION SELECT parent.origin,parent.root_creator,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
+    "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
+    "WHERE 1=1" ++ archive_membership.filterSql("session", "?11") ++ ") " ++
+    "SELECT member.origin,work_session.session_ref,work_session.created_at," ++ clockColumnsSql("work_session.session_ref") ++
+    ",(member.root_creator IS NOT NULL AND member.session_ref=member.root_creator) AS cycle," ++
+    report_domain.work_columns ++ " " ++
+    "FROM descendants member JOIN session work_session ON work_session.session_ref=member.session_ref " ++
+    report_domain.work_joins ++ "WHERE member.session_ref<>member.origin";
+
+pub const descendant_work = rsql.Read(.{
+    .sql = descendant_work_source,
     .Args = struct {
-        root0: Bounded(session_id.bytes),
-        root1: Bounded(session_id.bytes),
-        root2: Bounded(session_id.bytes),
-        root3: Bounded(session_id.bytes),
-        root4: Bounded(session_id.bytes),
-        root5: Bounded(session_id.bytes),
-        root6: Bounded(session_id.bytes),
-        root7: Bounded(session_id.bytes),
+        root0: Bounded(change_ring.id_bytes),
+        root1: Bounded(change_ring.id_bytes),
+        root2: Bounded(change_ring.id_bytes),
+        root3: Bounded(change_ring.id_bytes),
+        root4: Bounded(change_ring.id_bytes),
+        root5: Bounded(change_ring.id_bytes),
+        root6: Bounded(change_ring.id_bytes),
+        root7: Bounded(change_ring.id_bytes),
         workspace: ?[]const u8,
         digest: ?[32]u8,
         archive: session_archive.Filter,
-        after_origin: Bounded(session_id.bytes),
-        after_member: Bounded(session_id.bytes),
     },
-    .Row = struct {
+    .Row = report_domain.WithWork(struct {
         origin: SessionText,
         session_ref: SessionText,
         created_at: rsql.Positive,
@@ -647,10 +664,28 @@ const descendant_page = rsql.Read(.{
         clock_approval_entered_at: ?rsql.Positive,
         clock_approval_left_at: ?rsql.Positive,
         cycle: bool,
-    },
+    }),
     .cardinality = .each,
     .compound = true,
 });
+
+/// Binds a page's roots by value, so no root bytes outlive this call. Unused slots are empty and match no Session.
+fn subtreeArgs(request: *const session_list.ListSessions, roots: []const change_ring.Id) !descendant_work.Args {
+    const slots = try refSlots(roots);
+    return .{
+        .root0 = slots[0],
+        .root1 = slots[1],
+        .root2 = slots[2],
+        .root3 = slots[3],
+        .root4 = slots[4],
+        .root5 = slots[5],
+        .root6 = slots[6],
+        .root7 = slots[7],
+        .workspace = if (request.workspace) |*scope| scope.slice() else null,
+        .digest = if (request.workspace) |*scope| store_core.workspaceDigest(scope.slice()) else null,
+        .archive = request.archive,
+    };
+}
 
 const Rollup = struct {
     subtree_state_change_at: u64 = 0,
@@ -658,104 +693,46 @@ const Rollup = struct {
     descendant_needs_you_count: u64 = 0,
 };
 
-const DescendantPage = struct {
-    rows: [session_list.session_list_page_size + 1]descendant_page.Row = undefined,
-    count: usize = 0,
-    failure: ?error{CorruptStore} = null,
+/// Folds each creator descendant into its page root's Rollup as the subtree statement streams it: its row decodes
+/// into `decoded`, its work replays through WorkRead.decode, and only the totals outlive the row. It lives in Scratch,
+/// since the row is over 1 KiB. `roots` and `totals` are borrowed from readRows until the round runs.
+const SubtreeFold = struct {
+    decoded: descendant_work.Row = undefined,
+    work: WorkRead = undefined,
+    roots: []const change_ring.Id = &.{},
+    totals: []Rollup = &.{},
+    now_ms: u64 = 0,
+    failure: ?error{ CorruptStore, ActionReadFailed } = null,
 
-    pub fn visit(self: *DescendantPage, row: *const descendant_page.Row) bool {
-        if (self.count == self.rows.len or row.origin.slice().len != change_ring.id_bytes or row.session_ref.slice().len != change_ring.id_bytes or row.cycle) {
-            self.failure = error.CorruptStore;
+    pub fn visit(self: *SubtreeFold, row: *const descendant_work.Row) bool {
+        self.fold(row) catch |err| {
+            self.failure = err;
             return false;
-        }
-        self.rows[self.count] = row.*;
-        self.count += 1;
+        };
         return true;
     }
-};
 
-/// One creator-subtree read: the page roots, the two page buffers (the page being walked and the next one, queued in
-/// the same round as the walked page's work rows), the cursor for the next page, and the WorkRead of the descendant
-/// being folded. It lives in the caller's Scratch.
-const RollupRead = struct {
-    roots: [session_list.session_list_page_size]Bounded(session_id.bytes) = @splat(.{}),
-    pages: [2]DescendantPage = .{ .{}, .{} },
-    current: usize = 0,
-    after_origin: ?change_ring.Id = null,
-    after_member: ?change_ring.Id = null,
-    work: report_domain.WorkRead = undefined,
-};
-
-/// Queues the creator-subtree page after the cursor in `read` into `page`. The caller runs the round.
-fn queueRollupPage(a: *ReadAccess, request: *const session_list.ListSessions, read: *const RollupRead, page: *DescendantPage) !void {
-    page.* = .{};
-    a.readEach(descendant_page, .{
-        .root0 = read.roots[0],
-        .root1 = read.roots[1],
-        .root2 = read.roots[2],
-        .root3 = read.roots[3],
-        .root4 = read.roots[4],
-        .root5 = read.roots[5],
-        .root6 = read.roots[6],
-        .root7 = read.roots[7],
-        .workspace = if (request.workspace) |*scope| scope.slice() else null,
-        .digest = if (request.workspace) |*scope| store_core.workspaceDigest(scope.slice()) else null,
-        .archive = request.archive,
-        .after_origin = if (read.after_origin) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
-        .after_member = if (read.after_member) |*id| Bounded(session_id.bytes).from(id) catch return error.CorruptStore else .{},
-    }, session_list.session_list_page_size + 1, page);
-}
-
-/// Folds the creator subtree into the rollups. The caller's first round read page 1 and its roots' work; each page
-/// here is walked in one round that reads its descendants' work rows and queues the next page beside them, so every
-/// extra page costs one round. The descendants' work rows reuse the caller's slots, which the roots have decoded.
-fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, references: []const change_ring.Id, now_ms: u64, read: *RollupRead, slots: []WorkRowSlot, totals: []Rollup) !void {
-    while (true) {
-        const page = &read.pages[read.current];
-        if (page.failure) |err| return err;
-        const count = @min(page.count, session_list.session_list_page_size);
-        if (count == 0) return;
-        const more = page.count > session_list.session_list_page_size;
-        if (more) {
-            read.after_origin = page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;
-            read.after_member = page.rows[count - 1].session_ref.slice()[0..change_ring.id_bytes].*;
-            try queueRollupPage(a, request, read, &read.pages[read.current ^ 1]);
-        }
-        var work_count: usize = 0;
-        for (page.rows[0..count]) |*row| {
-            if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
-            const slot = &slots[work_count];
-            a.readInto(report_domain.work_row, .{ .session = row.session_ref.slice() }, &slot.row, &slot.found);
-            work_count += 1;
-        }
-        if (work_count != 0 or more) try runList(a);
-        work_count = 0;
-        for (page.rows[0..count]) |*row| {
-            if (std.mem.eql(u8, row.origin.slice(), row.session_ref.slice())) continue;
-            var index: usize = 0;
-            while (index < references.len and !std.mem.eql(u8, row.origin.slice(), &references[index])) : (index += 1) {}
-            if (index == references.len) return error.CorruptStore;
-            const total = &totals[index];
-            const slot = &slots[work_count];
-            work_count += 1;
-            if (!slot.found.get()) return error.CorruptStore;
-            read.work = .{ .session = row.session_ref.slice() };
-            try read.work.decode(&slot.row);
-            const work = try read.work.work(row.created_at.get(), now_ms);
-            total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), &read.work, work));
-            total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
-            if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
-        }
-        if (!more) return;
-        read.current ^= 1;
+    fn fold(self: *SubtreeFold, row: *const descendant_work.Row) error{ CorruptStore, ActionReadFailed }!void {
+        if (row.origin.slice().len != change_ring.id_bytes or row.session_ref.slice().len != change_ring.id_bytes or row.cycle) return error.CorruptStore;
+        var index: usize = 0;
+        while (index < self.roots.len and !std.mem.eql(u8, row.origin.slice(), &self.roots[index])) : (index += 1) {}
+        if (index == self.roots.len) return error.CorruptStore;
+        // The ref is borrowed from `decoded`; the fold finishes before the next row overwrites it.
+        self.work = .{ .session = row.session_ref.slice() };
+        try self.work.decode(row);
+        const work = try self.work.work(row.created_at.get(), self.now_ms);
+        const total = &self.totals[index];
+        total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), &self.work, work));
+        total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
+        if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
     }
-}
+};
 
 const settings_columns = "session.session_ref,session.archive_seq,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     archive_membership.stateSql("session") ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
-    last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clock_columns;
+    last_line_columns ++ ",awaiting.action_id AS first_awaiting_action," ++ clockColumnsSql("session.session_ref") ++ ",";
 
 const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
@@ -835,9 +812,9 @@ const WorkRowSlot = struct {
     found: store_access.Found = undefined,
 };
 
-/// Reads one page of rows in three stages. The first round queues the creator-subtree page 1, every row's one-statement
-/// work row and every row's settings, which need only the Session ref. The rounds after it walk the subtree pages, one
-/// round per page. Then the rows are shaped from the settings read.
+/// Reads one page of rows in one round: the creator subtree of every row with its descendants' work, streamed into
+/// the subtree fold, every row's one-statement work row and every row's settings, which need only the Session ref.
+/// Then the rows are shaped from the settings read.
 noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, scratch: *Scratch, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
@@ -846,24 +823,25 @@ noinline fn readRows(a: *ReadAccess, request: *const session_list.ListSessions, 
     const now = std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange;
     const rollups = list.rollups[0..references.len];
     @memset(rollups, .{});
-    const rollup = &scratch.rollup;
-    // One assignment resets the cursors and the pages. Naming `roots` stores the fields' defaults and skips `work`,
-    // which is undefined by default and is written before it is read.
-    rollup.* = .{ .roots = @splat(.{}) };
-    for (references, 0..) |*reference, index| rollup.roots[index].set(reference) catch return error.CorruptStore;
-    if (references.len != 0) try queueRollupPage(a, request, rollup, &rollup.pages[rollup.current]);
+    // Only the small fields are set: `decoded` and `work` are each written before they are read, and assigning the
+    // whole fold would put its 2 KiB row on this frame.
+    const subtree = &scratch.subtree;
+    subtree.roots = references;
+    subtree.totals = rollups;
+    subtree.now_ms = now;
+    subtree.failure = null;
+    if (references.len != 0) a.readEach(descendant_work, try subtreeArgs(request, references), std.math.maxInt(u64), subtree);
     for (references, scratch.work_rows[0..references.len], scratch.settings[0..references.len]) |*reference, *slot, *settings| {
         a.readInto(report_domain.work_row, .{ .session = reference }, &slot.row, &slot.found);
         a.readInto(list_row, .{ .session = reference }, &settings.row, &settings.found);
     }
     try runList(a);
-    // The page's own rows decode before the descendants' rows reuse the same slots.
     for (references, works[0..references.len], scratch.work_rows[0..references.len]) |*reference, *work, *slot| {
         if (!slot.found.get()) return error.CorruptStore;
         work.* = .{ .session = reference };
         try work.decode(&slot.row);
     }
-    try readRollups(a, request, references, now, rollup, scratch.work_rows[0..], rollups);
+    if (subtree.failure) |err| return err;
     const shown = &list.shown;
     for (references, works[0..references.len], shown[0..references.len]) |*reference, *work, *row| row.* = .{ .reference = reference, .work = work };
     try readRowSettings(a, shown[0..references.len], scratch.settings[0..references.len], rollups, now, visitor);

@@ -754,6 +754,13 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 
 /// The rounds one whole-list read takes over `storage`, which must hold `stopped` stopped Sessions for its row check.
 fn readRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize) !u32 {
+    return readListRoundsForTesting(storage, tmp, stopped, &.{}, &.{});
+}
+
+/// The rounds of one whole-list read of the first page over `storage`, which must hold `stopped` stopped
+/// Sessions for its row check. Each of `roots` must be on that page with `descendants` at its index as its
+/// descendant_count.
+fn readListRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usize, roots: []const []const u8, descendants: []const u64) !u32 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -771,53 +778,106 @@ fn readRoundsForTesting(storage: *Store, tmp: *std.testing.TmpDir, stopped: usiz
     const rounds = storage.testing_content_work.rounds - before;
     var report = try capture.seal();
     defer report.deinit();
-    var bytes: [8192]u8 = undefined;
-    const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
+    defer std.testing.allocator.free(bytes);
+    const read = try report.read(0, bytes);
     try std.testing.expectEqual(stopped, std.mem.count(u8, bytes[0..read], "\"kind\":\"stopped\""));
+    if (roots.len != 0) {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..read], .{});
+        defer parsed.deinit();
+        for (roots, descendants) |reference, count| {
+            var found = false;
+            for (parsed.value.object.get("sessions").?.array.items) |row| {
+                if (!std.mem.eql(u8, row.object.get("reference").?.string, reference)) continue;
+                try std.testing.expectEqual(count, try std.fmt.parseInt(u64, row.object.get("descendant_count").?.string, 10));
+                found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
     return rounds;
 }
 
-// Round budget with descendants. A list page takes 2 rounds: membership, then the rows with their settings and work and
-// subtree page 1. Each subtree page's descendant rows take one work round, and the next page is queued in that round, so
-// a further page costs one round only when it holds a descendant row. A subtree page holds nine rows (eight, and one
-// peeked to find the next page), and a root's own row and each child's own row are rows too, so the rows are 1 + N + min(N, 7)
-// for N children of a root read in the first page. A page of only Sessions' own rows takes no work round, and which rows
-// fall on which page follows the Sessions' random refs. Measured: 0 children 2 rounds; 2 children (one page) 3; 7 children
-// (two pages) 3 or 4; 16 children (three pages) 4 or 5.
-test "a list page's descendants take one round for their work, and one more per further subtree page" {
+// Round budget over subtree size. A list page takes 2 rounds: membership, then the rows with their settings, their work
+// and the whole creator subtree with its descendants' work in one statement, whatever the subtree's size or depth. The
+// subtree's passes are SQLite's `a creator subtree adds no list read passes`. (Was 2 + about one round per 8-row subtree
+// page: 16 children took 4 or 5 rounds.)
+test "a list page takes two rounds however many descendants its roots have" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 2), try descendantRoundsForTesting(case, 0));
-            try std.testing.expectEqual(@as(u32, 3), try descendantRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 3), try descendantRoundsForTesting(case, 2));
-            const two_pages = try descendantRoundsForTesting(case, 7);
-            try std.testing.expect(two_pages == 3 or two_pages == 4);
-            const three_pages = try descendantRoundsForTesting(case, 16);
-            try std.testing.expect(three_pages >= 4 and three_pages <= 5);
+            for ([_]usize{ 0, 1, 2, 7, 16, 40 }) |count| try expectSame(try children(case, count, false), try children(case, count, true));
+            try expectSame(try chain(case, 16, false), try chain(case, 16, true));
+            try expectSame(try twoRoots(case, 20, false), try twoRoots(case, 20, true));
+        }
+
+        fn expectSame(unlinked: u32, linked: u32) !void {
+            try std.testing.expectEqual(@as(u32, 2), unlinked);
+            try std.testing.expectEqual(@as(u32, 2), linked);
+        }
+
+        fn link(storage: *Store, linked: bool, creator: []const u8, child: []const u8) !void {
+            if (linked) try store_testing.exec(storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ creator, child });
+        }
+
+        /// One root with `count` children, the root first on the page.
+        fn children(case: *store_testing.Case, count: usize, linked: bool) !u32 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "descendant-rounds-root");
+            var name: [48]u8 = undefined;
+            for (0..count) |index| {
+                const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-rounds-{d}", .{index}));
+                try link(&storage, linked, root.slice(), child.slice());
+            }
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) count else 0});
+        }
+
+        /// A chain of `depth` Sessions under one root, each created by the one before it.
+        fn chain(case: *store_testing.Case, depth: usize, linked: bool) !u32 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "descendant-chain-root");
+            var creator = root;
+            var name: [48]u8 = undefined;
+            for (0..depth) |index| {
+                const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-chain-{d}", .{index}));
+                try link(&storage, linked, creator.slice(), child.slice());
+                creator = child;
+            }
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{root.slice()}, &.{if (linked) depth else 0});
+        }
+
+        /// Two roots on the page with `count` children each.
+        fn twoRoots(case: *store_testing.Case, count: usize, linked: bool) !u32 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const left = try configureTestSession(&storage, "descendant-two-left");
+            const right = try configureTestSession(&storage, "descendant-two-right");
+            var name: [48]u8 = undefined;
+            for (0..count * 2) |index| {
+                const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-two-{d}", .{index}));
+                try link(&storage, linked, if (index % 2 == 0) left.slice() else right.slice(), child.slice());
+            }
+            const expected: u64 = if (linked) count else 0;
+            return readListRoundsForTesting(&storage, &tmp, 0, &.{ left.slice(), right.slice() }, &.{ expected, expected });
         }
     }.run);
-}
-
-fn descendantRoundsForTesting(case: *store_testing.Case, children: usize) !u32 {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const root = try configureTestSession(&storage, "descendant-rounds-root");
-    var name: [48]u8 = undefined;
-    for (0..children) |index| {
-        const child = try configureTestSession(&storage, try std.fmt.bufPrint(&name, "descendant-rounds-{d}", .{index}));
-        try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
-    }
-    return readRoundsForTesting(&storage, &tmp, 0);
 }
 
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            // Work is one statement per Session, so a page of any size takes the settings-and-work round and the subtree
-            // round: two rounds, down from seven (was 7, one per staged work stage).
+            // Work is one statement per Session, so a page of any size takes the membership round and the row round:
+            // two rounds, down from seven (was 7, one per staged work stage).
             try std.testing.expectEqual(@as(u32, 2), try listRoundsForTesting(case, 1));
             try std.testing.expectEqual(@as(u32, 2), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
@@ -929,6 +989,76 @@ test "Session list changed page round budget is the same for 1, 9, 64, 65 and 13
             const configured = try store.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             return configured.accepted.session.slice()[0..change_ring.id_bytes].*;
+        }
+    }.run);
+}
+
+// The changed page reads its rows through the same row round as the full page, so a changed root's whole creator
+// subtree and its descendants' work cost no round beyond the budget.
+test "Session list changed page round budget holds for a changed root with sixteen descendants" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const root = try configure(&storage, "changed-subtree-root", "", workspace);
+            var name: [48]u8 = undefined;
+            for (0..16) |index| {
+                const child = try configure(&storage, try std.fmt.bufPrint(&name, "changed-subtree-{d}", .{index}), "", workspace);
+                try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ &root, &child });
+            }
+            const since: protocol.SinceToken = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) };
+            _ = try configure(&storage, "changed-subtree-root-again", &root, workspace);
+            var used = std.atomic.Value(u64).init(0);
+            var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            const bytes = try testingSessionList(&storage, &tmp, .{ .since = since }, &used, 1);
+            defer std.testing.allocator.free(bytes);
+            try meter.stop(.readChangedSessionList);
+            try std.testing.expectEqual(round_budgets.get(.readChangedSessionList), meter.measured.get(.readChangedSessionList).?.rounds);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings("changed", parsed.value.object.get("delta").?.string);
+            const rows = parsed.value.object.get("sessions").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), rows.len);
+            try std.testing.expectEqualStrings(&root, rows[0].object.get("reference").?.string);
+            try std.testing.expectEqualStrings("16", rows[0].object.get("descendant_count").?.string);
+        }
+
+        fn configure(store: *Store, key: []const u8, session: []const u8, place: []const u8) !change_ring.Id {
+            var command = try completeConfiguration(key, session, place, "model");
+            const configured = try store.configure(&command, .{});
+            try std.testing.expect(configured == .accepted);
+            return configured.accepted.session.slice()[0..change_ring.id_bytes].*;
+        }
+    }.run);
+}
+
+// A creator cycle under a page root's subtree is refused on the full page too, not only on the changed page: the
+// subtree fold refuses a row whose chain shows the cycle.
+test "Session list refuses a creator cycle under a page root" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            if (case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const healthy = try configureTestSession(&storage, "page-cycle-healthy");
+            const child = try configureTestSession(&storage, "page-cycle-child");
+            const left = try configureTestSession(&storage, "page-cycle-left");
+            const right = try configureTestSession(&storage, "page-cycle-right");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ healthy.slice(), child.slice() });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ right.slice(), left.slice() });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ left.slice(), right.slice() });
+            var used = std.atomic.Value(u64).init(0);
+            try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 6));
         }
     }.run);
 }
@@ -1664,6 +1794,163 @@ test "SL-6: a Session's one-statement work is its staged work, for every stage o
         fn stopForTesting(storage: *Store, session: []const u8, key: []const u8) !void {
             var stop = try completeSessionStop(key, session);
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        }
+    }.run);
+}
+
+// SL-8. The expected rollup is the fold of each descendant's own list row, the U3 path (work_row and WorkRead.decode,
+// tied to the staged machine by SL-6), never the subtree statement under test. The children span every work shape the
+// list derives, including the stopped parent whose stop_remaining reads its attached child.
+test "SL-8: a creator subtree's rollup is its descendants' own rows, for every work shape" {
+    try store_testing.forEachEngine(struct {
+        const Seen = struct { reference: change_ring.Id, state_change_at: u64, subtree_state_change_at: u64, descendants: u64, needs_you_descendants: u64, needs_you: bool };
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "sl8-root");
+            var children: [12]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            var count: usize = 0;
+            // Admission takes the next runnable Session in the whole Store, so each fixture that admits runs while no
+            // other Session has runnable work, and the stopping Session with queued work comes last.
+            children[count] = try running(&storage, &tmp, "sl8-running", false);
+            count += 1;
+            children[count] = try live(&storage, &tmp, "sl8-live");
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.awaiting.make(&storage, &tmp, "sl8-awaiting");
+            count += 1;
+            children[count] = try retrying(&storage, &tmp, "sl8-retrying");
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.finished.make(&storage, &tmp, "sl8-finished");
+            count += 1;
+            const stopped = try shared_fixtures.TestingWorkShape.stopped.make(&storage, &tmp, "sl8-stopped");
+            children[count] = stopped;
+            count += 1;
+            children[count] = try shared_fixtures.TestingWorkShape.idle.make(&storage, &tmp, "sl8-idle");
+            count += 1;
+            const owed = try configureTestSession(&storage, "sl8-owed");
+            try store_testing.exec(&storage, "UPDATE session SET obligation_since=?1 WHERE session_ref=?2", .{ @as(u64, 1), owed.slice() });
+            children[count] = owed;
+            count += 1;
+            children[count] = try stoppingWithChild(&storage, &tmp);
+            count += 1;
+            children[count] = try running(&storage, &tmp, "sl8-stopping-queued", true);
+            count += 1;
+            for (children[0..count]) |*child| try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+            const grandchild = try configureTestSession(&storage, "sl8-grandchild");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ stopped.slice(), grandchild.slice() });
+
+            var seen: [32]Seen = undefined;
+            const rows = seen[0..try readAll(&storage, &tmp, &seen)];
+            var descendants: [13][]const u8 = undefined;
+            for (children[0..count], descendants[0..count]) |*child, *slot| slot.* = child.slice();
+            descendants[count] = grandchild.slice();
+            try expectRollup(rows, root.slice(), descendants[0 .. count + 1]);
+            try expectRollup(rows, stopped.slice(), &.{grandchild.slice()});
+            // The fixtures reach the groups the rollup counts: some descendant needs you and some does not.
+            const root_row = find(rows, root.slice()).?;
+            try std.testing.expect(root_row.needs_you_descendants != 0 and root_row.needs_you_descendants < root_row.descendants);
+        }
+
+        fn expectRollup(rows: []const Seen, reference: []const u8, descendants: []const []const u8) !void {
+            const row = find(rows, reference) orelse return error.TestUnexpectedResult;
+            var latest = row.state_change_at;
+            var needs_you: u64 = 0;
+            for (descendants) |descendant| {
+                const own = find(rows, descendant) orelse return error.TestUnexpectedResult;
+                latest = @max(latest, own.state_change_at);
+                if (own.needs_you) needs_you += 1;
+            }
+            try std.testing.expectEqual(@as(u64, descendants.len), row.descendants);
+            try std.testing.expectEqual(needs_you, row.needs_you_descendants);
+            try std.testing.expectEqual(latest, row.subtree_state_change_at);
+        }
+
+        fn find(rows: []const Seen, reference: []const u8) ?*const Seen {
+            for (rows) |*row| if (std.mem.eql(u8, &row.reference, reference)) return row;
+            return null;
+        }
+
+        /// Every list page's rows, walked by the page cursor.
+        fn readAll(storage: *Store, tmp: *std.testing.TmpDir, seen: []Seen) !usize {
+            var request: protocol.ListSessions = .{};
+            var total: usize = 0;
+            while (true) {
+                var used = std.atomic.Value(u64).init(0);
+                const bytes = try testingSessionList(storage, tmp, request, &used, 8);
+                defer std.testing.allocator.free(bytes);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer parsed.deinit();
+                const object = parsed.value.object;
+                for (object.get("sessions").?.array.items) |item| {
+                    const row = item.object;
+                    seen[total] = .{
+                        .reference = row.get("reference").?.string[0..change_ring.id_bytes].*,
+                        .state_change_at = try number(row, "state_change_at"),
+                        .subtree_state_change_at = try number(row, "subtree_state_change_at"),
+                        .descendants = try number(row, "descendant_count"),
+                        .needs_you_descendants = try number(row, "descendant_needs_you_count"),
+                        // The row's own group, which session_work.group derives and the list row serves.
+                        .needs_you = std.meta.stringToEnum(session_work.Group, row.get("work").?.object.get("group").?.string).? == .needs_you,
+                    };
+                    total += 1;
+                }
+                if (object.get("next").? != .object) return total;
+                const next = object.get("next").?.object;
+                request = .{ .after = try number(next, "after"), .ceiling = try number(next, "ceiling") };
+            }
+        }
+
+        fn number(object: std.json.ObjectMap, name: []const u8) !u64 {
+            return std.fmt.parseInt(u64, object.get(name).?.string, 10);
+        }
+
+        /// An approval allowed once and admitted, so its Action runs in a live Turn; with `stop_queued`, the Session
+        /// is then stopped and a Message queued behind the stop.
+        fn running(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8, stop_queued: bool) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try shared_fixtures.TestingWorkShape.awaiting.make(storage, tmp, name);
+            const action = try store_testing.queryU64(storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+            try allow.key.set(name ++ "-allow");
+            try allow.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+            _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+            if (stop_queued) {
+                var stop = try completeSessionStop(name ++ "-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try submitTestMessage(storage, tmp, name ++ "-queued-file", name ++ "-queued", session.slice(), "after the stop");
+            }
+            return session;
+        }
+
+        fn live(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try configureTestSessionAsk(storage, name);
+            try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "propose");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            return session;
+        }
+
+        fn retrying(storage: *Store, tmp: *std.testing.TmpDir, comptime name: []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+            const session = try configureTestSession(storage, name);
+            try submitTestMessage(storage, tmp, name ++ "-file", name ++ "-message", session.slice(), "first");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(model, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+            return session;
+        }
+
+        /// SL-6's stopping_with_child: a stopped Turn whose attached child still owes work.
+        fn stoppingWithChild(storage: *Store, tmp: *std.testing.TmpDir) !protocol.Bounded(protocol.max_session_bytes) {
+            const parent = try live(storage, tmp, "sl8-parent");
+            const child = try configureTestSessionAsk(storage, "sl8-attached");
+            try store_testing.exec(storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+            try submitTestMessage(storage, tmp, "sl8-attached-file", "sl8-attached-message", child.slice(), "work");
+            _ = (try storage.admitNextModelAttempt(.{})).?;
+            var stop = try completeSessionStop("sl8-parent-stop", parent.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            return parent;
         }
     }.run);
 }

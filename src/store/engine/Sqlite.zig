@@ -15,6 +15,24 @@ const Statement = engine.Statement;
 
 const Sqlite = @This();
 
+/// At least the widest Row cachedTyped accepts. cachedTyped checks every statement's Row against the column limit, so a
+/// wider statement fails to compile instead of failing to prepare.
+const max_result_columns = 46;
+
+/// SQLITE_LIMIT_COLUMN: the widest SQLite table or the widest statement row, whichever is wider.
+const column_limit = blk: {
+    var widest: usize = max_result_columns;
+    for (store_schema.tables) |table| {
+        if (!table.engines.on(.sqlite)) continue;
+        var columns: usize = 0;
+        for (table.columns) |column| {
+            if (column.engines.on(.sqlite)) columns += 1;
+        }
+        widest = @max(widest, columns);
+    }
+    break :blk @as(c_int, @intCast(widest));
+};
+
 pub const Database = *c.sqlite3;
 
 database: Database,
@@ -79,18 +97,6 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
 
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-    const column_limit = comptime blk: {
-        var widest: usize = 0;
-        for (store_schema.tables) |table| {
-            if (!table.engines.on(.sqlite)) continue;
-            var columns: usize = 0;
-            for (table.columns) |column| {
-                if (column.engines.on(.sqlite)) columns += 1;
-            }
-            widest = @max(widest, columns);
-        }
-        break :blk @as(c_int, @intCast(widest));
-    };
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, column_limit);
     // Since 3.54, SQLite also counts a statement's cursors against this limit; the Store's widest statement opens about 140.
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, 256);
@@ -324,6 +330,8 @@ fn controlStatement(self: *Sqlite, comptime which: Control) !*c.sqlite3_stmt {
 
 pub fn cachedTyped(self: *Sqlite, comptime S: type) !*c.sqlite3_stmt {
     comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
+    comptime if (@hasDecl(S, "Row") and S.Row != void and @typeInfo(S.Row).@"struct".field_names.len > column_limit)
+        @compileError("a statement row is wider than SQLITE_LIMIT_COLUMN; raise max_result_columns: " ++ @typeName(S));
     if (@import("builtin").is_test) @import("../mysql_dialect_check.zig").shadowPrepare(comptime S.mysql.prepared());
     return cachedStatic(self, S.sql);
 }
