@@ -112,6 +112,11 @@ pub const Store = struct {
         return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).model_timings;
     }
 
+    /// The Access passes this Store ran, in test builds.
+    pub fn testingAccessPasses(self: *const Store) *u64 {
+        return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).testing_access_passes;
+    }
+
     pub inline fn identities(self: *const Store) *HostValues {
         return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).ids;
     }
@@ -1927,6 +1932,8 @@ const OutOfLine = struct {
     tools: HostTools,
     control_generation: std.atomic.Value(u64),
     commit_wake: std.atomic.Value(?*std.Io.Event),
+    /// The Access passes this Store ran, on every engine, in test builds (RoundMeter's pass budgets).
+    testing_access_passes: if (@import("builtin").is_test) u64 else void,
     scratch: Scratch align(scratch_align),
 };
 
@@ -1958,6 +1965,7 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     owned.model_timings = .{};
     owned.control_generation = .init(0);
     owned.commit_wake = .init(null);
+    if (@import("builtin").is_test) owned.testing_access_passes = 0;
     const ring: *change_ring.Ring = &owned.ring;
     const info = @typeInfo(change_ring.Ring).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
@@ -2496,7 +2504,7 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (columns.count() != 0) self.engine.notePass(.identity);
+        if (columns.count() != 0) self.engine.noteIdentityPass();
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};

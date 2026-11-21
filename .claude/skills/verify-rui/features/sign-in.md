@@ -17,7 +17,7 @@ Run `rui` without local credentials, or open **Settings**, select **Sign-in** an
 
 Run `$V frames FULLSHA --only first-run,first-run-browser,first-run-codex,first-run-key`.
 
-Frame states: `first-run`, `first-run-browser`, `first-run-codex`, `first-run-key`, `signin-paste-refused-night`
+Frame states: `first-run`, `first-run-browser`, `first-run-codex`, `first-run-key`, `signin-paste-refused-night`, `settings-signin`
 
 These recipes open a separate terminal without local credentials. `RUI_TEST_LOGIN=waiting` keeps browser sign-in on the loopback fixture and device sign-in waiting for cancellation. Check the explicit browser/copy controls and the masked API key at both sizes. The API recipe types a key without connecting. `signin-paste-refused-night` opens first-run Sign-in, chooses API key and sends an over-limit bracketed paste: the key field locks, Status names **API key** and Connect stays blocked.
 

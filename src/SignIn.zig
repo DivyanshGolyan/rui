@@ -1264,7 +1264,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (!focused_visible) self.drawn.focused = null;
     const children = try a.alloc(vxfw.SubSurface, 1);
     children[0] = .{ .origin = origin, .surface = child };
-    return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
+    // The dialog covers the retained screen, so its layer owns every cell:
+    // nothing of the screen beneath may read as part of the dialog.
+    var cover = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
+    @memset(cover.buffer, .{ .style = self.style });
+    cover.children = children;
+    return cover;
 }
 
 test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {

@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 88;
+pub const schema_version: u32 = 89;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -67,7 +67,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 85, .digest = 0x7ad844b9681bc98f },
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
-    .{ .schema_version = 88, .digest = 0x07d6d413d8db7abb },
+    .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
+    .{ .schema_version = 89, .digest = 0xb685d0066083875b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -884,8 +885,19 @@ pub const migrations = [_]Migration{
             "ALTER TABLE turn ADD COLUMN turn_outcome_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN outcome_position IS NULL THEN session_ref END) STORED AFTER turn_unpositioned_lead, ADD INDEX turn_outcome_unpositioned(turn_outcome_unpositioned_lead)",
         },
     },
+    // A Session whose first Message came from another Session was started by it (Divyansh,
+    // 2026-11-20): saved creation before format 88 named a creator only from explicit parent input.
     .{
         .from = 87,
+        .sqlite = &.{
+            "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
+        },
+        .mysql = &.{
+            "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
+        },
+    },
+    .{
+        .from = 88,
         .sqlite = &.{
             "ALTER TABLE session ADD COLUMN profile_id TEXT CHECK(profile_id IS NULL OR (length(CAST(profile_id AS BLOB))=32 AND (profile_id NOT GLOB '*[^0-9a-f]*' AND length(profile_id)=length(CAST(profile_id AS BLOB)))))",
             "ALTER TABLE turn ADD COLUMN profile_id TEXT CHECK(profile_id IS NULL OR (length(CAST(profile_id AS BLOB))=32 AND (profile_id NOT GLOB '*[^0-9a-f]*' AND length(profile_id)=length(CAST(profile_id AS BLOB)))))",
@@ -3809,14 +3821,14 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
 }
 
-test "schema 88 profile columns match MySQL fresh type and order" {
+test "schema 89 profile columns match MySQL fresh type and order" {
     const fresh = comptime renderedObjects(.mysql);
     const cases = [_]struct { table: []const u8, preceding: []const u8, generated: []const u8, migration: []const u8 }{
         .{ .table = "session", .preceding = "archive_seq BIGINT", .generated = "session_obligation_parent_lead", .migration = "ADD COLUMN profile_id TEXT AFTER archive_seq" },
         .{ .table = "turn", .preceding = "continuation_operation_id BIGINT", .generated = "turn_tool_continuation_lead", .migration = "ADD COLUMN profile_id TEXT AFTER continuation_operation_id" },
     };
-    const step = migrations[87 - migration_baseline];
-    try std.testing.expectEqual(@as(u32, 87), step.from);
+    const step = migrations[88 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 88), step.from);
     for (cases, 0..) |case, index| {
         var sql: ?[]const u8 = null;
         for (fresh) |object| if (object.kind == .table and std.mem.eql(u8, object.name, case.table)) {
