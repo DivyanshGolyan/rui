@@ -20,6 +20,7 @@ pub const Rejection = enum {
     unknown_preset,
     preset_on_update,
     parent_on_update,
+    profile_on_update,
     parent_provider_forbidden,
     parent_workspace_forbidden,
     tools_not_in_parent,

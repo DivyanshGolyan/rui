@@ -1173,7 +1173,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
-            const Field = enum { key, session, configuration, preset, require_model, reload_skills };
+            const Field = enum { key, session, configuration, preset, require_model, reload_skills, profile };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
@@ -1185,9 +1185,20 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .require_model => out.require_model = try self.readBoolean(),
                 .reload_skills => out.reload_skills = try self.readBoolean(),
+                .profile => try self.readProfile(&out.profile),
             };
             try require(Field, seen, &.{ .key, .session, .configuration });
             if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
+        }
+
+        fn readProfile(self: *Parser, out: *@import("command_input.zig").OptionalBounded(32)) !void {
+            if (try self.readNull()) {
+                out.state = .explicit_null;
+                return;
+            }
+            out.state = .value;
+            try self.readSmallString(&out.value);
+            _ = @import("profile_id.zig").Id.parse(out.value.slice()) catch return error.InvalidJsonShape;
         }
 
         fn validateCreatingConfiguration(configuration: *const Configuration) !void {
@@ -1288,7 +1299,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-            const Field = enum { key, session, sender, sender_handle, configuration, text, parts, require_model };
+            const Field = enum { key, session, sender, sender_handle, configuration, text, parts, require_model, profile };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
@@ -1309,11 +1320,12 @@ fn ParserOf(comptime Custody: type) type {
                 .text => try self.readContent(&out.text, false, true),
                 .parts => try self.scanParts(),
                 .require_model => out.require_model = try self.readBoolean(),
+                .profile => try self.readProfile(&out.profile),
             };
             try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
             if (seen.contains(.text) == seen.contains(.parts)) return error.InvalidMessage;
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
-            if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
+            if (out.session.len != 0 and (out.configuration != null or out.profile.state != .omitted)) return error.UnexpectedField;
             if (seen.contains(.text) and out.text.state != .value) return error.InvalidMessage;
             if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         }
@@ -2368,11 +2380,12 @@ pub const public_parts_reply = struct {
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
+    pub const profile = .{ ",\"profile\":", Hole{ .optional_string = 32 } };
     pub const reload_skills = .{",\"reload_skills\":true"};
     pub const require_model = .{",\"require_model\":true"};
     pub const preset = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes } };
     pub const tail = .{"}"};
-    pub const max_metadata_bytes = shapeBytes(head ++ reload_skills ++ require_model ++ preset ++ tail);
+    pub const max_metadata_bytes = shapeBytes(head ++ reload_skills ++ require_model ++ preset ++ profile ++ tail);
 };
 pub const message_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":" };

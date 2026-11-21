@@ -197,9 +197,14 @@ const ConfigureRequest = struct {
             S.Optional(r.reload_skills),
             S.Optional(r.require_model),
             S.Optional(r.preset),
+            S.Optional(r.profile),
         } ++ r.tail);
     }
 };
+
+fn WireProfile(comptime S: type) @TypeOf(S.Wire.configure_request.profile) {
+    return S.Wire.configure_request.profile;
+}
 
 const MessageRequest = struct {
     pub fn maxBytes(comptime Wire: type) ?usize {
@@ -216,6 +221,7 @@ const MessageRequest = struct {
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.text ++ .{S.Content} ++ r.text_tail ++ .{
             S.Optional(r.require_model),
+            S.Optional(WireProfile(S)),
         } ++ r.tail);
     }
     pub fn partsSchema(comptime S: type) type {
@@ -224,6 +230,7 @@ const MessageRequest = struct {
             S.Optional(r.configuration ++ .{S.Configuration}),
         } ++ r.parts ++ .{S.Parts} ++ .{
             S.Optional(r.require_model),
+            S.Optional(WireProfile(S)),
         } ++ r.tail);
     }
 };

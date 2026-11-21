@@ -6,6 +6,11 @@
 
 | id | level | invariant | seam that observes it | owner test | source |
 | --- | --- | --- | --- | --- | --- |
+| CM-46 | Module | A legacy installation cannot replace an owned profile. | Credential custody API | `CM-46 an owned profile cannot be replaced by a legacy installation` | src/codex_credential_policy.zig |
+| CM-47 | Module | Scoped logout fences only the selected profile even when remote revocation fails. | Credential custody API | `CM-47 profile logout fences one owner even when revocation fails` | src/codex_credentials.zig |
+| CM-48 | Module | Profile authentication retains its selected owner across refresh and rejects mismatched sources. | Authentication API and synthetic credentials | `CM-48 profile authentication retains its owner across refresh` | src/codex_auth.zig |
+| CM-49 | Module | Refresh cannot publish a grant owned by another profile. | Credential custody API | `CM-49 refresh cannot relabel a foreign owned grant` | src/codex_credentials.zig |
+| CM-50 | Module | A damaged profile is reported without hiding healthy profiles in the same directory. | Profile listing API | `CM-50 profile listing reports a damaged entry without hiding a healthy one` | src/codex_auth.zig |
 | CM-1 | Host | Admitted messages are immutable and project in admission order only when selected for a Turn. | Wire and Store | `pending_projection`: pause active work, admit a batch, inspect before and after boundary. | docs/contracts/conversation.md:10 |
 | CM-2 | Host | Selection atomically binds the eligible cutoff prefix, projects it, and admits its next model Operation. | Wire and Store | `boundary_atomicity`: vary cutoff, rollback and concurrent stop; inspect all three facts. | src/store/domain/model_admission.zig:804 |
 | CM-3 | Host | Every selected message receives its bound Turn's one terminal outcome without requeue. | Wire | `selected_outcomes`: batch messages and vary success, structured result and failure. | docs/contracts/conversation.md:23 |

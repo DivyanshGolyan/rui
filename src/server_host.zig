@@ -331,6 +331,7 @@ pub const Host = struct {
     pause_owner: if (test_pause.enabled) ?*test_pause.PauseController else void = if (test_pause.enabled) null else {},
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
+    profile_home: ?[]const u8 = null,
     catalog_url: ?[]const u8 = null,
     presets: []const core_tools.Preset = &.{},
     model_lists: ModelLists = .{},

@@ -21,6 +21,7 @@ pub const PreparedRequest = struct {
     charged: u64,
     structured_output: bool,
     provider: protocol.Provider,
+    profile_id: ?@import("profile_id.zig").Id = null,
     codec: protocol.Codec,
     headers: codec_abi.Headers,
 

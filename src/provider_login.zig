@@ -14,57 +14,72 @@ pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     dir.close(io);
 }
 
-pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !void {
+pub const ProfileReceipt = struct { id: credentials.ProfileId, publication: credentials.ProfilePublication };
+
+fn generateProfileId(io: std.Io) !credentials.ProfileId {
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &random);
+    return .{ .bytes = std.fmt.bytesToHex(random, .lower) };
+}
+
+fn profileDestination(init: std.process.Init, id: credentials.ProfileId, buffer: []u8) ![]const u8 {
+    const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
+    try createConfigDirectory(init.io, home);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try location.profileDirectory(init.environ_map, &directory_buffer);
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(init.io, directory, .{ .permissions = .fromMode(0o700) });
+    dir.close(init.io);
+    return location.profile(init.environ_map, id, buffer);
+}
+
+pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !ProfileReceipt {
+    const id = try generateProfileId(init.io);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try location.default(init.environ_map, .codex, &path_buffer);
-    if (init.environ_map.get(location.variable(.codex)) == null) try createConfigDirectory(init.io, init.environ_map.get("HOME").?);
+    const path = try profileDestination(init, id, &path_buffer);
     if (cancelled()) return error.LoginInterrupted;
     const mapped = try pages.Mapped(auth.Login).map();
     defer mapped.unmap();
     const room = mapped.value;
-    {
-        const snapshot = &room.work.credentials.current;
-        defer std.crypto.secureZero(u8, std.mem.asBytes(snapshot));
-        _ = try credentials.readSnapshotInto(path, snapshot, &room.work.credentials);
-    }
-    if (cancelled()) return error.LoginInterrupted;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&room.tokens));
     try exchange(init.io, display, cancelled, &room.tokens);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&room.record));
+    defer room.record.wipe();
     try auth.loginRecord(&room.tokens, auth.nowSeconds(init.io), &room.record, &room.work.claims);
     if (!publish()) return error.LoginInterrupted;
-    try credentials.install(path, &room.record, null, &room.work.credentials);
+    return .{ .id = id, .publication = try credentials.createProfile(path, id, &room.record, &room.work.credentials) };
 }
 
-pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !void {
+pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !ProfileReceipt {
+    const id = try generateProfileId(init.io);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try location.default(init.environ_map, .chatgpt, &path_buffer);
+    const path = try profileDestination(init, id, &path_buffer);
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
-    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
-    try createConfigDirectory(init.io, home);
     var host_id_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const host_id_path = try std.fmt.bufPrint(&host_id_buffer, "{s}/.config/rui/host-id", .{home});
     if (cancelled()) return error.LoginInterrupted;
     const mapped = try pages.Mapped(auth.Login).map();
     defer mapped.unmap();
     const room = mapped.value;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&room.record));
+    defer room.record.wipe();
     const Publish = struct {
         path: []const u8,
+        id: credentials.ProfileId,
         scratch: *credentials.Scratch,
         gate: *const fn () bool,
-
-        fn install(self: @This(), record: *credentials.Record) !void {
+        publication: ?credentials.ProfilePublication = null,
+        fn install(self: *@This(), record: *credentials.Record) !void {
             if (!self.gate()) return error.LoginInterrupted;
-            try credentials.install(self.path, record, null, self.scratch);
+            self.publication = try credentials.createProfile(self.path, self.id, record, self.scratch);
         }
     };
+    var published: Publish = .{ .path = path, .id = id, .scratch = &room.work.credentials, .gate = publish };
     try plan_login.login(init.io, .{
         .credential_path = path,
         .host_id_path = host_id_path,
         .issuer = issuer,
         .opener = if (issuer == .fixture) null else os.linkOpener(init.environ_map),
-    }, display, paste, cancelled, &room.record, Publish{ .path = path, .scratch = &room.work.credentials, .gate = publish }, Publish.install);
+    }, display, paste, cancelled, &room.record, &published, Publish.install);
+    return .{ .id = id, .publication = published.publication orelse return error.ProfilePublicationMissing };
 }
 
 pub fn key(init: std.process.Init, bytes: []const u8) !void {

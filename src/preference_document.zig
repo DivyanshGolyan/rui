@@ -9,6 +9,7 @@ pub const Values = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     provider: protocol.Bounded(16) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    profile: protocol.Bounded(32) = .{},
     notifications: bool = true,
     reasoning_effort: ?model_capability.ReasoningEffort = null,
     permission_mode: ?@import("cli_value.zig").PermissionMode = null,
@@ -26,6 +27,7 @@ pub const Edit = struct {
     store: Change = .keep,
     provider: Change = .keep,
     model: union(enum) { keep, set: []const u8, clear } = .keep,
+    profile: union(enum) { keep, set: []const u8, clear } = .keep,
     notifications: ?bool = null,
     reasoning_effort: union(enum) { keep, set: model_capability.ReasoningEffort, clear } = .keep,
     permission_mode: union(enum) { keep, set: PermissionMode, clear } = .keep,
@@ -33,6 +35,7 @@ pub const Edit = struct {
 
 pub fn validate(values: *const Values) !void {
     if (values.store.len != 0 and !validAbsoluteText(values.store.slice())) return error.InvalidPreferenceStore;
+    if (values.profile.len != 0) _ = @import("profile_id.zig").Id.parse(values.profile.slice()) catch return error.InvalidPreferenceProfile;
     for (values.provider.slice()) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
     }
@@ -43,6 +46,7 @@ pub fn validate(values: *const Values) !void {
 pub fn validateSaved(values: *const Values) !void {
     validate(values) catch |err| return switch (err) {
         error.InvalidPreferenceStore => error.SavedPreferenceStoreInvalid,
+        error.InvalidPreferenceProfile => error.SavedPreferenceProfileInvalid,
         error.InvalidPreferenceProvider => error.SavedPreferenceProviderInvalid,
         error.InvalidPreferenceModel => error.SavedPreferenceModelInvalid,
         error.PreferenceProviderRequired => error.SavedPreferenceProviderRequired,
@@ -57,7 +61,7 @@ pub fn decode(bytes: []const u8) !Values {
     if (bytes.len > max_file_bytes) return error.InvalidPreferences;
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     const version_line = lines.next() orelse "";
-    const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4" };
+    const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4", "version=5" };
     const number = for (known, 1..) |name, at| {
         if (std.mem.eql(u8, version_line, name)) break at;
     } else return error.UnsupportedPreferencesVersion;
@@ -81,7 +85,14 @@ pub fn decode(bytes: []const u8) !Values {
     if (number >= 4) {
         const line = lines.next() orelse return error.InvalidPreferences;
         if (!std.mem.startsWith(u8, line, permission_key)) return error.InvalidPreferences;
-        result.permission_mode = std.meta.stringToEnum(PermissionMode, line[permission_key.len..]) orelse return error.InvalidPreferences;
+        const mode = line[permission_key.len..];
+        if (number < 5 or mode.len != 0) result.permission_mode = std.meta.stringToEnum(PermissionMode, mode) orelse return error.InvalidPreferences;
+    }
+    if (number >= 5) {
+        const line = lines.next() orelse return error.InvalidPreferences;
+        if (!std.mem.startsWith(u8, line, "profile=")) return error.InvalidPreferences;
+        result.profile.set(line["profile=".len..]) catch return error.InvalidPreferences;
+        _ = @import("profile_id.zig").Id.parse(result.profile.slice()) catch return error.InvalidPreferences;
     }
     if (!std.mem.eql(u8, lines.next() orelse return error.InvalidPreferences, "") or lines.next() != null)
         return error.InvalidPreferences;
@@ -117,6 +128,7 @@ pub fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
 
 pub fn validateEdit(edit: Edit) !void {
     if (edit.provider == .set and std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
+    if (edit.profile == .set) _ = @import("profile_id.zig").Id.parse(edit.profile.set) catch return error.InvalidPreferenceProfile;
     if (edit.model == .set and !model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
     if (edit.store == .set) {
         const value = edit.store.set;
@@ -147,6 +159,11 @@ pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Re
         .set => |mode| values.permission_mode = mode,
         .clear => values.permission_mode = null,
     }
+    switch (edit.profile) {
+        .keep => {},
+        .clear => values.profile = .{},
+        .set => |profile| values.profile.set(profile) catch return error.InvalidPreferenceProfile,
+    }
     switch (edit.model) {
         .keep => {},
         .clear => values.model = .{},
@@ -164,12 +181,14 @@ pub fn apply(saved: Values, edit: Edit, store: ?[]const u8, readiness: *const Re
 }
 
 pub fn version(values: *const Values) u8 {
-    return if (values.permission_mode != null) 4 else if (values.reasoning_effort != null) 3 else if (values.notifications) 1 else 2;
+    return if (values.profile.len != 0) 5 else if (values.permission_mode != null) 4 else if (values.reasoning_effort != null) 3 else if (values.notifications) 1 else 2;
 }
 
 pub fn encode(values: *const Values, buffer: *[max_file_bytes]u8) ![]const u8 {
     const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
-    return (if (values.permission_mode) |mode|
+    return (if (values.profile.len != 0)
+        std.fmt.bufPrint(buffer, "version=5\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\nprofile={s}\n", fields ++ .{ if (values.notifications) "on" else "off", if (values.reasoning_effort) |effort| @tagName(effort) else "", if (values.permission_mode) |mode| @tagName(mode) else "", values.profile.slice() })
+    else if (values.permission_mode) |mode|
         std.fmt.bufPrint(buffer, "version=4\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", if (values.reasoning_effort) |effort| @tagName(effort) else "", @tagName(mode) })
     else if (values.reasoning_effort) |effort|
         std.fmt.bufPrint(buffer, "version=3\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", @tagName(effort) })
@@ -185,6 +204,7 @@ test "CLI-22 a defaults file is the lowest version that holds its values" {
         .{ .text = "version=2\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\n", .version_number = 2 },
         .{ .text = "version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", .version_number = 3 },
         .{ .text = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n", .version_number = 4 },
+        .{ .text = "version=5\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\nprofile=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", .version_number = 5 },
     };
     for (literals) |case| {
         const values = try decode(case.text);
@@ -216,6 +236,19 @@ test "CLI-22 a defaults file is the lowest version that holds its values" {
             }
         }
     }
+}
+
+test "CLI profile default changes only on explicit selection" {
+    const readiness: Readinesses = .initFill(.configured);
+    var saved: Values = .{};
+    try saved.provider.set("codex");
+    try saved.profile.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const unchanged = try apply(saved, .{ .notifications = false }, null, &readiness);
+    try std.testing.expectEqualStrings(saved.profile.slice(), unchanged.profile.slice());
+    const selected = try apply(unchanged, .{ .profile = .{ .set = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, null, &readiness);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", selected.profile.slice());
+    const legacy = try apply(selected, .{ .profile = .clear }, null, &readiness);
+    try std.testing.expectEqual(@as(usize, 0), legacy.profile.len);
 }
 
 test "CLI-23 an edit changes only what it names" {

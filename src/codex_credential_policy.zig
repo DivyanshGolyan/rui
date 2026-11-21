@@ -70,6 +70,7 @@ pub const ClaimScratch = struct {
 
 pub const Record = struct {
     version: u32 = 3,
+    profile_id: Bounded(32) = .{},
     generation: u64,
     account_id: Bounded(max_account_id_bytes),
     client_id: Bounded(max_client_id_bytes) = .{},
@@ -82,6 +83,7 @@ pub const Record = struct {
     state: State = .ready,
 
     pub fn wipe(self: *Record) void {
+        self.profile_id.wipe();
         self.account_id.wipe();
         self.client_id.wipe();
         self.id_token.wipe();
@@ -222,11 +224,14 @@ pub fn validateReplacement(record: *const Record) !void {
 pub fn admitReplacement(current: ?*const Record, replacement: *const Record, expected_generation: ?u64) !u64 {
     try validateReplacement(replacement);
     const expected = expected_generation orelse {
+        if (replacement.profile_id.len != 0) return error.OwnedCredential;
         const old = current orelse return 1;
+        if (old.profile_id.len != 0) return error.OwnedCredential;
         return std.math.add(u64, old.generation, 1) catch error.GenerationExhausted;
     };
     const old = current orelse return error.GenerationMismatch;
     if (old.generation != expected or old.state != .refresh_pending) return error.GenerationMismatch;
+    if (old.version != replacement.version or !std.mem.eql(u8, old.profile_id.slice(), replacement.profile_id.slice())) return error.OwnedCredential;
     if (!std.mem.eql(u8, old.account_id.slice(), replacement.account_id.slice()) or
         !std.mem.eql(u8, old.client_id.slice(), replacement.client_id.slice()) or
         old.fedramp != replacement.fedramp)
@@ -240,7 +245,16 @@ fn validateText(value: []const u8, empty_allowed: bool) !void {
 }
 
 pub fn validateRecord(record: *const Record) !void {
-    if (record.version != 3) return error.UnsupportedCredentialVersion;
+    switch (record.version) {
+        3 => if (record.profile_id.len != 0) return error.InvalidCredentialFile,
+        4 => {
+            if (record.profile_id.len != 32) return error.InvalidCredentialFile;
+            for (record.profile_id.slice()) |byte| {
+                if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidCredentialFile;
+            }
+        },
+        else => return error.UnsupportedCredentialVersion,
+    }
     try validateText(record.account_id.slice(), false);
     try validateText(record.client_id.slice(), true);
     if (record.state == .signed_out) {
@@ -271,16 +285,20 @@ pub fn encode(record: *const Record, destination: []u8) ![]const u8 {
 }
 
 fn writeFields(writer: *std.Io.Writer, record: *const Record) !void {
-    try writer.print("version=3\ngeneration={d}\naccount_id={s}\n", .{ record.generation, record.account_id.slice() });
+    try writer.print("version={d}\n", .{record.version});
+    if (record.version == 4) try writer.print("profile_id={s}\n", .{record.profile_id.slice()});
+    try writer.print("generation={d}\naccount_id={s}\n", .{ record.generation, record.account_id.slice() });
     if (record.client_id.len != 0) try writer.print("client_id={s}\n", .{record.client_id.slice()});
     try writer.print("fedramp={d}\nid_token={s}\naccess_token={s}\nrefresh_token={s}\nexpires_at={d}\nrefreshed_at={d}\nstate={s}\n", .{ @intFromBool(record.fedramp), record.id_token.slice(), record.access_token.slice(), record.refresh_token.slice(), record.expires_at, record.refreshed_at, @tagName(record.state) });
 }
 
 pub fn parseInto(bytes: []const u8, record: *Record) !void {
     var lines = std.mem.splitScalar(u8, bytes, '\n');
-    if (!std.mem.eql(u8, lines.next() orelse return error.InvalidCredentialFile, "version=3"))
-        return error.UnsupportedCredentialVersion;
-    record.* = .{ .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
+    const version_line = lines.next() orelse return error.InvalidCredentialFile;
+    const version: u32 = if (std.mem.eql(u8, version_line, "version=3")) 3 else if (std.mem.eql(u8, version_line, "version=4")) 4 else return error.UnsupportedCredentialVersion;
+    const profile_id = if (version == 4) try field(lines.next(), "profile_id=") else "";
+    record.* = .{ .version = version, .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
+    try record.profile_id.set(profile_id);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try record.account_id.set(try field(lines.next(), "account_id="));
     if (lines.peek()) |line| if (std.mem.startsWith(u8, line, "client_id=")) {

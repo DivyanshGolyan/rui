@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 88;
+pub const schema_version: u32 = 89;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -68,6 +68,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
+    .{ .schema_version = 89, .digest = 0xb685d0066083875b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -895,6 +896,17 @@ pub const migrations = [_]Migration{
             "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
         },
     },
+    .{
+        .from = 88,
+        .sqlite = &.{
+            "ALTER TABLE session ADD COLUMN profile_id TEXT CHECK(profile_id IS NULL OR (length(CAST(profile_id AS BLOB))=32 AND (profile_id NOT GLOB '*[^0-9a-f]*' AND length(profile_id)=length(CAST(profile_id AS BLOB)))))",
+            "ALTER TABLE turn ADD COLUMN profile_id TEXT CHECK(profile_id IS NULL OR (length(CAST(profile_id AS BLOB))=32 AND (profile_id NOT GLOB '*[^0-9a-f]*' AND length(profile_id)=length(CAST(profile_id AS BLOB)))))",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN profile_id TEXT AFTER archive_seq, ADD CHECK(profile_id IS NULL OR (OCTET_LENGTH(profile_id)=32 AND (NOT REGEXP_LIKE(profile_id,'[^0-9a-f]','c'))))",
+            "ALTER TABLE turn ADD COLUMN profile_id TEXT AFTER continuation_operation_id, ADD CHECK(profile_id IS NULL OR (OCTET_LENGTH(profile_id)=32 AND (NOT REGEXP_LIKE(profile_id,'[^0-9a-f]','c'))))",
+        },
+    },
 };
 
 comptime {
@@ -1319,6 +1331,7 @@ pub const tables = [_]Table{
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
             .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
             .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .check = "archive_seq IS NULL OR archive_seq>0" },
+            .{ .name = "profile_id", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .sqlite_added = true, .check = "@charset(profile_id,'0-9a-f')" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1483,6 +1496,7 @@ pub const tables = [_]Table{
             .{ .name = "outcome_position", .type = .int, .nullable = true, .check = "outcome_position>0" },
             .{ .name = "outcome_at", .type = .int, .nullable = true, .check = "outcome_at IS NULL OR outcome_at>0" },
             .{ .name = "continuation_operation_id", .type = .int, .nullable = true, .check = "continuation_operation_id IS NULL OR continuation_operation_id<=operation_id" },
+            .{ .name = "profile_id", .type = .{ .text = .{ .min = 32, .max = 32 } }, .nullable = true, .sqlite_added = true, .check = "@charset(profile_id,'0-9a-f')" },
         },
         .primary_key = &.{"turn_id"},
         .foreign_keys = &.{
@@ -3805,6 +3819,29 @@ test "schema 84 adds a canonical creator index without changing Sessions" {
     const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
     try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
+}
+
+test "schema 89 profile columns match MySQL fresh type and order" {
+    const fresh = comptime renderedObjects(.mysql);
+    const cases = [_]struct { table: []const u8, preceding: []const u8, generated: []const u8, migration: []const u8 }{
+        .{ .table = "session", .preceding = "archive_seq BIGINT", .generated = "session_obligation_parent_lead", .migration = "ADD COLUMN profile_id TEXT AFTER archive_seq" },
+        .{ .table = "turn", .preceding = "continuation_operation_id BIGINT", .generated = "turn_tool_continuation_lead", .migration = "ADD COLUMN profile_id TEXT AFTER continuation_operation_id" },
+    };
+    const step = migrations[88 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 88), step.from);
+    for (cases, 0..) |case, index| {
+        var sql: ?[]const u8 = null;
+        for (fresh) |object| if (object.kind == .table and std.mem.eql(u8, object.name, case.table)) {
+            sql = object.sql;
+            break;
+        };
+        const table = sql orelse return error.MissingTable;
+        const before = std.mem.indexOf(u8, table, case.preceding) orelse return error.MissingPreviousColumn;
+        const profile = std.mem.indexOf(u8, table, "profile_id TEXT") orelse return error.MissingProfileColumn;
+        const generated = std.mem.indexOf(u8, table, case.generated) orelse return error.MissingGeneratedColumn;
+        try std.testing.expect(before < profile and profile < generated);
+        try std.testing.expect(std.mem.indexOf(u8, step.mysql[index], case.migration) != null);
+    }
 }
 
 test "schema 87 adds the unaccepted action and unpositioned outcome partial indexes on SQLite and MySQL" {

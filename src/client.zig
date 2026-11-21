@@ -2217,6 +2217,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         archived: bool = true,
         pinned: ?bool = null,
         reload_skills: ?bool = null,
+        profile: protocol_reply.OmittableJson(?protocol_reply.JsonString(32)) = .{},
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -2232,6 +2233,9 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
+    if (fields.profile.value) |maybe_id| if (maybe_id) |id| {
+        _ = @import("profile_id.zig").Id.parse(id.slice()) catch return error.InvalidRequestRecord;
+    };
     if (!fields.version.eql(protocol.wire_version)) return error.SavedRequestWireVersionMismatch;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
@@ -2271,6 +2275,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         } },
     };
     if ((kind != .configure and kind != .message and fields.configuration != null) or
+        (fields.profile.isPresent() and kind != .configure and !(kind == .message and fields.configuration != null)) or
         (fields.require_model != null and kind != .configure and kind != .message) or
         (kind != .configure and (fields.reload_skills != null or fields.preset != null)) or
         (kind != .session_pin and fields.pinned != null) or
@@ -2350,6 +2355,7 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
 fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, session: []const u8, input: ConfigureInput) !void {
     try capture.writeRequest(protocol.configure_request.head, .{ store, key, session });
     try capture.writeConfiguration(input);
+    if (input.profile.present) try capture.writeRequest(protocol.configure_request.profile, .{input.profile.value});
     if (input.reload_skills) try capture.writeRequest(protocol.configure_request.reload_skills, .{});
     if (input.require_model) try capture.writeRequest(protocol.configure_request.require_model, .{});
     if (input.preset.present) try capture.writeRequest(protocol.configure_request.preset, .{input.preset.value});
@@ -2417,6 +2423,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
     if (input.configuration) |configuration| {
         try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
+        if (configuration.profile.present) try capture.writeRequest(protocol.configure_request.profile, .{configuration.profile.value});
     }
     if (input.operands.len != 0) {
         try capture.writeMessageOperands(input.operands, input.operand_stdin);
@@ -6029,6 +6036,39 @@ test "archive recovery preserves the protocol default and refuses ambiguous or m
             defer recovered.close(io);
             try std.testing.expectEqual(expected, recovered.target.session_archive.archived);
         } else try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
+    }
+}
+
+test "profile capture accepts explicit profile and legacy intent" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]?[]const u8{ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", null }) |profile| {
+        var captured = try captureConfigure(io, .{ .store = root, .session = .create, .profile = .{ .present = true, .value = profile } }, .{ .generated = root }).get();
+        defer captured.close(io);
+        _ = try readCapturedBinding(io, &captured.file);
+    }
+}
+
+test "profile capture rejects malformed and wrong-kind fields" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const bodies = [_][]const u8{
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"configure\",\"store\":\"/tmp\",\"key\":\"key\",\"session\":\"\",\"configuration\":{},\"profile\":\"invalid\"}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_stop\",\"store\":\"/tmp\",\"key\":\"key\",\"session\":\"k7m2qx\",\"profile\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_stop\",\"store\":\"/tmp\",\"key\":\"key\",\"session\":\"k7m2qx\",\"profile\":null}",
+    };
+    for (bodies) |body| {
+        const written = try tmp.dir.createFile(io, "request", .{});
+        try written.writeStreamingAll(io, body);
+        written.close(io);
+        var file = try tmp.dir.openFile(io, "request", .{});
+        defer file.close(io);
+        try std.testing.expectError(error.InvalidRequestRecord, readCapturedBinding(io, &file));
     }
 }
 

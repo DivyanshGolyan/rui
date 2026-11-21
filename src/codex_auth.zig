@@ -56,6 +56,8 @@ pub const Wire = enum {
 
 pub const Source = struct {
     path: []const u8,
+    profile_id: ?credentials.ProfileId = null,
+    profile_home: ?[]const u8 = null,
     wire: Wire,
     refresh: RefreshTarget = .issuer,
 
@@ -64,6 +66,13 @@ pub const Source = struct {
         synthetic,
         fixture_endpoint: []const u8,
     };
+
+    fn resolvedPath(self: Source, buffer: []u8) ![]const u8 {
+        const id = self.profile_id orelse return self.path;
+        const home = self.profile_home orelse return error.ProfileUnavailable;
+        if (!std.fs.path.isAbsolute(home)) return error.ProfileUnavailable;
+        return std.fmt.bufPrint(buffer, "{s}/.config/rui/profiles/{s}", .{ home, id.slice() }) catch error.ProfileUnavailable;
+    }
 
     pub fn fixture(self: Source) bool {
         return self.refresh != .issuer;
@@ -100,8 +109,56 @@ pub fn localSignIn(path: []const u8, now_seconds: i64, shown: *Shown) !void {
     policy.emailOf(record.id_token.slice(), &work.claims, &shown.email) catch {};
 }
 
+pub const ProfileInfo = struct {
+    wire: Wire,
+    status: LocalStatus,
+    signed_out: bool,
+    email: policy.Email = .{},
+};
+
+pub fn profileInfo(path: []const u8, id: credentials.ProfileId, now_seconds: i64) !?ProfileInfo {
+    const mapped = try pages.Mapped(Work).map();
+    defer mapped.unmap();
+    const work = mapped.value;
+    const record = &work.credentials.current;
+    defer record.wipe();
+    if (!try credentials.readProfileSnapshotInto(path, id, record, &work.credentials)) return null;
+    var info: ProfileInfo = .{
+        .wire = if (record.client_id.len == 0) .codex_device else .chatgpt_plan,
+        .status = try policy.localStatus(record, now_seconds, &work.claims),
+        .signed_out = record.state == .signed_out,
+    };
+    if (info.status.usable()) policy.emailOf(record.id_token.slice(), &work.claims, &info.email) catch {};
+    return info;
+}
+
+pub const ProfileEntry = union(enum) { ready: ProfileInfo, unavailable: anyerror };
+
+pub fn listProfiles(directory: []const u8, now_seconds: i64, context: anytype, visit: anytype) !void {
+    const list_io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(list_io, directory, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(list_io);
+    var iterator = dir.iterate();
+    while (try iterator.next(list_io)) |entry| {
+        const id = credentials.ProfileId.parse(entry.name) catch continue;
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, id.slice() }) catch {
+            try visit(context, id, ProfileEntry{ .unavailable = error.NameTooLong });
+            continue;
+        };
+        const info = profileInfo(path, id, now_seconds) catch |err| {
+            try visit(context, id, ProfileEntry{ .unavailable = err });
+            continue;
+        };
+        try visit(context, id, if (info) |value| ProfileEntry{ .ready = value } else ProfileEntry{ .unavailable = error.FileNotFound });
+    }
+}
+
 pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *credentials.Lease) !void {
-    try credentials.leaseInto(source.path, destination, &work.credentials);
+    try leaseSource(source, destination, &work.credentials);
     const selection = select(source, &destination.record, nowSeconds(io), &work.claims) catch |err| {
         destination.release();
         return err;
@@ -110,10 +167,23 @@ pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *creden
         const generation = destination.record.generation;
         destination.release();
         _ = try exchangeAt(io, source, generation);
-        try credentials.leaseInto(source.path, destination, &work.credentials);
+        try leaseSource(source, destination, &work.credentials);
     }
     errdefer destination.release();
     try policy.launchCheck(&destination.record, source.synthetic(), nowSeconds(io), &work.claims);
+}
+
+fn leaseSource(source: Source, destination: *credentials.Lease, scratch: *credentials.Scratch) !void {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try source.resolvedPath(&path_buffer);
+    if (source.profile_id) |id| {
+        try credentials.leaseProfileInto(path, id, destination, scratch);
+        const actual: Wire = if (destination.record.client_id.len == 0) .codex_device else .chatgpt_plan;
+        if (actual != source.wire) {
+            destination.release();
+            return error.AccountMismatch;
+        }
+    } else try credentials.leaseInto(path, destination, scratch);
 }
 
 fn select(source: Source, record: *const credentials.Record, now_seconds: i64, claims: *policy.ClaimScratch) !policy.Selection {
@@ -137,9 +207,18 @@ fn exchangeAt(io: std.Io, source: Source, expected_generation: u64) !bool {
     const mapped = try pages.Mapped(Refresh).map();
     defer mapped.unmap();
     const room = mapped.value;
+    if (source.profile_id != null) {
+        var selected: credentials.Lease = undefined;
+        try leaseSource(source, &selected, &room.credentials);
+        selected.release();
+    }
     const Context = struct { io: std.Io, source: Source, room: *Refresh };
-    return credentials.exchangeRefresh(source.path, expected_generation, &room.credentials, &room.replacement, Context{ .io = io, .source = source, .room = room }, struct {
+    const exchange = struct {
         fn exchange(context: Context, current: *const credentials.Record, replacement: *credentials.Record) !void {
+            if (context.source.profile_id != null) {
+                const actual: Wire = if (current.client_id.len == 0) .codex_device else .chatgpt_plan;
+                if (actual != context.source.wire) return error.AccountMismatch;
+            }
             try policy.validateSelected(current, context.source.synthetic(), &context.room.wire.claims);
             if (context.source.synthetic()) {
                 replacement.* = current.*;
@@ -147,7 +226,52 @@ fn exchangeAt(io: std.Io, source: Source, expected_generation: u64) !bool {
                 replacement.refreshed_at = nowSeconds(context.io);
             } else try refresh(context.io, context.source, current, replacement, context.room);
         }
-    }.exchange);
+    }.exchange;
+    const context: Context = .{ .io = io, .source = source, .room = room };
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try source.resolvedPath(&path_buffer);
+    if (source.profile_id) |id| return credentials.exchangeProfileRefresh(path, id, expected_generation, &room.credentials, &room.replacement, context, exchange);
+    return credentials.exchangeRefresh(path, expected_generation, &room.credentials, &room.replacement, context, exchange);
+}
+
+test "CM-48 profile authentication retains its owner across refresh" {
+    const test_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(test_io, ".config/rui/profiles", .{ .permissions = .fromMode(0o700) });
+    private.close(test_io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(test_io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/.config/rui/profiles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .{root[0..root_len]});
+    const id = try credentials.ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var record: credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 100 };
+    defer record.wipe();
+    try record.account_id.set(fixture_account_id);
+    try record.id_token.set(fixture_id_token);
+    try record.access_token.set(fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    var scratch: credentials.Scratch = undefined;
+    try std.testing.expect((try credentials.createProfile(path, id, &record, &scratch)) == .durable);
+    const source: Source = .{ .path = path, .profile_id = id, .profile_home = root[0..root_len], .wire = .codex_device, .refresh = .synthetic };
+    try std.testing.expect(try forceRefresh(test_io, source, 1));
+    var work: Work = undefined;
+    var lease: credentials.Lease = undefined;
+    try acquireInto(test_io, source, &work, &lease);
+    try std.testing.expectEqualStrings(id.slice(), lease.record.profile_id.slice());
+    try std.testing.expectEqual(@as(u64, 2), lease.record.generation);
+    lease.release();
+    const wrong: Source = .{ .path = path, .profile_id = try credentials.ProfileId.parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), .profile_home = root[0..root_len], .wire = .codex_device, .refresh = .synthetic };
+    try std.testing.expectError(error.FileNotFound, acquireInto(test_io, wrong, &work, &lease));
+    try std.testing.expectError(error.FileNotFound, forceRefresh(test_io, wrong, 2));
+    const mismatched: Source = .{ .path = path, .profile_id = id, .profile_home = root[0..root_len], .wire = .chatgpt_plan, .refresh = .synthetic };
+    try std.testing.expectError(error.AccountMismatch, acquireInto(test_io, mismatched, &work, &lease));
+    try std.testing.expectError(error.AccountMismatch, forceRefresh(test_io, mismatched, 2));
+    try acquireInto(test_io, source, &work, &lease);
+    try std.testing.expectEqual(@as(u64, 2), lease.record.generation);
+    lease.release();
+    const legacy: Source = .{ .path = path, .wire = .codex_device, .refresh = .synthetic };
+    try std.testing.expectError(error.OwnedCredential, acquireInto(test_io, legacy, &work, &lease));
 }
 
 test "a forced refresh runs only for the rejected lease's unchanged generation" {
@@ -420,4 +544,43 @@ fn refresh(io: std.Io, source: Source, current: *const credentials.Record, repla
         return err;
     };
     try source.wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement, &room.wire);
+}
+
+test "CM-50 profile listing reports a damaged entry without hiding a healthy one" {
+    const test_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(test_io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(test_io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(test_io, &root);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&directory_buffer, "{s}/private", .{root[0..len]});
+    const a = try credentials.ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const b = try credentials.ProfileId.parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = try std.fmt.bufPrint(&a_buffer, "{s}/{s}", .{ directory, a.slice() });
+    const b_path = try std.fmt.bufPrint(&b_buffer, "{s}/{s}", .{ directory, b.slice() });
+    var scratch: credentials.Scratch = undefined;
+    try std.testing.expect(try credentials.createPrivate(a_path, "invalid", &scratch.file));
+    var record: credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 100 };
+    defer record.wipe();
+    try record.account_id.set(fixture_account_id);
+    try record.id_token.set(fixture_id_token);
+    try record.access_token.set(fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    _ = try credentials.createProfile(b_path, b, &record, &scratch);
+    const Seen = struct {
+        damaged: bool = false,
+        healthy: bool = false,
+        fn visit(self: *@This(), id: credentials.ProfileId, entry: ProfileEntry) !void {
+            if (std.mem.eql(u8, id.slice(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")) self.damaged = entry == .unavailable;
+            if (std.mem.eql(u8, id.slice(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")) self.healthy = entry == .ready;
+        }
+    };
+    var seen: Seen = .{};
+    try listProfiles(directory, 1_750_000_000, &seen, Seen.visit);
+    try std.testing.expect(seen.damaged);
+    try std.testing.expect(seen.healthy);
 }

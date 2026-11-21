@@ -818,8 +818,8 @@ const PressureGuard = union(enum) { plain: within_pressure.Args, parts: within_c
 pub const within_pressure_sql = within_pressure.sql;
 
 const insert_turn = rsql.Write(.{
-    .sql = "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id) " ++
-        "VALUES(?1,@session(?2),?3,?4,?5,NULL,NULL)",
+    .sql = "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,profile_id) " ++
+        "VALUES(?1,@session(?2),?3,?4,?5,NULL,NULL,(SELECT profile_id FROM session WHERE session_ref=@session(?2)))",
     .Args = struct { turn_id: u64, session: rsql.SessionHead, first_admission: u64, cutoff: u64, operation_id: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
