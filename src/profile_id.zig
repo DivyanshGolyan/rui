@@ -9,12 +9,6 @@ pub const Id = struct {
         return .{ .bytes = text[0..32].* };
     }
 
-    pub fn generate(random_io: std.Io) !Id {
-        var random: [16]u8 = undefined;
-        try std.Io.randomSecure(random_io, &random);
-        return .{ .bytes = std.fmt.bytesToHex(random, .lower) };
-    }
-
     pub fn slice(self: *const Id) []const u8 {
         return &self.bytes;
     }

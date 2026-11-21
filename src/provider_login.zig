@@ -16,6 +16,12 @@ pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
 
 pub const ProfileReceipt = struct { id: credentials.ProfileId, publication: credentials.ProfilePublication };
 
+fn generateProfileId(io: std.Io) !credentials.ProfileId {
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &random);
+    return .{ .bytes = std.fmt.bytesToHex(random, .lower) };
+}
+
 fn profileDestination(init: std.process.Init, id: credentials.ProfileId, buffer: []u8) ![]const u8 {
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
@@ -28,7 +34,7 @@ fn profileDestination(init: std.process.Init, id: credentials.ProfileId, buffer:
 }
 
 pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !ProfileReceipt {
-    const id = try credentials.ProfileId.generate(init.io);
+    const id = try generateProfileId(init.io);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try profileDestination(init, id, &path_buffer);
     if (cancelled()) return error.LoginInterrupted;
@@ -44,7 +50,7 @@ pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytyp
 }
 
 pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !ProfileReceipt {
-    const id = try credentials.ProfileId.generate(init.io);
+    const id = try generateProfileId(init.io);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try profileDestination(init, id, &path_buffer);
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;

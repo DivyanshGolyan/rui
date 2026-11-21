@@ -487,7 +487,10 @@ fn writeProfiles(init: std.process.Init) !void {
 
 fn writeProfileEntry(out: *std.Io.Writer, id: @import("profile_id.zig").Id, entry: codex_auth.ProfileEntry) !void {
     switch (entry) {
-        .unavailable => |err| try out.print("{s} unavailable ({s})\n", .{ id.slice(), @errorName(err) }),
+        .unavailable => |err| try out.print("{s} unavailable ({s})\n", .{ id.slice(), switch (err) {
+            error.AccessDenied, error.PermissionDenied => "access denied",
+            else => "unreadable or invalid profile",
+        } }),
         .ready => |info| {
             try out.print("{s} {s} {s}", .{ id.slice(), @tagName(info.wire), if (info.signed_out) "signed_out" else @tagName(info.status) });
             if (info.email.len != 0) {
@@ -510,7 +513,7 @@ test "CLI profile list escapes labels and reports unavailable records" {
     try writeProfileEntry(&out, id, .{ .ready = info });
     try writeProfileEntry(&out, id, .{ .unavailable = error.AccessDenied });
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\x1b") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "AccessDenied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "access denied") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "@example.test") != null);
 }
 
