@@ -305,11 +305,13 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .host_set, .host_unset, .host_settings => try hostSettings(init, command, parsed),
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
         .auth_login => try login(init, parsed.positional.?, parsed.has("device-code"), parsed.get("test-chatgpt-fixture-endpoint"), codex_auth.login),
-        .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("test-chatgpt-fixture-endpoint")),
+        .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("profile"), parsed.get("test-chatgpt-fixture-endpoint")),
         .auth_status => {
             const readiness = localReadiness(init);
             try writeSignIns(init, &readiness);
+            try writeProfiles(init);
         },
+        .auth_profiles => try writeProfiles(init),
     }
 }
 
@@ -335,6 +337,18 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
     if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
+fn profileMethod(init: std.process.Init, text: []const u8) !protocol.Provider {
+    const id = try @import("profile_id.zig").Id.parse(text);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credential_location.profile(init.environ_map, id, &path_buffer);
+    const info = (try codex_auth.profileInfo(path, id, codex_auth.nowSeconds(init.io))) orelse return error.ProfileUnavailable;
+    if (info.signed_out) return error.SignedOut;
+    return switch (info.wire) {
+        .codex_device => .codex,
+        .chatgpt_plan => .chatgpt,
+    };
+}
+
 fn signInPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8) ![]const u8 {
     return credential_location.default(init.environ_map, provider, buffer) catch |err| {
         if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime credential_location.variable(provider) ++ " names it");
@@ -353,11 +367,22 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     if (parsed.get("store")) |store| edit.store = .{ .set = store };
     if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
     if (parsed.get("model")) |model| edit.model = .{ .set = model };
+    if (parsed.get("profile")) |text| {
+        if (std.mem.eql(u8, text, "legacy")) {
+            edit.profile = .clear;
+        } else {
+            const method = try profileMethod(init, text);
+            const saved = try preferences.load(home);
+            const provider = parsed.get("provider") orelse if (saved.provider.len != 0) saved.provider.slice() else null;
+            if (provider) |chosen| if (!std.mem.eql(u8, chosen, @tagName(method))) return error.AccountMismatch;
+            edit.profile = .{ .set = text };
+        }
+    }
     if (parsed.has("clear-model")) edit.model = .clear;
     if (parsed.get("notifications")) |choice| edit.notifications = if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else return error.InvalidArguments;
     if (parsed.get("reasoning-effort")) |text| edit.reasoning_effort = try effortEdit(text);
     if (parsed.get("permission-mode")) |text| edit.permission_mode = .{ .set = std.meta.stringToEnum(cli_value.PermissionMode, text).? };
-    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep or edit.permission_mode != .keep;
+    const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.profile != .keep or edit.notifications != null or edit.reasoning_effort != .keep or edit.permission_mode != .keep;
     // The prospective Store is known before the save, so one readiness serves the save and the report.
     const local = localReadiness(init);
     const saved_before: ?preferences.Values = if (edit.store == .set) null else preferences.load(home) catch null;
@@ -451,11 +476,113 @@ fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Rea
     try output.flush();
 }
 
+fn writeProfiles(init: std.process.Init) !void {
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try credential_location.profileDirectory(init.environ_map, &directory_buffer);
+    var buffer: [1024]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try codex_auth.listProfiles(directory, codex_auth.nowSeconds(init.io), &output.interface, writeProfileEntry);
+    try output.flush();
+}
+
+fn writeProfileEntry(out: *std.Io.Writer, id: @import("profile_id.zig").Id, entry: codex_auth.ProfileEntry) !void {
+    switch (entry) {
+        .unavailable => |err| try out.print("{s} unavailable ({s})\n", .{ id.slice(), @errorName(err) }),
+        .ready => |info| {
+            try out.print("{s} {s} {s}", .{ id.slice(), @tagName(info.wire), if (info.signed_out) "signed_out" else @tagName(info.status) });
+            if (info.email.len != 0) {
+                try out.writeAll(" ");
+                var text: @import("TerminalText.zig") = .{ .mode = .line };
+                try text.feed(out, info.email.slice());
+                try text.finish(out);
+            } else try out.writeAll(" (label unknown)");
+            try out.writeByte('\n');
+        },
+    }
+}
+
+test "CLI profile list escapes labels and reports unavailable records" {
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    const id = try @import("profile_id.zig").Id.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var info: codex_auth.ProfileInfo = .{ .wire = .chatgpt_plan, .status = .configured, .signed_out = false };
+    try info.email.set("a\x1b[31m@example.test");
+    try writeProfileEntry(&out, id, .{ .ready = info });
+    try writeProfileEntry(&out, id, .{ .unavailable = error.AccessDenied });
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\x1b") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "AccessDenied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "@example.test") != null);
+}
+
+test "CLI profile list and scoped logout use isolated custody" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir = try tmp.dir.createDirPathOpen(io, ".config/rui/profiles", .{ .permissions = .fromMode(0o700) });
+    dir.close(io);
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..home_len];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    const credentials = @import("codex_credentials.zig");
+    const id = try credentials.ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credential_location.profile(&environment, id, &path_buffer);
+    var record: credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1_750_000_000 };
+    defer record.wipe();
+    try record.account_id.set(codex_auth.fixture_account_id);
+    try record.id_token.set(codex_auth.fixture_id_token);
+    try record.access_token.set(codex_auth.fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    var scratch: credentials.Scratch = undefined;
+    try std.testing.expect((try credentials.createProfile(path, id, &record, &scratch)) == .durable);
+    var list_buffer: [1024]u8 = undefined;
+    var list_output: std.Io.Writer = .fixed(&list_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = try credential_location.profileDirectory(&environment, &directory_buffer);
+    try codex_auth.listProfiles(directory, codex_auth.nowSeconds(io), &list_output, writeProfileEntry);
+    try std.testing.expect(std.mem.indexOf(u8, list_output.buffered(), id.slice()) != null);
+    var receipt_buffer: [1024]u8 = undefined;
+    var receipt_output: std.Io.Writer = .fixed(&receipt_buffer);
+    try profileLogoutTo(init, id.slice(), .openai, &receipt_output);
+    try std.testing.expect(std.mem.indexOf(u8, receipt_output.buffered(), "signed out locally") != null);
+    const info = (try codex_auth.profileInfo(path, id, codex_auth.nowSeconds(io))).?;
+    try std.testing.expect(info.signed_out);
+}
+
+fn profileLogout(init: std.process.Init, text: []const u8, issuer: chatgpt_plan_login.Issuer) !void {
+    var buffer: [1024]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try profileLogoutTo(init, text, issuer, &output.interface);
+    try output.flush();
+}
+
+fn profileLogoutTo(init: std.process.Init, text: []const u8, issuer: chatgpt_plan_login.Issuer, out: *std.Io.Writer) !void {
+    const id = try @import("profile_id.zig").Id.parse(text);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credential_location.profile(init.environ_map, id, &path_buffer);
+    const info = (try codex_auth.profileInfo(path, id, codex_auth.nowSeconds(init.io))) orelse return error.FileNotFound;
+    const result = try chatgpt_plan_login.logoutProfile(init.io, path, id, issuer);
+    switch (result.local) {
+        .absent => try out.writeAll("Profile already signed out; nothing changed.\n"),
+        .fenced => |fenced| {
+            try out.writeAll("Profile signed out locally; its ID cannot be reused.\n");
+            if (fenced.durability_error != null) stderr.diagnostic("rui: local sign-out was published, but durable storage could not be confirmed.\n", .{});
+            if (info.wire == .chatgpt_plan and (fenced.revoke_error != null or result.remote != .revoked)) stderr.diagnostic("rui: ChatGPT did not confirm remote revocation; disconnect Rui in ChatGPT settings if needed.\n", .{});
+        },
+    }
+}
+
 fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
     const issuer = try planIssuer(init, fixture_endpoint);
-    provider_login.chatgpt(init, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
+    const receipt = provider_login.chatgpt(init, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
         fn publish() bool {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
@@ -463,9 +590,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
         error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime credential_location.variable(.chatgpt) ++ " names the credential"),
         else => err,
     };
-    const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves ChatGPT uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\n");
-    try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.chatgpt, outcome));
+    try writeProfileReceipt(init, .chatgpt, receipt);
 }
 
 fn planDisplay(shown: chatgpt_plan_login.Shown) !void {
@@ -539,12 +664,13 @@ fn readStdin(buffer: []u8) ?usize {
     return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
 }
 
-fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
+fn planLogout(init: std.process.Init, provider: []const u8, profile: ?[]const u8, fixture_endpoint: ?[]const u8) !void {
     if (!std.mem.eql(u8, provider, "chatgpt")) {
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
     const issuer = try planIssuer(init, fixture_endpoint);
+    if (profile) |text| return profileLogout(init, text, issuer);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const browser_path = credential_location.default(init.environ_map, .chatgpt, &browser_buffer) catch null;
     var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1245,7 +1371,7 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, fixture_en
     }
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
-    try provider_login.codex(init, exchange, struct {
+    const receipt = try provider_login.codex(init, exchange, struct {
         fn display(code: []const u8) !void {
             std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance ++ "Waiting for you to approve in the browser...\n", .{code});
         }
@@ -1254,8 +1380,17 @@ fn login(init: std.process.Init, name: []const u8, device_code: bool, fixture_en
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish);
-    const outcome = try finishLogin(init, .codex, "Rui: Signed in to ChatGPT with a device code.\n") orelse return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.codex, outcome));
+    try writeProfileReceipt(init, .codex, receipt);
+}
+
+fn writeProfileReceipt(init: std.process.Init, provider: protocol.Provider, receipt: provider_login.ProfileReceipt) !void {
+    var buffer: [512]u8 = undefined;
+    const status = switch (receipt.publication) {
+        .durable => "saved",
+        .committed_unconfirmed => "saved; durability unconfirmed, inspect before retrying",
+    };
+    const text = try std.fmt.bufPrint(&buffer, "Rui: ChatGPT profile {s} {s}. New-Session default unchanged.\nChoose it for new Sessions: rui defaults configure --provider {s} --profile {s}\n", .{ receipt.id.slice(), status, @tagName(provider), receipt.id.slice() });
+    try std.Io.File.stdout().writeStreamingAll(init.io, text);
 }
 
 fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !?preferences.LoginDefault {
@@ -1390,212 +1525,60 @@ fn loginInterrupted() bool {
     return login_state.load(.acquire) == .cancelled;
 }
 
-test "login owner preserves interruption, publication and independent defaults" {
-    const Case = enum { before_fresh, before_existing, after_fresh, after_existing, preference_failure, credential_failure, missing_home, receipt_failure };
+test "login owner publishes a fresh device profile without replacing existing defaults" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory = try tmp.dir.createDirPathOpen(io, ".config/rui", .{ .permissions = .fromMode(0o700) });
+    defer directory.close(io);
+    const old_credential = "synthetic legacy credential unchanged";
+    const old_preferences = "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n";
+    {
+        const file = try directory.createFile(io, "codex.json", .{ .permissions = .fromMode(0o600) });
+        defer file.close(io);
+        try file.writeStreamingAll(io, old_credential);
+    }
+    {
+        const file = try directory.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        defer file.close(io);
+        try file.writeStreamingAll(io, old_preferences);
+    }
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
     const Fixture = struct {
-        var before: bool = false;
-        var lock_path: []const u8 = undefined;
-        var signal_thread: ?std.Thread = null;
-        var signal_failure: ?anyerror = null;
-
-        const Custodian = struct {
-            done: std.atomic.Value(bool) = .init(false),
-            completed_while_held: bool = false,
-
-            fn hold(self: *@This(), held: std.Io.File) void {
-                const io = std.Io.Threaded.global_single_threaded.io();
-                defer held.close(io);
-                test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &self.done, test_poll.isSet) catch return;
-                self.completed_while_held = true;
-            }
-        };
-
-        fn exchange(io: std.Io, display: anytype, cancelled: *const fn () bool, tokens: *codex_auth.Tokens) !void {
-            _ = display;
+        fn exchange(_: std.Io, _: anytype, _: *const fn () bool, tokens: *codex_auth.Tokens) !void {
             tokens.* = .{};
-            errdefer std.crypto.secureZero(u8, std.mem.asBytes(tokens));
             try tokens.id_token.set(codex_auth.fixture_id_token);
             try tokens.access_token.set(codex_auth.fixture_access_token);
-            try tokens.refresh_token.set("new-synthetic-refresh");
-            if (before) {
-                try std.posix.raise(.INT);
-                try std.testing.expect(cancelled());
-                return;
-            }
-            const held = try std.Io.Dir.cwd().openFile(io, lock_path, .{ .mode = .read_write, .lock = .exclusive });
-            errdefer held.close(io);
-            signal_thread = try std.Thread.spawn(.{}, struct {
-                fn send(lock: std.Io.File) void {
-                    const clock = std.Io.Threaded.global_single_threaded.io();
-                    defer lock.close(clock);
-                    test_poll.waitUntil(clock, test_poll.after(clock, .fromSeconds(2)), {}, publishing) catch {
-                        signal_failure = error.PublicationNotReached;
-                        return;
-                    };
-                    std.posix.raise(.INT) catch |err| {
-                        signal_failure = err;
-                    };
-                }
-
-                fn publishing(_: void) bool {
-                    return login_state.load(.acquire) == .publishing;
-                }
-            }.send, .{held});
+            try tokens.refresh_token.set("synthetic-device-refresh");
+        }
+        fn display(_: []const u8) !void {}
+        fn no() bool {
+            return false;
+        }
+        fn yes() bool {
+            return true;
         }
     };
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const ignored: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
-    var previous: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.INT, &ignored, &previous);
-    defer std.posix.sigaction(.INT, &previous, null);
-    var signal_set = std.posix.sigemptyset();
-    std.posix.sigaddset(&signal_set, .INT);
-    var previous_mask: std.posix.sigset_t = undefined;
-    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &signal_set, &previous_mask);
-    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
-    defer login_state.store(.cancellable, .release);
-
-    for (std.meta.tags(Case)) |case| {
-        const before = case == .before_fresh or case == .before_existing;
-        const existing = case == .before_existing or case == .after_existing;
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
-        var directory = try tmp.dir.createDirPathOpen(io, ".config/rui", .{ .permissions = .fromMode(0o700) });
-        defer directory.close(io);
-        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buffer, "{s}/.config/rui/codex.json", .{home});
-        var lock_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        Fixture.lock_path = try std.fmt.bufPrint(&lock_buffer, "{s}/.config/rui/.codex.json.lock", .{home});
-        Fixture.before = before;
-        Fixture.signal_thread = null;
-        Fixture.signal_failure = null;
-        login_state.store(.cancelled, .release);
-        const lock = try directory.createFile(io, ".codex.json.lock", .{ .read = true, .permissions = .fromMode(0o600) });
-        lock.close(io);
-        const prior_defaults = "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n";
-        var prior_bytes: [4096]u8 = undefined;
-        defer std.crypto.secureZero(u8, &prior_bytes);
-        var prior_auth: []const u8 = &.{};
-        if (existing) {
-            var record: codex_credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 100 };
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-            try record.account_id.set("prior-account");
-            try record.id_token.set("prior-id");
-            try record.access_token.set("prior-access");
-            try record.refresh_token.set("prior-refresh");
-            var scratch: codex_credentials.Scratch = undefined;
-            try codex_credentials.install(path, &record, null, &scratch);
-            prior_auth = try directory.readFile(io, "codex.json", &prior_bytes);
-            const file = try directory.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-            defer file.close(io);
-            try file.writeStreamingAll(io, prior_defaults);
-        }
-        if (case == .preference_failure) {
-            const file = try directory.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
-            defer file.close(io);
-            try file.writeStreamingAll(io, "version=9\n");
-        }
-        if (case == .credential_failure) try directory.createDir(io, ".codex.json.tmp", .fromMode(0o700));
-        var custodian: Fixture.Custodian = .{};
-        var custodian_thread: ?std.Thread = null;
-        if (case == .before_existing) {
-            const held = try directory.openFile(io, ".codex.json.lock", .{ .mode = .read_write, .lock = .exclusive });
-            custodian_thread = std.Thread.spawn(.{}, Fixture.Custodian.hold, .{ &custodian, held }) catch |err| {
-                held.close(io);
-                return err;
-            };
-        }
-        defer if (custodian_thread) |thread| {
-            custodian.done.store(true, .release);
-            thread.join();
-        };
-        var environment = std.process.Environ.Map.init(std.testing.allocator);
-        defer environment.deinit();
-        if (case != .missing_home) try environment.put("HOME", home);
-        try environment.put("RUI_CODEX_CREDENTIAL_FILE", path);
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const argv = [_][*:0]const u8{ "rui", "login", "codex" };
-        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
-        var outcome: anyerror!void = undefined;
-        {
-            const saved_stdout = std.c.dup(1);
-            if (saved_stdout < 0) return error.TestDupFailed;
-            defer _ = std.c.close(saved_stdout);
-            const receipt = try directory.createFile(io, "receipt", .{});
-            defer receipt.close(io);
-            if (std.c.dup2(receipt.handle, 1) < 0) return error.TestRedirectFailed;
-            defer std.debug.assert(std.c.dup2(saved_stdout, 1) == 1);
-            if (case == .receipt_failure) {
-                const readonly = try directory.openFile(io, "receipt", .{});
-                defer readonly.close(io);
-                if (std.c.dup2(readonly.handle, 1) < 0) return error.TestRedirectFailed;
-            }
-            outcome = if (@backingInt(case) % 2 == 0) login(init, "codex", false, null, Fixture.exchange) else login(init, "chatgpt", true, null, Fixture.exchange);
-        }
-        if (Fixture.signal_thread) |thread| thread.join();
-        custodian.done.store(true, .release);
-        if (custodian_thread) |thread| {
-            thread.join();
-            custodian_thread = null;
-            try std.testing.expect(custodian.completed_while_held);
-        }
-        if (Fixture.signal_failure) |err| return err;
-        var restored: std.posix.Sigaction = undefined;
-        std.posix.sigaction(.INT, null, &restored);
-        try std.testing.expectEqual(std.posix.SIG.IGN, restored.handler.handler);
-        var receipts: [2048]u8 = undefined;
-        const receipt_bytes = try directory.readFile(io, "receipt", &receipts);
-        if (before or case == .credential_failure) {
-            if (before) {
-                try std.testing.expectError(error.LoginInterrupted, outcome);
-            } else {
-                try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
-                if (outcome) |_| return error.CredentialFailureNotReported else |err| try std.testing.expect(err != error.LoginInterrupted);
-            }
-            try std.testing.expectEqual(@as(usize, 0), receipt_bytes.len);
-            if (existing) {
-                var bytes: [4096]u8 = undefined;
-                defer std.crypto.secureZero(u8, &bytes);
-                try std.testing.expectEqualStrings(prior_auth, try directory.readFile(io, "codex.json", &bytes));
-            } else {
-                var scratch: codex_credentials.Scratch = undefined;
-                try std.testing.expectError(error.FileNotFound, codex_credentials.loadInto(path, &scratch.current, &scratch));
-            }
-        } else {
-            if (case == .receipt_failure) {
-                if (outcome) |_| return error.ReceiptFailureNotReported else |err| try std.testing.expect(err != error.LoginInterrupted);
-            } else try outcome;
-            try std.testing.expectEqual(LoginState.publishing, login_state.load(.acquire));
-            var scratch: codex_credentials.Scratch = undefined;
-            const record = &scratch.current;
-            try codex_credentials.loadInto(path, record, &scratch);
-            defer std.crypto.secureZero(u8, std.mem.asBytes(record));
-            try std.testing.expectEqualStrings(codex_auth.fixture_account_id, record.account_id.slice());
-            try std.testing.expectEqualStrings("new-synthetic-refresh", record.refresh_token.slice());
-            try std.testing.expectEqual(@as(u64, if (existing) 2 else 1), record.generation);
-            if (case != .receipt_failure) try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Rui: Signed in to ChatGPT with a device code.\n") != null);
-            if (case == .missing_home or case == .preference_failure) {
-                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "ChatGPT (device code) may not be saved as the default for new Sessions") != null);
-                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, if (case == .missing_home) "InvalidHome" else "UnsupportedPreferencesVersion") != null);
-            }
-        }
-        if (existing) {
-            var bytes: [1024]u8 = undefined;
-            try std.testing.expectEqualStrings(prior_defaults, try directory.readFile(io, "preferences", &bytes));
-        } else if (case == .preference_failure) {
-            var bytes: [1024]u8 = undefined;
-            try std.testing.expectEqualStrings("version=9\n", try directory.readFile(io, "preferences", &bytes));
-        } else {
-            const defaults = try preferences.load(home);
-            try std.testing.expectEqualStrings(if (before or case == .credential_failure or case == .missing_home) "" else "codex", defaults.provider.slice());
-            try std.testing.expectEqualStrings("", defaults.model.slice());
-        }
-        try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "new-synthetic-refresh") == null);
-        try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, codex_auth.fixture_access_token) == null);
-    }
+    try std.testing.expectError(error.LoginInterrupted, provider_login.codex(init, Fixture.exchange, Fixture.display, Fixture.yes, Fixture.yes));
+    try std.testing.expectError(error.LoginInterrupted, provider_login.codex(init, Fixture.exchange, Fixture.display, Fixture.no, Fixture.no));
+    const first = try provider_login.codex(init, Fixture.exchange, Fixture.display, Fixture.no, Fixture.yes);
+    const second = try provider_login.codex(init, Fixture.exchange, Fixture.display, Fixture.no, Fixture.yes);
+    try std.testing.expect(first.publication == .durable and second.publication == .durable);
+    try std.testing.expect(!std.mem.eql(u8, first.id.slice(), second.id.slice()));
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credential_location.profile(&environment, first.id, &path_buffer);
+    const info = (try codex_auth.profileInfo(path, first.id, codex_auth.nowSeconds(io))).?;
+    try std.testing.expect(info.wire == .codex_device and !info.signed_out);
+    var original: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(old_credential, try directory.readFile(io, "codex.json", &original));
+    try std.testing.expectEqualStrings(old_preferences, try directory.readFile(io, "preferences", &original));
 }
 
 test "SIGINT and credential publication have one winner" {
@@ -1855,19 +1838,19 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     entry.workspace_len = try cwd.realPath(init.io, &entry.workspace_buffer);
     const home = init.environ_map.get("HOME") orelse return homeRequired("a new Session reads saved defaults and request captures under HOME");
     entry.home = home;
-    const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.needsPreferences()) try preferences.load(home) else .{} };
+    const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = try preferences.load(home) };
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
     const usable: provider_selection.Readinesses = .initFill(.configured);
     const selected = try snapshot.resolve(&usable);
-    var readiness = localReadiness(init);
+    var readiness = profileReadiness(init, &snapshot.defaults, localReadiness(init), if (intent.provider) |name| std.mem.eql(u8, name, "openai") else false);
     entry.binding = try snapshot.resolve(&readiness);
     if (selected != null and entry.binding != null) {
         if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
-        readiness.set(.openai, connection_info.readiness);
+        if (snapshot.defaults.profile.len == 0 or (intent.provider != null and std.mem.eql(u8, intent.provider.?, "openai"))) readiness.set(.openai, connection_info.readiness);
         entry.binding = try snapshot.resolve(&readiness);
         if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
@@ -1928,7 +1911,32 @@ fn copiedKeySource(init: std.process.Init, source: @FieldType(host_start.Connect
 }
 
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
-    return storeReadiness(init, store, localReadiness(init)).readiness;
+    const local = storeReadiness(init, store, localReadiness(init)).readiness;
+    const home = init.environ_map.get("HOME") orelse return local;
+    const defaults = preferences.load(home) catch return local;
+    return profileReadiness(init, &defaults, local, true);
+}
+
+fn profileReadiness(init: std.process.Init, defaults: *const preferences.Values, legacy: provider_selection.Readinesses, allow_openai: bool) provider_selection.Readinesses {
+    if (defaults.profile.len == 0) return legacy;
+    var readiness: provider_selection.Readinesses = .initFill(.missing);
+    if (allow_openai) readiness.set(.openai, legacy.get(.openai));
+    const id = @import("profile_id.zig").Id.parse(defaults.profile.slice()) catch return readiness;
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = credential_location.profile(init.environ_map, id, &path_buffer) catch return readiness;
+    const info = (codex_auth.profileInfo(path, id, codex_auth.nowSeconds(init.io)) catch return readiness) orelse return readiness;
+    if (info.signed_out) return readiness;
+    const provider: protocol.Provider = switch (info.wire) {
+        .codex_device => .codex,
+        .chatgpt_plan => .chatgpt,
+    };
+    readiness.set(provider, switch (info.status) {
+        .missing => .missing,
+        .configured => .configured,
+        .renewal_due => .renewal_due,
+        .refresh_required => .refresh_required,
+    });
+    return readiness;
 }
 
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, assignments: []const []const u8, ops: HostLaunchOps, result: *HostLaunchResult) void {
@@ -2210,6 +2218,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
+    if (parsed.get("profile")) |text| {
+        if (!std.mem.eql(u8, text, "legacy")) _ = try @import("profile_id.zig").Id.parse(text);
+        input.profile = .{ .present = true, .value = if (std.mem.eql(u8, text, "legacy")) null else text };
+    }
     if (parsed.get("preset")) |name| input.preset = .{ .present = true, .value = name };
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
@@ -2230,28 +2242,44 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    if (input.session == .create and !input.preset.present) {
+    var saved_profile: [32]u8 = undefined;
+    if (input.session == .create) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
         const reads = input.creationReads();
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads.preferences) blk: {
+        var snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if ((!input.preset.present and reads.preferences) or (!input.parent.present and !input.profile.present)) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration with omitted defaults reads saved preferences");
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
-        saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
-        if (reads.binding) {
-            binding = try snapshot.resolveUnprompted();
-            input.model = .{ .present = true, .value = binding.model.slice() };
-            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+        const selected = new_session_selection.capturedProfile(input.profile, input.parent.present, if (input.provider.present) input.provider.value else null, &snapshot.defaults.profile);
+        if (!input.profile.present and selected.present) {
+            input.profile = if (selected.value) |value| blk: {
+                @memcpy(&saved_profile, value);
+                break :blk .{ .present = true, .value = &saved_profile };
+            } else .{ .present = true, .value = null };
         }
-        input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
-        if (!input.parent.present and !input.workspace.present) {
-            var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
-            defer cwd.close(io);
-            const length = try cwd.realPath(io, &workspace_buffer);
-            input.workspace = .{ .present = true, .value = workspace_buffer[0..length] };
+        if (input.profile.present) if (input.profile.value) |text| {
+            const method = try profileMethod(init, text);
+            const chosen = if (input.provider.present) input.provider.value else if (!input.preset.present and snapshot.defaults.provider.len != 0) snapshot.defaults.provider.slice() else @tagName(method);
+            if (!std.mem.eql(u8, chosen, @tagName(method))) return error.AccountMismatch;
+            if (!input.preset.present and !input.provider.present and snapshot.defaults.provider.len == 0) try snapshot.defaults.provider.set(@tagName(method));
+        };
+        if (!input.preset.present) {
+            saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
+            if (reads.binding) {
+                binding = try snapshot.resolveUnprompted();
+                input.model = .{ .present = true, .value = binding.model.slice() };
+                if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+            }
+            input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
+            if (!input.parent.present and !input.workspace.present) {
+                var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
+                defer cwd.close(io);
+                const length = try cwd.realPath(io, &workspace_buffer);
+                input.workspace = .{ .present = true, .value = workspace_buffer[0..length] };
+            }
         }
     }
     if (start) {
@@ -5678,4 +5706,78 @@ test "Host selection round trips every Store placement and interface through def
             try std.testing.expectEqualStrings(dir, result.outcome.failed.store.slice());
         }
     };
+}
+
+test "GUI explicit OpenAI and selected profile readiness" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir = try tmp.dir.createDirPathOpen(io, ".config/rui/profiles", .{ .permissions = .fromMode(0o700) });
+    dir.close(io);
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    const credentials = @import("codex_credentials.zig");
+    const id = try credentials.ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credential_location.profile(&environment, id, &path_buffer);
+    var record: credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1_750_000_000 };
+    defer record.wipe();
+    try record.account_id.set(codex_auth.fixture_account_id);
+    try record.id_token.set(codex_auth.fixture_id_token);
+    try record.access_token.set(codex_auth.fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    var legacy = record;
+    defer legacy.wipe();
+    var scratch: credentials.Scratch = undefined;
+    try std.testing.expect((try credentials.createProfile(path, id, &record, &scratch)) == .durable);
+    const usable: provider_selection.Readinesses = .initFill(.configured);
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .profile = .{ .set = id.slice() } }, &usable);
+    const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
+    const entry = try init.gpa.create(OverviewEntry);
+    defer init.gpa.destroy(entry);
+    var fixture: LaunchFixture = .{ .scenario = .success, .chatgpt = true };
+    try prepareOverviewUsing(init, .{ .store = store }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding != null);
+    try std.testing.expectEqualStrings("codex", entry.binding.?.provider.slice());
+    try std.testing.expect(entry.launch.?.outcome == .ready);
+    try std.testing.expectEqual(@as(usize, 1), fixture.launches);
+    try std.testing.expect((overviewProviderReady(init, store).get(.codex)).usable());
+    try provider_login.key(init, "synthetic-openai-key");
+    fixture = .{ .scenario = .success, .chatgpt = true };
+    try prepareOverviewUsing(init, .{ .store = store, .provider = "openai", .model = "explicit-model" }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding != null and entry.launch.?.outcome == .ready);
+    try std.testing.expectEqualStrings("openai", entry.binding.?.provider.slice());
+    fixture = .{ .scenario = .success, .chatgpt = true };
+    try prepareOverviewUsing(init, .{ .store = store, .provider = "codex", .model = "explicit-model" }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding != null and entry.launch.?.outcome == .ready);
+
+    var legacy_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const legacy_path = try credential_location.default(&environment, .codex, &legacy_buffer);
+    try credentials.install(legacy_path, &legacy, null, &scratch);
+    _ = try preferences.update(home, .{ .profile = .{ .set = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, &usable);
+    fixture = .{ .scenario = .success, .chatgpt = true };
+    try prepareOverviewUsing(init, .{ .store = store }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding == null and entry.launch == null);
+    try std.testing.expect(!overviewProviderReady(init, store).get(.codex).usable());
+    try std.testing.expectEqual(@as(usize, 0), fixture.launches);
+    _ = try preferences.update(home, .{ .profile = .{ .set = id.slice() } }, &usable);
+    try prepareOverviewUsing(init, .{ .store = store, .provider = "chatgpt" }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding == null and entry.launch == null);
+    const revoke = struct {
+        fn call(_: void, _: *const credentials.Record) !void {}
+    }.call;
+    try std.testing.expect((try credentials.signOutProfile(path, id, &scratch, {}, revoke)) == .fenced);
+    try prepareOverviewUsing(init, .{ .store = store }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding == null and entry.launch == null);
+    try std.testing.expectEqual(@as(usize, 0), fixture.launches);
+    _ = try preferences.update(home, .{ .profile = .clear }, &usable);
+    try prepareOverviewUsing(init, .{ .store = store }, entry, fixture.ops(), null);
+    try std.testing.expect(entry.binding != null and entry.launch.?.outcome == .ready);
+    try std.testing.expectEqual(@as(usize, 1), fixture.launches);
 }

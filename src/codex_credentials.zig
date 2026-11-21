@@ -11,6 +11,12 @@ pub const max_file_bytes = policy.max_file_bytes;
 pub const State = policy.State;
 pub const Record = policy.Record;
 
+pub const ProfileId = @import("profile_id.zig").Id;
+
+fn requireProfile(record: *const Record, id: ProfileId) !void {
+    if (!std.mem.eql(u8, record.profile_id.slice(), id.slice())) return error.AccountMismatch;
+}
+
 pub const Scratch = struct {
     file: [max_file_bytes + 1]u8 = undefined,
     current: Record = undefined,
@@ -29,12 +35,23 @@ pub const Lease = struct {
 };
 
 pub fn leaseInto(path: []const u8, destination: *Lease, scratch: *Scratch) !void {
+    return leaseOwnedInto(path, null, destination, scratch);
+}
+
+pub fn leaseProfileInto(path: []const u8, id: ProfileId, destination: *Lease, scratch: *Scratch) !void {
+    return leaseOwnedInto(path, id, destination, scratch);
+}
+
+fn leaseOwnedInto(path: []const u8, id: ?ProfileId, destination: *Lease, scratch: *Scratch) !void {
     destination.owner = try Owner.open(path);
     errdefer destination.owner.close();
     destination.lock = try destination.owner.acquireLock(.shared);
     errdefer destination.lock.close(io);
     try destination.owner.readRecordInto(&destination.record, &scratch.file);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&destination.record));
+    if (id) |profile| {
+        try requireProfile(&destination.record, profile);
+    } else if (destination.record.profile_id.len != 0) return error.OwnedCredential;
     try destination.owner.syncDirectory();
     try policy.requireReady(&destination.record);
 }
@@ -46,10 +63,19 @@ pub fn loadInto(path: []const u8, destination: *Record, scratch: *Scratch) !void
     defer lock.close(io);
     try owner.readRecordInto(destination, &scratch.file);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
+    if (destination.profile_id.len != 0) return error.OwnedCredential;
     try owner.syncDirectory();
 }
 
 pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratch) !bool {
+    return readOwnedSnapshotInto(path, null, destination, scratch);
+}
+
+pub fn readProfileSnapshotInto(path: []const u8, id: ProfileId, destination: *Record, scratch: *Scratch) !bool {
+    return readOwnedSnapshotInto(path, id, destination, scratch);
+}
+
+fn readOwnedSnapshotInto(path: []const u8, id: ?ProfileId, destination: *Record, scratch: *Scratch) !bool {
     var owner = Owner.open(path) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
@@ -59,6 +85,10 @@ pub fn readSnapshotInto(path: []const u8, destination: *Record, scratch: *Scratc
         error.FileNotFound => return false,
         else => return err,
     };
+    errdefer destination.wipe();
+    if (id) |profile| {
+        try requireProfile(destination, profile);
+    } else if (destination.profile_id.len != 0) return error.OwnedCredential;
     return true;
 }
 
@@ -83,7 +113,80 @@ pub fn install(path: []const u8, record: *Record, expected_generation: ?u64, scr
     try owner.publish(record, &scratch.file);
 }
 
+pub const ProfilePublication = union(enum) { durable, committed_unconfirmed: anyerror };
+
+pub fn createProfile(path: []const u8, id: ProfileId, record: *Record, scratch: *Scratch) !ProfilePublication {
+    try policy.validateReplacement(record);
+    if (record.profile_id.len != 0) return error.OwnedCredential;
+    _ = try ProfileId.parse(id.slice());
+    var owner = try Owner.open(path);
+    defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
+    if (owner.readRecordInto(&scratch.current, &scratch.file)) |_| {
+        scratch.current.wipe();
+        return error.ProfileAlreadyExists;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    const previous = .{ .version = record.version, .generation = record.generation, .profile_id = record.profile_id };
+    record.version = 4;
+    try record.profile_id.set(id.slice());
+    record.generation = 1;
+    var renamed = false;
+    owner.publishRecordObserved(record, null, &scratch.file, &renamed) catch |err| {
+        if (renamed) return .{ .committed_unconfirmed = err };
+        record.version = previous.version;
+        record.generation = previous.generation;
+        record.profile_id = previous.profile_id;
+        return err;
+    };
+    return .durable;
+}
+
+pub const ProfileLogout = union(enum) {
+    absent,
+    fenced: struct { durability_error: ?anyerror = null, revoke_error: ?anyerror = null },
+};
+
+pub fn signOutProfile(path: []const u8, id: ProfileId, scratch: *Scratch, context: anytype, revoke: anytype) !ProfileLogout {
+    var owner = try Owner.open(path);
+    defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
+    const record = &scratch.current;
+    owner.readRecordInto(record, &scratch.file) catch |err| switch (err) {
+        error.FileNotFound => return .absent,
+        else => return err,
+    };
+    defer record.wipe();
+    try requireProfile(record, id);
+    if (record.state == .signed_out) return .absent;
+    var tombstone = record.*;
+    defer tombstone.wipe();
+    try policy.signOut(&tombstone);
+    var renamed = false;
+    var result: ProfileLogout = .{ .fenced = .{} };
+    owner.publishRecordObserved(&tombstone, null, &scratch.file, &renamed) catch |err| {
+        if (!renamed) return err;
+        result.fenced.durability_error = err;
+    };
+    revoke(context, record) catch |err| {
+        result.fenced.revoke_error = err;
+    };
+    return result;
+}
+
 pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scratch, replacement: *Record, context: anytype, exchange: anytype) !bool {
+    return exchangeOwnedRefresh(path, null, expected_generation, scratch, replacement, context, exchange);
+}
+
+pub fn exchangeProfileRefresh(path: []const u8, id: ProfileId, expected_generation: u64, scratch: *Scratch, replacement: *Record, context: anytype, exchange: anytype) !bool {
+    return exchangeOwnedRefresh(path, id, expected_generation, scratch, replacement, context, exchange);
+}
+
+fn exchangeOwnedRefresh(path: []const u8, id: ?ProfileId, expected_generation: u64, scratch: *Scratch, replacement: *Record, context: anytype, exchange: anytype) !bool {
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.exclusive);
@@ -91,6 +194,9 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scr
     const record = &scratch.current;
     try owner.readRecordInto(record, &scratch.file);
     defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    if (id) |profile| {
+        try requireProfile(record, profile);
+    } else if (record.profile_id.len != 0) return error.OwnedCredential;
     if (try policy.claimRefresh(record, expected_generation) == .superseded) return false;
     try owner.publish(record, &scratch.file);
     defer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
@@ -117,6 +223,7 @@ pub fn signOut(path: []const u8, scratch: *Scratch, context: anytype, revoke: an
         else => return err,
     };
     defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    if (record.profile_id.len != 0) return error.OwnedCredential;
     if (record.state == .signed_out) return false;
     try revoke(context, record);
     try policy.signOut(record);
@@ -256,13 +363,18 @@ const Owner = struct {
     const PublishFault = enum { write, file_sync, rename, directory_sync };
 
     fn publishWithFault(self: *Owner, record: *const Record, fault: ?PublishFault, buffer: *[max_file_bytes + 1]u8) !void {
+        var renamed = false;
+        return self.publishRecordObserved(record, fault, buffer, &renamed);
+    }
+
+    fn publishRecordObserved(self: *Owner, record: *const Record, fault: ?PublishFault, buffer: *[max_file_bytes + 1]u8, renamed: *bool) !void {
         const bytes = buffer[0..max_file_bytes];
         const encoded = policy.encode(record, bytes) catch |err| {
             std.crypto.secureZero(u8, bytes);
             return err;
         };
         defer std.crypto.secureZero(u8, bytes[0..encoded.len]);
-        return self.publishBytes(encoded, fault);
+        return self.publishBytesObserved(encoded, fault, renamed);
     }
 
     fn publishBytes(self: *Owner, encoded: []const u8, fault: ?PublishFault) !void {
@@ -729,4 +841,117 @@ test "private document edits hold one lock across concurrent read modify and pub
     for (workers) |worker| try std.testing.expectEqual(@as(?anyerror, null), worker.failure);
     var result: [32]u8 = undefined;
     try std.testing.expectEqualStrings("40", (try readPrivate(path, &result)).?);
+}
+
+test "CM-46 an owned profile cannot be replaced by a legacy installation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = try testPath(&tmp, "profile-a", &a_buffer);
+    const b_path = try testPath(&tmp, "profile-b", &b_buffer);
+    var scratch: Scratch = undefined;
+    const a = "version=4\nprofile_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ngeneration=1\naccount_id=synthetic-a\nfedramp=0\nid_token=aaa.bbb.ccc\naccess_token=aaa.bbb.ccc\nrefresh_token=synthetic-a-refresh\nexpires_at=1234\nrefreshed_at=1750000000\nstate=ready\n";
+    try std.testing.expect(try createPrivate(a_path, a, &scratch.file));
+    var b = try testRecord("synthetic-b", 0);
+    try install(b_path, &b, null, &scratch);
+    var replacement = try testRecord("synthetic-b", 0);
+    try std.testing.expectError(error.OwnedCredential, install(a_path, &replacement, null, &scratch));
+    var lease: Lease = undefined;
+    try std.testing.expectError(error.OwnedCredential, leaseInto(a_path, &lease, &scratch));
+    try leaseProfileInto(a_path, try ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), &lease, &scratch);
+    try std.testing.expectEqualStrings("synthetic-a", lease.record.account_id.slice());
+    lease.release();
+    try leaseInto(b_path, &lease, &scratch);
+    try std.testing.expectEqualStrings("synthetic-b", lease.record.account_id.slice());
+    lease.release();
+}
+
+test "CM-47 profile logout fences one owner even when revocation fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = try testPath(&tmp, "a", &a_buffer);
+    const b_path = try testPath(&tmp, "b", &b_buffer);
+    const a_id = try ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const b_id = try ProfileId.parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    var scratch: Scratch = undefined;
+    var a = try testRecord("synthetic-a", 0);
+    defer a.wipe();
+    var b = try testRecord("synthetic-b", 0);
+    defer b.wipe();
+    try std.testing.expect((try createProfile(a_path, a_id, &a, &scratch)) == .durable);
+    try std.testing.expect((try createProfile(b_path, b_id, &b, &scratch)) == .durable);
+    try std.testing.expectError(error.OwnedCredential, createProfile(b_path, b_id, &a, &scratch));
+    var refreshed: Record = undefined;
+    const exchange = struct {
+        fn run(_: void, current: *const Record, replacement: *Record) !void {
+            replacement.* = current.*;
+            replacement.state = .ready;
+            try replacement.refresh_token.set("synthetic-rotated");
+        }
+    }.run;
+    try std.testing.expectError(error.OwnedCredential, exchangeRefresh(a_path, 1, &scratch, &refreshed, {}, exchange));
+    try std.testing.expectError(error.AccountMismatch, exchangeProfileRefresh(a_path, b_id, 1, &scratch, &refreshed, {}, exchange));
+    try std.testing.expect(try exchangeProfileRefresh(a_path, a_id, 1, &scratch, &refreshed, {}, exchange));
+    var refreshed_lease: Lease = undefined;
+    try leaseProfileInto(a_path, a_id, &refreshed_lease, &scratch);
+    try std.testing.expectEqual(@as(u64, 2), refreshed_lease.record.generation);
+    try std.testing.expectEqualStrings(a_id.slice(), refreshed_lease.record.profile_id.slice());
+    refreshed_lease.release();
+    const revoke = struct {
+        fn call(_: void, _: *const Record) !void {
+            return error.SyntheticRevokeFailure;
+        }
+    }.call;
+    const result = try signOutProfile(a_path, a_id, &scratch, {}, revoke);
+    try std.testing.expect(result == .fenced);
+    try std.testing.expectEqual(error.SyntheticRevokeFailure, result.fenced.revoke_error.?);
+    try std.testing.expect(result.fenced.durability_error == null);
+    var lease: Lease = undefined;
+    try std.testing.expectError(error.SignedOut, leaseProfileInto(a_path, a_id, &lease, &scratch));
+    try std.testing.expectError(error.AccountMismatch, leaseProfileInto(b_path, a_id, &lease, &scratch));
+    try leaseProfileInto(b_path, b_id, &lease, &scratch);
+    try std.testing.expectEqualStrings("synthetic-b", lease.record.account_id.slice());
+    lease.release();
+    var replacement = try testRecord("synthetic-a", 0);
+    defer replacement.wipe();
+    try std.testing.expectError(error.OwnedCredential, install(a_path, &replacement, null, &scratch));
+    try std.testing.expectError(error.ProfileAlreadyExists, createProfile(a_path, a_id, &replacement, &scratch));
+}
+
+test "CM-49 refresh cannot relabel a foreign owned grant" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = try testPath(&tmp, "a", &a_buffer);
+    const b_path = try testPath(&tmp, "b", &b_buffer);
+    const a_id = try ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const b_id = try ProfileId.parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    var scratch: Scratch = undefined;
+    var a = try testRecord("same-local-account", 0);
+    defer a.wipe();
+    var b = try testRecord("same-local-account", 0);
+    defer b.wipe();
+    _ = try createProfile(a_path, a_id, &a, &scratch);
+    _ = try createProfile(b_path, b_id, &b, &scratch);
+    const foreign = struct {
+        fn run(input: *const Record, _: *const Record, replacement: *Record) !void {
+            replacement.* = input.*;
+        }
+    }.run;
+    var replacement: Record = undefined;
+    try std.testing.expectError(error.OwnedCredential, exchangeProfileRefresh(a_path, a_id, 1, &scratch, &replacement, &b, foreign));
+    var current: Record = undefined;
+    defer current.wipe();
+    try std.testing.expect(try readProfileSnapshotInto(a_path, a_id, &current, &scratch));
+    try std.testing.expectEqual(State.refresh_pending, current.state);
+    try std.testing.expectEqualStrings(a_id.slice(), current.profile_id.slice());
+    var lease: Lease = undefined;
+    try leaseProfileInto(b_path, b_id, &lease, &scratch);
+    try std.testing.expectEqual(@as(u64, 1), lease.record.generation);
+    try std.testing.expectEqualStrings(b_id.slice(), lease.record.profile_id.slice());
+    lease.release();
 }

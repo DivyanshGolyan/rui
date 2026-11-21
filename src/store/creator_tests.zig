@@ -169,3 +169,47 @@ test "session creator Configure and Message births preserve origin across archiv
         }
     }.run);
 }
+
+test "ADM-54 Session profile is captured for Turn retry and child creation" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var a_command = try testing.completeConfiguration("profile-a", "", workspace, "model-a");
+            a_command.profile.state = .value;
+            try a_command.profile.value.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            const a = (try storage.configure(&a_command, .{})).accepted.session;
+            try testing.submitTestMessage(&storage, &tmp, "profile-input", "profile-input", a.slice(), "work");
+            const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var b_command = try testing.completeConfiguration("profile-b", "", workspace, "model-a");
+            b_command.profile.state = .value;
+            try b_command.profile.value.set("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            const b = (try storage.configure(&b_command, .{})).accepted.session;
+            var child = try childCommand("profile-child", a.slice());
+            const c = (try storage.configure(&child, .{})).accepted.session;
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND profile_id=?2", .{ b.slice(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }));
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND profile_id=?2", .{ c.slice(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }));
+            try std.testing.expect((try storage.configure(&a_command, .{})).accepted.replayed);
+            try a_command.profile.value.set("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            try std.testing.expect(try storage.configure(&a_command, .{}) == .conflict);
+            try storage.close();
+            opened = false;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            opened = true;
+            const retry = (try fixtures.admitRetryForTesting(&storage)).?.permit.binding;
+            try std.testing.expectEqual(original.operation_id, retry.operation_id);
+            var page: testing.TestingPage = undefined;
+            page.open(&storage, retry);
+            defer page.close();
+            var settings: @import("domain/historical.zig").HistoricalSettings = undefined;
+            try page.settings(&settings);
+            try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", settings.profile_id.?.slice());
+        }
+    }.run);
+}

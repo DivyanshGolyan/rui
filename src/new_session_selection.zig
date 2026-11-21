@@ -5,6 +5,30 @@ const product_defaults = @import("product_defaults.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
 
+pub fn capturedProfile(explicit: @import("configure_input.zig").OptionalPolicy, has_parent: bool, provider: ?[]const u8, saved: *const protocol.Bounded(32)) @import("configure_input.zig").OptionalPolicy {
+    if (explicit.present or has_parent) return explicit;
+    if (provider) |name| if (std.mem.eql(u8, name, "openai")) return .{ .present = true, .value = null };
+    if (saved.len == 0) return explicit;
+    return .{ .present = true, .value = saved.slice() };
+}
+
+test "new Session profile capture respects explicit choice and parent inheritance" {
+    var saved: protocol.Bounded(32) = .{};
+    try saved.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const root = capturedProfile(.{}, false, null, &saved);
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", root.value.?);
+    const explicit = capturedProfile(.{ .present = true, .value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, false, null, &saved);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", explicit.value.?);
+    const legacy = capturedProfile(.{ .present = true, .value = null }, false, null, &saved);
+    try std.testing.expect(legacy.present and legacy.value == null);
+    try std.testing.expect(!capturedProfile(.{}, true, null, &saved).present);
+    const openai = capturedProfile(.{}, false, "openai", &saved);
+    try std.testing.expect(openai.present and openai.value == null);
+    try std.testing.expect(!capturedProfile(.{}, true, "openai", &saved).present);
+    const explicit_openai = capturedProfile(.{ .present = true, .value = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, false, "openai", &saved);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", explicit_openai.value.?);
+}
+
 pub const Intent = struct {
     store: ?[]const u8 = null,
     provider: ?[]const u8 = null,

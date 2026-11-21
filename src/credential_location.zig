@@ -28,6 +28,19 @@ pub fn default(environ: *const std.process.Environ.Map, comptime provider: Provi
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/" ++ @tagName(provider) ++ extension, .{home}) catch error.InvalidCredentialPath;
 }
 
+pub fn profileDirectory(environ: *const std.process.Environ.Map, buffer: []u8) Error![]const u8 {
+    const home = environ.get("HOME") orelse return error.HomeRequired;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/profiles", .{home}) catch error.InvalidCredentialPath;
+}
+
+pub fn profile(environ: *const std.process.Environ.Map, id: @import("profile_id.zig").Id, buffer: []u8) Error![]const u8 {
+    const home = environ.get("HOME") orelse return error.HomeRequired;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
+    _ = @import("profile_id.zig").Id.parse(id.slice()) catch return error.InvalidCredentialPath;
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/profiles/{s}", .{ home, id.slice() }) catch error.InvalidCredentialPath;
+}
+
 test "credential default covers each variable and home combination" {
     inline for (std.enums.values(Provider)) |provider| {
         for ([_]?[]const u8{ null, "/credential", "relative", "" }) |named| {

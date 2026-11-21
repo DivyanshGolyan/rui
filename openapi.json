@@ -4332,6 +4332,7 @@
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
+                      "profile_on_update",
                       "parent_provider_forbidden",
                       "parent_workspace_forbidden",
                       "tools_not_in_parent",
@@ -4431,6 +4432,18 @@
             "type": "string",
             "maxLength": 64,
             "x-rui-max-bytes": 64
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32,
+                "x-rui-max-bytes": 32
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -7781,6 +7794,18 @@
               },
               "require_model": {
                 "const": true
+              },
+              "profile": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -7871,6 +7896,18 @@
               },
               "require_model": {
                 "const": true
+              },
+              "profile": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [

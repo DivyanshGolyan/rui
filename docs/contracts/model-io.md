@@ -600,7 +600,7 @@ The pinned first-party login tests accept opaque tokens without `exp`, so treati
 Account IDs are nonempty opaque exact strings, not UUIDs.
 No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
-`rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
+`rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and publishes a new isolated profile. Existing legacy device credentials remain at `~/.config/rui/codex.json` or the absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
 `rui host serve --set 'providers.codex={}'` activates the fixed HTTPS subscription endpoint; a development endpoint and credential-free requests can instead be configured through provider settings.
 An explicit `providers` object selects exactly the providers a new Host serves; `providers={}` selects none.
 When `providers` is omitted, every new-Host entry uses automatic selection, including plain `rui`, `host start`, foreground `host serve`, saved `host.json`, and file or framed-stdin settings documents.
@@ -614,7 +614,7 @@ Model admission skips Sessions of any provider the Host does not serve, and `hos
 Configuration and saved-result inspection need no credential.
 The credential file and stable lock live in the same private directory and reject symlinks, wrong ownership and permissive modes; symlinks above that directory are followed, as macOS's `/var` needs, but the directory itself must not be one.
 They carry a closed versioned format.
-There is no Session account binding or Codex CLI credential fallback.
+A new Session can capture an opaque profile ID. Each admitted Turn retains that ID for acquisition, refresh and continuation; changing the new-Session default does not change existing work. Child creation inherits its parent's profile when the child omits a choice. Legacy Sessions retain their existing unbound source and unknown provenance. Profile-bound work never falls back to a legacy file or another profile. Rui does not import Codex CLI credentials.
 
 `rui auth login openai` reads one line from stdin (unechoed on a terminal) and installs it as an owner-only `~/.config/rui/openai.key`, or the absolute path `RUI_OPENAI_KEY_FILE` names; it then saves the provider default as every `rui auth login` does ([Human entry and authentication](session-ui.md#human-entry-and-authentication)).
 An explicitly selected OpenAI provider reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to the configured `providers.openai.endpoint` Responses URL and its sibling `/models` for an OpenAI-compatible `https://` endpoint with a host and no credentials or fragment, with no ChatGPT account header.
@@ -623,22 +623,19 @@ A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.
 Automatic provider selection serves OpenAI whenever a usable key is saved.
 
-An explicitly selected `chatgpt` provider serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
+An explicitly selected `chatgpt` provider serves a browser profile or the legacy credential at `~/.config/rui/chatgpt.json` or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names. Its record carries the issued client id and its local account claim is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-Its provider fact names `rui auth login chatgpt`, and the device-code provider's names `rui auth login chatgpt --device-code`, so the Host line and the overview's notices name the command for the sign-in at hand; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." or "ChatGPT (device code) sign-in expired." so the 40-column list pane keeps it whole.
+The overview reports an unavailable sign-in without claiming that a fresh login repairs an existing Session. A fresh login creates a new profile.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
-Automatic provider selection serves `chatgpt` whenever that credential is usable.
+Automatic provider selection also serves `chatgpt` when a usable browser profile exists.
 
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
-A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
-The checked record is installed through the same custody and SIGINT gate as a device-code login; it fills an unset provider default and replaces a saved `codex` one, as either ChatGPT sign-in replaces a saved default of the other because the provider table says both sign in to the same account, and a Host already serving `chatgpt` uses it from its next lease.
-`rui auth logout chatgpt` ends both ChatGPT logins (Divyansh chose this on 2026-11-13), each under its own exclusive credential lock and each whether or not the other could be ended.
-For the browser sign-in it revokes the refresh token as the issued client, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed.
-The device-code login has no revocation Rui sends, so its record is only published `signed_out` locally at a new generation; OpenAI is not told.
-A `signed_out` record holds no tokens and keeps its account and, for the browser sign-in, its issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
-`rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
+A fresh sign-in names `dynamic_agent_client` and the agent name. Rui sends no `id_token_hint` because the link is printed.
+The checked record is published as a new profile through the same credential owner and SIGINT gate as a device-code login. It does not change the selected new-Session default or overwrite legacy credentials. An explicit `rui defaults configure --provider PROVIDER --profile ID` selects a profile for future root Sessions.
+`rui auth profiles` lists locally known profiles and their local status. `rui auth logout chatgpt --profile ID` permanently fences that profile locally and reports whether browser revocation was confirmed. The profile ID cannot be reactivated. Plain `rui auth logout chatgpt` addresses only the two legacy global sources and leaves profile records unchanged. Existing work bound to a signed-out profile cannot switch accounts in this slice.
+The saved method and local identity claims belong to the credential owner. They do not establish that browser and device profiles represent the same person or workspace.
 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
 
 The credential owner serializes mutations across Hosts and login processes.

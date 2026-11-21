@@ -30,6 +30,7 @@ pub const ConfigureInput = struct {
         create,
     },
     parent: OptionalText = .{},
+    profile: OptionalPolicy = .{},
     preset: OptionalText = .{},
     require_model: bool = false,
     reload_skills: bool = false,

@@ -67,6 +67,7 @@ pub const HistoricalSettings = struct {
     starting_effort: ?model_capability.ReasoningEffort = null,
     codec: provider_name.Codec,
     provider: provider_name.Provider,
+    profile_id: ?@import("../../profile_id.zig").Id = null,
     model: Bounded(model_capability.max_model_bytes),
     workspace: Bounded(workspace_path.max_bytes),
     store: Bounded(store_path.max_bytes),
@@ -724,14 +725,14 @@ fn readHistoricalSettingsHeld(self: *Store, view: *RequestPage, out: *Historical
 const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,t.profile_id,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
-        "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
+        "FROM model_operation o JOIN turn t ON t.turn_id=o.turn_id JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
         "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=o.tool_set_id JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
         "JOIN content instructions ON instructions.content_id=baseline.instructions_content_id " ++
         "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id WHERE o.operation_id=?1",
@@ -744,6 +745,7 @@ const historical_settings = rsql.Read(.{
         member_count: u64,
         provider_count: u64,
         provider: provider_name.Provider,
+        profile_id: ?Bounded(32),
         session_ref: *Bounded(session_id.max_reference_bytes),
         parent_ref: ?Bounded(session_id.max_reference_bytes),
         workspace: *Bounded(workspace_path.max_bytes),
@@ -927,6 +929,7 @@ pub const SettingsRead = struct {
         out.effort_update = row.effort_update;
         out.starting_effort = row.starting_effort;
         out.provider = row.provider;
+        out.profile_id = if (row.profile_id) |*id| @import("../../profile_id.zig").Id.parse(id.slice()) catch return error.CorruptStore else null;
         out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
         if (!row.plain_codec) return error.CorruptStore;
         out.session_affinity = hash.finalResult()[0..16].*;

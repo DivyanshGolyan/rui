@@ -1557,6 +1557,7 @@ pub const Preparation = struct {
         self.request.charged = self.writer.charged;
         self.request.structured_output = self.settings.output_schema != null;
         self.request.provider = self.settings.provider;
+        self.request.profile_id = self.settings.profile_id;
         self.request.codec = self.settings.codec;
         return .{ .prepared = &self.request };
     }

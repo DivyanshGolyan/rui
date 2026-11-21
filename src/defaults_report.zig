@@ -124,6 +124,10 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
     try std.json.Stringify.value(if (values.provider.len != 0) values.provider.slice() else null, .{}, writer);
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(if (values.model.len != 0) values.model.slice() else null, .{}, writer);
+    if (values.profile.len != 0) {
+        try writer.writeAll(",\"profile\":");
+        try std.json.Stringify.value(values.profile.slice(), .{}, writer);
+    }
     try writer.print(",\"notifications\":{}", .{values.notifications});
     try writer.writeAll(",\"reasoning_effort\":");
     try std.json.Stringify.value(if (values.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
@@ -151,7 +155,7 @@ pub fn writeJson(writer: *std.Io.Writer, facts: *const Facts) !void {
         .selected => |selected| {
             try writer.print("{{\"status\":\"selected\",\"provider\":\"{s}\",\"model\":", .{selected.provider});
             try std.json.Stringify.value(selected.model, .{}, writer);
-            try writer.print(",\"local_credential\":\"{s}\"}}", .{@tagName(selected.readiness)});
+            try writer.print(",\"local_credential\":\"{s}\"}}", .{if (values.profile.len != 0) "profile_unverified" else @tagName(selected.readiness)});
         },
         .unsupported_provider => try writer.writeAll("{\"status\":\"unsupported_provider\"}"),
         .unsupported_model => try writer.writeAll("{\"status\":\"unsupported_model\"}"),
@@ -207,6 +211,7 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
     if (!facts.store_available) try writer.writeAll("Store unavailable: destination cannot be selected; no alternate Store selected.\n");
     try safeField(writer, "Provider: ", if (values.provider.len != 0) shownOf(names, values.provider.slice()) else "not selected");
     try safeField(writer, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
+    if (values.profile.len != 0) try safeField(writer, "Profile: ", values.profile.slice());
     try writer.writeAll(if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     try safeField(writer, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     try safeField(writer, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else facts.defaults.permission_mode);
@@ -218,7 +223,9 @@ pub fn writeText(writer: *std.Io.Writer, facts: *const Facts) !void {
         .selected => |selected| {
             const login = loginOf(names, selected.provider);
             try writer.print("Next Session: {s} / {s} (", .{ shownOf(names, selected.provider), selected.model });
-            switch (selected.readiness) {
+            if (values.profile.len != 0) {
+                try writer.writeAll("selected profile; local availability not checked here; no fallback");
+            } else switch (selected.readiness) {
                 .configured => try writer.writeAll("local credential configured; remote acceptance not checked"),
                 .renewal_due => try writer.writeAll("local credential usable; renewal due at dispatch; remote acceptance not checked"),
                 .missing => if (login.len != 0) try writer.print("credential missing; run `{s}`. No fallback", .{login}) else try writer.writeAll("credential missing. No fallback"),

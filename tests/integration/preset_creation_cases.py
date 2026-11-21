@@ -3,6 +3,8 @@ import json
 import pathlib
 import subprocess
 
+import codex_fixture
+
 from canonical_fixture import announced
 import host_process
 import settings_fixture
@@ -280,6 +282,33 @@ def _preset_creation(binary, root, store_settings, env, runtime):
         assert sessions() - before == {session, native_session, loaded_session, changed_session, unknown_effort_session,
                                                 reset_effort_session, reset_compact_session}
         assert value("request", "inspect", base)["observation"] == original_admission
+        # Profile selection is captured even when the preset supplies the settings.
+        launch({"restricted": preset})
+        profile_dir = home / ".config/rui/profiles"
+        profile_dir.mkdir(mode=0o700, parents=True)
+        for profile_id in ("a" * 32, "b" * 32):
+            path = profile_dir / profile_id
+            codex_fixture.credentials(path)
+            path.write_text(path.read_text().replace("version=3\n", f"version=4\nprofile_id={profile_id}\n", 1))
+            path.chmod(0o600)
+        invoke("defaults", "configure", "--provider", "codex", "--profile", "a" * 32)
+        openai_handle, openai_capture = capture("--provider", "openai", "--model", "gpt-6.1-sol", "--test-drop-reply", "after-commit")
+        assert "profile" in openai_capture and openai_capture["profile"] is None, openai_capture
+        assert inspect(recover(openai_handle)["context"]["session"])["session"]["provider"] == "openai"
+        incompatible = subprocess.run([str(binary), "session", "configure", "--store", str(store),
+                                       "--provider", "openai", "--profile", "a" * 32], cwd=elsewhere,
+                                      env=clean, text=True, capture_output=True, timeout=40)
+        assert incompatible.returncode != 0, incompatible
+        for options, expected in (((), "a" * 32), (("--profile", "b" * 32), "b" * 32), (("--profile", "legacy"), None)):
+            handle, captured = capture("--preset", "restricted", *options, "--test-drop-reply", "after-commit")
+            assert captured["profile"] == expected and captured["configuration"] == {}, captured
+            reply = recover(handle)
+            saved = inspect(reply["context"]["session"])["session"]
+            assert saved["provider"] == preset["provider"], saved
+        mismatch = subprocess.run([str(binary), "session", "configure", "--store", str(store), "--preset", "restricted",
+                                   "--provider", "chatgpt", "--profile", "a" * 32], cwd=elsewhere, env=clean,
+                                  text=True, capture_output=True, timeout=40)
+        assert mismatch.returncode != 0, mismatch
         for record, original, routing, route in captures:
             assert record.read_bytes() == original and routing.read_bytes() == route
         print("CLI presets: sparse capture, restricted seed, native parity, explicit clears, durable replay and refusals passed")

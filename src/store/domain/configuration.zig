@@ -534,16 +534,17 @@ const saved_session = rsql.Read(.{
 
 const creation_facts = rsql.Read(.{
     .sql = "SELECT (SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1) AS workspace_key," ++
-        "EXISTS(SELECT 1 FROM session WHERE session_ref=?3) AS taken",
-    .Args = struct { digest: [32]u8, workspace: []const u8, session: []const u8 },
-    .Row = struct { workspace_key: ?rsql.Positive, taken: bool },
+        "EXISTS(SELECT 1 FROM session WHERE session_ref=?3) AS taken," ++
+        "(SELECT profile_id FROM session WHERE session_ref=?4) AS inherited_profile",
+    .Args = struct { digest: [32]u8, workspace: []const u8, session: []const u8, creator: []const u8 },
+    .Row = struct { workspace_key: ?rsql.Positive, taken: bool, inherited_profile: ?Bounded(32) },
     .cardinality = .one,
 });
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref,profile_id) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19,?20)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -564,11 +565,12 @@ const insert_session = rsql.Write(.{
         parent: ?Bounded(session_id.bytes),
         loaded_tool_set_id: ?u64,
         creator: ?Bounded(session_id.bytes),
+        profile: ?Bounded(32),
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8) void {
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8, profile: ?[]const u8) void {
     var parent_ref: ?Bounded(session_id.bytes) = null;
     if (parent) |reference| {
         parent_ref = .{};
@@ -594,6 +596,7 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .parent = parent_ref,
         .loaded_tool_set_id = next.loaded_tool_set_id,
         .creator = if (creator) |reference| Bounded(session_id.bytes).from(reference) catch unreachable else null,
+        .profile = if (profile) |value| Bounded(32).from(value) catch unreachable else null,
     });
 }
 
@@ -765,7 +768,7 @@ fn savedNames(reads: *const ConfigurationReads) error{CorruptStore}!void {
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
-    a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
+    a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference, .creator = if (reads.creator) |*reference| reference else "" }, &reads.creation);
 }
 
 pub fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
@@ -783,6 +786,7 @@ pub const Request = struct {
     served: provider_route.Routes,
     session: []const u8,
     configuration: *const content_custody.Configuration,
+    profile: command_input.OptionalBounded(32) = .{},
     initial_skills: ?*const skills_domain.Initial,
     saved: *tool_set.SavedSelection,
 };
@@ -854,6 +858,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (!creating and request.configuration.preferences != null) return .{ .rejected = .preferences_on_update };
+    if (!creating and request.profile.state != .omitted) return .{ .rejected = .profile_on_update };
     if (configuration.permission_mode.state == .value and
         std.meta.stringToEnum(cli_value.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {
@@ -1069,7 +1074,12 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .next_position = .of(1),
     };
     const creator = if (reads.creator) |*reference| reference else null;
-    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator);
+    const profile = switch (request.profile.state) {
+        .omitted => if (reads.creation.inherited_profile) |*value| value.slice() else null,
+        .explicit_null => null,
+        .value => request.profile.value.slice(),
+    };
+    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator, profile);
     try accept(reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
         reads.step.applying.catalog = appending;

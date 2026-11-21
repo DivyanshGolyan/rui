@@ -1091,6 +1091,7 @@ fn serveOpened(
         .catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null,
         .limits = limits,
         .providers = served,
+        .profile_home = home,
         .presets = settings.presets.specs,
         .bash_path = bash_path,
         .bash_facts = bash_facts,

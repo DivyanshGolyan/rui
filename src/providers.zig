@@ -141,6 +141,10 @@ pub const Credential = union(enum) {
                 var hash = std.crypto.hash.sha2.Sha256.init(.{});
                 hash.update(&.{@intFromBool(record.fedramp)});
                 hash.update(record.account_id.slice());
+                if (record.profile_id.len != 0) {
+                    hash.update("profile:");
+                    hash.update(record.profile_id.slice());
+                }
                 break :owner hash.finalResult();
             },
         };

@@ -28,7 +28,7 @@ pub const Activation = struct {
 };
 pub const Activate = *const fn (std.process.Init, selection.Intent, ?*const host_start.Connection) anyerror!Activation;
 pub const Ready = *const fn (std.process.Init, []const u8) core.Readinesses;
-const Published = struct { defaults: anyerror!void, activation: anyerror!Activation, connection: ?host_start.ConnectionSave = null };
+const Published = struct { defaults: anyerror!void, activation: anyerror!Activation, connection: ?host_start.ConnectionSave = null, profile: ?provider_login.ProfileReceipt = null };
 const Outcome = union(enum) { cancelled, failed: struct { cause: anyerror, shown: ?core.Failure = null }, published: Published };
 const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer, native_departure };
 const max_receipt_bytes = @max(host_launch.max_report_bytes + 512, 4 * @import("host_settings.zig").max_path_bytes + 1024);
@@ -444,7 +444,7 @@ fn work(raw: *anyopaque, _: *ClientTask) !void {
 }
 fn launchSummary(self: *const Self) ?host_launch.Summary {
     const outcome = self.outcome orelse return null;
-    if (outcome != .published) return null;
+    if (outcome != .published or outcome.published.profile != null) return null;
     const activation = outcome.published.activation catch |err| return .{ .failed = host_launch.failureOf(err) };
     return if (activation.launch) |*launch| launch.summary() else null;
 }
@@ -462,14 +462,18 @@ fn runAttempt(self: *Self) !Published {
     const fixture = std.mem.eql(u8, init_.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting");
     var connection: ?host_start.ConnectionSave = null;
     switch (self.attempt) {
-        .browser => try provider_login.chatgpt(init_, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish),
+        .browser => {
+            const receipt = try provider_login.chatgpt(init_, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish);
+            return .{ .defaults = {}, .activation = error.ProfileSelectionRequired, .profile = receipt };
+        },
         .device => {
             if (fixture) {
                 try display("BDL9-KI88H");
                 while (!cancelled()) try init_.io.sleep(.fromMilliseconds(20), .awake);
                 return error.LoginInterrupted;
             }
-            try provider_login.codex(init_, codex_auth.login, display, cancelled, publish);
+            const receipt = try provider_login.codex(init_, codex_auth.login, display, cancelled, publish);
+            return .{ .defaults = {}, .activation = error.ProfileSelectionRequired, .profile = receipt };
         },
         .key => {
             connection = try host_start.saveConnection(init_, self.target.slice(), frozen.endpoint, frozen.key, frozen.model, publish);
@@ -568,6 +572,15 @@ fn writeOutcome(self: *const Self, writer: *std.Io.Writer) !?anyerror {
             return @as(?anyerror, failure.cause);
         },
         .published => |published| {
+            if (published.profile) |receipt| {
+                const provider: []const u8 = if (self.attempt == .device) "codex" else "chatgpt";
+                try writer.print("Profile {s} saved; new-Session default unchanged. Choose it with: rui defaults configure --provider {s} --profile {s}\n", .{ receipt.id.slice(), provider, receipt.id.slice() });
+                if (receipt.publication == .committed_unconfirmed) {
+                    try writer.print("Profile publication durability unconfirmed ({s}); inspect before retrying.\n", .{@errorName(receipt.publication.committed_unconfirmed)});
+                    return receipt.publication.committed_unconfirmed;
+                }
+                return null;
+            }
             if (published.connection) |connection| switch (connection) {
                 .saved => {},
                 .uncertain => |uncertain| {
@@ -634,6 +647,12 @@ fn settle(self: *Self, presentation: Presentation) anyerror!void {
             _ = self.state.step(.{ .failed = self.failedKind(failure) });
         },
         .published => |published| {
+            if (published.profile != null) {
+                self.issue = "Profile saved. Close sign-in for the profile ID and command to select it.";
+                _ = self.state.step(.pending);
+                ctx.redraw = true;
+                return;
+            }
             if (published.connection) |connection| switch (connection) {
                 .saved => self.saved = connection,
                 .uncertain => {

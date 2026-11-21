@@ -265,6 +265,7 @@ const DefaultsEdit = struct {
 const CreationSettings = struct {
     effort: ?model_capability.ReasoningEffort = null,
     permission: ?protocol.PermissionMode = null,
+    profile: protocol.Bounded(32) = .{},
 };
 
 const CreationSnapshot = struct {
@@ -276,6 +277,7 @@ const CreationSnapshot = struct {
         return .{ .binding = binding, .settings = .{
             .effort = saved.reasoning_effort,
             .permission = saved.permission_mode,
+            .profile = saved.profile,
         } };
     }
 };
@@ -1595,11 +1597,12 @@ fn creationSnapshot(self: *const Self, binding: ?view.Default) CreationSnapshot 
 }
 
 fn creationInput(self: *const Self, snapshot: *const CreationSnapshot) !configure_input.ConfigureInput {
-    const saved = try snapshot.settings;
+    const saved = if (snapshot.settings) |*value| value else |err| return err;
     const binding = &snapshot.binding;
     var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
+        .profile = new_session_selection.capturedProfile(.{}, false, if (binding.*) |value| @tagName(value.provider) else null, &saved.profile),
         .require_model = true,
         .workspace = .{ .present = true, .value = self.options.workspace },
         .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
@@ -7934,6 +7937,7 @@ fn checkCreationSnapshot() !void {
     Load.fail = false;
     Load.values = .{ .reasoning_effort = .high, .permission_mode = .bypass };
     const binding = view.Default.of("codex", "gpt-6-luna").?;
+    try Load.values.profile.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     const captured = CreationSnapshot.read(binding, "/snapshot-home", Load.read);
     try std.testing.expectEqual(@as(usize, 1), Load.calls);
     Load.values = .{ .reasoning_effort = .low, .permission_mode = .ask };
@@ -7963,7 +7967,10 @@ fn checkCreationSnapshot() !void {
 
     const rig = try openOverview();
     defer rig.close();
+    const frozen = try rig.overview.creationInput(&captured);
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", frozen.profile.value.?);
     const input = try rig.overview.creationInput(&unbound);
+    try std.testing.expect(!input.profile.present);
     try std.testing.expect(input.require_model);
     try std.testing.expect(!input.provider.present and !input.model.present);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), input.preferences.permission_mode);
@@ -9113,4 +9120,20 @@ test "SUI-108 App overview keyboard and pointer precedence" {
     try std.testing.expectEqual(36, @import("widgets/RowInset.zig").contentWidth(40));
     try keyboardSelectionCase();
     try keyboardOriginCase();
+}
+
+test "GUI explicit OpenAI creation does not capture saved ChatGPT profile" {
+    const Load = struct {
+        fn read(_: []const u8) !preferences.Values {
+            var result: preferences.Values = .{};
+            try result.profile.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            return result;
+        }
+    };
+    const rig = try openOverview();
+    defer rig.close();
+    const snapshot = CreationSnapshot.read(view.Default.of("openai", "gpt-6.1-sol").?, "/home", Load.read);
+    const input = try rig.overview.creationInput(&snapshot);
+    try std.testing.expect(input.profile.present and input.profile.value == null);
+    try std.testing.expectEqualStrings("openai", input.provider.value);
 }

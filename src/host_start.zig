@@ -474,13 +474,24 @@ const AutomaticBuffer = [std.enums.values(protocol.Provider).len]protocol.Provid
 /// The providers a Host with no saved `providers` object serves automatically: each one whose credential is usable.
 fn automaticProviders(init: std.process.Init, buffer: *AutomaticBuffer) []const protocol.Provider {
     var count: usize = 0;
+    const ProfileReadiness = struct {
+        chatgpt: bool = false,
+        fn visit(self: *@This(), _: @import("profile_id.zig").Id, entry: codex_auth.ProfileEntry) !void {
+            if (entry == .ready and entry.ready.wire == .chatgpt_plan and entry.ready.status.usable()) self.chatgpt = true;
+        }
+    };
+    var profiles: ProfileReadiness = .{};
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (credential_location.profileDirectory(init.environ_map, &directory_buffer)) |directory| {
+        codex_auth.listProfiles(directory, codex_auth.nowSeconds(init.io), &profiles, ProfileReadiness.visit) catch {};
+    } else |_| {}
     inline for (std.enums.values(protocol.Provider)) |provider| {
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const usable = switch (comptime provider.facts().credential) {
             .sign_in => if (comptime provider.facts().model_list == .catalog) true else usable: {
                 const path = credential_location.default(init.environ_map, provider, &path_buffer) catch break :usable false;
-                const status = codex_auth.localStatus(path, codex_auth.nowSeconds(init.io)) catch break :usable false;
-                break :usable status == .configured or status == .renewal_due;
+                const status = codex_auth.localStatus(path, codex_auth.nowSeconds(init.io)) catch break :usable provider == .chatgpt and profiles.chatgpt;
+                break :usable status == .configured or status == .renewal_due or (provider == .chatgpt and profiles.chatgpt);
             },
             .api_key => usable: {
                 const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch break :usable false;

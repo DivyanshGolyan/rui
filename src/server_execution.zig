@@ -2143,6 +2143,12 @@ fn advanceModelPreparation(
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
             traceOperation(host, "preparation_completed", owner.binding);
             const leased = host.providers.get(request.provider).?.credential.leased();
+            if (request.profile_id != null and !leased) {
+                request.deinit(host.io, host.scratch_budget.?);
+                settleUnansweredFailure(host, owner.token, owner.binding, "provider_sign_in_required", .ordinary);
+                finishCustodyNow(host, slot);
+                return true;
+            }
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
@@ -2173,7 +2179,10 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
                 finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
-                worker.request(host.providers.get(request.provider).?.credential.signIn().?);
+                var source = host.providers.get(request.provider).?.credential.signIn().?;
+                source.profile_id = request.profile_id;
+                source.profile_home = host.profile_home;
+                worker.request(source);
             }
             return true;
         },
@@ -2327,9 +2336,14 @@ fn launchPreparedRequest(
         finishCustodyNow(host, slot);
         return;
     };
+    var rejection = served.credential.rejection(lease);
+    if (rejection == .refresh_once) {
+        rejection.refresh_once.source.profile_id = request.profile_id;
+        rejection.refresh_once.source.profile_home = host.profile_home;
+    }
     moveSlot(host, slot, .provider, .{
         .owner = .{ .token = token, .binding = binding, .purpose = owner.purpose.? },
-        .rejection = served.credential.rejection(lease),
+        .rejection = rejection,
     });
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
@@ -3258,6 +3272,70 @@ test "authentication worker answers each job with that job's result" {
     try std.testing.expectEqual(error.FileNotFound, worker.take().?.failed);
     try std.testing.expect(worker.take() == null);
     try std.testing.expect(worker.idle());
+}
+
+test "profile authentication worker keeps its selected source across refresh and logout" {
+    const credentials = @import("codex_credentials.zig");
+    const auth = @import("codex_auth.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir = try tmp.dir.createDirPathOpen(io, ".config/rui/profiles", .{ .permissions = .fromMode(0o700) });
+    dir.close(io);
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_len = try tmp.dir.realPath(io, &home_buffer);
+    const home = home_buffer[0..home_len];
+    const a = try credentials.ProfileId.parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const b = try credentials.ProfileId.parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = try std.fmt.bufPrint(&a_buffer, "{s}/.config/rui/profiles/{s}", .{ home, a.slice() });
+    const b_path = try std.fmt.bufPrint(&b_buffer, "{s}/.config/rui/profiles/{s}", .{ home, b.slice() });
+    var record: credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1_750_000_000 };
+    try record.account_id.set(auth.fixture_account_id);
+    try record.id_token.set(auth.fixture_id_token);
+    try record.access_token.set(auth.fixture_access_token);
+    try record.refresh_token.set("synthetic-a");
+    var worker = AuthWorker{ .io = io };
+    try std.testing.expect((try credentials.createProfile(a_path, a, &record, &worker.work.credentials)) == .durable);
+    record.version = 3;
+    record.profile_id = .{};
+    try record.refresh_token.set("synthetic-b");
+    try std.testing.expect((try credentials.createProfile(b_path, b, &record, &worker.work.credentials)) == .durable);
+    defer record.wipe();
+    const source: providers.Authentication = .{ .path = "", .profile_home = home, .profile_id = a, .wire = .codex_device, .refresh = .synthetic };
+    const thread = try std.Thread.spawn(.{}, AuthWorker.run, .{&worker});
+    defer worker.stop(thread);
+    const answered = struct {
+        fn check(target: *AuthWorker) bool {
+            target.mutex.lockUncancelable(target.io);
+            defer target.mutex.unlock(target.io);
+            return target.state != .requested;
+        }
+    }.check;
+    worker.request(source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqualStrings(a.slice(), worker.take().?.ready.record.profile_id.slice());
+    worker.finish();
+    worker.requestRefresh(.{ .source = source, .generation = 1 });
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(worker.take().?.refreshed);
+    worker.request(source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqualStrings(a.slice(), worker.take().?.ready.record.profile_id.slice());
+    worker.finish();
+    const revoke = struct {
+        fn call(_: void, _: *const credentials.Record) !void {}
+    }.call;
+    try std.testing.expect((try credentials.signOutProfile(a_path, a, &worker.work.credentials, {}, revoke)) == .fenced);
+    worker.request(source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqual(error.SignedOut, worker.take().?.failed);
+    const b_source: providers.Authentication = .{ .path = "", .profile_home = home, .profile_id = b, .wire = .codex_device, .refresh = .synthetic };
+    worker.request(b_source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqualStrings(b.slice(), worker.take().?.ready.record.profile_id.slice());
+    worker.finish();
 }
 
 test "HTTP error capture retires before execution custody" {

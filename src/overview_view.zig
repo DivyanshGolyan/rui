@@ -2894,7 +2894,7 @@ const BandRule = struct {
 };
 
 const band_rules = [_]BandRule{
-    .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode, .after_login = true },
+    .{ .trouble = .sign_in, .kind = .failed, .matches = signInCode },
     .{ .trouble = .api_key, .kind = .failed, .matches = apiKeyCode, .after_login = true },
     .{ .trouble = .quota, .kind = .failed, .matches = quotaCode, .until_reset = true },
     .{ .trouble = .rate_limit, .kind = .retrying, .matches = failure_class.rateLimited },
@@ -3277,11 +3277,9 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
         .sign_in => sign_in: {
-            if (trouble.provider.?.login()) |command| {
-                const run = try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command});
-                if (run.len <= built.width -| 2) break :sign_in run;
-            }
-            break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{trouble.provider.?.shown()});
+            const guidance = "Sign-in unavailable. A new login needs a new Session.";
+            if (guidance.len <= built.width -| 2) break :sign_in guidance;
+            break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in failed.", .{trouble.provider.?.shown()});
         },
         .api_key => if (trouble.provider.?.login()) |command|
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), command })
@@ -4541,7 +4539,7 @@ test "App header preserves provider recovery without a counts or Host-stopped ba
     defer state.deinit();
     state.list_stale = true;
     const segments = try headerSegments(arena.allocator(), &state, 100, .{});
-    try std.testing.expectEqual(Background.band, (try styleOf(segments, "Sign-in expired. Run ")).background);
+    try std.testing.expectEqual(Background.band, (try styleOf(segments, "Sign-in unavailable.")).background);
     const text = try segmentText(arena.allocator(), segments);
     try std.testing.expect(std.mem.indexOf(u8, text, "Host stopped") == null);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "\n"));
@@ -4555,8 +4553,8 @@ test "the band names the provider of the newest sign-in or key failure" {
         session("bbbbbb", .{ .failed = .{ .since = test_now_s - 30, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .chatgpt }),
     };
     for ([_]struct { []const Listed, []const u8 }{
-        .{ &rows, "Sign-in expired. Run rui auth login chatgpt." },
-        .{ rows[0..1], "Sign-in expired. Run rui auth login chatgpt --device-code." },
+        .{ &rows, "Sign-in unavailable. A new login needs a new Session." },
+        .{ rows[0..1], "Sign-in unavailable. A new login needs a new Session." },
         .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = .openai })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
     }) |case| {
         var state = try opened(case[0]);
@@ -4567,13 +4565,13 @@ test "the band names the provider of the newest sign-in or key failure" {
     var state = try opened(&rows);
     defer state.deinit();
     const narrow = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 40, .{}));
-    try std.testing.expectEqualStrings("ChatGPT sign-in expired.", std.mem.trim(u8, narrow, " "));
+    try std.testing.expectEqualStrings("ChatGPT sign-in failed.", std.mem.trim(u8, narrow, " "));
     var device = try opened(rows[0..1]);
     defer device.deinit();
     const sixty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 60, .{}));
-    try std.testing.expectEqualStrings("Sign-in expired. Run rui auth login chatgpt --device-code.", std.mem.trim(u8, sixty, " "));
+    try std.testing.expectEqualStrings("Sign-in unavailable. A new login needs a new Session.", std.mem.trim(u8, sixty, " "));
     const forty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 40, .{}));
-    try std.testing.expectEqualStrings("ChatGPT (device code) sign-in expired.", std.mem.trim(u8, forty, " "));
+    try std.testing.expectEqualStrings("ChatGPT (device code) sign-in failed.", std.mem.trim(u8, forty, " "));
 }
 
 const spinning = [_]Listed{
@@ -5558,7 +5556,7 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
-    try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
+    try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30)).?);
     try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
     try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
     try std.testing.expect(!signInCode(failure_class.api_key_rejected));

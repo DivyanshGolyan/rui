@@ -219,6 +219,7 @@ fn ConfigureCommandOf(comptime Custody: type) type {
         key: Bounded(max_key_bytes) = .{},
         session: Bounded(max_session_bytes) = .{},
         configuration: Configuration = .{},
+        profile: OptionalBounded(32) = .{},
         preset: ?Bounded(max_preset_name_bytes) = null,
         require_model: bool = false,
         reload_skills: bool = false,
@@ -228,7 +229,7 @@ fn ConfigureCommandOf(comptime Custody: type) type {
         }
 
         pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
-            const base = configureDigest(self.session.slice(), &self.configuration, self.require_model);
+            const base = profileDigest(configureDigest(self.session.slice(), &self.configuration, self.require_model), &self.profile);
             if (!self.reload_skills) return base;
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
             hash.update("rui/core/reload-skills/v1");
@@ -245,6 +246,15 @@ fn ConfigureCommandOf(comptime Custody: type) type {
             return hash.finalResult();
         }
     };
+}
+
+fn profileDigest(base: [32]u8, profile: *const OptionalBounded(32)) [32]u8 {
+    if (profile.state == .omitted) return base;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hash, "rui/core/create-profile/v1");
+    hash.update(&base);
+    hashOptional(&hash, profile);
+    return hash.finalResult();
 }
 
 fn configureDigest(session: []const u8, configuration: anytype, require_model: bool) [32]u8 {
@@ -299,6 +309,7 @@ fn MessageCommandOf(comptime Custody: type) type {
         sender_handle: ?Bounded(max_sender_handle_bytes) = null,
         text: ContentField = .{},
         configuration: ?Configuration = null,
+        profile: OptionalBounded(32) = .{},
         require_model: bool = false,
 
         pub fn removeTemporaryContent(self: *MessageCommand, io: Custody.Io) !void {
@@ -339,7 +350,7 @@ fn MessageCommandOf(comptime Custody: type) type {
                 hashField(&hash, "initial-configuration");
                 hash.update(&configureDigest("", configuration, self.require_model));
             } else if (self.require_model) hashField(&hash, "require-model");
-            return hash.finalResult();
+            return profileDigest(hash.finalResult(), &self.profile);
         }
     };
 }

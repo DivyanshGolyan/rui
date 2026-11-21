@@ -590,6 +590,7 @@ pub const SubmitMessage = struct {
             .served = t.input.served,
             .session = "",
             .configuration = &t.input.command.configuration.?,
+            .profile = t.input.command.profile,
             .initial_skills = t.input.initial_skills,
             .saved = &t.later.saved,
         };
@@ -1327,6 +1328,7 @@ pub const Configure = struct {
             .served = t.input.served,
             .session = t.input.command.session.slice(),
             .configuration = &t.input.command.configuration,
+            .profile = t.input.command.profile,
             .initial_skills = t.input.initial_skills,
             .saved = &t.later.saved,
         };
