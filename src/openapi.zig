@@ -1370,8 +1370,9 @@ fn publishedRequestSchemas() !void {
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
             .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
-            // Live and since reads, or an Archived window: a one-of over the two request forms.
-            .list_sessions => {
+            // Live and since reads, or an Archived window; a plain or a draining
+            // stop: a one-of over the two request forms.
+            .list_sessions, .host_stop => {
                 try std.testing.expectEqual(@as(usize, 2), route.variants.len);
                 try std.testing.expect(schema.contains("anyOf"));
             },
