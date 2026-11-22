@@ -25,6 +25,8 @@ from report_issue import gh, job_log
 
 AGGREGATES = frozenset({"linux", "macos", "admission"})
 PROMOTE = "Promote"
+# Promote runs on a dispatch and on its schedule; both are promotions.
+PROMOTE_EVENTS = frozenset({"workflow_dispatch", "schedule"})
 # The qualification tier's verdict fails whenever a tier did. GitHub names a
 # called workflow's jobs after each caller job ("qualify / selected / linux").
 PROMOTE_AGGREGATES = frozenset({"qualified"})
@@ -114,7 +116,7 @@ def needs_log(job):
 
 
 def promotion(run):
-    return run["event"] == "workflow_dispatch" and run["name"] == PROMOTE
+    return run["event"] in PROMOTE_EVENTS and run["name"] == PROMOTE
 
 
 def retry_refusal(run, found, current):
@@ -137,7 +139,7 @@ def retry_refusal(run, found, current):
         return f"{SELF_HOSTED_LABEL} would reject a bot-triggered rerun of " + ", ".join(pinned)
     if promotion(run):
         if current != run["id"]:
-            return f"promotion run {current} was dispatched later; a rerun would queue behind or displace it"
+            return f"promotion run {current} started later; a rerun would queue behind or displace it"
         return None
     if current is None:
         return "the run names no open pull request in this repository"
@@ -169,7 +171,7 @@ def explain(repository, run_id, attempt, event, workflow):
         lines.append("No job of this run failed: the requirement above failed by itself, "
                      "such as a draft or a selection its results do not match.")
     elif all(kind == "infra" for _, kind, _ in found):
-        automatic = attempt == "1" and (event == "pull_request" or (event, workflow) == ("workflow_dispatch", PROMOTE))
+        automatic = attempt == "1" and (event == "pull_request" or (event in PROMOTE_EVENTS and workflow == PROMOTE))
         follow = (f"{workflow} reruns the failed jobs once when the run finishes."
                   if automatic else "Rerun the failed jobs.")
         lines.append(f"Infrastructure only, no check failed. {follow}")
