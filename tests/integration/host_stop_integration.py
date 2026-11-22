@@ -266,7 +266,8 @@ def drain_stop():
                 pause = drain(store, seconds)
                 pauses.append(pause)
                 if name == "finish":
-                    time.sleep(1.5)
+                    # Release the call only once the drain is in force, so an early stop would cut it.
+                    fixture.wait_for(lambda: (store / "host.stopped").exists() and (store / "host.stopped").read_text() == "draining", "drain in force")
                     assert pause.poll() is None and host.poll() is None, "a drain stopped the Host while its model call ran"
                     released.set()
                 reply = result(pause, seconds + 20)
@@ -275,6 +276,8 @@ def drain_stop():
                 assert reply["drain"] == {"finish": "finished", "deadline": "deadline", "idle": "finished"}[name], (name, reply)
                 assert (store / "host.stopped").read_text() == reply["drain"], name
                 host.wait(timeout=10)
+                if name == "finish":
+                    assert bash_fixture.rows(store, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL") == [(0,)], "the drain cut the running model call"
                 if name == "deadline":
                     assert 2 <= elapsed < 15, elapsed
                 if name == "idle":
