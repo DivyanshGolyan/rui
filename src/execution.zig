@@ -505,6 +505,18 @@ pub const CustodyPool = struct {
         return count;
     }
 
+    /// Effects still running or about to launch; retained cleanup is not counted.
+    pub fn running(self: *const CustodyPool) usize {
+        var count: usize = 0;
+        for (self.records) |*record| {
+            switch (record.state.load(.acquire)) {
+                .attached, .reserved => count += 1,
+                .free, .detached => {},
+            }
+        }
+        return count;
+    }
+
     pub fn dispatchCapacity(self: *const CustodyPool, mcp_open: bool) DispatchCapacity {
         return .fromFree(self.records.len - self.occupied(), mcp_open);
     }

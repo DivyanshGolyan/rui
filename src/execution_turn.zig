@@ -59,6 +59,15 @@ pub const State = struct {
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
     retry_deadlines: ?struct { through: u64, generation: u64, next: ?u64 } = null,
+
+    /// When the next model retry falls due, as the last pass left it.
+    pub fn retryOutlook(self: *const State, now_unix_ms: ?u64) @import("host_drain.zig").RetryOutlook {
+        if (self.work) |work| if (!work.found.retry) return .none;
+        if (self.idle_retry == null) return .unknown;
+        const due = self.next_retry_unix_ms orelse return .none;
+        const now_ms = now_unix_ms orelse return .unknown;
+        return .{ .in_ns = (due -| now_ms) *| 1_000_000 };
+    }
 };
 
 pub fn serviceLifecycle(state: *State, context: anytype) bool {

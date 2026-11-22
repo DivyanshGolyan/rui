@@ -26,6 +26,7 @@ const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
+const host_drain = @import("host_drain.zig");
 
 pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
 pub const default_bash_path = @import("host_settings.zig").default_bash_path;
@@ -353,7 +354,12 @@ pub const Host = struct {
     custody: execution.CustodyPool = .{ .records = &.{} },
     phase: std.atomic.Value(Phase) = .init(.open),
     controls_changed: std.atomic.Value(bool) = .init(false),
+    /// The operator's hold on new Turns (host-pause). Read the hold in force
+    /// through `turnsHeld`, never this flag alone.
     turns_paused: std.atomic.Value(bool) = .init(false),
+    /// A draining pause's deadline on the awake clock; 0 means none. Written
+    /// only by `askStop` under `launch_mutex`; it only ever moves earlier.
+    drain_until_ns: std.atomic.Value(u64) = .init(0),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     dispatch_wake: std.Io.Event = .unset,
     request_counter: std.atomic.Value(u64) = .init(0),
@@ -410,10 +416,66 @@ pub const Host = struct {
         self.diagnostics = writer;
     }
 
+    /// The hold on new Turns in force: the operator's hold or a drain.
+    pub fn turnsHeld(self: *const Host) bool {
+        return self.turns_paused.load(.acquire) or self.drain_until_ns.load(.acquire) != 0;
+    }
+
+    pub fn drainUntil(self: *const Host) ?u64 {
+        const until = self.drain_until_ns.load(.acquire);
+        return if (until == 0) null else until;
+    }
+
+    /// A plain stop. True when this call moved the Host to stopping.
     pub fn stopAsked(self: *Host) bool {
-        if (self.advance(.stopping) == .stopping) return false;
-        self.lease.recordStopAsked() catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
+        return self.askStop(.immediate) == .stop_now;
+    }
+
+    /// The one door every stop enters: a plain stop, a signal, stdin closing
+    /// and a draining pause. The stop record is written inside the lock, so
+    /// its order matches the order of decisions.
+    pub fn askStop(self: *Host, bound: host_drain.Bound) host_drain.Ask {
+        const answer = blk: {
+            self.launch_mutex.lockUncancelable(self.io);
+            defer self.launch_mutex.unlock(self.io);
+            const phase: host_drain.PhaseView = switch (self.phase.load(.monotonic)) {
+                .open => .open,
+                .fenced => .fenced,
+                .ending => .ending,
+                .stopping => .stopping,
+            };
+            const current = self.drainUntil();
+            const answer = host_drain.ask(phase, current, bound, nowNs(self));
+            switch (answer) {
+                .already_stopping => {},
+                .stop_now => {
+                    self.phase.store(.stopping, .release);
+                    self.recordStop(if (current == null) .asked else .superseded);
+                },
+                .drain => |drain| if (drain.changed) {
+                    self.drain_until_ns.store(drain.until_ns, .release);
+                    if (current == null) self.recordStop(.draining);
+                },
+            }
+            break :blk answer;
+        };
+        if (answer == .drain and answer.drain.changed) self.dispatch_wake.set(self.io);
+        return answer;
+    }
+
+    /// Ends a drain the execution owner judged over. False when a plain stop
+    /// already ended the Host.
+    pub fn finishDrain(self: *Host, outcome: host_drain.Outcome) bool {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        if (@backingInt(self.phase.load(.monotonic)) >= @backingInt(Phase.stopping)) return false;
+        self.phase.store(.stopping, .release);
+        self.recordStop(host_drain.Record.of(outcome));
         return true;
+    }
+
+    fn recordStop(self: *Host, record: host_drain.Record) void {
+        self.lease.recordStop(record.text()) catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
     }
 
     pub fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
@@ -1345,6 +1407,51 @@ test "an asked stop leaves the stop record only when it is what stops the Host, 
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+    }
+}
+
+test "a draining stop holds new Turns, only tightens, and records how it ended" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    const host_drain_test = @import("host_drain.zig");
+    // How the drain ends: the execution owner's judgement, or a plain stop first.
+    for ([_]?host_drain_test.Outcome{ .finished, .deadline, null }) |ending| {
+        errdefer std.debug.print("ending: {?t}\n", .{ending});
+        var lease = try platform.StoreLease.acquire(io, path);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
+        try std.testing.expect(!host.turnsHeld());
+        const first = host.askStop(try .seconds(60));
+        try std.testing.expect(first == .drain and first.drain.changed);
+        try std.testing.expect(host.turnsHeld() and !host.stopping());
+        try std.testing.expectEqual(host_drain_test.Record.draining, platform.StoreLease.stopRecord(io, path));
+        // A longer repeat leaves the deadline; a shorter one brings it in.
+        const longer = host.askStop(try .seconds(600));
+        try std.testing.expectEqual(host_drain_test.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
+        const shorter = host.askStop(try .seconds(1));
+        try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
+        try std.testing.expectEqual(shorter.drain.until_ns, host.drainUntil().?);
+        // The operator's release does not end a drain's hold.
+        host.turns_paused.store(false, .release);
+        try std.testing.expect(host.turnsHeld());
+        if (ending) |outcome| {
+            try std.testing.expect(host.finishDrain(outcome));
+            try std.testing.expectEqual(host_drain_test.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!host.stopAsked());
+        } else {
+            try std.testing.expect(host.stopAsked());
+            try std.testing.expectEqual(host_drain_test.Record.superseded, platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!host.finishDrain(.finished));
+        }
+        try std.testing.expect(host.stopping());
+        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.askStop(try .seconds(60)));
+        try std.testing.expectEqual(platform.StoreLease.LastStop.asked, platform.StoreLease.lastStop(io, path));
     }
 }
 

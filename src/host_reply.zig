@@ -297,6 +297,10 @@ pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
     try response.appendShape(protocol.host_pause_reply, .{paused});
 }
 
+pub fn renderHostDrain(response: protocol.JsonOut, until_unix_ms: u64) !void {
+    try response.appendShape(protocol.host_drain_reply, .{until_unix_ms});
+}
+
 pub fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });

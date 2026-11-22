@@ -697,7 +697,8 @@ fn RequestOf(comptime Custody: type) type {
         const Request = @This();
 
         host_info: struct { store: Bounded(max_store_bytes) = .{} },
-        host_stop: struct { store: Bounded(max_store_bytes) = .{} },
+        /// `drain_seconds` asks for a draining pause: 1..86400, or null for a plain stop.
+        host_stop: struct { store: Bounded(max_store_bytes) = .{}, drain_seconds: ?u32 = null },
         host_pause: struct { store: Bounded(max_store_bytes) = .{}, paused: bool = false },
         configure: ConfigureCommand,
         message: MessageCommand,
@@ -806,7 +807,7 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .host_stop => {
                     out.* = .{ .host_stop = .{ .store = store } };
-                    try self.endCommand(&members);
+                    try self.parseHostStop(&out.host_stop, &members);
                 },
                 .host_pause => {
                     out.* = .{ .host_pause = .{ .store = store } };
@@ -1135,6 +1136,18 @@ fn ParserOf(comptime Custody: type) type {
 
         fn require(comptime Field: type, seen: std.enums.EnumSet(Field), required: []const Field) !void {
             for (required) |field| if (!seen.contains(field)) return error.MissingField;
+        }
+
+        fn parseHostStop(self: *Parser, out: *@FieldType(Request, "host_stop"), members: *Members) !void {
+            const Field = enum { drain_seconds };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .drain_seconds => {
+                    const seconds = std.math.cast(u32, try self.readCanonicalU64()) orelse return error.InvalidDrainSeconds;
+                    _ = @import("host_drain.zig").Bound.seconds(seconds) catch |err| return err;
+                    out.drain_seconds = seconds;
+                },
+            };
         }
 
         fn parseHostPause(self: *Parser, out: *@FieldType(Request, "host_pause"), members: *Members) !void {
@@ -2195,6 +2208,7 @@ pub const skill_suggestions_reply = struct {
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
 pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
+pub const host_drain_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, ",\"drain_seconds\":\"", Hole.decimal, "\"}" };
 pub const read_result_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
 pub const inspect_session_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole };
@@ -2404,7 +2418,7 @@ pub const max_control_request_bytes = blk: {
 };
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
-pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
+pub const max_host_stop_request_bytes = @max(shapeBytes(host_stop_request), shapeBytes(host_drain_request));
 pub const max_host_pause_request_bytes = shapeBytes(host_pause_request);
 pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
@@ -2419,6 +2433,7 @@ pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,         host_info_request,             host_stop_request,
+    host_drain_request,
     host_pause_request,                  read_result_request,           list_sessions_request.all,
     read_action_request.all,             read_action_arguments_request, read_action_call_id_request,
     conversation_content_request.all,    conversation_page_request,     activity_search_request.all,
@@ -2662,8 +2677,11 @@ pub const model_list_reply = struct {
     }
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
+/// A draining pause in force: the Host stops once its running work ends, or
+/// at `until_unix_ms` at the latest.
+pub const host_drain_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"draining\",\"until_unix_ms\":\"", Hole.decimal, "\"}" };
 pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
-pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
+pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(@max(host_stop_ack.len, shapeBytes(host_drain_reply)), shapeBytes(host_pause_reply)));
 
 // Trace and readiness paths used the pre-creation-receipt response bound.
 // Keep that independent of the larger, caller-owned mutation reply buffer.
@@ -2674,7 +2692,7 @@ pub const max_diagnostic_buffer_bytes = blk: {
         bytes = @max(bytes, maxShapeBytes(.{ reply.accepted, reply.rejected, reply.conflict }));
         if (@hasDecl(reply, "accepted_skills")) bytes = @max(bytes, shapeBytes(reply.accepted_skills));
     }
-    break :blk @max(@max(bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
+    break :blk @max(@max(bytes, max_host_info_response_bytes), @max(@max(host_stop_ack.len, shapeBytes(host_drain_reply)), shapeBytes(host_pause_reply)));
 };
 
 pub const conversation_page_reply = struct {

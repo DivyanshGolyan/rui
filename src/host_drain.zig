@@ -27,8 +27,9 @@ pub const Bound = union(enum) {
     }
 };
 
-/// What the Host's phase means to a stop request.
-pub const PhaseView = enum { open, fenced, ending };
+/// The Host's phase, as a stop request sees it. `ending` means execution is
+/// already ending; `stopping` means a stop was already asked.
+pub const PhaseView = enum { open, fenced, ending, stopping };
 
 /// What a stop request does, given the deadline already in force.
 pub const Ask = union(enum) {
@@ -37,14 +38,16 @@ pub const Ask = union(enum) {
     /// Hold new Turns until `until_ns` (awake clock) at the latest.
     /// `changed` is false when a repeat left the deadline as it was.
     drain: struct { until_ns: u64, changed: bool },
-    /// The Host is already ending; nothing to do.
+    /// A stop was already asked; nothing to do.
     already_stopping,
 };
 
 /// Merge a stop request into the deadline in force. A repeat can only bring
 /// the stop earlier, so retrying a lost reply never postpones it.
 pub fn ask(phase: PhaseView, current_until_ns: ?u64, bound: Bound, now_ns: u64) Ask {
-    if (phase == .ending) return .already_stopping;
+    if (phase == .stopping) return .already_stopping;
+    // Execution already ending has nothing left to drain.
+    if (phase == .ending) return .stop_now;
     const within = switch (bound) {
         .immediate => return .stop_now,
         .within_ns => |ns| ns,
@@ -67,9 +70,9 @@ pub const Pass = struct {
     now_ns: u64,
     /// Nothing progressed and no transport, Bash or MCP call is in flight.
     idle: bool,
-    /// Effects in custody that are still running, background Actions
-    /// included; retained cleanup is not counted.
-    attached: usize,
+    /// Effects in custody still running or about to launch, background
+    /// Actions included; retained cleanup is not counted.
+    running: usize,
     retry: RetryOutlook,
 };
 
@@ -99,7 +102,7 @@ pub const Watch = struct {
             .unknown => true,
             .in_ns => |ns| ns <= left,
         };
-        if (!pass.idle or pass.attached != 0 or retry_due) {
+        if (!pass.idle or pass.running != 0 or retry_due) {
             self.quiet_since_ns = null;
             return .{ .wait_at_most_ns = left };
         }
@@ -164,7 +167,7 @@ test "a drain bound is 1 to 86400 seconds, and no bound is a plain stop" {
     for ([_]u32{ 0, max_seconds + 1, std.math.maxInt(u32) }) |bad| try std.testing.expectError(error.InvalidDrainSeconds, Bound.seconds(bad));
 }
 
-test "a stop request only ever brings the stop earlier, and an ending Host ignores it" {
+test "a stop request only ever brings the stop earlier, a stopping Host ignores it, and an ending one just stops" {
     const at: u64 = 50 * ns_per_s;
     const within: u64 = 10 * ns_per_s;
     const requested = at + within;
@@ -172,11 +175,11 @@ test "a stop request only ever brings the stop earlier, and an ending Host ignor
     const bounds = [_]Bound{ .immediate, .{ .within_ns = within }, .{ .within_ns = std.math.maxInt(u64) } };
     for (std.enums.values(PhaseView)) |phase| for (currents) |current| for (bounds) |bound| {
         const got = ask(phase, current, bound, at);
-        if (phase == .ending) {
+        if (phase == .stopping) {
             try std.testing.expectEqual(Ask.already_stopping, got);
             continue;
         }
-        if (bound == .immediate) {
+        if (bound == .immediate or phase == .ending) {
             try std.testing.expectEqual(Ask.stop_now, got);
             continue;
         }
@@ -194,9 +197,9 @@ test "a drain stops at its deadline, waits on work the Host advances itself, and
     const left = until - before;
     const retries = [_]RetryOutlook{ .none, .unknown, .{ .in_ns = left - 1 }, .{ .in_ns = left }, .{ .in_ns = left + 1 } };
     const histories = [_]?u64{ null, before - settle_ns + 1, before - settle_ns };
-    for ([_]u64{ before, until, until + 1 }) |at| for ([_]bool{ false, true }) |idle| for ([_]usize{ 0, 1, 3 }) |attached| for (retries) |retry| for (histories) |history| {
+    for ([_]u64{ before, until, until + 1 }) |at| for ([_]bool{ false, true }) |idle| for ([_]usize{ 0, 1, 3 }) |running| for (retries) |retry| for (histories) |history| {
         var watch: Watch = .{ .until_ns = until, .quiet_since_ns = history };
-        const got = watch.observe(.{ .now_ns = at, .idle = idle, .attached = attached, .retry = retry });
+        const got = watch.observe(.{ .now_ns = at, .idle = idle, .running = running, .retry = retry });
         if (at >= until) {
             try std.testing.expectEqual(Decision{ .stop = .deadline }, got);
             continue;
@@ -206,7 +209,7 @@ test "a drain stops at its deadline, waits on work the Host advances itself, and
             .unknown => true,
             .in_ns => |ns| ns <= left,
         };
-        const busy = !idle or attached != 0 or retry_due;
+        const busy = !idle or running != 0 or retry_due;
         if (busy) {
             try std.testing.expectEqual(Decision{ .wait_at_most_ns = left }, got);
             try std.testing.expectEqual(@as(?u64, null), watch.quiet_since_ns);
@@ -224,11 +227,11 @@ test "a drain stops at its deadline, waits on work the Host advances itself, and
 
 test "a busy pass restarts the settle window" {
     var watch: Watch = .{ .until_ns = 100 * ns_per_s };
-    const quiet: Pass = .{ .now_ns = 0, .idle = true, .attached = 0, .retry = .none };
+    const quiet: Pass = .{ .now_ns = 0, .idle = true, .running = 0, .retry = .none };
     try std.testing.expectEqual(Decision{ .wait_at_most_ns = settle_ns }, watch.observe(quiet));
     var busy = quiet;
     busy.now_ns = settle_ns - 1;
-    busy.attached = 1;
+    busy.running = 1;
     _ = watch.observe(busy);
     var later = quiet;
     later.now_ns = settle_ns;
