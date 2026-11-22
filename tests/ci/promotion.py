@@ -28,15 +28,13 @@ import time
 
 from git_command import git
 import build_files
-from promotion_lines import BISECT_PREFIX, SUSPECT_PREFIX
+from promotion_lines import BISECT_PREFIX, EXCERPT_PREFIX, SUSPECT_PREFIX
 import select_tests
 import steps
 
 # Manual bisect replays stop starting after this much time, shared by the step's replays.
 # The Promote 38-45 window's slowest find landed at 80 minutes (its last replay started at 66), so 90 leaves room for a slower runner.
 BISECT_CAP_SECONDS = 90 * 60
-# The tail of a failed step's output, one line per prefix: the suspects report prints it, and the issue filer does not parse it.
-EXCERPT_PREFIX = "Promotion excerpt: "
 TOP_SUSPECTS = 5
 # A commit the selector could not read: it stays listed, ranked after every attributed commit.
 UNATTRIBUTED = "unattributed"
