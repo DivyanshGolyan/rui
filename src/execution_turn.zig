@@ -70,6 +70,31 @@ pub const State = struct {
     }
 };
 
+test "a retry outlook is none without retry work, unknown until a pass read it, and otherwise the time left" {
+    const RetryOutlook = @import("host_drain.zig").RetryOutlook;
+    const key: RetryKey = .{ .generation = 1, .slot_changes = 0 };
+    const at_ms: u64 = 50_000;
+    const Case = struct { work: ?bool, read: bool, due: ?u64, now: ?u64, want: RetryOutlook };
+    const cases = [_]Case{
+        // No scan yet: retries may exist.
+        .{ .work = null, .read = false, .due = null, .now = at_ms, .want = .unknown },
+        .{ .work = false, .read = false, .due = null, .now = at_ms, .want = .none },
+        .{ .work = false, .read = true, .due = at_ms + 1, .now = at_ms, .want = .none },
+        .{ .work = true, .read = false, .due = null, .now = at_ms, .want = .unknown },
+        .{ .work = true, .read = true, .due = null, .now = at_ms, .want = .none },
+        .{ .work = true, .read = true, .due = at_ms + 2, .now = null, .want = .unknown },
+        .{ .work = true, .read = true, .due = at_ms - 1, .now = at_ms, .want = .{ .in_ns = 0 } },
+        .{ .work = true, .read = true, .due = at_ms + 2, .now = at_ms, .want = .{ .in_ns = 2 * std.time.ns_per_ms } },
+    };
+    for (cases) |case| {
+        var state: State = .{};
+        if (case.work) |retry| state.work = .{ .key = .{ .generation = 1, .paused = false, .capacity = undefined }, .found = .{ .retry = retry } };
+        if (case.read) state.idle_retry = key;
+        state.next_retry_unix_ms = case.due;
+        try std.testing.expectEqual(case.want, state.retryOutlook(case.now));
+    }
+}
+
 pub fn serviceLifecycle(state: *State, context: anytype) bool {
     context.noteLifecycleOpportunity();
     const now = context.now();

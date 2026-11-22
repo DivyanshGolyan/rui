@@ -304,6 +304,10 @@ Work parked on a person, on a held new Turn or on a retry past the deadline neve
 A repeated drain can only bring the deadline earlier; a plain `host-stop` during a drain stops at once and the drain reports `superseded`.
 The stop record holds `draining`, then `finished`, `deadline` or `superseded`; a plain stop still writes an empty record, and any record reads as an asked stop.
 The CLI waits for retirement until the deadline plus `host_shutdown_seconds`, then reads the record into `"drain"` (`unconfirmed` when it still says draining or is gone).
+The deadline counts awake time on the Host, so after a system sleep the CLI's wall-clock wait can end first and report `unconfirmed`.
+Quiet looks at work holding execution, not at work found but not yet started: a tool continuation waiting for capacity held by retained cleanup does not hold a drain, and resumes on the next Host.
+A fenced Host admits no retry, so its retry rows never hold a drain.
+A fence or crash during a drain leaves the record at `draining`; the next start reads it as an asked stop and does not start the Host by itself.
 
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).
 While held, Messages are still admitted and queue, running Turns go on through their tool continuations, retries and Messages that join them at an input boundary, and no waiting Message starts a Turn: model admission selects only a Session whose open Turn takes input at its next model call.

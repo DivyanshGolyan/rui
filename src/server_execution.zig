@@ -687,7 +687,8 @@ fn watchDrain(host: *Host, drain: *?host_drain.Watch, workspace: *Workspace, nat
         .now_ns = server_host.nowNs(host),
         .idle = outcome == .wait and !native.workInFlight(),
         .running = host.custody.running(),
-        .retry = workspace.turn_state.retryOutlook(native.unixMilliseconds()),
+        // A fenced Host admits no retry, so a retry row cannot hold the drain.
+        .retry = if (native.dispatchFenced()) .none else workspace.turn_state.retryOutlook(native.unixMilliseconds()),
     });
     switch (decision) {
         .wait_at_most_ns => |ns| return std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable,

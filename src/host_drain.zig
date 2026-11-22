@@ -123,12 +123,16 @@ pub const Record = enum {
     finished,
     deadline,
     superseded,
-    /// No record, or one this version does not know.
-    missing,
+    /// No record: the last Host stopped without being asked, or none ran.
+    absent,
+    /// A record that could not be read, or is not a plain file.
+    unreadable,
+    /// A record this version does not know, such as a newer Host's word.
+    unknown,
 
     pub fn text(self: Record) []const u8 {
         return switch (self) {
-            .asked, .missing => "",
+            .asked, .absent, .unreadable, .unknown => "",
             inline else => |tag| @tagName(tag),
         };
     }
@@ -141,13 +145,24 @@ pub const Record = enum {
         };
     }
 
+    /// Reads a record file's content; null means no record file.
     pub fn parse(bytes: ?[]const u8) Record {
-        const content = bytes orelse return .missing;
+        const content = bytes orelse return .absent;
         if (content.len == 0) return .asked;
         inline for (.{ .draining, .finished, .deadline, .superseded }) |tag| {
             if (std.mem.eql(u8, content, @tagName(tag))) return tag;
         }
-        return .missing;
+        return .unknown;
+    }
+
+    /// Whether the last Host was asked to stop. Any record present counts as
+    /// asked, a drain still recorded as draining included: someone asked.
+    pub fn wasAsked(self: Record) ?bool {
+        return switch (self) {
+            .absent => false,
+            .unreadable => null,
+            else => true,
+        };
     }
 
     /// The `drain` member a draining pause reports. A plain stop that came
@@ -156,7 +171,7 @@ pub const Record = enum {
         return switch (self) {
             .finished, .deadline, .superseded => @tagName(self),
             .asked => "superseded",
-            .draining, .missing => "unconfirmed",
+            .draining, .absent, .unreadable, .unknown => "unconfirmed",
         };
     }
 };
@@ -251,8 +266,15 @@ test "the stop record round-trips every outcome and reads older and unknown reco
     try std.testing.expectEqualStrings("unconfirmed", Record.draining.reported());
     try std.testing.expectEqual(Record.asked, Record.parse(""));
     try std.testing.expectEqualStrings("superseded", Record.asked.reported());
-    for ([_]?[]const u8{ null, "finished\n", "stopping", "finishedfinished" }) |bytes| {
-        try std.testing.expectEqual(Record.missing, Record.parse(bytes));
+    try std.testing.expectEqual(Record.absent, Record.parse(null));
+    for ([_][]const u8{ "finished\n", "stopping", "finishedfinished" }) |bytes| {
+        try std.testing.expectEqual(Record.unknown, Record.parse(bytes));
     }
-    try std.testing.expectEqualStrings("unconfirmed", Record.missing.reported());
+    for ([_]Record{ .absent, .unreadable, .unknown }) |unconfirmed| try std.testing.expectEqualStrings("unconfirmed", unconfirmed.reported());
+    // Every record present reads as an asked stop; only no record is unasked.
+    for (std.enums.values(Record)) |record| try std.testing.expectEqual(@as(?bool, switch (record) {
+        .absent => false,
+        .unreadable => null,
+        else => true,
+    }), record.wasAsked());
 }

@@ -239,27 +239,25 @@ pub const StoreLease = struct {
     pub const LastStop = @import("host_restart.zig").LastStop;
 
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
-        const selected = resolveClientSelection(supplied_path);
-        const paths = selected.paths(io) catch return .unknown;
-        const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store_identity.slice();
-        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
-        defer dir.close(io);
-        const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
-            error.FileNotFound => .unasked,
-            else => .unknown,
-        };
-        return if (stat.kind == .file) .asked else .unknown;
+        const asked = stopRecord(io, supplied_path).wasAsked() orelse return .unknown;
+        return if (asked) .asked else .unasked;
     }
 
     /// What the last Host's stop record says; read after the lease is free.
+    /// The one reader of the record: a record that is not a plain file is unreadable.
     pub fn stopRecord(io: std.Io, supplied_path: []const u8) @import("host_drain.zig").Record {
         const selected = resolveClientSelection(supplied_path);
-        const paths = selected.paths(io) catch return .missing;
+        const paths = selected.paths(io) catch return .unreadable;
         const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store_identity.slice();
-        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .missing;
+        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unreadable;
         defer dir.close(io);
+        const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
+            error.FileNotFound => .absent,
+            else => .unreadable,
+        };
+        if (stat.kind != .file) return .unreadable;
         var buffer: [32]u8 = undefined;
-        const bytes = dir.readFile(io, stop_record_name, &buffer) catch return .missing;
+        const bytes = dir.readFile(io, stop_record_name, &buffer) catch return .unreadable;
         return .parse(bytes);
     }
 

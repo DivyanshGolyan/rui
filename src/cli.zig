@@ -1067,12 +1067,13 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
         return err;
     };
     switch (outcome) {
-        .acknowledged => try reportPause(io, selected, paths.store_identity.slice(), &hex, product_defaults.host_shutdown_seconds * std.time.ns_per_s, false),
+        // A drain retry that finds the Host already stopping still reports its drain.
+        .acknowledged => try reportPause(io, selected, paths.store_identity.slice(), &hex, product_defaults.host_shutdown_seconds * std.time.ns_per_s, drain_seconds != null),
         .draining => |until_unix_ms| {
             // The Host stops by its deadline; then cleanup gets the usual shutdown bound.
             const now_ms: u64 = @intCast(@max(0, std.Io.Clock.real.now(io).toMilliseconds()));
-            const left_ns = (until_unix_ms -| now_ms) * std.time.ns_per_ms;
-            try reportPause(io, selected, paths.store_identity.slice(), &hex, left_ns + product_defaults.host_shutdown_seconds * std.time.ns_per_s, true);
+            const left_ns = (until_unix_ms -| now_ms) *| std.time.ns_per_ms;
+            try reportPause(io, selected, paths.store_identity.slice(), &hex, left_ns +| product_defaults.host_shutdown_seconds * std.time.ns_per_s, true);
         },
         .instance_changed => {
             stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
