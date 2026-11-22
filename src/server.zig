@@ -1166,7 +1166,7 @@ fn serveOpened(
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
         socket_owned = false;
-        _ = host.advance(.draining);
+        _ = host.advance(.ending);
         execution_thread.join();
         if (comptime test_pause.enabled) pause_owner.close();
     }

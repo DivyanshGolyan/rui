@@ -123,7 +123,7 @@ Each durability message names only its variable and the required value 1.
 Messages are bounded static text, never server diagnostics, host names, users or URLs.
 Connection messages describe the failed driver step using Rui's own static text.
 A running MySQL Store that fences writes the same envelope with
-`store_fenced` before draining and exits 1 (D211).
+`store_fenced` before shutting down and exits 1 (D211).
 When the connection is lost around a COMMIT, the Store first reconnects, up to three times a second apart: it ends the old server session with `KILL`, takes `GET_LOCK` again once that session is gone, and reads `store_owner.commit_seq`.
 Every write transaction advances it by exactly one, so the value says whether the COMMIT landed.
 Landed is success and the Store carries on.
@@ -150,7 +150,7 @@ Codex, OpenAI and the existing required identity/control fields remain required;
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.
-An owned Store without a usable listener/reply, or with a valid bounded 503 capacity/fencing error, is **owned but unavailable** (possibly starting, busy or draining; not a finer diagnosis); a complete malformed or unknown 503 reply is incompatible, distinct from an access failure.
+An owned Store without a usable listener/reply, or with a valid bounded 503 capacity/fencing error, is **owned but unavailable** (possibly starting, busy or shutting down; not a finer diagnosis); a complete malformed or unknown 503 reply is incompatible, distinct from an access failure.
 Lease and socket observations may race replacement, so they are not a durable ownership certificate and must not authorize effects.
 After listener closure, only the lease can still establish ownership; without it, completion remains unconfirmed.
 No status registry, separate listener, client SQLite, credential access or stale-owner reclamation is involved.

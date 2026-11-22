@@ -319,7 +319,7 @@ pub const HookProgress = struct {
     retry_recovery: enum { initial, held, released } = .initial,
 };
 
-pub const Phase = enum(u8) { open, fenced, draining, stopping };
+pub const Phase = enum(u8) { open, fenced, ending, stopping };
 
 pub const Host = struct {
     io: std.Io,
@@ -382,7 +382,7 @@ pub const Host = struct {
     }
 
     pub fn executionEnding(self: *const Host) bool {
-        return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.draining);
+        return @backingInt(self.phase.load(.acquire)) >= @backingInt(Phase.ending);
     }
 
     pub fn advance(self: *Host, target: Phase) Phase {
@@ -1292,7 +1292,7 @@ test "Host phases only move forward" {
             try std.testing.expectEqual(later, host.phase.load(.acquire));
             try std.testing.expectEqual(later == .open, host.launchAllowed());
             try std.testing.expectEqual(later == .stopping, host.stopping());
-            try std.testing.expectEqual(later == .draining or later == .stopping, host.executionEnding());
+            try std.testing.expectEqual(later == .ending or later == .stopping, host.executionEnding());
         }
     }
 }
