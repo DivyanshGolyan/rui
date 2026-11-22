@@ -743,14 +743,36 @@ def own_fixture(target, paths):
     return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
 
 
-def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False):
+# A shared Python helper under tests/integration that at least this many fixtures import is core. The PR tier does not
+# fan out to a core helper's importers: one broad execution target that runs them all in one job does not exist
+# (docs/verification/gates.md#two-tiers), so a core helper keeps the own-file rule on the PR.
+CORE_HELPER_IMPORTERS = 40
+
+
+def shared_helper_importers(paths, graph):
+    """The fixtures that import a changed shared Python helper, directly or transitively, unless it is core.
+
+    The import graph names every importer, so no second list is kept here.
+    """
+    importers = set()
+    for path in paths:
+        if path.startswith(I) and path.endswith(".py"):
+            reached = {target for target in graph.targets(path) or () if target in FIXTURES}
+            if len(reached) < CORE_HELPER_IMPORTERS:
+                importers |= reached
+    return importers
+
+
+def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False, importers=frozenset()):
     """The PR tier of a raw (unnormalized) selection.
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
     alone selected it; `test-store` only for Store paths) and the fixtures
-    whose own sources the diff touches. A fixture the diff reaches only
-    through imports runs on main and in promotion, never on the PR.
+    whose own sources the diff touches. `importers` are the fixtures that
+    import a changed shared helper (`shared_helper_importers`); they run on the
+    PR too. A fixture the diff reaches only through a core helper's import runs
+    on main and in promotion, never on the PR.
     `linked` are the unit roots a changed dependency links, kept whatever the
     paths are. An unclassified path selects every PR unit root.
     """
@@ -766,7 +788,7 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
     if unclassified:
         fast = set(PR_UNIT_ROOTS)
     fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
-             if own_fixture(target, paths)}
+             if own_fixture(target, paths) or target in importers}
     for broad, covered in FIXTURE_COVERS.items():
         if broad in fast:
             fast -= covered
@@ -1017,7 +1039,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     product = [path for path in changed if path not in bootstrap]
     bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
-    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified)
+    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified,
+                             shared_helper_importers(paths, graph))
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)

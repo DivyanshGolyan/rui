@@ -643,6 +643,21 @@ class CandidatePlanTest(unittest.TestCase):
                                      {'test-logic', 'test-native'}),
         'Store': (['src/store.zig'], {'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
+        # A shared helper runs the fixtures that import it, directly (bash_fixture.py) or through another
+        # helper (tool_profile_fixture.py is imported by fresh_tool_profile_cases.py, which human-cli imports).
+        'shared helper': (['tests/integration/bash_fixture.py'], {
+            'bash-integration', 'bash-lifecycle-integration', 'bash-owner-integration', 'bash-recovery-integration',
+            'chatgpt-plan-integration', 'codex-integration', 'descriptor-capacity-integration',
+            'host-launch-integration', 'host-process-test', 'host-stop-integration', 'read-image-integration',
+            'request-wait-integration'}),
+        'shared helper imported through a helper': (['tests/integration/tool_profile_fixture.py'], {'human-cli-integration'}),
+        # mysql-wire-integration needs live MySQL, which no PR target starts, so it stays off the PR even as an importer.
+        'shared helper of a live-MySQL fixture': (['tests/integration/mysql_server.py'], {'settings-integration', 'test-logic'}),
+        'shared helper no fixture imports': (['tests/integration/proc_sample.py'], set()),
+        # settings_fixture.py is the settings fixture's own script and the helper four other fixtures import.
+        'fixture script that other fixtures import': (['tests/integration/settings_fixture.py'], {
+            'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
+            'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
         'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
         'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),

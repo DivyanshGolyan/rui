@@ -70,7 +70,7 @@ A ready PR runs the PR tier, which `fast_tier` in [select_tests.py](../../tests/
 The PR tier holds exactly two kinds of target and nothing else:
 
 - The unit roots `test-native`, `test-logic`, `test-store`, `test-h2` and `test-pg` that the diff reaches through the import graph, `RULES` or asserted text. A selected whole-suite gate (`check`, `check-full`, `test` or `test-full`, including the fallback `check` for a path the graph does not know) becomes `test-native` and `test-logic`, or only `test-logic` when build inputs alone selected it (a changed `build.zig.zon` dependency adds the PR roots that link that package, see above): `BOOTSTRAP_INPUTS` in select_tests.py, the files the build reads beyond the import graph (build scripts and their modules, dependency pins and fetch, the compiler and cache setup action, and the CI producer that writes the zig command). `test-logic` still compiles and runs through the changed setup and producer. `test-store` runs only when the diff touches `src/store.zig` or `src/store/`.
-- An integration fixture only when the diff touches that fixture's own script, executable or `FIXTURES` owner. A fixture the diff reaches only through imports does not run.
+- An integration fixture only when the diff touches that fixture's own script, executable or `FIXTURES` owner, or a shared Python helper under `tests/integration` that the fixture imports, directly or transitively. A helper that at least `CORE_HELPER_IMPORTERS` (40) fixtures import is core: its importers do not run on the PR, so a fixture the diff reaches only through a core helper runs on main and in promotion. Today six helpers are core: `runtime_leftovers.py`, `live_engines.py`, `network_variables.py`, `os_semantics.py`, `host_process.py` and `pause_client.py`. The selector computes the importers from its import graph; no list is kept by hand.
 
 Every PR target runs on SQLite alone: the plan provisions no MySQL 8.4 or Postgres server, so `forEachEngine` skips its MySQL and MySQL-rerun legs and `test-pg` runs only its offline tests.
 
@@ -83,7 +83,7 @@ A compile failure stops the targets, and the first failed target batch stops the
 A green PR therefore no longer proves:
 
 - the composed `check` and `check-full` driver runs, ReleaseSmall deliverables and the deadline witness in `test-full`;
-- any integration fixture the diff reaches only through imports, `RULES` or asserted text, rather than through the fixture's own script, executable or `FIXTURES` owner;
+- any integration fixture the diff reaches only through a core helper's import, `RULES` or asserted text, rather than through the fixture's own script, executable, `FIXTURES` owner or a non-core helper's import;
 - the Store unit partition for a change outside `src/store.zig` and `src/store/`;
 - that the Store-reaching binaries (`test-native`, `test-store`, the integration product) still compile and pass after a change to build inputs alone, such as build.zig, the setup action or `build_artifact.py`; only `test-logic` runs through the changed path. A dependency pin change in `build.zig.zon` runs the PR roots that link the changed package;
 - that every unit partition still compiles after a branch merged main, when the candidate's own diff does not reach them: a semantic merge conflict that breaks only a unit partition reaches main, and Promote bisects it to the merge commit;
