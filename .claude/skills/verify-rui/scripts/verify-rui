@@ -3184,11 +3184,13 @@ def frame_restore_served(run, processes=PROCESSES):
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
     def ready(capture):
         text = capture.completed
-        guided = (any(re.search(r"^ *" + re.escape(title) + r" *$", text, re.M)
+        # The dialog may sit on a card whose stitched sides frame each row.
+        side, end = r"^ *(?:[┆|] +)?", r" *(?:[┆|] *)?$"
+        guided = (any(re.search(side + re.escape(title) + end, text, re.M)
                       for title in frame_wording("Welcome to Rui"))
-                  and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
+                  and all(re.search(side + re.escape(label) + r" {2,}\S", text, re.M)
                           for label in ("ChatGPT", "API key"))
-                  and any(re.search(r"^ *" + re.escape(close) + r"(?: {2,}\S| *$)", text, re.M)
+                  and any(re.search(side + re.escape(close) + r"(?: {2,}\S|" + end + ")", text, re.M)
                           for close in frame_wording("Close")))
         return (("›" in text or ("Settings" in text and frame_wording_contains("+ New chat", text)) or guided)
                 and "Opening…" not in text and (not first_wait or frame_wording_contains(first_wait, text)))
