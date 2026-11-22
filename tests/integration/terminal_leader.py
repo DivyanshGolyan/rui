@@ -109,10 +109,15 @@ def lead(control):
 
 def start(request, sources):
     error_read, error_write = os.pipe()
+    gate_read, gate_write = os.pipe()
     previous = signal.pthread_sigmask(signal.SIG_SETMASK, signal.valid_signals())
     pid = os.fork()
     if pid == 0:
+        os.close(gate_write)
+        if os.read(gate_read, 1) != b"+":
+            os._exit(255)
         try:
+            os.close(gate_read)
             floor = max(request["targets"] + sources + [error_write]) + 1
             error_write = fcntl.fcntl(error_write, fcntl.F_DUPFD_CLOEXEC, floor)
             become(request, sources, error_write)
@@ -122,22 +127,44 @@ def start(request, sources):
             failure = {"errno": errno.EINVAL, "filename": repr(error)}
         os.write(error_write, json.dumps(failure).encode())
         os._exit(255)
-    signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    refused = None
     try:
-        os.setpgid(pid, pid)
-    except OSError:
-        pass
-    os.close(error_write)
-    for fd in sources:
-        os.close(fd)
+        os.close(gate_read)
+        try:
+            hand_over(pid)
+        except OSError as error:
+            refused = {"errno": error.errno, "filename": error.filename}
+        else:
+            try:
+                os.write(gate_write, b"+")
+            except BrokenPipeError:
+                pass  # The job was killed at the gate; its exit reaches the caller as a status.
+    finally:
+        os.close(gate_write)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        os.close(error_write)
+        for fd in sources:
+            os.close(fd)
     failure = b""
-    while chunk := os.read(error_read, 4096):
-        failure += chunk
-    os.close(error_read)
-    if failure:
+    try:
+        while chunk := os.read(error_read, 4096):
+            failure += chunk
+    finally:
+        os.close(error_read)
+    if refused is not None or failure:
         os.waitpid(pid, 0)
-        return json.loads(failure)
+        return refused or json.loads(failure)
     return {"pid": pid}
+
+
+def hand_over(pid):
+    """Make the held job its own foreground group; only the leader moves it, and only while it waits at the gate."""
+    step("setpgid", os.setpgid, pid, pid)
+    terminal = step("open /dev/tty", os.open, "/dev/tty", os.O_RDWR | os.O_CLOEXEC)
+    try:
+        step("tcsetpgrp", os.tcsetpgrp, terminal, pid)
+    finally:
+        os.close(terminal)
 
 
 def step(name, call, *args):
@@ -156,10 +183,6 @@ def become(request, sources, error_write):
             signal.signal(number, signal.SIG_IGN if number in ignored else signal.SIG_DFL)
         except (OSError, ValueError):
             pass
-    step("setpgid", os.setpgid, 0, 0)
-    terminal = step("open /dev/tty", os.open, "/dev/tty", os.O_RDWR)
-    step("tcsetpgrp", os.tcsetpgrp, terminal, os.getpid())
-    os.close(terminal)
     os.umask(request["umask"])
     if request["cwd"] is not None:
         try:

@@ -768,6 +768,37 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(seen["session_leader"], seen)
         self.assertEqual(seen["session"], process.leader.process.pid, seen)
 
+    def hand_over(self, *modes):
+        master, slave = open_pty()
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        fixture = subprocess.run([sys.executable, "-I", "-c", HAND_OVER, os.path.dirname(os.path.abspath(__file__)),
+                                  folder, *modes], stdin=slave, stdout=subprocess.PIPE, start_new_session=True,
+                                 timeout=10, check=True)
+        leader, *cases = json.loads(fixture.stdout)
+        for case in cases:
+            self.assertTrue(case.pop("clean"), (case, "the leader kept a job, a descriptor or a blocked signal"))
+            case["calls"] = [[name, "leader" if pid == leader else pid] for name, pid in case["calls"]]
+        return cases
+
+    def test_start_hands_the_terminal_over_from_the_leader_alone(self):
+        handed = [["setpgid", "leader"], ["tcsetpgrp", "leader"]]
+        cases = {
+            "hand": ("pid", handed, 0, True),
+            "hand again from the background": ("pid", handed, 0, True),
+            "refuse setpgid": ({"errno": errno.EPERM, "filename": "setpgid"}, handed[:1], None, False),
+            "refuse tcsetpgrp": ({"errno": errno.EPERM, "filename": "tcsetpgrp"}, handed, None, False),
+            "unreachable target": ("errno", handed, None, False),
+            "missing program": ({"errno": errno.ENOENT, "filename": "/nonexistent/rui-terminal-test"}, handed,
+                                None, False),
+        }
+        for (name, (reply, calls, status, ran)), seen in zip(cases.items(), self.hand_over(*cases)):
+            with self.subTest(name):
+                if isinstance(reply, str):
+                    self.assertIn(reply, seen["reply"], seen)
+                else:
+                    self.assertEqual(seen["reply"], reply, seen)
+                self.assertEqual((seen["calls"], seen["status"], seen["ran"]), (calls, status, ran), seen)
+
     def test_shell_leaves_the_terminal_usable(self):
         master, slave = open_pty()
         shell = spawn(["bash", "-c", "sleep 0.2"], stdin=slave, stdout=slave, stderr=slave)
@@ -943,6 +974,58 @@ else:
     seen["same_terminal"] = not stdin[3] & termios.ECHO and stdin[6][termios.VMIN] in (7, b"\\x07")
 os.write(REPORT, json.dumps(seen).encode())
 os.write(1, b"abc")
+"""
+
+HAND_OVER = """
+import errno, fcntl, json, os, resource, signal, sys, termios
+sys.path.insert(0, sys.argv[1])
+import terminal_leader
+folder, modes = sys.argv[2], sys.argv[3:]
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+calls, mode = [], None
+
+
+def recorded(name, call):
+    def record(*args):
+        with open(os.path.join(folder, "calls"), "a") as log:
+            log.write(json.dumps([name, os.getpid()]) + "\\n")
+        if mode == "refuse " + name:
+            raise PermissionError(errno.EPERM, "refused by the test")
+        return call(*args)
+    return record
+
+
+def state():
+    return sorted(os.listdir("/dev/fd")), sorted(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+
+
+def reaped():
+    try:
+        os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    return False
+
+
+os.setpgid = recorded("setpgid", os.setpgid)
+os.tcsetpgrp = recorded("tcsetpgrp", os.tcsetpgrp)
+seen = [os.getpid()]
+for number, mode in enumerate(modes):
+    ran = os.path.join(folder, str(number))
+    program = "/nonexistent/rui-terminal-test" if mode == "missing program" else sys.executable
+    targets = [0, 1, 2] + ([resource.getrlimit(resource.RLIMIT_NOFILE)[0] + 5] if mode == "unreachable target" else [])
+    request = {"args": [program, "-I", "-c", "import sys; open(sys.argv[1], 'w').close()", ran],
+               "env": dict(os.environ), "cwd": None, "umask": 0o22, "limits": [], "targets": targets,
+               "mask": [], "ignored": [], "default_signals": []}
+    open(os.path.join(folder, "calls"), "w").close()
+    before = state()
+    reply = terminal_leader.start(request, [os.dup(0) for _ in targets])
+    status = os.waitstatus_to_exitcode(os.waitpid(reply["pid"], 0)[1]) if "pid" in reply else None
+    with open(os.path.join(folder, "calls")) as log:
+        recorded_calls = [json.loads(line) for line in log]
+    seen.append({"reply": reply, "status": status, "ran": os.path.exists(ran), "calls": recorded_calls,
+                 "clean": reaped() and state() == before})
+print(json.dumps(seen))
 """
 
 DESCRIPTORS = """

@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import time
 
-from promotion_lines import BISECT_PREFIX, SUSPECT_PREFIX
+from promotion_lines import BISECT_PREFIX, EXCERPT_PREFIX, SUSPECT_PREFIX
 
 
 LABEL = "ci-red"
@@ -47,9 +47,21 @@ WHITESPACE = re.compile(r"^([^\s:][^:\n]*):\d+: (trailing whitespace|new blank l
 WHITESPACE_PATHS = 10
 CARETS = re.compile(r"[\s~^]+")
 FRAME = re.compile(r'^  File "([^"]+)", line \d+, in \S+$')
-AGGREGATE_STEP = "Require every selected "
-# The lines a promotion step writes for its failure: its suspects (promotion.py suspects) and any manual bisect verdict.
-PROMOTION_LINE = re.compile(rf"^(?:{re.escape(SUSPECT_PREFIX)}|{re.escape(BISECT_PREFIX)}).+$", re.M)
+# An aggregate's own steps: its requirement, and the explain step that names its failed jobs (failure_cause.py explain),
+# which exits non-zero whenever it names one. Either failing alone means the aggregate only reports its needs.
+AGGREGATE_STEPS = ("Require every selected ", "Name each failed job and its cause")
+# The lines a promotion step writes for its failure: its suspects, any manual bisect verdict and its output excerpt.
+PROMOTION_LINE = re.compile(rf"^(?:{re.escape(SUSPECT_PREFIX)}|{re.escape(BISECT_PREFIX)}|{re.escape(EXCERPT_PREFIX)}).+$",
+                            re.M)
+# A job with no parsed cause shows this many trailing log lines, unless its log already carries an excerpt.
+UNPARSED_TAIL_LINES = 40
+# The runner's own error line that ends a failed step; the fallback tail ends there, not in later cleanup steps.
+STEP_EXIT = "##[error]Process completed with exit code"
+# GitHub refuses an issue body over 65536 characters, so a detail keeps lines and total length well under it.
+DETAIL_LINE_WIDTH = 400
+DETAIL_CHARS = 30000
+TRUNCATED = "... (truncated; the run's log has the rest)"
+ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
 
@@ -236,10 +248,23 @@ def signature_state(body):
     return json.loads(match[1]) if match else None
 
 
+def bounded(detail):
+    lines = [line if len(line) <= DETAIL_LINE_WIDTH else line[:DETAIL_LINE_WIDTH] + " ..."
+             for line in detail.splitlines()]
+    text = "\n".join(lines)
+    return text if len(text) <= DETAIL_CHARS else text[:DETAIL_CHARS].rsplit("\n", 1)[0] + "\n" + TRUNCATED
+
+
+def fenced(text):
+    """Text inside a tilde fence longer than any tilde run it holds, so log text cannot close it."""
+    fence = "~" * max(3, 1 + max((len(run) for run in re.findall(r"~+", text)), default=0))
+    return [fence, text, fence]
+
+
 def render(state, detail):
-    lines = ["CI failed with this signature:", "", "~~~", state["signature"], "~~~"]
+    lines = ["CI failed with this signature:", "", *fenced(state["signature"])]
     if detail:
-        lines += ["", "~~~", detail, "~~~"]
+        lines += ["", *fenced(bounded(detail))]
     paths = ", ".join(f"`{path}`" for path in state["paths"]) or "none known"
     lines += ["", f"Fixture or test paths: {paths}. Close this with `Fixes #N` in the commit that "
                   "fixes the fixture or its owner; a later green run alone does not fix it.",
@@ -322,15 +347,43 @@ def run_jobs(repository, run_id, attempt=None):
     return [job for page in pages for job in page["jobs"]]
 
 
+def failed_steps(job):
+    return [step["name"] for step in job.get("steps") or () if step.get("conclusion") == "failure"]
+
+
 def aggregate_only(job):
-    failed = [step["name"] for step in job.get("steps") or () if step.get("conclusion") == "failure"]
-    return bool(failed) and all(name.startswith(AGGREGATE_STEP) for name in failed)
+    failed = failed_steps(job)
+    return bool(failed) and all(name.startswith(AGGREGATE_STEPS) for name in failed)
+
+
+def unparsed_cause(log, workflow, job):
+    """A signature naming the failed step, so it stays stable across runs; the log's tail says what happened."""
+    # A timed-out job marks the step it stopped in cancelled, not failed.
+    failed = failed_steps(job) or [step["name"] for step in job.get("steps") or ()
+                                   if step.get("conclusion") == "cancelled"]
+    where = (f"failed at step{'s' if len(failed) > 1 else ''} " + ", ".join(f"'{name}'" for name in failed)
+             if failed else "failed with no failed step recorded")
+    text = untimed(log)
+    excerpted = any(line.startswith(EXCERPT_PREFIX) for line in text.splitlines())
+    lines = text.splitlines()
+    end = next((index + 1 for index, line in enumerate(lines) if line.startswith(STEP_EXIT)), len(lines))
+    tail = "" if excerpted else "\n".join(ESCAPE.sub("", line) for line in lines[max(0, end - UNPARSED_TAIL_LINES):end])
+    return Cause(f"{workflow}: job '{job['name']}' {where}", detail=tail)
 
 
 def job_causes(log, cases, workflow, job):
+    """A job's causes, each with the promotion lines that locate it attached to its detail."""
     if log is None:
         return [Cause(f"{workflow}: job '{job['name']}' log unavailable")]
-    return failure_causes(log, cases) or [Cause(f"{workflow}: job '{job['name']}' failed; cause not parsed")]
+    causes = failure_causes(log, cases) or [unparsed_cause(log, workflow, job)]
+    verdicts = PROMOTION_LINE.findall(untimed(log))
+    if verdicts:
+        scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above locates one "
+                  "failed step, and a step with several causes names only its earliest."]
+                 if len(causes) > 1 else [])
+        for cause in causes:
+            cause.detail = "\n".join(filter(None, (cause.detail, *verdicts, *scope)))
+    return causes
 
 
 def main():
@@ -348,15 +401,7 @@ def main():
     for job in run_jobs(repository, args.run_id):
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
-        log = job_log(repository, job["id"])
-        verdicts = PROMOTION_LINE.findall(untimed(log)) if log is not None else []
-        causes = job_causes(log, cases, args.workflow, job)
-        for cause in causes:
-            if verdicts:
-                scope = ([f"The job '{job['name']}' failed with {len(causes)} causes; each line above locates one "
-                          "failed step, and a step with several causes names only its earliest."]
-                         if len(causes) > 1 else [])
-                cause.detail = "\n".join(filter(None, (cause.detail, *verdicts, *scope)))
+        for cause in job_causes(job_log(repository, job["id"]), cases, args.workflow, job):
             print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
 
 
