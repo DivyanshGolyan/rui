@@ -841,9 +841,10 @@ class TerminalScreen:
             raise AssertionError(frame)
         self.contains("Notifications")
         frame = self.contains("Version")
+        # Settings is a card over the overview, so its Version row is found by its label, not by a screen column.
         for row, line in enumerate(frame.splitlines()):
-            if "Version" in line[40:]:
-                column = line.index("Version", 40)
+            if "Version" in line:
+                column = line.index("Version")
                 self.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
                 break
         else:
