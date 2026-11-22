@@ -10,7 +10,7 @@ a check failure, including a timeout in a step that builds or tests.
 job of the run attempt with its cause. `retry` runs after the run completes:
 on the first attempt of a pull request's run or of a promotion whose every
 failure was infrastructure, while that PR run still tests the PR's head or no
-later promotion was dispatched, it reruns the failed jobs once. A rerun job
+later promotion started, it reruns the failed jobs once. A rerun job
 never repeats a test that ran: its tests were skipped or never started. A
 promotion's rerun reruns `qualified` and Release with it, so publication still
 waits for every tier, and Release resumes rather than repeats a publication.
@@ -171,7 +171,7 @@ def explain(repository, run_id, attempt, event, workflow):
         lines.append("No job of this run failed: the requirement above failed by itself, "
                      "such as a draft or a selection its results do not match.")
     elif all(kind == "infra" for _, kind, _ in found):
-        automatic = attempt == "1" and (event == "pull_request" or (event in PROMOTE_EVENTS and workflow == PROMOTE))
+        automatic = attempt == "1" and (event == "pull_request" or promotion({"event": event, "name": workflow}))
         follow = (f"{workflow} reruns the failed jobs once when the run finishes."
                   if automatic else "Rerun the failed jobs.")
         lines.append(f"Infrastructure only, no check failed. {follow}")

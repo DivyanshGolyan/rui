@@ -62,13 +62,28 @@ def sparse_script_runs():
                 checkout = None
                 if sparse := SPARSE.search(text):
                     cone = CONE.search(text)
-                    checkout = (sparse[1].split(), not (cone and cone[1] == "false"))
+                    checkout = (sparse_paths(text, sparse), not (cone and cone[1] == "false"))
                 continue
             if checkout is None:
                 continue
             for script in dict.fromkeys(SCRIPT.findall(text)):
                 runs.append((path.name, job, script, *checkout))
     return runs
+
+
+def sparse_paths(text, match):
+    """Read a sparse-checkout value the way actions/checkout does: one path per line, inline or as a block scalar."""
+    value = match[1]
+    if value[0] not in "|>":
+        return [value]
+    indent = len(match[0]) - len(match[0].lstrip())
+    paths = []
+    for line in text[match.end():].splitlines()[1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        if line.strip():
+            paths.append(line.strip())
+    return paths
 
 
 def sparse_tree(destination, paths, cone):
@@ -87,6 +102,18 @@ def sparse_tree(destination, paths, cone):
 
 
 class SparseCheckoutImportTest(unittest.TestCase):
+    def test_sparse_paths_read_one_path_per_line(self):
+        cases = {
+            "inline": ("        sparse-checkout: tests/ci\n", ["tests/ci"]),
+            "inline with a space": ("        sparse-checkout: tests/ci dir\n", ["tests/ci dir"]),
+            "block": ("        sparse-checkout: |\n          tests/ci\n          build/unit.zig\n"
+                      "        persist-credentials: false\n", ["tests/ci", "build/unit.zig"]),
+            "folded block, blank line": ("        sparse-checkout: >\n          tests/ci\n\n          src\n", ["tests/ci", "src"]),
+        }
+        for name, (text, paths) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(sparse_paths(text, SPARSE.search(text)), paths)
+
     def test_each_script_a_sparse_step_runs_imports_in_its_sparse_checkout(self):
         runs = sparse_script_runs()
         found = {(workflow, job, Path(script).name) for workflow, job, script, _, _ in runs}
