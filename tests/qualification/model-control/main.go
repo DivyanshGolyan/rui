@@ -368,6 +368,9 @@ func delta(before, after measurement.ProcessSample) map[string]any {
 }
 
 func openPartial(socket string) (net.Conn, error) {
+	if err := measurement.CheckUnixPath(socket); err != nil {
+		return nil, err
+	}
 	connection, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
 		return nil, err
@@ -803,6 +806,9 @@ func (e *successEndpoint) Close() error {
 }
 
 func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (net.Conn, error) {
+	if err := measurement.CheckUnixPath(socketPath); err != nil {
+		return nil, err
+	}
 	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
 		return nil, err
@@ -833,6 +839,9 @@ type preparedRequest struct {
 }
 
 func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string, body []byte) (preparedRequest, error) {
+	if err := measurement.CheckUnixPath(socketPath); err != nil {
+		return preparedRequest{}, err
+	}
 	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
 		return preparedRequest{}, err
@@ -1153,6 +1162,9 @@ func repeatedDigest(value byte, count int) string {
 }
 
 func ordinaryBusy(socketPath string) error {
+	if err := measurement.CheckUnixPath(socketPath); err != nil {
+		return err
+	}
 	connection, err := net.DialTimeout("unix", socketPath, 3*time.Second)
 	if err != nil {
 		return err

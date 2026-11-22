@@ -69,6 +69,28 @@ exit 1
 SHIM
 chmod +x "$no_packages"
 
+# Linux runners have a host pkg-config and the Mac runner has none (#1932). PATH here
+# links every other command and leaves pkg-config out, so no step can reach a host copy.
+hidden_path="$build_root/path"
+mkdir -p "$hidden_path"
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    for entry in "$dir"/*; do
+        name=${entry##*/}
+        case "$name" in
+            *pkg-config|pkgconf*) continue ;;
+        esac
+        if [ -f "$entry" ] && [ -x "$entry" ] && [ ! -e "$hidden_path/$name" ]; then
+            ln -s "$entry" "$hidden_path/$name"
+        fi
+    done
+done
+IFS=$old_ifs
+PATH=$hidden_path
+export PATH
+
 if [ "${sdk:-}" ]; then
     mkdir -p "$prefix/sdk/System/Library" "$prefix/sdk/usr"
     rm -f \

@@ -164,6 +164,44 @@ func exitedTestHost(t *testing.T, stdout io.ReadCloser) *Host {
 	return host
 }
 
+// TestUnixPathLimitRefusesDarwinSunPathOnEveryPlatform checks the whole domain of the
+// AF_UNIX path rule (#1948): 103 bytes is bindable on Darwin, 104 and up are not.
+func TestUnixPathLimitRefusesDarwinSunPathOnEveryPlatform(t *testing.T) {
+	for _, row := range []struct {
+		length   int
+		accepted bool
+	}{
+		{length: 103, accepted: true},
+		{length: 104, accepted: false},
+		{length: 108, accepted: false},
+	} {
+		path := "/" + strings.Repeat("a", row.length-1)
+		if len(path) != row.length {
+			t.Fatalf("test path is %d bytes, want %d", len(path), row.length)
+		}
+		err := CheckUnixPath(path)
+		if row.accepted {
+			if err != nil {
+				t.Errorf("%d-byte path refused: %v", row.length, err)
+			}
+			continue
+		}
+		var refused *UnixPathError
+		if !errors.As(err, &refused) {
+			t.Fatalf("%d-byte path: got %v, want *UnixPathError", row.length, err)
+		}
+		if refused.Length != row.length || refused.Path != path {
+			t.Errorf("%d-byte path: error names length %d and path %q", row.length, refused.Length, refused.Path)
+		}
+		if msg := err.Error(); !strings.Contains(msg, fmt.Sprintf("%d bytes", row.length)) || !strings.Contains(msg, path) {
+			t.Errorf("%d-byte path: error %q does not state the path and its length", row.length, msg)
+		}
+		if _, err := ListenUnix(path); err == nil {
+			t.Errorf("%d-byte path bound", row.length)
+		}
+	}
+}
+
 func TestRetireSocketRemovesOnlyARefusingSocketHintedToTheStore(t *testing.T) {
 	// t.TempDir nests the test name under TMPDIR, which overflows sun_path (104 bytes on
 	// macOS) on CI's long darwin TMPDIR; a short directory keeps every socket path bindable.
@@ -176,7 +214,7 @@ func TestRetireSocketRemovesOnlyARefusingSocketHintedToTheStore(t *testing.T) {
 	other := filepath.Join(directory, "other")
 	listen := func(name string, keep bool) string {
 		socket := filepath.Join(directory, name+".sock")
-		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		listener, err := ListenUnix(socket)
 		if err != nil {
 			t.Fatal(err)
 		}

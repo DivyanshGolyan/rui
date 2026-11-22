@@ -16,6 +16,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
@@ -168,14 +169,28 @@ class RuntimeLeftovers(unittest.TestCase):
             self.assertFalse(path.exists() or path.with_suffix(".store").exists())
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
-        # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no
-        # refusal errno. Nothing proves the socket dead, so it is live and kept.
-        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
-            root = pathlib.Path(raw) / ("d" * 60) / ("e" * 60)
-            root.mkdir(parents=True)
+        # A probe that times out has no refusal errno. Nothing proves the socket dead, so it is
+        # live and kept. The probe is injected: a real long path would now be refused before
+        # connect, on every platform (#1948).
+        class TimedOutProbe:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def settimeout(self, seconds):
+                pass
+
+            def connect(self, address):
+                raise TimeoutError(errno.ETIMEDOUT, "probe timed out")
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw, \
+                mock.patch.object(runtime_leftovers.os_semantics, "unix_stream", TimedOutProbe):
+            root = pathlib.Path(raw)
             path = root / "p.sock"
             path.write_text("")
-            gone = str(pathlib.Path(raw) / "gone")
+            gone = str(root / "gone")
             path.with_suffix(".store").write_text(gone)
             self.assertTrue(runtime_leftovers.answers(path))
             self.assertEqual([], runtime_leftovers.leftovers(root))

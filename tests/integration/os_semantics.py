@@ -60,8 +60,36 @@ def file_access_tracer():
     return shutil.which("strace") if _module.PROC_FS else None
 
 
+# sun_path holds 104 bytes on Darwin and 108 on Linux, the NUL included. Every fixture
+# refuses a path of UNIX_PATH_LIMIT bytes or more on every platform, so a Linux run
+# fails where Darwin would refuse the bind or connect (#1948). See docs/verification/testing.md.
+UNIX_PATH_LIMIT = 104
+
+
+class UnixPathTooLong(ValueError):
+    def __init__(self, path):
+        self.path = os.fsdecode(path)
+        self.length = len(os.fsencode(path))
+        super().__init__(f"AF_UNIX path is {self.length} bytes, at or over the {UNIX_PATH_LIMIT}-byte "
+                         f"limit (Darwin's sun_path): {self.path!r}")
+
+
+def check_unix_path(path):
+    if len(os.fsencode(path)) >= UNIX_PATH_LIMIT:
+        raise UnixPathTooLong(path)
+    return path
+
+
+class _UnixStream(socket.socket):
+    def bind(self, address):
+        super().bind(check_unix_path(address))
+
+    def connect(self, address):
+        super().connect(check_unix_path(address))
+
+
 def unix_stream():
-    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stream = _UnixStream(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         if _module.PROC_FS:
             stream.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)

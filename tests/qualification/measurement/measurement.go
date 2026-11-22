@@ -311,14 +311,15 @@ func (h *Host) StopWithExit(allowance time.Duration) (HostExit, error) {
 		stderrError = nil
 	}
 	status := HostExit{StopSignalSent: stopSignalSent}
+	var retireError error
 	if h.Cmd.ProcessState != nil {
 		status.Exited = true
 		status.Code = h.Cmd.ProcessState.ExitCode()
 	}
 	if h.Cmd.ProcessState != nil {
-		retireSocket(h.Ready["socket"], h.Ready["store"])
+		retireError = retireSocket(h.Ready["socket"], h.Ready["store"])
 	}
-	return status, errors.Join(killError, waitError, stdoutError, stderrError)
+	return status, errors.Join(killError, waitError, stdoutError, stderrError, retireError)
 }
 
 // retireSocket removes a reaped Host's socket and its .store hint (#1855, #1880) once the
@@ -327,25 +328,61 @@ func (h *Host) StopWithExit(allowance time.Duration) (HostExit, error) {
 // leave a stale socket in the runtime directory. A socket that accepts is a live Host or
 // a successor on the same path, and a hint naming another Store belongs to that Host:
 // both stay. tests/integration/runtime_leftovers.py owns the same rule for Python fixtures.
-func retireSocket(socket, store string) {
+func retireSocket(socket, store string) error {
 	if socket == "" || store == "" || !strings.HasSuffix(socket, ".sock") {
-		return
+		return nil
 	}
 	hint := strings.TrimSuffix(socket, ".sock") + ".store"
 	named, err := os.ReadFile(hint)
 	if err != nil || string(named) != store {
-		return
+		return nil
+	}
+	if err := CheckUnixPath(socket); err != nil {
+		return err
 	}
 	connection, err := net.DialTimeout("unix", socket, time.Second)
 	if err == nil {
 		connection.Close()
-		return
+		return nil
 	}
 	if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.ENOENT) {
-		return
+		return nil
 	}
 	os.Remove(socket)
 	os.Remove(hint)
+	return nil
+}
+
+// UnixPathLimit is Darwin's sun_path capacity: a path of this many bytes or more, the NUL
+// included, cannot be bound or connected there, while Linux allows 108. Every harness
+// refuses at this limit on every platform, so Linux CI fails where Darwin would (#1948).
+// tests/integration/os_semantics.py owns the same limit for the Python fixtures.
+const UnixPathLimit = 104
+
+// UnixPathError names an AF_UNIX path that the harness refuses.
+type UnixPathError struct {
+	Path   string
+	Length int
+}
+
+func (e *UnixPathError) Error() string {
+	return fmt.Sprintf("AF_UNIX path is %d bytes, at or over the %d-byte limit (Darwin's sun_path): %q", e.Length, UnixPathLimit, e.Path)
+}
+
+// CheckUnixPath refuses a socket path at or over UnixPathLimit bytes.
+func CheckUnixPath(path string) error {
+	if len(path) >= UnixPathLimit {
+		return &UnixPathError{Path: path, Length: len(path)}
+	}
+	return nil
+}
+
+// ListenUnix binds a Unix listener at path after CheckUnixPath.
+func ListenUnix(path string) (*net.UnixListener, error) {
+	if err := CheckUnixPath(path); err != nil {
+		return nil, err
+	}
+	return net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 }
 
 func (h *Host) Stop(allowance time.Duration) error {
@@ -411,6 +448,9 @@ func EnvironmentHeader(route string) string {
 }
 
 func ExchangeUnix(deadline Deadline, socketPath string, route string, value any, destination any) error {
+	if err := CheckUnixPath(socketPath); err != nil {
+		return err
+	}
 	body, err := json.Marshal(value)
 	if err != nil {
 		return err

@@ -71,6 +71,14 @@ Provider wire classification is tested over the corpus in `src/testing/fixtures/
 
 A test that is flaky is fixed at its root or deleted.
 
+## Darwin limits on Linux
+
+Linux CI enforces these Darwin limits, so a Darwin-only red shows up without Mac minutes:
+
+- Every harness refuses an AF_UNIX path of 104 bytes or more on every platform, through `os_semantics.check_unix_path` in Python and `measurement.CheckUnixPath` in Go (#1948).
+- Dependency builds that run configure on Linux run with pkg-config hidden from PATH, as on the Mac runner, through `src/build_transport.sh` (#1932).
+- A fixture that listens without accepting sizes its listen backlog for every connect the test makes, because Darwin refuses a connect to a full backlog while Linux queues it, and Linux does not yet simulate that refusal (#1956).
+
 ## Migration
 
 Existing tests that predate these rules are legacy.
