@@ -3,8 +3,9 @@ name: Promote
 # advance stable to it. On schedule the commit is main HEAD (inputs are empty,
 # so `inputs.sha` is ''); when stable already holds it, the run does nothing.
 # A HEAD with a red main-qualified record is skipped when scheduled, since the
-# failing run already filed its issues; the scheduled run then fails, naming that
-# run, until main is fixed. By hand, the commit is main HEAD by default;
+# failing run already filed its issues under its own label (main-red or
+# promotion-red); the scheduled run then fails, naming that run, until the red
+# is cleared. By hand, the commit is main HEAD by default;
 # `sha` names an earlier first-parent main commit after stable, or `qualified`
 # the newest one with a green main-qualified record. A commit that a scheduled
 # or earlier promotion qualified green publishes that run's archives at once.
@@ -114,7 +115,7 @@ jobs:
           MAIN_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.batch.outputs.red_run }}
         run: |
-          echo "::error title=main is red::main HEAD $MAIN_SHA failed qualification in run $RUN_URL; fix main to release"
+          echo "::error title=main HEAD failed qualification::main HEAD $MAIN_SHA failed qualification in run $RUN_URL; to clear it, merge a fix to main, or for a flake or infrastructure red rerun that run's failed jobs with: gh run rerun $RED_RUN --failed"
           exit 1
   qualify:
     # The shared tier and its verdict (qualification-tier.yml), only when the

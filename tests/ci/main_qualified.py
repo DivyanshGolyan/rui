@@ -7,7 +7,8 @@ that commit has no verdict yet, and publishes a commit with a green record from
 the archives that run built and tested, without qualifying it again. Each run
 records its verdict as a commit status named `main-qualified` whose target is
 that run. A scheduled run skips a HEAD whose record is red, since the failing
-run already filed its issues, and fails, naming that run, until main is fixed.
+run filed its issues under its own label (main-red or promotion-red), and fails,
+naming that run, until the red is cleared.
 
 Commands (each prints KEY=VALUE lines for $GITHUB_OUTPUT):
 
@@ -194,6 +195,14 @@ def skipped(base, red):
     return {"head": "", "base": base, "size": "0", "reuse": "false", "run": "", "version": "", "red_run": red.run_id}
 
 
+def promoted(base, head, size, own):
+    """Promote's outputs for a commit it publishes or qualifies: no red_run, since the head is not red."""
+    outputs = {"head": head, "base": base, "size": str(size), "reuse": "false", "run": "", "version": ""}
+    if own is not None:
+        outputs.update(reuse="true", run=own.run_id, version=own.version)
+    return outputs
+
+
 def record(repository, sha, state, run_id, version):
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     api(f"repos/{repository}/statuses/{sha}", ("state", state), ("context", CONTEXT),
@@ -248,11 +257,10 @@ def main():
             return 0
         size = len(first_parent(floor, chosen))
         lines = [f"Promoting {size} main commits after stable {floor}, up to {chosen}:", *batch_log(floor, chosen)]
-        outputs = {"head": chosen, "base": floor, "size": str(size), "reuse": "false", "run": "", "version": ""}
+        outputs = promoted(floor, chosen, size, own)
         if not size:
             lines.append("stable already holds this commit; nothing to promote")
         elif own is not None:
-            outputs.update(reuse="true", run=own.run_id, version=own.version)
             lines.append(f"{chosen} passed qualification in run {own.run_id}; publishing its archives")
         else:
             lines.append(f"Qualifying {chosen} here: {reason}")

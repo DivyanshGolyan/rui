@@ -53,7 +53,9 @@ Correctness failures are fixed on the PR before it reaches `main`.
 
 [Promote](../../.github/workflows/promote.yml) runs every three hours, with empty inputs, so it promotes main HEAD.
 When [stable](#promote) already holds HEAD it does nothing.
-When HEAD has a red `main-qualified` record it skips qualification, since the failing run already filed its issues, and the scheduled run fails with a `main is red` error naming that run until main is fixed; infra-retry never reruns it, since its failed step is a check.
+When HEAD has a red `main-qualified` record it skips qualification, since the failing run filed its issues under its own label (`main-red` when scheduled, `promotion-red` by hand).
+The scheduled run then fails with a `main HEAD failed qualification` error that names the red run and the way out: merge a fix to main, or, for a flake or infrastructure red, rerun that run's failed jobs with `gh run rerun <id> --failed`, which reruns the `qualified` recorder and rewrites the record.
+While the red stands, an infrastructure failure in `dependency_lag` or `race_sweep` is not retried automatically, since the run already has a check failure in `batch`; infra-retry never reruns the scheduled run either.
 Otherwise it qualifies HEAD, or publishes the archives of HEAD's green record, exactly as a manual promotion does below, and a green HEAD that main has moved past since the last release becomes a release without anyone dispatching it.
 The batch runs from `stable`, the last promoted commit, so a failing step's suspects are the commits since the last release.
 A failing job files or updates one `main-red` issue per cause, with its failed steps' suspects on it; a manual promotion files `promotion-red` instead.
