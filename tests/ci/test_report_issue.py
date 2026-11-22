@@ -605,8 +605,33 @@ class JobCauseTest(unittest.TestCase):
                          "Promote: job 'linux suites (native)' failed at steps 'Build the artifact', 'Test the artifact'")
 
     def test_a_job_with_no_failed_step_recorded_still_has_a_stable_signature(self):
-        [cause] = self.causes(numbered_log(2), 'plan', [('Set up job', 'cancelled')])
+        [cause] = self.causes(numbered_log(2), 'plan', [('Set up job', 'success')])
         self.assertEqual(cause.signature, "Promote: job 'plan' failed with no failed step recorded")
+
+    def test_a_timed_out_job_is_named_by_the_step_it_stopped_in(self):
+        [cause] = self.causes(numbered_log(2), 'linux suites (check)',
+                              [('Set up job', 'success'), ('check', 'cancelled'), ('Upload', 'skipped')])
+        self.assertEqual(cause.signature, "Promote: job 'linux suites (check)' failed at step 'check'")
+
+    def test_the_unparsed_tail_ends_where_the_failed_step_exited_not_in_later_cleanup(self):
+        log = (numbered_log(50, prefix='build output line')
+               + logged('##[error]Process completed with exit code 1.')
+               + numbered_log(60, prefix='cleanup line'))
+        [cause] = self.causes(log, 'linux suites (check)', [('check', 'failure')])
+        self.assertIn('build output line 50', cause.detail)
+        self.assertTrue(cause.detail.endswith('##[error]Process completed with exit code 1.'))
+        self.assertNotIn('cleanup line', cause.detail)
+
+    def test_a_rendered_body_stays_under_the_issue_limit_and_inside_its_fences(self):
+        detail = '\n'.join(['~~~~~ closes a short fence', 'x' * 5000]
+                           + [f'Promotion excerpt: step {n}: ' + 'y' * 300 for n in range(400)])
+        state = dict(signature='W: job failed', paths=[])
+        body = report_issue.render(state, detail)
+        self.assertLess(len(body), 65536)
+        self.assertIn(report_issue.TRUNCATED, body)
+        self.assertNotIn('x' * (report_issue.DETAIL_LINE_WIDTH + 1), body)
+        self.assertIn('\n~~~~~~\n~~~~~ closes a short fence', body)
+        self.assertEqual(report_issue.signature_state(body), state)
 
     def test_a_job_whose_log_carries_excerpt_lines_is_described_by_them_not_by_its_tail(self):
         log = (numbered_log(50, prefix='early output')

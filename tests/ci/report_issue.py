@@ -55,6 +55,12 @@ PROMOTION_LINE = re.compile(rf"^(?:{re.escape(SUSPECT_PREFIX)}|{re.escape(BISECT
                             re.M)
 # A job with no parsed cause shows this many trailing log lines, unless its log already carries an excerpt.
 UNPARSED_TAIL_LINES = 40
+# The runner's own error line that ends a failed step; the fallback tail ends there, not in later cleanup steps.
+STEP_EXIT = "##[error]Process completed with exit code"
+# GitHub refuses an issue body over 65536 characters, so a detail keeps lines and total length well under it.
+DETAIL_LINE_WIDTH = 400
+DETAIL_CHARS = 30000
+TRUNCATED = "... (truncated; the run's log has the rest)"
 ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # Seconds before each repeated log download; a log can lag its job's completion.
 LOG_RETRY_DELAYS = (10, 30)
@@ -242,10 +248,23 @@ def signature_state(body):
     return json.loads(match[1]) if match else None
 
 
+def bounded(detail):
+    lines = [line if len(line) <= DETAIL_LINE_WIDTH else line[:DETAIL_LINE_WIDTH] + " ..."
+             for line in detail.splitlines()]
+    text = "\n".join(lines)
+    return text if len(text) <= DETAIL_CHARS else text[:DETAIL_CHARS].rsplit("\n", 1)[0] + "\n" + TRUNCATED
+
+
+def fenced(text):
+    """Text inside a tilde fence longer than any tilde run it holds, so log text cannot close it."""
+    fence = "~" * max(3, 1 + max((len(run) for run in re.findall(r"~+", text)), default=0))
+    return [fence, text, fence]
+
+
 def render(state, detail):
-    lines = ["CI failed with this signature:", "", "~~~", state["signature"], "~~~"]
+    lines = ["CI failed with this signature:", "", *fenced(state["signature"])]
     if detail:
-        lines += ["", "~~~", detail, "~~~"]
+        lines += ["", *fenced(bounded(detail))]
     paths = ", ".join(f"`{path}`" for path in state["paths"]) or "none known"
     lines += ["", f"Fixture or test paths: {paths}. Close this with `Fixes #N` in the commit that "
                   "fixes the fixture or its owner; a later green run alone does not fix it.",
@@ -339,12 +358,16 @@ def aggregate_only(job):
 
 def unparsed_cause(log, workflow, job):
     """A signature naming the failed step, so it stays stable across runs; the log's tail says what happened."""
-    failed = failed_steps(job)
+    # A timed-out job marks the step it stopped in cancelled, not failed.
+    failed = failed_steps(job) or [step["name"] for step in job.get("steps") or ()
+                                   if step.get("conclusion") == "cancelled"]
     where = (f"failed at step{'s' if len(failed) > 1 else ''} " + ", ".join(f"'{name}'" for name in failed)
              if failed else "failed with no failed step recorded")
     text = untimed(log)
     excerpted = any(line.startswith(EXCERPT_PREFIX) for line in text.splitlines())
-    tail = "" if excerpted else "\n".join(ESCAPE.sub("", line) for line in text.splitlines()[-UNPARSED_TAIL_LINES:])
+    lines = text.splitlines()
+    end = next((index + 1 for index, line in enumerate(lines) if line.startswith(STEP_EXIT)), len(lines))
+    tail = "" if excerpted else "\n".join(ESCAPE.sub("", line) for line in lines[max(0, end - UNPARSED_TAIL_LINES):end])
     return Cause(f"{workflow}: job '{job['name']}' {where}", detail=tail)
 
 
