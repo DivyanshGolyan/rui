@@ -85,6 +85,15 @@ A step is one suite batch, one upgrade check or one contract; a suite job stops 
 Each failed step's suspect lines name the commits to read first, and a suspect is a candidate rather than a verdict; a manual bisect's verdict names the first failing commit, says the red did not reproduce at HEAD, or says it already fails at `stable`, and its replay logs are retained with the run.
 Two failed steps get separate suspect lists; the job's issues carry every suspect line, and a job with several causes says so.
 The run then files one `promotion-red` issue (`main-red` when scheduled) per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the suspects on it.
+Each new issue carries an `escape:<class>` label and an `Escape class` line saying why the ready PR tier did not catch the failure.
+The classes are `own-files:<target>`; `promotion-only:<target>` for a target the PR tier never runs (today only `rsql-table`), or bare `promotion-only` for a whole-tier job (the renderer contracts, the release build, cache execution); `live-mysql`, which comes only from the failing cause's own text naming MySQL, with `:<target>` when a target is named; `macos`; `upgrade`; `pr-tier`; `cold-cache-timeout`; and `unknown`.
+`pr-tier` means the PR tier did run the check, so its selection or a combination of tests let the failure through; a target the PR tier runs is `pr-tier` even where promotion also runs it.
+A `check-full` failure that names no target is `unknown`.
+An infrastructure red, as [failure_cause.py](../../tests/ci/failure_cause.py) classifies it, carries no escape class.
+[report_issue.py](../../tests/ci/report_issue.py) classifies from the owners in [select_tests.py](../../tests/ci/select_tests.py), and the label is the record: relabelling an issue changes the class its recurrences show.
+A new issue whose class a selection rule can fix (`own-files`, `promotion-only`, `live-mysql`, `macos`, `upgrade`) repeats when an issue with the same label was created within 14 days; the filer then comments on that issue and adds `escape-repeat`, which asks for a narrow `select_tests` rule.
+The comparison uses only the issues that existed before the run, so two new causes of one class in one run never flag each other.
+Issues filed before this change carry no escape label, so repeats start counting only after it lands.
 A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
 A suspect list never turns a promotion green, and a promotion never merges or reverts.
 From the start, beside the suites, [Release build](../../.github/workflows/release-build.yml) numbers the release and builds the cold versioned archives of main HEAD; it publishes nothing.

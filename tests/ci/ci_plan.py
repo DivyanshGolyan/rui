@@ -7,7 +7,7 @@ from qualification import shards, split_build
 
 
 _UNSET = object()
-from select_tests import live_mysql_suites, normalize
+from select_tests import PROMOTION_CORE_TARGETS, PROMOTION_EXTRA_TARGETS, live_mysql_suites, normalize
 
 
 @dataclass(frozen=True)
@@ -54,11 +54,11 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['retry'] = False
         quarantine = 'off'
     elif promotion:
-        core = {'check-full', 'test-logic', 'admission-debug-integration'}
+        core = set(PROMOTION_CORE_TARGETS)
         # Every check the PR tier skips runs here whatever the batch touched: the LLVM frame
         # gate, the Store statement table comparison and the live MySQL wire client, as well
         # as native macOS below.
-        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames', 'rsql-table', 'mysql-wire-integration'})
+        p['targets'] = sorted(normalize(set(p['targets']) | core) | PROMOTION_EXTRA_TARGETS)
         p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False

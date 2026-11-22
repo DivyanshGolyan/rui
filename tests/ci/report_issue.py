@@ -6,9 +6,15 @@ or a gate's own error, read from the jobs' full logs. Each signature has one
 `ci-red` issue that recurrences comment on. A later green run never closes it;
 the commit that fixes the fixture or its owner says `Fixes #N`, and a failure
 on a commit containing that fix reopens the issue.
+
+Each cause also names its escape class: why the ready PR tier did not run the
+failing check. The label is the record of that class. A new issue whose class a
+selection rule can fix, and which had an issue in the 14 days before this run,
+is flagged, since the PR tier then needs that rule.
 """
 import argparse
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -17,10 +23,41 @@ import shlex
 import subprocess
 import time
 
+from infra_cause import cause as infra_verdict, needs_log
 from promotion_lines import BISECT_PREFIX, EXCERPT_PREFIX, SUSPECT_PREFIX
+from collections import namedtuple
+
+from qualification import FULL_PARTS, matrix_name
 
 
 LABEL = "ci-red"
+ESCAPE_LABEL = "escape:"
+REPEAT_LABEL = "escape-repeat"
+REPEAT_WINDOW = timedelta(days=14)
+# The classes a selection rule can fix; a second issue of one of these within the window is a repeat.
+FIXABLE = frozenset({"own-files", "promotion-only", "live-mysql", "macos", "upgrade"})
+ESCAPE_REASONS = {
+    "own-files": "the PR tier runs this target only when the diff touches its own files, so a change elsewhere skips it.",
+    "promotion-only": "the PR tier never runs this target, whatever the diff touches.",
+    "live-mysql": "the PR job starts no MySQL server, so a live MySQL leg runs only in Promote.",
+    "macos": "the ready PR tier runs no macOS job, so Promote is the first check to run this one.",
+    "upgrade": "the ready PR tier never runs the previous-release upgrade check, which tests the release executables.",
+    "pr-tier": "the PR tier did run this target, so its selection or a test that fails only in combination let the failure through.",
+    "cold-cache-timeout": "a cold cache takes longer than the PR tier's warm runs, so the step's time limit is reached only in Promote.",
+    "unknown": "no rule places this job or target in a class, so it needs classifying by hand.",
+}
+# Whole-tier jobs: the renderer contracts, the release build and the cache-execution proof run only in Promote.
+WHOLE_TIER_JOB = re.compile(r"\b(?:renderer|release_build) /|\bcache execution\b")
+MACOS_JOB = re.compile(r"\bmacos")
+UPGRADE_JOB = re.compile(r"\bupgrade \(")
+# A timed-out job's cancelled steps that build or test: the cold-cache time limit.
+COLD_STEP = re.compile(r"build|compile|test|run (?:required|selected)", re.IGNORECASE)
+MYSQL = re.compile(r"mysql", re.IGNORECASE)
+# The step that fails whenever the live MySQL dialect binary did not run; it counts only as a job's sole failure.
+DIALECT_STEP = "Require that the live MySQL dialect check ran"
+# A shard names its targets in parentheses: "linux suites (a+b)"; the check-full parts are named full-<part>.
+SHARD_TARGETS = re.compile(r"\(([^()]+)\)\s*$")
+PART_TARGETS = {matrix_name("check-full", part): "check-full" for part in FULL_PARTS}
 FIXED_BY = re.compile(r"Fixed by ([0-9a-f]{40})\b")
 STATE = re.compile(r"<!-- ci-signature: (\{.*?\}) -->")
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ", re.M)
@@ -74,6 +111,7 @@ class Cause:
     zig_test: str = ""
     python_test: str = ""
     zig_binary: str = ""
+    escape: str = ""
 
 
 def gh(*args):
@@ -261,21 +299,45 @@ def fenced(text):
     return [fence, text, fence]
 
 
-def render(state, detail):
+def render(state, detail, escape=""):
     lines = ["CI failed with this signature:", "", *fenced(state["signature"])]
     if detail:
         lines += ["", *fenced(bounded(detail))]
     paths = ", ".join(f"`{path}`" for path in state["paths"]) or "none known"
     lines += ["", f"Fixture or test paths: {paths}. Close this with `Fixes #N` in the commit that "
-                  "fixes the fixture or its owner; a later green run alone does not fix it.",
-              "", f"<!-- ci-signature: {json.dumps(state, sort_keys=True)} -->"]
+                  "fixes the fixture or its owner; a later green run alone does not fix it."]
+    if escape:
+        lines += ["", f"Escape class: {escape}: {ESCAPE_REASONS[escape.split(':')[0]]}"]
+    lines += ["", f"<!-- ci-signature: {json.dumps(state, sort_keys=True)} -->"]
     return "\n".join(lines)
 
 
 def known_issues(repository):
+    """Each ci-red issue as (number, state, signature state, escape class or "", created time)."""
     rows = json.loads(gh("issue", "list", "--repo", repository, "--state", "all", "--label", LABEL,
-                         "--limit", "1000", "--json", "number,state,body"))
-    return [(row["number"], row["state"], state) for row in rows if (state := signature_state(row["body"]))]
+                         "--limit", "1000", "--json", "number,state,body,labels,createdAt"))
+    return [(row["number"], row["state"], state,
+             next((label["name"][len(ESCAPE_LABEL):] for label in row["labels"] if label["name"].startswith(ESCAPE_LABEL)), ""),
+             datetime.fromisoformat(row["createdAt"].replace("Z", "+00:00")))
+            for row in rows if (state := signature_state(row["body"]))]
+
+
+def repeat_of(escape, issues, now):
+    """The newest issue of this escape class created within REPEAT_WINDOW before now, or None.
+
+    Only a class a selection rule can fix repeats; the class is compared whole, so a target-keyed class
+    repeats only for its own target.
+    """
+    if not escape or escape.split(":")[0] not in FIXABLE:
+        return None
+    earlier = [number for number, _, _, kind, created in issues if kind == escape and now - REPEAT_WINDOW <= created]
+    return max(earlier, default=None)
+
+
+def ensure_labels(repository, colours):
+    """Create each label a filing needs, right before the issue create or edit that uses it."""
+    for label, colour in colours:
+        gh("label", "create", label, "--repo", repository, "--force", "--color", colour)
 
 
 def fixing_commit(repository, number):
@@ -296,23 +358,26 @@ def contains(repository, sha, ancestor):
     return status in ("ahead", "identical")
 
 
-def file_cause(repository, issues, cause, workflow, sha, url, labels):
+def file_cause(repository, issues, cause, workflow, sha, url, labels, now, prior):
+    """File one cause. `issues` grows with this run's new issues; `prior` is the issue list before the run's jobs."""
     note = f"{workflow} failed on `{sha}`: {url}"
     matches = sorted((row for row in issues if row[2]["signature"] == cause.signature),
                      key=lambda row: (row[1] == "OPEN", row[0]))
     if matches:
-        number, state, recorded = matches[-1]
+        number, state, recorded, kind, created = matches[-1]
         fix = state != "OPEN" and fixing_commit(repository, number)
         if fix and not contains(repository, sha, fix):
             gh("issue", "comment", str(number), "--repo", repository,
                "--body", f"{note}. This predates its fix `{fix}`, so the issue stays closed.")
             return number
         recorded.update(last_sha=sha, workflows=sorted({*recorded["workflows"], workflow}))
-        gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail),
+        ensure_labels(repository, [(label, "D93F0B") for label in labels])
+        # The body's class is the issue's label, so a hand-relabelled issue keeps its own class.
+        gh("issue", "edit", str(number), "--repo", repository, "--body", render(recorded, cause.detail, kind),
            *(arg for label in labels for arg in ("--add-label", label)))
         if state != "OPEN":
             gh("issue", "reopen", str(number), "--repo", repository)
-            issues[issues.index(matches[-1])] = (number, "OPEN", recorded)
+            issues[issues.index(matches[-1])] = (number, "OPEN", recorded, kind, created)
             note = f"Failed again after its fix. {note}"
         gh("issue", "comment", str(number), "--repo", repository, "--body", note)
         return number
@@ -320,12 +385,21 @@ def file_cause(repository, issues, cause, workflow, sha, url, labels):
     title = f"CI red: {cause.signature}"
     if len(title) > 200:
         title = title[:197] + "..."
+    repeat = repeat_of(cause.escape, prior, now)
+    escape_labels = [f"{ESCAPE_LABEL}{cause.escape}"] if cause.escape else []
+    escape_labels += [REPEAT_LABEL] if repeat else []
+    ensure_labels(repository, [(LABEL, "B60205"), *((label, "D93F0B") for label in labels),
+                               *((label, "FBCA04" if label.startswith(ESCAPE_LABEL) else "D93F0B") for label in escape_labels)])
     args = ["issue", "create", "--repo", repository, "--title", title,
-            "--body", render(recorded, cause.detail) + f"\n\nFirst seen: {note}"]
-    for label in (LABEL, *labels):
+            "--body", render(recorded, cause.detail, cause.escape) + f"\n\nFirst seen: {note}"]
+    for label in (LABEL, *labels, *escape_labels):
         args += ["--label", label]
     created = gh(*args).strip()
-    issues.append((int(created.rsplit("/", 1)[-1]), "OPEN", recorded))
+    number = int(created.rsplit("/", 1)[-1])
+    issues.append((number, "OPEN", recorded, cause.escape, now))
+    if repeat:
+        gh("issue", "comment", str(number), "--repo", repository,
+           "--body", f"Second {cause.escape} escape in 14 days (#{repeat}): add a narrow select_tests rule (see #1965 unit 2)")
     return created
 
 
@@ -354,6 +428,107 @@ def failed_steps(job):
 def aggregate_only(job):
     failed = failed_steps(job)
     return bool(failed) and all(name.startswith(AGGREGATE_STEPS) for name in failed)
+
+
+def annotations(repository, job):
+    try:
+        notes = json.loads(gh("api", f"repos/{repository}/check-runs/{job['id']}/annotations"))
+    except subprocess.CalledProcessError:
+        return []
+    return [note["message"] for note in notes]
+
+
+def cause_targets(cause, cases):
+    """The target names a cause could name: its zig test binary, or every fixture of the file it failed in.
+
+    `cases` maps each fixture name to its file. A python file the table does not name also names the target of
+    its stem (mysql_wire_integration.py); the caller keeps only names a shard covers.
+    """
+    if cause.zig_binary:
+        return [cause.zig_binary]
+    names = []
+    for path in cause.paths:
+        names += [name for name, file in cases.items() if file == path]
+        if path.endswith(".py"):
+            names.append(Path(path).stem.replace("_", "-"))
+    return names
+
+
+def shard_targets(job):
+    """The targets a job's shard names, in order; a whole-tier job names none."""
+    named = SHARD_TARGETS.search(job["name"])
+    return [PART_TARGETS.get(token, token) for token in named[1].split("+")] if named else []
+
+
+EscapeOwners = namedtuple("EscapeOwners", "own_files unit_roots never fixtures covers")
+
+
+def escape_owners():
+    """The selection owners the classifier reads. Imported here: select_tests reads the repository when it loads."""
+    from select_tests import FIXTURES, PR_NEVER_TARGETS, PR_OWN_FILE_TARGETS, PR_UNIT_ROOTS, covers
+    return EscapeOwners(own_files=PR_OWN_FILE_TARGETS, unit_roots=PR_UNIT_ROOTS, never=PR_NEVER_TARGETS,
+                        fixtures=frozenset(FIXTURES), covers=covers)
+
+
+def target_class(target, leg, owners):
+    """The class of one target: what keeps the PR tier from running it, or the tier that does.
+
+    A unit root the PR tier always runs is pr-tier even where promotion's core also lists it (test-logic).
+    """
+    if target in owners.own_files:
+        return f"own-files:{target}"
+    if leg:
+        return f"live-mysql:{target}"
+    if target in owners.unit_roots:
+        return "pr-tier"
+    if target in owners.never:
+        return f"promotion-only:{target}"
+    if target in owners.fixtures:
+        return "pr-tier"
+    return "unknown"
+
+
+def cause_text(job, cause):
+    """The words a cause's own failure carries, for the MySQL leg check: never the job's name or the step names.
+
+    A parsed cause's signature names its file or test; an unparsed one names the job and its failed steps, so
+    only its paths, test names and binary count. A failure whose only failed step is the dialect check counts.
+    """
+    failed = failed_steps(job)
+    parsed = not re.match(r"[^\n]*: job '", cause.signature)
+    text = [cause.signature] if parsed else []
+    text += [*cause.paths, cause.zig_test, cause.python_test, cause.zig_binary]
+    if failed == [DIALECT_STEP]:
+        text += failed
+    return text
+
+
+def escape_class(job, cause, owners, cases):
+    """Why the ready PR tier did not run a failed job's cause: its class label, without the escape prefix."""
+    steps = job.get("steps") or ()
+    timed = job.get("conclusion") == "timed_out" or any(step.get("conclusion") == "cancelled" for step in steps)
+    stopped = [step["name"] for step in steps if step.get("conclusion") == "cancelled"] if timed else failed_steps(job)
+    if timed and any(COLD_STEP.search(name) for name in stopped):
+        return "cold-cache-timeout"
+    if UPGRADE_JOB.search(job["name"]):
+        return "upgrade"
+    if MACOS_JOB.search(job["name"]):
+        return "macos"
+    if WHOLE_TIER_JOB.search(job["name"]):
+        return "promotion-only"
+    leg = any(MYSQL.search(part) for part in cause_text(job, cause) if part)
+    # A named target counts when the shard covers it through one of its own targets, or the job lists none. A binary
+    # or fixture no shard target covers (unit-store-tests in check-full) leaves the shard's targets to classify.
+    shard = shard_targets(job)
+    named = [name for name in cause_targets(cause, cases)
+             if not shard or any(owners.covers(name, {target}) for target in shard)]
+    targets = named or shard
+    classes = {target_class(target, leg, owners) for target in targets} if targets else {"unknown"}
+    if len(classes) == 1:
+        return classes.pop()
+    if leg:
+        return "live-mysql"
+    return "unknown"
 
 
 def unparsed_cause(log, workflow, job):
@@ -386,7 +561,7 @@ def job_causes(log, cases, workflow, job):
     return causes
 
 
-def main():
+def main(now=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", required=True, help="name recorded on each issue")
     parser.add_argument("--run-id", required=True)
@@ -395,14 +570,18 @@ def main():
     args = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
     url = f"https://github.com/{repository}/actions/runs/{args.run_id}"
-    for label, color in ((LABEL, "B60205"), *((label, "D93F0B") for label in args.label)):
-        gh("label", "create", label, "--repo", repository, "--force", "--color", color)
+    now = now or datetime.now(timezone.utc)
     issues, cases = known_issues(repository), fixtures()
+    prior = list(issues)
+    owners = escape_owners()
     for job in run_jobs(repository, args.run_id):
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
-        for cause in job_causes(job_log(repository, job["id"]), cases, args.workflow, job):
-            print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label))
+        log = job_log(repository, job["id"])
+        infra = infra_verdict(job, annotations(repository, job), log if needs_log(job) else None)[0] == "infra"
+        for cause in job_causes(log, cases, args.workflow, job):
+            cause.escape = "" if infra else escape_class(job, cause, owners, cases)
+            print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label, now, prior))
 
 
 if __name__ == "__main__":

@@ -747,6 +747,13 @@ STORE_PATHS = ("src/store.zig", "src/store/*")
 # Go measurement packages, and the Host frame gate's own script and budget. A Host source change
 # alone does not run stack-frames on the PR: it needs the LLVM ReleaseSafe build the PR job avoids.
 PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check", "stack-frames"})
+# Promotion's own targets: the PR tier never runs these whatever the diff touches. ci_plan.py adds
+# them to every promotion, and the issue filer names a red's target as promotion-only with them.
+PROMOTION_CORE_TARGETS = frozenset({"check-full", "test-logic", "admission-debug-integration"})
+PROMOTION_EXTRA_TARGETS = frozenset({"stack-frames", "rsql-table", "mysql-wire-integration"})
+# The targets the PR tier never runs, whatever the diff touches: the escape classifier's promotion-only set.
+# Own-file targets are checked first in the classifier, so this is what remains of the extras.
+PR_NEVER_TARGETS = PROMOTION_EXTRA_TARGETS - PR_OWN_FILE_TARGETS
 
 
 def touches_own_files(target, paths):
