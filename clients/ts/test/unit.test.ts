@@ -550,21 +550,38 @@ async function stalledHost(reply: string): Promise<{ socketPath: string; close: 
 	return { socketPath, close: () => { for (const socket of open) socket.destroy(); server.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
-test("a Host that never answers ends the call after the response wait", async () => {
+test("a Host that never answers ends the call after the one idle budget", async () => {
 	const host = await stalledHost("");
 	try {
 		const started = Date.now();
-		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { responseMs: 200 } }), ConnectionError);
+		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { idleMs: 200 } }), ConnectionError);
 		assert.ok(Date.now() - started < 3_000);
 	} finally {
 		host.close();
 	}
 });
 
+test("a Host that answers after five seconds is still confirmed under the default wait", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "rui-ts-late-"));
+	const socketPath = join(directory, "s");
+	const server = createServer((socket) => {
+		socket.on("error", () => {});
+		socket.once("data", () => setTimeout(() => socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"), 5_300));
+	});
+	await new Promise<void>((ready) => server.listen(socketPath, ready));
+	try {
+		const reply = await post({ socketPath, path: "/v1/x", body: "{}" });
+		assert.equal(reply.toString("utf8"), "ok");
+	} finally {
+		server.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 test("a reply that stops partway ends the call after the idle budget", async () => {
 	const host = await stalledHost("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
 	try {
-		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { responseMs: 5_000, idleMs: 200 } }), ConnectionError);
+		await assert.rejects(post({ socketPath: host.socketPath, path: "/v1/x", body: "{}", limits: { idleMs: 200 } }), ConnectionError);
 	} finally {
 		host.close();
 	}

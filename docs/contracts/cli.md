@@ -283,9 +283,9 @@ Stop ends only the local exchange with `Cancelled`, never revokes Host import/co
 At socket service points, observed stop precedes timeout/error; an already completely framed and delivered response remains complete without a retrospective stop check.
 
 Cancellation-aware connect/write/read waits use nonblocking sockets and at most 100-ms polling quanta, not an end-to-end return bound.
-After mutation upload completes, five seconds without response progress expires the local exchange, including the silent first-byte phase.
+Every exchange, in the Zig and TypeScript clients alike, shares one 60-second inactivity rule.
+After mutation upload completes, that rule also bounds the silent first-byte phase: 60 seconds without response progress expires the local exchange.
 Timeout leaves an unconfirmed outcome with the original recovery identity; it does not cancel admitted work.
-Large uploads and streaming reads retain separate 60-second transfer inactivity.
 Only positive byte progress renews inactivity, not polling, `AGAIN` or interruption.
 Progressing transfers have no minimum rate or total deadline.
 Source-file and synchronous sink work are not preemptible.
