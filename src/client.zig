@@ -3759,17 +3759,36 @@ test "Host processing wait starts inactivity only after the first response byte"
     try std.testing.expectEqual(@as(u16, 200), head.status);
 }
 
+/// A fake Host that sends `rest` only if the client is still reading two
+/// seconds later. A working deadline returns long before that, so no thread
+/// stall lets the rest arrive in time; a broken one reads the rest and fails
+/// at once instead of waiting out a fallback inactivity (#1989).
+const LateRest = struct {
+    given_up: std.Io.Event = .unset,
+    thread: std.Thread = undefined,
+
+    fn start(self: *LateRest, fd: std.posix.fd_t, rest: []const u8) !void {
+        self.* = .{};
+        self.thread = try std.Thread.spawn(.{}, run, .{ self, fd, rest });
+    }
+
+    fn run(self: *LateRest, fd: std.posix.fd_t, rest: []const u8) void {
+        self.given_up.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } }) catch writeAll(fd, rest) catch {};
+    }
+
+    fn finish(self: *LateRest) void {
+        self.given_up.set(std.testing.io);
+        self.thread.join();
+    }
+};
+
 test "Host-info first byte is bounded independently of normal processing waits" {
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, struct {
-        fn respond(fd: std.posix.fd_t) void {
-            defer closeTestDescriptor(fd);
-            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
-            writeAll(fd, empty_test_response) catch {};
-        }
-    }.respond, .{sockets[1]});
-    defer writer.join();
+    defer closeTestDescriptor(sockets[1]);
+    var late: LateRest = undefined;
+    try late.start(sockets[1], empty_test_response);
+    defer late.finish();
     var buffer: ReplyBuffer = .{};
     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
     try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, .{}, until));
@@ -3782,16 +3801,12 @@ test "response deadlines include partial header and body" {
         for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
             const sockets = try socketPair();
             defer closeTestDescriptor(sockets[0]);
+            defer closeTestDescriptor(sockets[1]);
             try addNonblocking(sockets[0]);
             try writeAll(sockets[1], response[0..prefix_len]);
-            const writer = try std.Thread.spawn(.{}, struct {
-                fn respond(fd: std.posix.fd_t, rest: []const u8) void {
-                    defer closeTestDescriptor(fd);
-                    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
-                    writeAll(fd, rest) catch {};
-                }
-            }.respond, .{ sockets[1], response[prefix_len..] });
-            defer writer.join();
+            var late: LateRest = undefined;
+            try late.start(sockets[1], response[prefix_len..]);
+            defer late.finish();
             var buffer: ReplyBuffer = .{};
             const until: ?i128 = if (mutation) null else std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
             const timing: ResponseTiming = if (mutation) .{ .inactivity_ms = 10, .wait_for_first_byte = false } else .{};
@@ -3802,22 +3817,25 @@ test "response deadlines include partial header and body" {
 }
 
 test "mutation response progress renews inactivity through header and body" {
+    // Each gap leaves 600 ms of the 1 s inactivity unused, so a stalled
+    // producer or reader still lands inside it; the 1.2 s total exceeds one
+    // window only if progress renews it (#1989).
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     const Producer = struct {
         fn run(fd: std.posix.fd_t) void {
             defer closeTestDescriptor(fd);
-            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n") catch return;
-            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
-            writeAll(fd, "\r\n{") catch return;
-            std.Io.sleep(std.testing.io, .fromMilliseconds(350), .awake) catch return;
-            writeAll(fd, "}") catch return;
+            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n") catch return;
+            for ([_][]const u8{ "Content-Length: 2\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n", "\r\n{", "}" }) |piece| {
+                std.Io.sleep(std.testing.io, .fromMilliseconds(400), .awake) catch return;
+                writeAll(fd, piece) catch return;
+            }
         }
     };
     const writer = try std.Thread.spawn(.{}, Producer.run, .{sockets[1]});
     defer writer.join();
     var buffer: ReplyBuffer = .{};
-    const timing: ResponseTiming = .{ .inactivity_ms = 600, .wait_for_first_byte = ResponseTiming.mutation.wait_for_first_byte };
+    const timing: ResponseTiming = .{ .inactivity_ms = 1_000, .wait_for_first_byte = ResponseTiming.mutation.wait_for_first_byte };
     const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, timing, null);
     try std.testing.expectEqual(@as(u16, 200), reply.status);
     try std.testing.expectEqualStrings("{}", reply.body);
@@ -3844,15 +3862,11 @@ test "Host processing wait does not consume response transfer inactivity" {
 test "response transfer inactivity begins after the first byte" {
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
-    const writer = try std.Thread.spawn(.{}, struct {
-        fn respond(fd: std.posix.fd_t) void {
-            defer closeTestDescriptor(fd);
-            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch return;
-            writeAll(fd, empty_test_response[1..]) catch {};
-        }
-    }.respond, .{sockets[1]});
-    defer writer.join();
+    defer closeTestDescriptor(sockets[1]);
     try writeAll(sockets[1], empty_test_response[0..1]);
+    var late: LateRest = undefined;
+    try late.start(sockets[1], empty_test_response[1..]);
+    defer late.finish();
     try std.testing.expectError(
         error.ResponseInactive,
         readResponseHeadWithInactivity(sockets[0], 10),
@@ -4479,7 +4493,10 @@ test "capture retransmits complete original bytes after a lost reply" {
         Peer.failure = null;
         const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
-        const sent = (Requests{ .io = connected_io, .mutation_timing = .{ .inactivity_ms = 200, .wait_for_first_byte = false } }).sendCaptured(&captured, .empty, &buffer);
+        // Only the silent Host tests the wait; a short one elsewhere lets a
+        // stalled close or reply read as silence (#1989).
+        const timing: ResponseTiming = if (response == .silent) .{ .inactivity_ms = 200, .wait_for_first_byte = false } else .mutation;
+        const sent = (Requests{ .io = connected_io, .mutation_timing = timing }).sendCaptured(&captured, .empty, &buffer);
         const result = sent.get();
         peer.join();
         if (Peer.failure) |err| return err;
