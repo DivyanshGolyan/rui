@@ -118,6 +118,8 @@ def queued_in_active():
                 # Rows sort by their latest state change in whole seconds, which these
                 # three share, so this case checks marks, not order.
                 assert lines.index(row(frame, "Dispatcher")) < min(lines.index(working), lines.index(queued)), frame
+                guides = [line[3] for line in lines if line in (working, queued)]
+                assert guides == ["│", "╰"], frame
                 queued_mark = cells(screen, "Second peer task")[5]
                 working_mark = cells(screen, "First peer task")[5]
                 assert queued_mark.data == "◌", queued_mark

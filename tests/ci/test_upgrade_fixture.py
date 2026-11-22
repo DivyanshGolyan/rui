@@ -51,7 +51,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
     def observe(self, footer, *, report=None, listing=None, model="gpt-6-luna"):
         self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
                                       copy.deepcopy(self.listing if listing is None else listing)]
-        frame = f"{VERTICAL_DIVIDER} › conversation β draft\n{VERTICAL_DIVIDER} {model} · low    {footer}"
+        frame = f"{'':40}{VERTICAL_DIVIDER} › conversation β draft\n{'':40}{VERTICAL_DIVIDER} {model} · low    {footer}"
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session)
 
