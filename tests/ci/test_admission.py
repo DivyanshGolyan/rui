@@ -622,8 +622,8 @@ class CandidatePlanTest(unittest.TestCase):
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
-    # CI-1: written as literals, independent of select_tests' tier constants. stack-frames (a Host path) and
-    # mysql-wire-integration (its own files) reach the PR tier; their domain is pinned in test_selection.
+    # CI-1: written as literals, independent of select_tests' tier constants. stack-frames, measurement-check and
+    # mysql-wire-integration reach the PR tier only through their own files (the rows below name each case).
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full'}
     # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
@@ -641,14 +641,20 @@ class CandidatePlanTest(unittest.TestCase):
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
         'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
-                                     {'stack-frames', 'test-logic', 'test-native'}),
-        # Host sources (src/store.zig and the cores below) also keep stack-frames on the PR tier.
-        'Store': (['src/store.zig'], {'stack-frames', 'test-native', 'test-store'}),
+                                     {'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
-        'core owning no fixture': (['src/request_encoding.zig'], {'stack-frames', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'],
-                                    {'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
+        # The frame gate's own inputs run stack-frames on the PR; its script and budget are the gate's own files.
+        'frame gate budget': (['tests/ci/stack_frames.json'], {'stack-frames'}),
+        'Host source under check': (['src/wire_version.zig'], {'test-logic', 'test-native'}),
+        'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
+        'measurement non-own file': (['build/measurement.zig'], set()),
+        'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
+        'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
+                                    {'test-logic', 'test-native', 'test-store'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',
@@ -659,6 +665,7 @@ class CandidatePlanTest(unittest.TestCase):
     PR_TIER_CONTENTS = {'dependency pins': {'build.zig.zon': sqlite_bump()}}
 
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
+        """CI-1 and CI-88: a ready candidate runs its PR tier, own-file checks included; promotion runs all."""
         from ci_plan import plan
         from docs_only import ChangeKind
         available = set(build_files.steps())

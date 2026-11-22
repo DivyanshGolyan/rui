@@ -63,9 +63,9 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False
     elif ready_pr:
-        # The PR tier: select_tests.fast_tier's targets, which hold the own-file checks and the Host
-        # frame check. Promotion owns every other fixture, whole-suite gates, live engines, macOS,
-        # the upgrade, cache-execution and Linux memory checks.
+        # The PR tier: select_tests.fast_tier's targets, the unit roots and own-file checks. Promotion
+        # owns every other fixture, whole-suite gates, live engines, macOS, the upgrade,
+        # cache-execution and Linux memory checks.
         p['targets'] = list(p['fast_targets'])
         p['native_targets'] = []
         p['cache_execution_checks'] = False
