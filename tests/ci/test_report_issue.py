@@ -335,9 +335,10 @@ class CauseTest(unittest.TestCase):
 
 class FakeGitHub:
 
-    def __init__(self, jobs=(), logs=None, issues=(), timeline=(), compare='ahead'):
-        self.jobs, self.logs, self.issues, self.calls = list(jobs), logs or {}, list(issues), []
-        self.timeline, self.compare = list(timeline), compare
+    def __init__(self, jobs=(), logs=None, issues=(), timeline=(), compare='ahead', annotations=()):
+        self.jobs = [dict(status='completed', **job) for job in jobs]
+        self.logs, self.issues, self.calls = logs or {}, list(issues), []
+        self.timeline, self.compare, self.annotations = list(timeline), compare, list(annotations)
 
     def __call__(self, *args):
         self.calls.append(args)
@@ -352,6 +353,8 @@ class FakeGitHub:
                     'the response contains terminal escape sequences; '
                     'pass --allow-escape-sequences to output it anyway'))
             return log
+        if args[0] == 'api' and args[1].endswith('/annotations'):
+            return json.dumps([dict(message=note) for note in self.annotations])
         if args[0] == 'api' and '/timeline' in args[1]:
             return json.dumps([self.timeline])
         if args[0] == 'api' and '/compare/' in args[1]:
@@ -373,33 +376,58 @@ def issue(number, signature, paths, workflows, last_sha, state='OPEN', escape=''
                 createdAt=created.strftime('%Y-%m-%dT%H:%M:%SZ'))
 
 
+MYSQL_BUNDLE = ('qualify / selected / linux suites (chatgpt-login-integration+codex-credential-integration+'
+                'dispatch-debug-integration+installer-integration+mysql-wire-integration+server-delivery-integration+'
+                'test-full+ts-client)')
+MEASUREMENT_BUNDLE = ('qualify / selected / linux suites (admission-debug-integration+cli-image-integration+'
+                      'current-facts-integration+human-cli-integration+measurement-check+public-parts-integration+'
+                      'skills-integration+transport-h2-integration)')
+
+
 class EscapeClassTest(unittest.TestCase):
-    def test_each_escape_class_and_an_unmatched_job_map_from_the_job_and_its_stopping_step(self):
-        plain = report_issue.Cause('signature')
-        mysql = report_issue.Cause('signature', ['tests/integration/mysql_wire_integration.py'])
+    def test_each_escape_class_and_an_unmatched_job_map_from_the_real_job_and_its_stopping_step(self):
+        owners = report_issue.escape_owners()
+        cases = report_issue.fixtures()
+        fixture_targets = {path: name for name, path in cases.items()}
+        Cause = report_issue.Cause
         failed, cancelled = 'failure', 'cancelled'
+        selected = 'Run selected targets'
         rows = [
-            # job name, job conclusion, its steps (name, conclusion), cause, expected class
-            ('qualify / upgrade (macos-15)', 'failure', [('Start detached, then install', failed)], plain, 'upgrade'),
-            ('qualify / selected / linux suites (stack-frames)', 'failure', [('Run selected targets', failed)], plain,
-             'stack-frames'),
-            ('qualify / selected / macos suites (native)', 'failure', [('Run selected targets', failed)], plain, 'macos'),
-            ('qualify / selected / linux suites (mysql-wire-integration)', 'failure', [('Run selected targets', failed)],
-             plain, 'live-mysql'),
-            ('qualify / selected / linux suites (test-store)', 'failure', [('Run selected targets', failed)], mysql,
-             'live-mysql'),
-            ('qualify / selected / linux suites (test-logic)', 'timed_out', [('Run selected targets', cancelled)], plain,
-             'cold-cache-timeout'),
-            ('qualify / selected / linux_build', 'failure', [('Build the artifact', failed)], plain, 'pr-tier'),
-            ('qualify / selected / linux suites (test-native)', 'failure', [('Run selected targets', failed)], plain,
+            # job name, job conclusion, steps (name, conclusion), cause, expected class
+            (MYSQL_BUNDLE, 'failure', [(selected, failed)], Cause('signature', zig_binary='test-full'), 'unknown'),
+            (MYSQL_BUNDLE, 'failure', [(selected, failed)], Cause('signature', ['tests/integration/mysql_wire_integration.py']),
+             'own-files:mysql-wire-integration'),
+            (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature', zig_binary='measurement-check'),
+             'own-files:measurement-check'),
+            (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature'), 'unknown'),
+            ('qualify / selected / linux suites (stack-frames)', 'failure', [(selected, failed)], Cause('signature'),
+             'own-files:stack-frames'),
+            ('qualify / selected / linux suites (rsql-table)', 'failure', [(selected, failed)], Cause('signature'),
+             'promotion-only:rsql-table'),
+            ('qualify / selected / cache execution (ubuntu-24.04)', 'failure',
+             [('Prove warm compilation does not cache test acceptance', failed)], Cause('signature'), 'promotion-only'),
+            ('qualify / renderer / contracts', 'failure', [('Run the contracts', failed)], Cause('signature'),
+             'promotion-only'),
+            ('qualify / release_build / build (darwin-arm64)', 'failure', [('Build the artifact', failed)],
+             Cause('signature'), 'promotion-only'),
+            ('qualify / selected / linux suites (full-execution)', 'failure', [(selected, failed)],
+             Cause('signature', zig_test='store.archive_tests.test.MySQL plans a list row'), 'live-mysql:check-full'),
+            ('qualify / selected / macos suites (native)', 'timed_out', [('Run required native targets', cancelled)],
+             Cause('signature'), 'cold-cache-timeout'),
+            ('qualify / upgrade (macos-15)', 'failure', [('Start detached, then install', failed)], Cause('signature'),
+             'upgrade'),
+            ('qualify / selected / macos suites (full-callers)', 'failure', [(selected, failed)], Cause('signature'),
+             'macos'),
+            ('qualify / selected / linux suites (test-logic)', 'failure', [(selected, failed)], Cause('signature'),
              'pr-tier'),
-            ('qualify / renderer / contracts', 'failure', [('Run the contracts', failed)], plain, 'unknown'),
+            ('qualify / selected / linux_build', 'failure', [('Build the artifact', failed)], Cause('signature'),
+             'unknown'),
         ]
-        self.assertEqual({expected for *_, expected in rows}, set(report_issue.ESCAPE_REASONS))
+        self.assertEqual({expected.split(':')[0] for *_, expected in rows}, set(report_issue.ESCAPE_REASONS))
         for name, conclusion, steps, cause, expected in rows:
             job = dict(name=name, conclusion=conclusion, steps=[dict(name=step, conclusion=c) for step, c in steps])
-            with self.subTest(job=name):
-                self.assertEqual(report_issue.escape_class(job, cause), expected)
+            with self.subTest(job=name, expected=expected):
+                self.assertEqual(report_issue.escape_class(job, cause, owners, fixture_targets), expected)
 
 
 class ReportTest(unittest.TestCase):
@@ -418,11 +446,24 @@ class ReportTest(unittest.TestCase):
         self.assertIsNone(report_issue.repeat_of('macos', [(5, 'CLOSED', {}, 'macos', NOW - timedelta(days=15))], NOW))
         self.assertIsNone(report_issue.repeat_of('upgrade', earlier, NOW))
         self.assertIsNone(report_issue.repeat_of('unknown', [(5, 'OPEN', {}, 'unknown', NOW)], NOW))
+        for kind in ('pr-tier', 'cold-cache-timeout', 'unknown'):
+            with self.subTest(kind=kind):
+                self.assertIsNone(report_issue.repeat_of(kind, [(5, 'OPEN', {}, kind, NOW)], NOW))
+        target_keyed = [(5, 'OPEN', {}, 'live-mysql:check-full', NOW)]
+        self.assertEqual(report_issue.repeat_of('live-mysql:check-full', target_keyed, NOW), 5)
+        self.assertIsNone(report_issue.repeat_of('live-mysql:test-store', target_keyed, NOW))
 
-        def run_against(*existing):
-            fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH}, list(existing))
+        def run_against(*existing, jobs=None):
+            fake = FakeGitHub(jobs or [dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH, 2: HOST_STOP},
+                              list(existing))
             self.run_main(fake)
             return fake
+
+        # Two new causes of one class in one run: each sees only the issues from before the run's jobs.
+        same_run = run_against(jobs=[dict(id=1, name='macos / full-execution', conclusion='failure'),
+                                     dict(id=2, name='macos / full-callers', conclusion='failure')])
+        self.assertEqual(len(same_run.made('create')), 2)
+        self.assertEqual(same_run.made('comment'), [])
 
         signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
         flagged = run_against(issue(5, 'other', [], ['Promote'], 'a' * 40, escape='macos', created=NOW - timedelta(days=3)))
@@ -448,6 +489,9 @@ class ReportTest(unittest.TestCase):
         [comment] = recurrence.made('comment')
         self.assertEqual(comment[2], '5')
         self.assertNotIn('Second', comment[comment.index('--body') + 1])
+        # A recurrence renders its body's class from the issue's own label, so a hand-relabel sticks.
+        [edit] = recurrence.made('edit')
+        self.assertIn('Escape class: macos: the ready PR tier runs no macOS job', edit[edit.index('--body') + 1])
 
     def test_a_new_cause_opens_one_labelled_issue_and_a_recurrence_comments(self):
         fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH})
@@ -471,6 +515,19 @@ class ReportTest(unittest.TestCase):
         [comment] = fake.made('comment')
         self.assertEqual(comment[2], '5')
         self.assertNotIn('--add-label', edit)
+
+    def test_an_infrastructure_red_is_filed_without_an_escape_class(self):
+        lost = dict(id=1, name='macos / full-execution', conclusion='failure')
+        cancelled_setup = dict(id=1, name='macos / full-execution', conclusion='failure',
+                               steps=[dict(name='Set up job', conclusion='cancelled')])
+        for job, annotations in ((lost, ['The runner has received a shutdown signal']), (cancelled_setup, [])):
+            with self.subTest(annotations=annotations):
+                fake = FakeGitHub([job], {1: BASH}, annotations=annotations)
+                self.run_main(fake)
+                [create] = fake.made('create')
+                labels = [create[i + 1] for i, arg in enumerate(create) if arg == '--label']
+                self.assertEqual(labels, ['ci-red'])
+                self.assertNotIn('Escape class', create[create.index('--body') + 1])
 
     def test_a_stable_red_labels_an_issue_another_workflow_filed(self):
         signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'

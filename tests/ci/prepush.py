@@ -301,7 +301,7 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
 
 def red_revision():
     digest = hashlib.sha256()
-    for path in ("prepush.py", "report_issue.py", "failure_cause.py", "promotion_lines.py", "select_tests.py","build_files.py", "qualification.py"):
+    for path in ("prepush.py", "report_issue.py", "failure_cause.py", "infra_cause.py", "promotion_lines.py", "select_tests.py","build_files.py", "qualification.py"):
         digest.update((Path(__file__).parent / path).read_bytes())
     digest.update(build_files.source(ROOT).encode())
     digest.update((ROOT / "src/unit_test_partition.zig").read_bytes())
