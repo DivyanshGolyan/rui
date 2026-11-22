@@ -16,10 +16,10 @@ import tempfile
 import threading
 import types
 import unittest
-from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
+import os_semantics  # noqa: E402
 import runtime_leftovers  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/integration/host_process.py")
@@ -169,27 +169,19 @@ class RuntimeLeftovers(unittest.TestCase):
             self.assertFalse(path.exists() or path.with_suffix(".store").exists())
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
-        # A probe that times out has no refusal errno. Nothing proves the socket dead, so it is
-        # live and kept. The probe is injected: a real long path would now be refused before
-        # connect, on every platform (#1948).
-        class TimedOutProbe:
-            def __enter__(self):
-                return self
+        # The parent of the path is a file, so connect fails with ENOTDIR: no refusal errno.
+        # Nothing proves the socket dead, so it is live and kept.
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = pathlib.Path(raw)
+            (root / "plain").write_text("")
+            self.assertTrue(runtime_leftovers.answers(root / "plain" / "p.sock"))
 
-            def __exit__(self, *exc):
-                return False
-
-            def settimeout(self, seconds):
-                pass
-
-            def connect(self, address):
-                raise TimeoutError(errno.ETIMEDOUT, "probe timed out")
-
-        with tempfile.TemporaryDirectory(dir="/tmp") as raw, \
-                mock.patch.object(runtime_leftovers.os_semantics, "unix_stream", TimedOutProbe):
+    def test_a_live_socket_is_kept_by_leftovers_and_retire(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw, os_semantics.unix_stream() as live:
             root = pathlib.Path(raw)
             path = root / "p.sock"
-            path.write_text("")
+            live.bind(str(path))
+            live.listen(8)
             gone = str(root / "gone")
             path.with_suffix(".store").write_text(gone)
             self.assertTrue(runtime_leftovers.answers(path))

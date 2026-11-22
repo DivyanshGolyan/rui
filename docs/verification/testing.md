@@ -65,7 +65,7 @@ Provider wire classification is tested over the corpus in `src/testing/fixtures/
 | Leftover state | A test's processes die with the test; nothing outlives it, including a killed Host's socket and `.store` hint in `/tmp/rui-<uid>`. Disposal through `stop_process` or `forced_crash_cleanup` retires the runtime entry before the Store is deleted; a fixture that kills a Host any other way must dispose through `stop_process`. `run_selected.py` fails a step that leaves one ([runtime_leftovers.py](../../tests/integration/runtime_leftovers.py), #1855) |
 | Network and live providers | The scripted fake provider; live providers are manual, never a gate |
 | Ordering and races | Inject the interleaving through a named pause point; never rely on the scheduler |
-| Platform differences | Platform code sits behind one small seam; only that seam's tests run on both systems |
+| Platform differences | Platform code sits behind one small seam; only that seam's tests run on both systems. Darwin limits that Linux CI copies are listed in [Darwin limits on Linux](#darwin-limits-on-linux) |
 
 `tests/ci/flake_sources.py` enforces the flake-source rules with a shrink-only allowance.
 
@@ -75,9 +75,13 @@ A test that is flaky is fixed at its root or deleted.
 
 Linux CI enforces these Darwin limits, so a Darwin-only red shows up without Mac minutes:
 
-- Every harness refuses an AF_UNIX path of 104 bytes or more on every platform, through `os_semantics.check_unix_path` in Python and `measurement.CheckUnixPath` in Go (#1948).
-- Dependency builds that run configure on Linux run with pkg-config hidden from PATH, as on the Mac runner, through `src/build_transport.sh` (#1932).
-- A fixture that listens without accepting sizes its listen backlog for every connect the test makes, because Darwin refuses a connect to a full backlog while Linux queues it, and Linux does not yet simulate that refusal (#1956).
+- Darwin-shaped temporary directory: `.github/actions/darwin-tmpdir` gives Linux CI Darwin's long `TMPDIR` path (#579, #724, #755).
+- AF_UNIX send buffer: `os_semantics.unix_stream` limits unread send capacity to 4 KiB, as Darwin does (#1150).
+- Bind without listen: `platform_boundary.bind_violations` refuses a fixture that binds a socket and never listens, since Darwin drops connections to it.
+- AF_UNIX path length: every harness refuses a path of 104 bytes or more on every platform, through `os_semantics.check_unix_path` and its checked server and asyncio wrappers in Python, and `measurement.CheckUnixPath`, `ListenUnix` and `DialUnix` in Go (#1948). `platform_boundary` refuses any other Unix server or asyncio call outside `os_semantics`.
+- pkg-config: dependency builds that run configure on Linux run with pkg-config hidden from PATH, as on the Mac runner, in `src/build_transport.sh` (#1932).
+
+Rule only, not enforced on Linux: a fixture that listens without accepting sizes its listen backlog for every connect the test makes, because Darwin refuses a connect to a full backlog while Linux queues it (#1956).
 
 ## Migration
 

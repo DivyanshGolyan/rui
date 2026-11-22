@@ -1,3 +1,4 @@
+import asyncio
 import ctypes
 import fcntl
 import os
@@ -7,6 +8,7 @@ import re
 import shlex
 import shutil
 import socket
+import socketserver
 import struct
 import subprocess
 import sys
@@ -86,6 +88,23 @@ class _UnixStream(socket.socket):
 
     def connect(self, address):
         super().connect(check_unix_path(address))
+
+    def connect_ex(self, address):
+        return super().connect_ex(check_unix_path(address))
+
+
+class UnixStreamServer(socketserver.UnixStreamServer):
+    def server_bind(self):
+        check_unix_path(self.server_address)
+        super().server_bind()
+
+
+async def start_unix_server(client_connected_cb, path, **kwargs):
+    return await asyncio.start_unix_server(client_connected_cb, path=check_unix_path(path), **kwargs)
+
+
+async def open_unix_connection(path, **kwargs):
+    return await asyncio.open_unix_connection(check_unix_path(path), **kwargs)
 
 
 def unix_stream():

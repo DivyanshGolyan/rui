@@ -179,13 +179,30 @@ func TestUnixPathLimitRefusesDarwinSunPathOnEveryPlatform(t *testing.T) {
 		if len(path) != row.length {
 			t.Fatalf("test path is %d bytes, want %d", len(path), row.length)
 		}
-		err := CheckUnixPath(path)
 		if row.accepted {
+			// A real bind under a short directory, so the accepted row is bindable, not only
+			// under the check.
+			directory, err := os.MkdirTemp("", "ul")
 			if err != nil {
-				t.Errorf("%d-byte path refused: %v", row.length, err)
+				t.Fatal(err)
 			}
+			t.Cleanup(func() { os.RemoveAll(directory) })
+			fill := row.length - len(directory) - len("/") - len(".sock")
+			if fill < 1 {
+				t.Fatalf("directory %q leaves no room for a %d-byte path", directory, row.length)
+			}
+			bindable := directory + "/" + strings.Repeat("a", fill) + ".sock"
+			if len(bindable) != row.length {
+				t.Fatalf("bind path is %d bytes, want %d", len(bindable), row.length)
+			}
+			listener, err := ListenUnix(bindable)
+			if err != nil {
+				t.Fatalf("%d-byte path refused: %v", row.length, err)
+			}
+			listener.Close()
 			continue
 		}
+		err := CheckUnixPath(path)
 		var refused *UnixPathError
 		if !errors.As(err, &refused) {
 			t.Fatalf("%d-byte path: got %v, want *UnixPathError", row.length, err)
@@ -196,8 +213,8 @@ func TestUnixPathLimitRefusesDarwinSunPathOnEveryPlatform(t *testing.T) {
 		if msg := err.Error(); !strings.Contains(msg, fmt.Sprintf("%d bytes", row.length)) || !strings.Contains(msg, path) {
 			t.Errorf("%d-byte path: error %q does not state the path and its length", row.length, msg)
 		}
-		if _, err := ListenUnix(path); err == nil {
-			t.Errorf("%d-byte path bound", row.length)
+		if _, err := ListenUnix(path); !errors.As(err, &refused) {
+			t.Errorf("%d-byte path: ListenUnix returned %v, want *UnixPathError", row.length, err)
 		}
 	}
 }

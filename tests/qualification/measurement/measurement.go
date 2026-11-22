@@ -340,7 +340,7 @@ func retireSocket(socket, store string) error {
 	if err := CheckUnixPath(socket); err != nil {
 		return err
 	}
-	connection, err := net.DialTimeout("unix", socket, time.Second)
+	connection, err := DialUnix(socket, time.Second)
 	if err == nil {
 		connection.Close()
 		return nil
@@ -375,6 +375,15 @@ func CheckUnixPath(path string) error {
 		return &UnixPathError{Path: path, Length: len(path)}
 	}
 	return nil
+}
+
+// DialUnix connects to a Unix socket at path after CheckUnixPath. These two functions are
+// the only owners of AF_UNIX listen and dial calls in tests/qualification (see unix_boundary_test.go).
+func DialUnix(path string, timeout time.Duration) (net.Conn, error) {
+	if err := CheckUnixPath(path); err != nil {
+		return nil, err
+	}
+	return net.DialTimeout("unix", path, timeout)
 }
 
 // ListenUnix binds a Unix listener at path after CheckUnixPath.
@@ -459,8 +468,7 @@ func ExchangeUnix(deadline Deadline, socketPath string, route string, value any,
 	if err != nil {
 		return err
 	}
-	dialer := net.Dialer{Timeout: remaining}
-	connection, err := dialer.Dial("unix", socketPath)
+	connection, err := DialUnix(socketPath, remaining)
 	if err != nil {
 		return err
 	}

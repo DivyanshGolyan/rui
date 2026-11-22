@@ -30,11 +30,7 @@ def announced(result):
     return match[1]
 
 
-class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    def server_bind(self):
-        os_semantics.check_unix_path(self.server_address)
-        super().server_bind()
-
+class ReplyProxy(socketserver.ThreadingMixIn, os_semantics.UnixStreamServer):
     def __init__(self, host, route, rewrite=None, *, before_forward=None, match_record=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         self.backend = self.path.with_name("=" + self.path.name[1:])

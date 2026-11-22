@@ -47,7 +47,8 @@ def leftovers(directory=None):
 
 def answers(path):
     """True unless the socket is provably dead: refused or absent. Any other probe failure
-    (timeout, permission, ...) cannot prove the socket dead, so it counts as live and is kept."""
+    (timeout, permission, ...) cannot prove the socket dead, so it counts as live and is kept.
+    A path at or over the limit raises UnixPathTooLong before any connect (os_semantics)."""
     with os_semantics.unix_stream() as probe:
         probe.settimeout(1)
         try:

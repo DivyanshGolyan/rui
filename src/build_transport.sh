@@ -75,8 +75,14 @@ hidden_path="$build_root/path"
 mkdir -p "$hidden_path"
 old_ifs=$IFS
 IFS=:
+set -f
 for dir in $PATH; do
-    [ -n "$dir" ] || continue
+    # Globbing stays off only while PATH is split; each entry below globs its own directory.
+    set +f
+    case "$dir" in
+        /*) ;;
+        *) continue ;;
+    esac
     for entry in "$dir"/*; do
         name=${entry##*/}
         case "$name" in
@@ -87,9 +93,11 @@ for dir in $PATH; do
         fi
     done
 done
+set +f
 IFS=$old_ifs
 PATH=$hidden_path
 export PATH
+unset PKG_CONFIG
 
 if [ "${sdk:-}" ]; then
     mkdir -p "$prefix/sdk/System/Library" "$prefix/sdk/usr"

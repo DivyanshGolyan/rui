@@ -173,9 +173,17 @@ def python_sites(source):
     return trust + platform + sockets + process_sites
 
 
+UNIX_SERVERS = ("UnixStreamServer", "start_unix_server", "open_unix_connection")
+
+
 def unix_socket_sites(tokens):
-    return sum(tokens[i:i + 7] == ["socket", ".", "socket", "(", "socket", ".", "AF_UNIX"]
-               for i in range(len(tokens)))
+    """Raw AF_UNIX socket constructions, and server or asyncio Unix calls, that are not qualified by
+    os_semantics. The owner's checked class and wrappers carry the 104-byte path rule (#1948)."""
+    sites = sum(tokens[i:i + 7] == ["socket", ".", "socket", "(", "socket", ".", "AF_UNIX"]
+                for i in range(len(tokens)))
+    return sites + sum(1 for i in range(len(tokens) - 1)
+                       if tokens[i] in UNIX_SERVERS and tokens[i + 1] == "("
+                       and tokens[max(i - 2, 0):i] != ["os_semantics", "."])
 
 
 def shell_sites(source):
@@ -251,7 +259,7 @@ def sites(root=ROOT):
 
 def violations(found):
     return [f"{path}: {count} platform sites outside Mac paths. "
-            "Move them to an appropriate Mac owner; use os_semantics.unix_stream() for fixture Unix sockets; "
+            "Move them to an appropriate Mac owner; use os_semantics.unix_stream, os_semantics.UnixStreamServer, os_semantics.start_unix_server or os_semantics.open_unix_connection for fixture Unix sockets; "
             "see tests/ci/platform_boundary.py" for path, count in sorted(found.items())]
 
 

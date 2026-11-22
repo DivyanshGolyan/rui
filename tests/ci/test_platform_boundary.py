@@ -191,6 +191,24 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertEqual(shell_sites("python3 - <<'PY'\npeer = socket.socket(socket.AF_UNIX)\nPY\n"), 1)
         self.assertEqual(shell_sites("python3 - <<'PY'\n# socket.socket(socket.AF_UNIX)\ns = 'socket.socket(socket.AF_UNIX)'\nPY\n"), 0)
 
+    def test_unix_servers_and_asyncio_unix_calls_belong_to_the_checked_owner(self):
+        # Each row is one call outside os_semantics, so each counts as one site (#1948).
+        for source in ('socketserver.UnixStreamServer(str(path), handler)\n',
+                       'class Proxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):\n    pass\n'
+                       'server = UnixStreamServer(path, handler)\n',
+                       'await asyncio.start_unix_server(self._serve, path=self.listen)\n',
+                       'await asyncio.open_unix_connection(self.upstream)\n'):
+            with self.subTest(source=source):
+                self.assertEqual(python_sites(source), 1)
+        for source in ('class ReplyProxy(socketserver.ThreadingMixIn, os_semantics.UnixStreamServer):\n    pass\n',
+                       'loop.run_until_complete(os_semantics.start_unix_server(self._serve, self.listen))\n',
+                       'await os_semantics.open_unix_connection(self.upstream)\n',
+                       'host = os_semantics.UnixStreamServer(str(path), handler)\n',
+                       '# asyncio.start_unix_server(cb, path=p)\n',
+                       's = "asyncio.open_unix_connection(p)"\n'):
+            with self.subTest(source=source):
+                self.assertEqual(python_sites(source), 0)
+
     def test_unix_stream_limits_unread_linux_send_capacity(self):
         sys.path.insert(0, str(Path(__file__).parents[1] / "integration"))
         import os_semantics

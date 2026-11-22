@@ -11,6 +11,7 @@ import time
 from urllib.parse import quote
 
 import h2_fixture
+import os_semantics
 import host_process
 import live_engines
 import settings_fixture as frame_host
@@ -49,7 +50,7 @@ class Relay:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(asyncio.start_unix_server(self._serve, path=self.listen))
+            loop.run_until_complete(os_semantics.start_unix_server(self._serve, self.listen))
         except BaseException as error:
             self.failure = error
             self.ready.set()
@@ -66,7 +67,7 @@ class Relay:
             return list(self.queries[start:])
 
     async def _serve(self, client_reader, client_writer):
-        server_reader, server_writer = await asyncio.open_unix_connection(self.upstream)
+        server_reader, server_writer = await os_semantics.open_unix_connection(self.upstream)
 
         async def upstream():
             buffer = b""
