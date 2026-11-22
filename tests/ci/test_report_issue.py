@@ -382,13 +382,15 @@ MYSQL_BUNDLE = ('qualify / selected / linux suites (chatgpt-login-integration+co
 MEASUREMENT_BUNDLE = ('qualify / selected / linux suites (admission-debug-integration+cli-image-integration+'
                       'current-facts-integration+human-cli-integration+measurement-check+public-parts-integration+'
                       'skills-integration+transport-h2-integration)')
+FULL_CALLERS = 'qualify / selected / linux suites (full-callers)'
+FULL_EXECUTION = 'qualify / selected / linux suites (full-execution)'
+DIALECT = 'Require that the live MySQL dialect check ran'
 
 
 class EscapeClassTest(unittest.TestCase):
     def test_each_escape_class_and_an_unmatched_job_map_from_the_real_job_and_its_stopping_step(self):
         owners = report_issue.escape_owners()
         cases = report_issue.fixtures()
-        fixture_targets = {path: name for name, path in cases.items()}
         Cause = report_issue.Cause
         failed, cancelled = 'failure', 'cancelled'
         selected = 'Run selected targets'
@@ -420,6 +422,14 @@ class EscapeClassTest(unittest.TestCase):
              'macos'),
             ('qualify / selected / linux suites (test-logic)', 'failure', [(selected, failed)], Cause('signature'),
              'pr-tier'),
+            (FULL_CALLERS, 'failure', [(selected, failed)],
+             Cause('signature', ['tests/integration/human_cli_integration.py']), 'pr-tier'),
+            (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)],
+             Cause('signature', zig_binary='admission-debug-integration'), 'pr-tier'),
+            (FULL_EXECUTION, 'failure', [(selected, failed)], Cause('signature'), 'unknown'),
+            (FULL_EXECUTION, 'failure', [('Build the artifact', failed), (DIALECT, failed)], Cause('signature'),
+             'unknown'),
+            (FULL_EXECUTION, 'failure', [(DIALECT, failed)], Cause('signature'), 'live-mysql:check-full'),
             ('qualify / selected / linux_build', 'failure', [('Build the artifact', failed)], Cause('signature'),
              'unknown'),
         ]
@@ -427,7 +437,7 @@ class EscapeClassTest(unittest.TestCase):
         for name, conclusion, steps, cause, expected in rows:
             job = dict(name=name, conclusion=conclusion, steps=[dict(name=step, conclusion=c) for step, c in steps])
             with self.subTest(job=name, expected=expected):
-                self.assertEqual(report_issue.escape_class(job, cause, owners, fixture_targets), expected)
+                self.assertEqual(report_issue.escape_class(job, cause, owners, cases), expected)
 
 
 class ReportTest(unittest.TestCase):

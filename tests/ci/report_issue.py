@@ -53,6 +53,8 @@ UPGRADE_JOB = re.compile(r"\bupgrade \(")
 # A timed-out job's cancelled steps that build or test: the cold-cache time limit.
 COLD_STEP = re.compile(r"build|compile|test|run (?:required|selected)", re.IGNORECASE)
 MYSQL = re.compile(r"mysql", re.IGNORECASE)
+# The step that fails whenever the live MySQL dialect binary did not run; it counts only as a job's sole failure.
+DIALECT_STEP = "Require that the live MySQL dialect check ran"
 # A shard names its targets in parentheses: "linux suites (a+b)"; the check-full parts are named full-<part>.
 SHARD_TARGETS = re.compile(r"\(([^()]+)\)\s*$")
 PART_TARGETS = {matrix_name("check-full", part): "check-full" for part in FULL_PARTS}
@@ -436,20 +438,20 @@ def annotations(repository, job):
     return [note["message"] for note in notes]
 
 
-def cause_target(cause, fixture_targets, shard):
-    """The target a cause names: its zig test binary, or the fixture whose file it failed in; "" when neither.
+def cause_targets(cause, cases):
+    """The target names a cause could name: its zig test binary, or every fixture of the file it failed in.
 
-    A file the fixture table does not name (mysql_wire_integration.py) names the shard target of its stem.
+    `cases` maps each fixture name to its file. A python file the table does not name also names the target of
+    its stem (mysql_wire_integration.py); the caller keeps only names a shard covers.
     """
     if cause.zig_binary:
-        return cause.zig_binary
+        return [cause.zig_binary]
+    names = []
     for path in cause.paths:
-        if path in fixture_targets:
-            return fixture_targets[path]
-        stem = Path(path).stem.replace("_", "-")
-        if stem in shard:
-            return stem
-    return ""
+        names += [name for name, file in cases.items() if file == path]
+        if path.endswith(".py"):
+            names.append(Path(path).stem.replace("_", "-"))
+    return names
 
 
 def shard_targets(job):
@@ -458,14 +460,14 @@ def shard_targets(job):
     return [PART_TARGETS.get(token, token) for token in named[1].split("+")] if named else []
 
 
-EscapeOwners = namedtuple("EscapeOwners", "own_files unit_roots promotion_only live_mysql fixtures")
+EscapeOwners = namedtuple("EscapeOwners", "own_files unit_roots never fixtures covers")
 
 
 def escape_owners():
     """The selection owners the classifier reads. Imported here: select_tests reads the repository when it loads."""
-    from select_tests import FIXTURES, PR_OWN_FILE_TARGETS, PR_UNIT_ROOTS, PROMOTION_ONLY_TARGETS, tree_graph
-    return EscapeOwners(own_files=PR_OWN_FILE_TARGETS, unit_roots=PR_UNIT_ROOTS, promotion_only=PROMOTION_ONLY_TARGETS,
-                        live_mysql=frozenset(tree_graph().live_mysql), fixtures=frozenset(FIXTURES))
+    from select_tests import FIXTURES, PR_NEVER_TARGETS, PR_OWN_FILE_TARGETS, PR_UNIT_ROOTS, covers
+    return EscapeOwners(own_files=PR_OWN_FILE_TARGETS, unit_roots=PR_UNIT_ROOTS, never=PR_NEVER_TARGETS,
+                        fixtures=frozenset(FIXTURES), covers=covers)
 
 
 def target_class(target, leg, owners):
@@ -479,16 +481,29 @@ def target_class(target, leg, owners):
         return f"live-mysql:{target}"
     if target in owners.unit_roots:
         return "pr-tier"
-    if target in owners.promotion_only:
+    if target in owners.never:
         return f"promotion-only:{target}"
-    if target in owners.live_mysql:
-        return f"live-mysql:{target}"
     if target in owners.fixtures:
         return "pr-tier"
     return "unknown"
 
 
-def escape_class(job, cause, owners, fixture_targets):
+def cause_text(job, cause):
+    """The words a cause's own failure carries, for the MySQL leg check: never the job's name or the step names.
+
+    A parsed cause's signature names its file or test; an unparsed one names the job and its failed steps, so
+    only its paths, test names and binary count. A failure whose only failed step is the dialect check counts.
+    """
+    failed = failed_steps(job)
+    parsed = not re.match(r"[^\n]*: job '", cause.signature)
+    text = [cause.signature] if parsed else []
+    text += [*cause.paths, cause.zig_test, cause.python_test, cause.zig_binary]
+    if failed == [DIALECT_STEP]:
+        text += failed
+    return text
+
+
+def escape_class(job, cause, owners, cases):
     """Why the ready PR tier did not run a failed job's cause: its class label, without the escape prefix."""
     steps = job.get("steps") or ()
     timed = job.get("conclusion") == "timed_out" or any(step.get("conclusion") == "cancelled" for step in steps)
@@ -501,14 +516,13 @@ def escape_class(job, cause, owners, fixture_targets):
         return "macos"
     if WHOLE_TIER_JOB.search(job["name"]):
         return "promotion-only"
-    # The cause's text without the job's own name, which an unparsed signature carries.
-    text = [cause.signature.replace(job["name"], ""), *cause.paths, cause.zig_test, cause.python_test, cause.zig_binary, *stopped]
-    leg = any(MYSQL.search(part) for part in text)
-    # A named target counts when the job's shard lists it, or the job lists none; a binary or fixture the shard
-    # does not list (unit-store-tests in check-full) leaves the shard's own targets to classify.
+    leg = any(MYSQL.search(part) for part in cause_text(job, cause) if part)
+    # A named target counts when the shard covers it through one of its own targets, or the job lists none. A binary
+    # or fixture no shard target covers (unit-store-tests in check-full) leaves the shard's targets to classify.
     shard = shard_targets(job)
-    named = cause_target(cause, fixture_targets, shard)
-    targets = [named] if named and (not shard or named in shard) else shard
+    named = [name for name in cause_targets(cause, cases)
+             if not shard or any(owners.covers(name, {target}) for target in shard)]
+    targets = named or shard
     classes = {target_class(target, leg, owners) for target in targets} if targets else {"unknown"}
     if len(classes) == 1:
         return classes.pop()
@@ -560,14 +574,13 @@ def main(now=None):
     issues, cases = known_issues(repository), fixtures()
     prior = list(issues)
     owners = escape_owners()
-    fixture_targets = {path: name for name, path in cases.items()}
     for job in run_jobs(repository, args.run_id):
         if job["conclusion"] not in ("failure", "timed_out") or aggregate_only(job):
             continue
         log = job_log(repository, job["id"])
         infra = infra_verdict(job, annotations(repository, job), log if needs_log(job) else None)[0] == "infra"
         for cause in job_causes(log, cases, args.workflow, job):
-            cause.escape = "" if infra else escape_class(job, cause, owners, fixture_targets)
+            cause.escape = "" if infra else escape_class(job, cause, owners, cases)
             print(file_cause(repository, issues, cause, args.workflow, args.sha, url, args.label, now, prior))
 
 
