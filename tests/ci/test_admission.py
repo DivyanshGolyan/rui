@@ -12,7 +12,7 @@ import unittest
 
 import build_files
 from dependency_replay import sqlite_bump
-from select_tests import select
+from select_tests import BROAD_HELPER_IMPORTERS, FIXTURES, PR_OWN_FILE_TARGETS, select, shared_helper_importers
 import steps
 from strict_paths import STRICT, strict
 
@@ -652,11 +652,11 @@ class CandidatePlanTest(unittest.TestCase):
             'host-launch-integration', 'host-process-test', 'host-stop-integration', 'read-image-integration',
             'request-wait-integration'}),
         'shared helper imported through a helper': (['tests/integration/tool_profile_fixture.py'], {'human-cli-integration'}),
-        # mysql-wire-integration needs live MySQL, which no PR target starts, so it stays off the PR even as an importer.
+        # mysql-wire-integration stays off the PR here because it is in PR_OWN_FILE_TARGETS: an import never selects it.
         'shared helper of a live-MySQL fixture': (['tests/integration/mysql_server.py'], {'settings-integration', 'test-logic'}),
         'shared helper no fixture imports': (['tests/integration/proc_sample.py'], set()),
-        # A core helper (imported by 30 or more fixtures) adds none of its importers; ts-client is host_process.py's own script.
-        'core helper adds no importers': (['tests/integration/host_process.py'], {'ts-client'}),
+        # A broad helper (imported by 30 or more fixtures) adds none of its importers; ts-client is host_process.py's own script.
+        'broad helper adds no importers': (['tests/integration/host_process.py'], {'ts-client'}),
         # settings_fixture.py is the settings fixture's own script and the helper four other fixtures import.
         'fixture script that other fixtures import': (['tests/integration/settings_fixture.py'], {
             'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
@@ -682,7 +682,7 @@ class CandidatePlanTest(unittest.TestCase):
     PR_TIER_CONTENTS = {'dependency pins': {'build.zig.zon': sqlite_bump()}}
 
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
-        """CI-1 and CI-88: a ready candidate runs its PR tier, own-file checks included; promotion runs all."""
+        """CI-1, CI-88 and CI-89: a ready candidate runs its PR tier, own-file and helper importers included; promotion runs all."""
         from ci_plan import plan
         from docs_only import ChangeKind
         available = set(build_files.steps())
@@ -706,6 +706,47 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
                 from select_tests import covers
                 self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
+
+    def test_shared_helper_importers_follow_the_cap_and_deleted_helpers(self):
+        """CI-89: a changed shared helper's importers join the PR tier below the whole-PR cap, never through PR_OWN_FILE_TARGETS, and a deleted helper keeps the fixtures still importing it."""
+        class StubGraph:
+            # The three answers shared_helper_importers reads, over fixed paths and fixture names.
+            def __init__(self, targets=None, missing=None, reached=None):
+                self.table, self.missing, self.reached = targets or {}, missing or {}, reached or {}
+
+            def targets(self, path):
+                return self.table.get(path)
+
+        fixtures = sorted(set(FIXTURES) - PR_OWN_FILE_TARGETS)
+        helper = 'tests/integration/shared_helper.py'
+        other = 'tests/integration/other_helper.py'
+        cases = {
+            'exactly 29 importers fans out': ([helper], StubGraph({helper: set(fixtures[:29])}), set(fixtures[:29])),
+            'exactly 30 importers adds none': ([helper], StubGraph({helper: set(fixtures[:30])}), set()),
+            'two helpers whose union reaches the cap add none': (
+                [helper, other], StubGraph({helper: set(fixtures[:15]), other: set(fixtures[15:30])}), set()),
+            'two helpers under the cap add their union': (
+                [helper, other], StubGraph({helper: set(fixtures[:14]), other: set(fixtures[14:28])}), set(fixtures[:28])),
+            'a PR_OWN_FILE_TARGETS importer is removed': (
+                [helper], StubGraph({helper: {'mysql-wire-integration', 'settings-integration'}}), {'settings-integration'}),
+            'a non-.py file under tests/integration selects nothing': (
+                ['tests/integration/check.sh'], StubGraph({'tests/integration/check.sh': {'overview-integration'}}), set()),
+            'a .py file outside tests/integration selects nothing': (
+                ['tests/ci/shared_helper.py'], StubGraph({'tests/ci/shared_helper.py': {'overview-integration'}}), set()),
+            'a path the graph does not know selects nothing': ([helper], StubGraph(), set()),
+            'a deleted helper keeps the fixture still importing it': (
+                ['tests/integration/gone.py'],
+                StubGraph(missing={'tests/integration/gone.py': {'tests/integration/host_status_integration.py'}},
+                          reached={'host-status-integration': {'tests/integration/host_status_integration.py'},
+                                   'settings-integration': {'tests/integration/settings_integration.py'}}),
+                {'host-status-integration'}),
+            'a deleted helper nothing imports selects nothing': (
+                ['tests/integration/gone.py'], StubGraph(), set()),
+        }
+        for name, (paths, graph, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(shared_helper_importers(paths, graph), expected)
+        self.assertEqual(BROAD_HELPER_IMPORTERS, 30)
 
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
         with PlanFixture() as fixture:
