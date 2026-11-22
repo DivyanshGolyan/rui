@@ -15,30 +15,28 @@ DIVIDER_GLYPHS = (VERTICAL_DIVIDER, "│", "|")
 RULE_PATTERN = "[" + re.escape("".join(RULE_GLYPHS)) + "]"
 DIVIDER_PATTERN = "[" + re.escape("".join(DIVIDER_GLYPHS)) + "]"
 
+# The split layout draws its divider in this column (src/Root.zig list_width), and
+# only there: the list also draws `│` as tree guides and the chat draws `┆` as quote
+# marks, so a divider glyph anywhere else on a row is content.
+PANE_COLUMN = 40
+JUNCTION_GLYPHS = ("┼", "┤", "+")
+
+
 def split_pane_row(row, column=None):
-    if column is not None:
-        offset = 0
-        for index, char in enumerate(row):
-            if offset == column and char in DIVIDER_GLYPHS + ("┼", "┤", "+"):
-                return row[:index], char, row[index + 1:]
-            offset += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-            if offset > column:
-                break
+    if column is None and row.startswith((" ›", " >")):
         return "", "", row
-    if row.startswith((" ›", " >")):
-        return "", "", row
-    rule = re.match(rf"^({RULE_PATTERN}{{2,}})([┼┤+])", row)
-    if rule:
-        return rule.group(1), rule.group(2), row[rule.end():]
-    divider = min((index for glyph in DIVIDER_GLYPHS[:2] if (index := row.find(glyph)) >= 0), default=-1)
-    column = 0
+    at = PANE_COLUMN if column is None else column
+    offset = 0
     for index, char in enumerate(row):
-        if char == "|" and column == 40 and (divider < 0 or index < divider):
-            divider = index
+        if offset == at:
+            left = row[:index]
+            joins_rule = len(left) >= 2 and set(left) <= set(RULE_GLYPHS)
+            if char in DIVIDER_GLYPHS or (char in JUNCTION_GLYPHS and (column is not None or joins_rule)):
+                return left, char, row[index + 1:]
             break
-        column += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-    if divider >= 0:
-        return row[:divider], row[divider], row[divider + 1:]
+        offset += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if offset > at:
+            break
     return "", "", row
 
 

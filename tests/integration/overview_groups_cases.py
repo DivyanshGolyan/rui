@@ -112,20 +112,19 @@ def queued_in_active():
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"   [◜◝◞◟] First peer task *", working), working
-                assert re.fullmatch(r"   ◌ Second peer task +now", queued), queued
+                # The Dispatcher sent each peer its first Message, so both nest under it.
+                assert re.fullmatch(r"   [│╰] [◜◝◞◟] First peer task *", working), working
+                assert re.fullmatch(r"   [│╰] ◌ Second peer task +now", queued), queued
                 # Rows sort by their latest state change in whole seconds, which these
                 # three share, so this case checks marks, not order.
-                row(frame, "Dispatcher")
-                drawn = cells(screen, "Second peer task")
-                queued_mark = drawn[3]
-                working_mark = cells(screen, "First peer task")[3]
+                assert lines.index(row(frame, "Dispatcher")) < min(lines.index(working), lines.index(queued)), frame
+                queued_mark = cells(screen, "Second peer task")[5]
+                working_mark = cells(screen, "First peer task")[5]
                 assert queued_mark.data == "◌", queued_mark
-                assert re.fullmatch(r"   ◌ Second peer task +now", queued), frame
                 assert queued_mark.fg != working_mark.fg, frame
         finally:
             hold.set()
-    print("overview groups: a queued peer row shows a dim `◌` beside working and done rows, with no headings", flush=True)
+    print("overview groups: a queued peer row shows a dim `◌` beside working and done rows, both nested under the chat that sent them, with no headings", flush=True)
 
 
 def detail_column():

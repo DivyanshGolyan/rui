@@ -196,13 +196,13 @@ class UpgradeEmptyChatTest(unittest.TestCase):
             self.observe("", model="wrong-model")
 
     def test_sidebar_keeps_memory_with_settings_and_hides_current_version(self):
-        valid = ["Settings    38 MB", "  Settings    1.5 GB │ chat\n footer │ model"]
+        valid = ["Settings    38 MB", "  Settings    1.5 GB".ljust(40) + "│ chat\n" + " footer".ljust(40) + "│ model"]
         invalid = ["Settings\n  38 MB", "Settings 0.76.0\n footer",
                    "Settings\n38 MB 0.76.0", "Settings    38 MB 0.76.0",
                    "Settings    38 MB\n0.76.1", "Settings    38 MB\nunreleased",
                    "Settings    rui 38 MB", "Settings    38 MB · tools 12 MB",
                    "Settings    38 MB    Update to 0.76.0", "Settings    38 MB    Updating…",
-                   "Settings    38 MB    Update failed", "Settings │ 38 MB",
+                   "Settings    38 MB    Update failed", "Settings".ljust(40) + "│ 38 MB",
                    "Settings    38 MB\nUpgraded to 0.76.0",
                    "Settings    38 MB\n · upgraded to 0.76.0"]
         for frame in valid:
@@ -236,17 +236,17 @@ class UpgradeEmptyChatTest(unittest.TestCase):
 
     def test_sidebar_update_failure_replaces_memory_with_a_short_label(self):
         for frame in ("Settings    Update failed",
-                      "  Settings    Update failed │ chat"):
+                      "  Settings    Update failed".ljust(40) + "│ chat"):
             self.screen.observe = lambda: frame
             with self.subTest(frame=frame):
                 self.assertEqual(frame, self.screen.sidebar(failed=True))
         for frame in ("Settings\nUpdate failed", "Settings    38 MB\nUpdate failed",
-                      "Settings    38 MB    Update failed", "Settings    1.5 GB    Update failed │ chat",
+                      "Settings    38 MB    Update failed", "Settings    1.5 GB    Update failed".ljust(40) + "│ chat",
                       "Settings    Update failed: Couldn't reach GitHub",
                       "Settings    Update failed: Upgrade failed",
                       "Settings    Update failed 0.76.0",
                       "Settings    Update failed\n0.76.0",
-                      "Settings    Update failed │ chat\n · upgraded to 0.76.0"):
+                      "Settings    Update failed".ljust(40) + "│ chat\n · upgraded to 0.76.0"):
             self.screen.observe = lambda: frame
             with self.subTest(frame=frame), self.assertRaises(NotReady):
                 self.screen.sidebar(failed=True)
@@ -289,8 +289,8 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = f" + New chat                Archived {VERTICAL_DIVIDER}\n   Settings {VERTICAL_DIVIDER} gpt-6-luna · low\n"
-        frames = [sidebar + f"{VERTICAL_DIVIDER} › What shall we work on?", sidebar + f"{VERTICAL_DIVIDER} › unsent draft",
+        sidebar = f"{' + New chat                Archived'.ljust(40)}{VERTICAL_DIVIDER}\n{'   Settings'.ljust(40)}{VERTICAL_DIVIDER} gpt-6-luna · low\n"
+        frames = [sidebar + f"{''.ljust(40)}{VERTICAL_DIVIDER} › What shall we work on?", sidebar + f"{''.ljust(40)}{VERTICAL_DIVIDER} › unsent draft",
                   "+ New chat                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)
         self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
