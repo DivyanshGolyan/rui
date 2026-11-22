@@ -113,13 +113,13 @@ def start(request, sources):
     previous = signal.pthread_sigmask(signal.SIG_SETMASK, signal.valid_signals())
     pid = os.fork()
     if pid == 0:
+        os.close(gate_write)
+        if os.read(gate_read, 1) != b"+":
+            os._exit(255)
         try:
-            os.close(gate_write)
-            floor = max(request["targets"] + sources + [error_write, gate_read]) + 1
+            os.close(gate_read)
+            floor = max(request["targets"] + sources + [error_write]) + 1
             error_write = fcntl.fcntl(error_write, fcntl.F_DUPFD_CLOEXEC, floor)
-            gate_read = fcntl.fcntl(gate_read, fcntl.F_DUPFD_CLOEXEC, floor)
-            if os.read(gate_read, 1) != b"+":
-                os._exit(255)
             become(request, sources, error_write)
         except OSError as error:
             failure = {"errno": error.errno, "filename": error.filename}
@@ -127,30 +127,33 @@ def start(request, sources):
             failure = {"errno": errno.EINVAL, "filename": repr(error)}
         os.write(error_write, json.dumps(failure).encode())
         os._exit(255)
-    os.close(gate_read)
+    refused = None
     try:
-        hand_over(pid)
-    except OSError as error:
+        os.close(gate_read)
+        try:
+            hand_over(pid)
+        except OSError as error:
+            refused = {"errno": error.errno, "filename": error.filename}
+        else:
+            try:
+                os.write(gate_write, b"+")
+            except BrokenPipeError:
+                pass  # The job was killed at the gate; its exit reaches the caller as a status.
+    finally:
         os.close(gate_write)
-        os.waitpid(pid, 0)
-        refused = {"errno": error.errno, "filename": error.filename}
-    else:
-        os.write(gate_write, b"+")
-        os.close(gate_write)
-        refused = None
-    signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-    os.close(error_write)
-    for fd in sources:
-        os.close(fd)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        os.close(error_write)
+        for fd in sources:
+            os.close(fd)
     failure = b""
-    while chunk := os.read(error_read, 4096):
-        failure += chunk
-    os.close(error_read)
-    if refused is not None:
-        return refused
-    if failure:
+    try:
+        while chunk := os.read(error_read, 4096):
+            failure += chunk
+    finally:
+        os.close(error_read)
+    if refused is not None or failure:
         os.waitpid(pid, 0)
-        return json.loads(failure)
+        return refused or json.loads(failure)
     return {"pid": pid}
 
 
