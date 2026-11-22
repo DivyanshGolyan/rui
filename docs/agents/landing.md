@@ -108,4 +108,5 @@ Whoever dispatches a promotion watches it to the end and reports the result unpr
 A failed step means the promotion is red; report it at once, since its suspects are in the run's log as the job ends.
 A red promotion lists, on each `promotion-red` issue it files, the batch commits suspected of each failed step of that job, most direct first.
 Fix forward through an ordinary PR, then promote again.
+A Promote run whose only failure is batch's `Fail a scheduled run whose main HEAD is red` step is a reminder, not a new red: triage the run its error names, file nothing, and leave it out of green-rate counts.
 Recover a red Release as [Release publication](../verification/release.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

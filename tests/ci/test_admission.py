@@ -967,9 +967,10 @@ def job_needs(body):
     return [name.strip() for name in (match[1] or match[2]).split(',')] if match else []
 
 
-def translate(expression, outputs, results):
-    """Rewrite one job-level `if` as Python over the plan outputs and the needs results."""
-    expression = re.sub(r"needs\.plan\.outputs\.(\w+)", lambda match: repr(outputs.get(match[1], '')), expression)
+def translate(expression, root, outputs, results, variables):
+    """Rewrite one job-level `if` as Python over the root job's outputs, the workflow variables and the needs results."""
+    expression = re.sub(rf"needs\.{root}\.outputs\.(\w+)", lambda match: repr(outputs.get(match[1], '')), expression)
+    expression = re.sub(r"vars\.(\w+)", lambda match: repr(variables.get(match[1], '')), expression)
     expression = re.sub(r"needs\.(\w+)\.result", lambda match: repr(results[match[1]]), expression)
     expression = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), ('[^']*')\)", r'(\2 in \1)', expression)
     expression = expression.replace('github.event.repository.private', 'False')
@@ -979,13 +980,15 @@ def translate(expression, outputs, results):
     return re.sub(r'!(?!=)', ' not ', expression)
 
 
-def jobs_running(workflow, outputs, event):
-    """The jobs of check.yml that run for one plan output and event, from each job's `needs` and `if`.
+def jobs_running(workflow, outputs, event, root='plan', root_result='success', variables=None, names=None):
+    """The jobs of a workflow that run for one root job's outputs and result, the event and the workflow variables.
 
-    The plan's outputs and the event are the only inputs. An `if` without a status function keeps
-    the implicit success() of its needs, so a job behind a skipped need is skipped, as Actions does.
+    The root is check.yml's `plan` by default; promote.yml's `batch` is the other caller. Each job's `needs`
+    and `if` decide the rest, and an `if` without a status function keeps the implicit success() of its needs,
+    so a job behind a skipped need is skipped, as Actions does. `names` limits the jobs evaluated.
     """
-    results, runs = {'plan': 'success'}, {'plan'}
+    results = {root: root_result}
+    runs = {root} if root_result == 'success' else set()
     text = workflow.split('\njobs:', 1)[1]
 
     def result(name):
@@ -999,8 +1002,10 @@ def jobs_running(workflow, outputs, event):
                 ok = needs_ok
             else:
                 expression = condition[1].replace('github.event_name', repr(event))
-                # The expressions are this repository's own check.yml conditions, rewritten above.
-                value = bool(eval(translate(expression, outputs, results), {'__builtins__': {}}, {}))
+                # The expressions are this repository's own workflow conditions (check.yml, promote.yml), rewritten
+                # above, with builtins disabled; no input from outside the repository reaches this eval.
+                value = bool(eval(translate(expression, root, outputs, results, variables or {}),
+                                  {'__builtins__': {}}, {}))
                 status = any(function in expression for function in ('always()', 'cancelled()', 'failure()', 'success()'))
                 ok = value and (status or needs_ok)
             results[name] = 'success' if ok else 'skipped'
@@ -1008,9 +1013,45 @@ def jobs_running(workflow, outputs, event):
                 runs.add(name)
         return results[name]
 
-    for name in re.findall(r'(?m)^  ([a-z_]+):$', text):
+    for name in names or re.findall(r'(?m)^  ([a-z_]+):$', text):
         result(name)
     return runs
+
+
+PROMOTE = ROOT / '.github/workflows/promote.yml'
+PROMOTE_JOBS = ('qualify', 'release', 'dependency_lag', 'race_sweep')
+
+
+class PromoteJobGraphTest(unittest.TestCase):
+    """CI-13: which of Promote's jobs after batch run for each batch result and its outputs, on a schedule."""
+
+    def runs(self, batch, outputs, event='schedule', variables=None):
+        return jobs_running(PROMOTE.read_text(), outputs, event, root='batch', root_result=batch,
+                            variables=variables, names=PROMOTE_JOBS)
+
+    def test_each_batch_result_runs_exactly_its_jobs(self):
+        idle = {'size': '0', 'reuse': 'false', 'weekly': 'false', 'daily': 'false'}
+        cases = {
+            # A red HEAD: batch fails after choosing, and weekly or daily work still runs.
+            'red HEAD, weekly and daily': ('failure', dict(idle, weekly='true', daily='true'), {'dependency_lag', 'race_sweep'}),
+            'red HEAD, weekly only': ('failure', dict(idle, weekly='true'), {'dependency_lag'}),
+            'red HEAD, daily only': ('failure', dict(idle, daily='true'), {'race_sweep'}),
+            'red HEAD, neither': ('failure', idle, set()),
+            'batch failed with no outputs': ('failure', {}, set()),
+            'batch skipped': ('skipped', {}, set()),
+            'stable holds HEAD': ('success', idle, {'batch'}),
+            'stable holds HEAD, weekly': ('success', dict(idle, weekly='true'), {'batch', 'dependency_lag'}),
+            'green record reused': ('success', dict(idle, size='2', reuse='true', run='41', version='0.80.0'),
+                                    {'batch', 'release'}),
+            'normal qualify': ('success', dict(idle, size='2'), {'batch', 'qualify', 'release'}),
+        }
+        for case, (batch, outputs, expected) in cases.items():
+            with self.subTest(case=case):
+                # batch itself runs only when it succeeds; the expected sets name the jobs after it.
+                self.assertEqual(self.runs(batch, outputs), expected | ({'batch'} if batch == 'success' else set()))
+        with self.subTest(case='paused scheduled releases hold a reused green record'):
+            self.assertEqual(self.runs('success', dict(idle, size='2', reuse='true', run='41', version='0.80.0'),
+                                       variables={'SCHEDULED_RELEASES': 'paused'}), {'batch'})
 
 
 class JobGraphTest(unittest.TestCase):

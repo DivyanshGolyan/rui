@@ -149,7 +149,8 @@ class PromotionChoiceTest(unittest.TestCase):
                              (A, None, "stable already holds it"))
         # A scheduled run never refuses: a red HEAD promotes nothing, and an unrecorded or green HEAD proceeds.
         scheduled = {
-            "red HEAD skips": ({A: "failure"}, None, (None, None, f"{A} failed qualification in run 41; "
+            "red HEAD skips": ({A: "failure"}, None, (None, mq.Record("failure", "41", "0.80.0"),
+                                                       f"{A} failed qualification in run 41; "
                                                        "the next scheduled run waits for a fix on main")),
             "green HEAD publishes": ({A: "success"}, None, (A, published, None)),
             "HEAD without a record qualifies": ({}, None, (A, None, "no green record")),
@@ -160,6 +161,31 @@ class PromotionChoiceTest(unittest.TestCase):
                     return mq.Record(states[commit], "41", "0.80.0") if commit in states else None
                 self.assertEqual(mq.choose(A, "", [A, B, C], record, lambda own, commit: reason, scheduled=True),
                                  expected)
+
+        # CI-13: a scheduled red HEAD publishes nothing and its outputs name the red record's run (red_run), so
+        # Promote's batch fails; a red record with no run cannot be named, so choose refuses it.
+        red = mq.Record("failure", "41", "0.80.0")
+        skip_outputs = {"head": "", "base": "S", "size": "0", "reuse": "false", "run": "", "version": "",
+                        "red_run": "41"}
+        with self.subTest(skipped="red record names its run"):
+            self.assertEqual(mq.skipped("S", red), skip_outputs)
+        with self.subTest(skipped="red record without a run"):
+            with self.assertRaisesRegex(SystemExit, "names no run"):
+                mq.choose(A, "", [A], lambda commit: mq.Record("failure", None, ""), lambda own, commit: None,
+                          scheduled=True)
+        # A head that is not red emits no red_run: the outputs below carry none, and so does an up-to-date head.
+        with self.subTest(outputs="up to date"):
+            self.assertEqual(mq.promoted("S", A, 0, None),
+                             {"head": A, "base": "S", "size": "0", "reuse": "false", "run": "", "version": ""})
+        with self.subTest(outputs="green archives reused"):
+            self.assertEqual(mq.promoted("S", B, 2, mq.Record("success", "41", "0.80.0")),
+                             {"head": B, "base": "S", "size": "2", "reuse": "true", "run": "41", "version": "0.80.0"})
+        with self.subTest(outputs="qualified here"):
+            self.assertEqual(mq.promoted("S", B, 2, None),
+                             {"head": B, "base": "S", "size": "2", "reuse": "false", "run": "", "version": ""})
+        with self.subTest(manual="red HEAD refuses"):
+            with self.assertRaisesRegex(SystemExit, "fix forward"):
+                mq.choose(A, "", [A], lambda commit: mq.Record("failure", "41", ""), lambda own, commit: None)
 
 
 if __name__ == "__main__":
