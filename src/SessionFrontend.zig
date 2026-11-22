@@ -1116,9 +1116,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
 
-        .overlay = if (self.app_hooks.root.input.layer.settingsOpen())
-            .{ .full = self.app_hooks.root.settings_page.bodyWidget() }
-        else if (self.info_open)
+        .overlay = if (self.info_open)
             .{ .full = self.app_info.bodyWidget() }
         else if (self.app_info.standaloneOpen())
             .{ .full = self.app_info.standaloneWidget() }
@@ -1132,10 +1130,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         self.app_input.facts = self.app_info.footerWidget();
-        self.app_input.status = null;
-    }
-    if (self.app_hooks.root.input.layer.settingsOpen()) {
-        self.app_input.facts = self.app_hooks.root.settings_page.footerWidget();
         self.app_input.status = null;
     }
     self.app_preview.size = .{};
@@ -1294,6 +1288,49 @@ test "App Session approval keeps typed abc through Esc and Allow once with its c
         try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
         try std.testing.expectEqual(caret, self.input.composition().cursor);
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), expected) != null);
+    }
+}
+
+test "Settings over an approval keeps the faded chat inert to the wheel and clicks around the dialog" {
+    for ([_]vxfw.MaxSize{ .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 40 } }) |size| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = size;
+        const self = &held.self;
+        _ = self.input.append("kept");
+        const file = try held.adopt(40);
+        defer file.close(std.testing.io);
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, self.app_consent.row);
+        var ctx = held.context();
+        try held.root.openSettings(&ctx);
+        const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = size, .cell_size = .{} });
+        // The approval still shows, faded, beneath the dialog.
+        const faded = frame.children[0].surface;
+        var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
+        for (faded.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "Allow") != null);
+        const anchor = held.screen.anchor;
+        const fills = self.reading.fills;
+        const request = self.app_consent.request;
+        // Every corner and edge midpoint lies on the faded screen or the card's margin.
+        const width: u16 = size.width.?;
+        const height: u16 = size.height.?;
+        for ([_][2]u16{ .{ 0, 0 }, .{ height / 2, 0 }, .{ height - 1, width - 1 }, .{ height / 2, width - 1 }, .{ height - 1, 0 } }) |point| {
+            var hits: std.ArrayList(vxfw.HitResult) = .empty;
+            try frame.hitTest(held.arena.allocator(), &hits, .{ .row = point[0], .col = point[1] });
+            // Root alone: its capture runs once, and nothing behind the dialog sees the event.
+            try std.testing.expectEqual(@as(usize, 1), hits.items.len);
+            try std.testing.expect(hits.items[0].widget.eql(held.root.widget()));
+            for ([_]vaxis.Mouse.Button{ .wheel_up, .wheel_down, .left }) |button| for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                try @import("testing/app_events.zig").mouse(&ctx, frame, .{ .row = @intCast(point[0]), .col = @intCast(point[1]), .button = button, .mods = .{}, .type = kind });
+            };
+        }
+        try std.testing.expect(held.root.input.layer.settingsOpen());
+        try std.testing.expectEqualDeep(anchor, held.screen.anchor);
+        try std.testing.expectEqualDeep(fills, self.reading.fills);
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, self.app_consent.row);
+        try std.testing.expectEqual(request, self.app_consent.request);
+        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
     }
 }
 
@@ -3443,10 +3480,18 @@ const HeldFrontend = struct {
     }
 
     fn shown(held: *HeldFrontend) ![]const u8 {
+        return held.rendered(try held.draw());
+    }
+
+    /// The whole frame as App draws it through Root, dialogs included.
+    fn shownThroughRoot(held: *HeldFrontend) ![]const u8 {
+        return held.rendered(try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} }));
+    }
+
+    fn rendered(held: *HeldFrontend, surface: vxfw.Surface) ![]const u8 {
         const width = held.size.width.?;
         const height = held.size.height.?;
         const gpa = held.arena.allocator();
-        const surface = try held.draw();
         var screen: vaxis.Screen = try .init(gpa, .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
         try surface.render(window, held.self.app_input.composer.widget());
@@ -11220,7 +11265,7 @@ test "consent and full panels compose across adoption, nested choices, and draft
         fn choice(held: *HeldFrontend, panel: PanelCase) !void {
             switch (panel) {
                 .settings => {
-                    _ = try held.shown();
+                    _ = try held.shownThroughRoot();
                     held.root.settings_page.select(.permissions);
                     held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
                     try std.testing.expect(held.root.settings_page.hasChoice());
@@ -11230,6 +11275,15 @@ test "consent and full panels compose across adoption, nested choices, and draft
                     try std.testing.expect(held.self.app_info.hasChoice());
                 },
             }
+        }
+        /// Whether the consent card shows: in the chat itself under Chat info, or, under the
+        /// Settings dialog, in the faded screen Root draws beneath the card.
+        fn consentShown(held: *HeldFrontend, panel: PanelCase) !bool {
+            const drawn = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+            if (panel == .info) return std.mem.indexOf(u8, try held.rendered(drawn), "Allow once") != null;
+            var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
+            for (drawn.children[0].surface.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            return std.mem.indexOf(u8, text.written(), "Allow once") != null;
         }
         fn closeChoice(held: *HeldFrontend, panel: PanelCase) !void {
             switch (panel) {
@@ -11262,11 +11316,14 @@ test "consent and full panels compose across adoption, nested choices, and draft
         if (!adopt_before) file = try held.adopt(3);
         try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
         try std.testing.expect(held.self.app_input.permission == &held.self.app_card);
-        const choice_text = try held.shown();
-        try std.testing.expect(std.mem.indexOf(u8, choice_text, "Allow once") == null);
-        try std.testing.expect(std.mem.indexOf(u8, choice_text, if (panel == .settings) "ask first" else "run without asking") != null);
+        // Chat info replaces the consent card; Settings is a dialog above the chat, where the
+        // card stays visible but faded and takes no input.
+        // A draft typed before the request keeps focus, so the selector waits behind it.
+        const selector_shown = panel == .settings and !(adopt_before and draft);
+        try std.testing.expectEqual(selector_shown, try Steps.consentShown(held, panel));
+        try std.testing.expect(std.mem.indexOf(u8, try held.shownThroughRoot(), if (panel == .settings) "ask first" else "run without asking") != null);
         try Steps.closeChoice(held, panel);
-        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") == null);
+        try std.testing.expectEqual(selector_shown, try Steps.consentShown(held, panel));
         try Steps.close(held, panel);
         if (!adopt_before and draft) {
             try held.keys("draft");

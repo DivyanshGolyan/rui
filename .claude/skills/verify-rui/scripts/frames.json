@@ -2244,7 +2244,7 @@
     },
     {
       "name": "settings-signin",
-      "note": "App settings Sign-in: a stitched card, with a margin of ground, above the Settings screen faded to the thread colour",
+      "note": "App settings Sign-in: Sign-in takes the Settings dialog's place, a stitched card above the main screen faded to the thread colour",
       "open": "overview",
       "steps": [
         {"wait": "+ New chat"},
@@ -2257,13 +2257,14 @@
         {"wait": "Welcome to Rui"}
       ],
       "expect": [
-        "Notifications",
         "Welcome to Rui",
         "ChatGPT",
         "API key",
         "Close"
       ],
-      "absent": [],
+      "absent": [
+        "Notifications"
+      ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
@@ -6659,7 +6660,7 @@
     },
     {
       "name": "panels-settings",
-      "note": "Panel inside the input rules on the plain background; night at both review widths",
+      "note": "Settings from a chat: the Settings dialog on the raised ground above the chat faded to the thread colour; night at both review widths",
       "open": "Fix retry deadline",
       "steps": [
         {

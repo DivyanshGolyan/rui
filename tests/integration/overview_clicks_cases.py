@@ -123,15 +123,21 @@ def opening_and_views():
             screen.keys(b"\x1b[B" * 6 + b"\r")
             panel = screen.wait(lambda frame: "earlier message" in frame and "tool output" in frame, "the keys panel")
             assert all(stale not in panel for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice")), panel
+            # Settings is a dialog: alpha's row stays visible, faded, beside the card's stitched
+            # edges, and neither the faded name nor the dialog's line on that row opens it.
             under = panel.split("\n")[alpha_row - 1]
-            assert under.strip() and "alpha" not in under, (under, panel)
-            screen.click(under.index(under.strip()[0]) + 1, alpha_row)
+            edges = [col for col, char in enumerate(under) if char in "\u2506|"]
+            assert len(edges) == 2 and "alpha" in under[:edges[0]], (under, panel)
+            inside = under[edges[0] + 1:edges[1]]
+            assert inside.strip(), (under, panel)
+            screen.click(under.index("alpha") + 1, alpha_row)
+            screen.click(edges[0] + 1 + len(inside) - len(inside.lstrip()) + 1, alpha_row)
             screen.keys(b"\x1b")
-            settings = screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "Esc closes only Keys after an inert click")
+            settings = screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "Esc closes only Keys after inert clicks")
             assert "earlier message" not in settings, settings
             screen.keys(b"\x1b")
             screen.wait(lambda frame: is_overview(frame) and "   alpha" in frame, "Esc returns from Settings to the overview")
-        print("overview clicks: a line of an open panel over a Session's row opens nothing", flush=True)
+        print("overview clicks: neither the faded screen nor a line of the Settings dialog over a Session's row opens it", flush=True)
 
 
 def flat_list():

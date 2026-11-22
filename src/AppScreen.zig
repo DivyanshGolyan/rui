@@ -29,9 +29,7 @@ fn Screen(comptime Body: type) type {
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
-        pub const Part = enum { whole, list, input_host };
-
-        const empty: vxfw.Text = .{ .text = "" };
+        pub const Part = enum { whole, list };
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -60,14 +58,13 @@ fn Screen(comptime Body: type) type {
             const own = switch (part) {
                 .whole => self.widget(),
                 .list => self.listWidget(),
-                .input_host => self.widget(),
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = if (part == .input_host) empty.widget() else self.content.widget(), .sizing = .fill };
+            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker, .style = self.style };
@@ -91,10 +88,10 @@ fn Screen(comptime Body: type) type {
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (part != .input_host) if (self.header) |header| {
+            if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            };
+            }
             upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const column = try ctx.arena.create(Stack);
