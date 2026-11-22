@@ -79,7 +79,9 @@ def catalog_unusable_trust_run():
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-offline", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-        ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")})
+        ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
+            # This case proves the default catalog URL's trust failure, so it keeps the default URL.
+            isolate_settings=False)
         for _ in range(3):
             listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
             assert listed and listed[0]["provider"] == "codex", listed
