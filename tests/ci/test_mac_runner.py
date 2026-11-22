@@ -1,6 +1,8 @@
 """Runner policy domain, mutation controls and workflow/hook handoffs."""
 
+import contextlib
 import copy
+import io
 import itertools
 import json
 import os
@@ -51,9 +53,10 @@ def cases():
 class DecisionTest(unittest.TestCase):
     def test_whole_domain(self):
         for args, expected in cases():
-            actual, reason = mac_runner.decide(*args)
+            actual, reason, offline = mac_runner.decide(*args)
             self.assertEqual(actual, expected, args)
             self.assertTrue(reason.endswith("."), reason)
+            self.assertFalse(offline and expected == SELF, args)
             self.assertNotIn("\n", reason)
 
     def test_shared_admission_domain(self):
@@ -106,7 +109,7 @@ class DecisionTest(unittest.TestCase):
         ]
         for runners, queue, expected in examples:
             with self.subTest(runners=runners, queue=queue):
-                actual, reason = mac_runner.decide(*base, runners, queue)
+                actual, reason, _ = mac_runner.decide(*base, runners, queue)
                 self.assertEqual(actual, expected)
                 if queue is not None:
                     for value in queue.values():
@@ -151,6 +154,85 @@ class DecisionTest(unittest.TestCase):
                 args = list(baseline)
                 args[index] = value
                 self.assertEqual(mac_runner.decide(*args)[0], HOSTED, args)
+
+
+SHORTER = {"mac_queued": 0, "hosted_queued": 1, "hosted_running": 0}
+LONGER = {"mac_queued": 2, "hosted_queued": 1, "hosted_running": 0}
+OFFLINE_SENTENCE = "Hosted macOS is selected because the rui-mac runner is offline."
+# (name, option overrides, runners, queue, route, offline flag); every admitted row is a trusted dispatch.
+OFFLINE_CASES = [
+    ("switch off", {"switch": "off"}, [runner("offline")], None, HOSTED, False),
+    ("not admitted", {"event_name": "push"}, [runner("offline")], None, HOSTED, False),
+    ("compile only", {"inputs": {"compile_only": True}}, [runner("offline")], None, HOSTED, False),
+    ("status unavailable", {}, None, None, HOSTED, False),
+    ("runner offline", {}, [runner("offline")], None, HOSTED, True),
+    ("no rui-mac runner", {}, [runner(label="other")], None, HOSTED, True),
+    ("online idle", {}, [runner()], None, SELF, False),
+    ("online busy, shorter queue", {}, [runner(busy=True)], SHORTER, SELF, False),
+    ("online busy, longer queue", {}, [runner(busy=True)], LONGER, HOSTED, False),
+]
+
+
+class OfflineWarningTest(unittest.TestCase):
+    def options(self, overrides):
+        options = {"event_name": "workflow_dispatch", "inputs": {}, "switch": "on"}
+        options.update(overrides)
+        return options
+
+    def run_main(self, options, runners, queue):
+        # Drives the CLI in process: its env contract, its GITHUB_OUTPUT route and its stdout annotations.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            (temp / "event").write_text("{}")
+            if runners is not None:
+                (temp / "runners").write_text(json.dumps({"runners": runners}))
+            if queue is not None:
+                (temp / "queue").write_text(json.dumps(queue))
+            env = {"GITHUB_EVENT_PATH": str(temp / "event"), "GITHUB_EVENT_NAME": options["event_name"],
+                   "GITHUB_ACTOR": TRUSTED, "GITHUB_TRIGGERING_ACTOR": TRUSTED, "GITHUB_REPOSITORY": REPO,
+                   "INPUTS": json.dumps(options["inputs"]), "RUI_MAC_RUNNER": options["switch"],
+                   "RUNNERS_PATH": str(temp / "runners"), "QUEUE_PATH": str(temp / "queue"),
+                   "GITHUB_OUTPUT": str(temp / "output"), "GITHUB_STEP_SUMMARY": str(temp / "summary")}
+            stdout = io.StringIO()
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["mac_runner.py"]), \
+                    contextlib.redirect_stdout(stdout):
+                mac_runner.main()
+            lines = dict(line.split("=", 1) for line in (temp / "output").read_text().splitlines())
+            annotations = [line for line in stdout.getvalue().splitlines() if line.startswith("::")]
+            return json.loads(lines["runs_on"]), annotations
+
+    def test_offline_flag_route_and_annotation_table(self):
+        for name, overrides, runners, queue, route, offline in OFFLINE_CASES:
+            with self.subTest(name):
+                options = self.options(overrides)
+                actual, reason, flag = mac_runner.decide(
+                    options["event_name"], {}, TRUSTED, TRUSTED, REPO, options["inputs"], options["switch"],
+                    runners, queue)
+                self.assertEqual((actual, flag), (route, offline), reason)
+                self.assertEqual(reason.startswith(OFFLINE_SENTENCE), offline, reason)
+                self.assertNotIn("\n", reason)
+                routed, annotations = self.run_main(options, runners, queue)
+                self.assertEqual(routed, route)
+                self.assertEqual(annotations, [f"::warning title=rui-mac offline::{reason}"] if offline else [])
+
+    def test_offline_flag_has_negative_controls(self):
+        source = Path(mac_runner.__file__).read_text()
+        mutations = [
+            ("if not online:", "if False:"),
+            ("                online = True\n", ""),
+        ]
+        for before, after in mutations:
+            with self.subTest(mutation=before):
+                self.assertIn(before, source)
+                namespace = {"__name__": "mutant"}
+                exec(compile(source.replace(before, after, 1), "mutant", "exec"), namespace)
+                def differs(case):
+                    _, overrides, runners, queue, _, offline = case
+                    options = self.options(overrides)
+                    flag = namespace["decide"](options["event_name"], {}, TRUSTED, TRUSTED, REPO,
+                                               options["inputs"], options["switch"], runners, queue)[2]
+                    return flag != offline
+                self.assertTrue(any(differs(case) for case in OFFLINE_CASES))
 
 
 class AdapterTest(unittest.TestCase):
