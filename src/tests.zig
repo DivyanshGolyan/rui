@@ -16,6 +16,7 @@ test {
     _ = @import("chat_info.zig");
     _ = @import("model_choice.zig");
     _ = @import("panel_editor.zig");
+    _ = @import("Dialog.zig");
     _ = @import("SignIn.zig");
     _ = @import("choice_row.zig");
     _ = @import("sign_in.zig");

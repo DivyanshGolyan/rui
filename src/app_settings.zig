@@ -62,7 +62,7 @@ pub fn bodyWidget(self: *Self) vxfw.Widget {
 }
 
 pub fn footerWidget(self: *Self) vxfw.Widget {
-    self.footer.style = widget_style.of(if (self.backend) |backend| backend.caps(backend.context) else .{}, .{ .colour = .quiet });
+    self.footer.style = widget_style.of(if (self.backend) |backend| backend.caps(backend.context) else .{}, .{ .colour = .quiet, .background = .raised });
     return self.footer.widget();
 }
 
@@ -197,12 +197,14 @@ fn bind(self: *Self) void {
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
     self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
-    self.panel.ground = widget_style.of(caps, .{});
-    self.panel.selection = widget_style.of(caps, .{ .background = .selection });
-    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
-    self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
-    self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    self.panel.rule = widget_style.line(caps, .horizontal);
+    // Settings opens as a dialog, so it draws in the dialog's palette.
+    const look: @import("Dialog.zig").Look = .of(caps);
+    self.panel.ground = look.ground;
+    self.panel.selection = look.selection;
+    self.panel.hover_style = look.hover;
+    self.panel.title_style = look.title;
+    self.panel.quiet = look.quiet;
+    self.panel.rule = look.stitch(.horizontal);
     self.model_choice.show_more = true;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
@@ -627,7 +629,7 @@ test "App settings and nested Keys share Composer input lines and preserve the d
     }
 }
 
-test "App settings footer stays plain in both themes and widths" {
+test "App settings footer stays quiet on the dialog ground in both themes and widths" {
     var fixture: Fixture = .{};
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
@@ -636,7 +638,7 @@ test "App settings footer stays plain in both themes and widths" {
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
         fixture.background = background;
         const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
-        const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
+        const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet, .background = .raised });
         for (surface.buffer, 0..) |cell, col| {
             try std.testing.expectEqual(plain, cell.style);
             const expected = if (col >= 1 and col < 1 + "Settings".len) "Settings"[col - 1] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
@@ -675,7 +677,7 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Rui") != null);
-        const ground = widget_style.of(.{}, .{});
+        const ground = widget_style.of(.{}, .{ .background = .raised });
         try std.testing.expectEqual(ground.bg, screen.readCell(0, surface.size.height - 1).?.style.bg);
         try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(0, 1).?.style.bg);
     }

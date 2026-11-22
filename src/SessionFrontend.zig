@@ -1116,9 +1116,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
 
-        .overlay = if (self.app_hooks.root.input.layer.settingsOpen())
-            .{ .full = self.app_hooks.root.settings_page.bodyWidget() }
-        else if (self.info_open)
+        .overlay = if (self.info_open)
             .{ .full = self.app_info.bodyWidget() }
         else if (self.app_info.standaloneOpen())
             .{ .full = self.app_info.standaloneWidget() }
@@ -1132,10 +1130,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         self.app_input.facts = self.app_info.footerWidget();
-        self.app_input.status = null;
-    }
-    if (self.app_hooks.root.input.layer.settingsOpen()) {
-        self.app_input.facts = self.app_hooks.root.settings_page.footerWidget();
         self.app_input.status = null;
     }
     self.app_preview.size = .{};
@@ -11220,7 +11214,8 @@ test "consent and full panels compose across adoption, nested choices, and draft
         fn choice(held: *HeldFrontend, panel: PanelCase) !void {
             switch (panel) {
                 .settings => {
-                    _ = try held.shown();
+                    // Root draws the Settings dialog above this chat; draw the page as it does.
+                    _ = try held.root.settings_page.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
                     held.root.settings_page.select(.permissions);
                     held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
                     try std.testing.expect(held.root.settings_page.hasChoice());
@@ -11263,10 +11258,13 @@ test "consent and full panels compose across adoption, nested choices, and draft
         try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
         try std.testing.expect(held.self.app_input.permission == &held.self.app_card);
         const choice_text = try held.shown();
-        try std.testing.expect(std.mem.indexOf(u8, choice_text, "Allow once") == null);
-        try std.testing.expect(std.mem.indexOf(u8, choice_text, if (panel == .settings) "ask first" else "run without asking") != null);
+        // Chat info replaces the chat; Settings is a dialog above it, where the consent card
+        // stays visible but faded and takes no input.
+        if (panel == .info) try std.testing.expect(std.mem.indexOf(u8, choice_text, "Allow once") == null);
+        // The Settings dialog is Root's layer, drawn above this chat (Root's own tests show it).
+        if (panel == .info) try std.testing.expect(std.mem.indexOf(u8, choice_text, "run without asking") != null);
         try Steps.closeChoice(held, panel);
-        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") == null);
+        if (panel == .info) try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") == null);
         try Steps.close(held, panel);
         if (!adopt_before and draft) {
             try held.keys("draft");

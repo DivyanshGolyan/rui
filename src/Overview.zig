@@ -354,8 +354,6 @@ attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
 sign_in: SignIn = .{},
 app_screen: AppScreen.Overview = undefined,
-settings_editor: @import("DraftEditor.zig") = .init(&.{}),
-settings_input: @import("InputArea.zig") = undefined,
 app_sessions: GroupedList = .{},
 app_new_session: OverviewLines.SessionControls = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
@@ -489,19 +487,6 @@ fn widget(self: *Self) vxfw.Widget {
 
 fn listWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = appListDraw };
-}
-
-fn inputHostWidget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .drawFn = appInputHostDraw };
-}
-
-fn appInputHostDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    self.app_screen.style = @import("widget_style.zig").of(self.caps, .{});
-    self.app_screen.input = self.bottomWidget();
-    var surface = try self.app_screen.drawPart(ctx, .input_host);
-    surface.widget = self.inputHostWidget();
-    return surface;
 }
 
 fn paintDivider(self: *Self) void {
@@ -1034,16 +1019,6 @@ fn drawSettings(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
 
 fn drawBottom(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.root.input.layer.settingsOpen() and self.root.session == null) {
-        self.settings_input = .{
-            .composer = .{ .editor = &self.settings_editor, .caret = false },
-            .panel = .{ .full = self.root.settings_page.bodyWidget() },
-            .facts = self.root.settings_page.footerWidget(),
-            .status = null,
-        };
-        self.settings_input.composer.setCaps(self.caps);
-        return self.settings_input.widget().draw(ctx);
-    }
     const footer = try ctx.arena.create(@import("widgets/Footer.zig"));
     footer.* = .{
         .left = "",
@@ -1174,7 +1149,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .interrupted = interrupted,
     };
-    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .settings_input_host = self.inputHostWidget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .caps = &self.caps };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
@@ -3666,15 +3641,14 @@ test "Settings composes the Overview list at most once with and without a retain
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
-            const list_count: usize = @intFromBool(width >= Root.split_at);
-            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_sessions.widget()));
-            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_new_session.widget()));
-            try std.testing.expectEqual(list_count, Count.widget(surface, overview.app_settings_line.widget()));
+            // Settings is a dialog over the faded main screen, which may show the list once.
+            try std.testing.expect(Count.widget(surface, overview.app_sessions.widget()) <= 1);
+            try std.testing.expect(Count.widget(surface, overview.app_new_session.widget()) <= 1);
+            try std.testing.expect(Count.widget(surface, overview.app_settings_line.widget()) <= 1);
             try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.root.settings_page.bodyWidget()));
-            if (!retained) try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.inputHostWidget()));
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
-            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New chat"));
+            try std.testing.expect(std.mem.count(u8, try shown.text(), "+ New chat") <= 1);
         }
     }
 }
@@ -5735,7 +5709,8 @@ fn sui4SettingsEntry() !void {
                 try std.testing.expect(overview.root.session.?.eql(widget_));
                 try std.testing.expect(overview.app_session.?.frontend.? == frontend.?);
                 try std.testing.expectEqualStrings("retained draft", frontend.?.input.composition().bytes);
-                try std.testing.expect(Settings.origin(opened, widget_, .{ .row = 0, .col = 0 }) != null);
+                // The chat stays behind the Settings dialog, faded and taking no clicks.
+                try std.testing.expectEqual(@as(usize, 0), opened.children[0].surface.children.len);
             } else try std.testing.expect(overview.root.session == null);
             try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
             try std.testing.expectEqual(@as(usize, 0), overview.retired.items.len);
