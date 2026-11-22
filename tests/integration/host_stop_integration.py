@@ -228,6 +228,68 @@ def signal_stop():
         print(f"host signal stop passed: SIGTERM, SIGINT and SIGHUP end as host-stop {asked}; SIGKILL {endings['SIGKILL']}")
 
 
+def drain_stop():
+    """`host pause --drain` lets a running model call finish, stops at its bound
+    when the call never ends, and stops an idle Host after one quiet second."""
+    with tempfile.TemporaryDirectory(prefix="rui-host-drain-") as root:
+        state = canonical_fixture_root(root)
+        released = threading.Event()
+        held = threading.Event()
+        endpoint = fixture.SuccessEndpoint([], responses_by_input={
+            "finish": (fixture.ResponseSpec(fixture.sse_answer("finish", "r", "answer", "finished")[0], {}), released),
+            "hang": (fixture.ResponseSpec(fixture.sse_answer("hang", "r", "answer", "never")[0], {}), held)})
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        hosts = []
+        pauses = []
+        try:
+            def drain(store, seconds):
+                return subprocess.Popen([RUI, "host", "pause", "--store", store, "--drain", "--drain-seconds", str(seconds)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            def result(pause, timeout):
+                out, err = pause.communicate(timeout=timeout)
+                assert pause.returncode == 0, (pause.returncode, out, err)
+                assert err.startswith("rui: pause holds new turns, lets running work finish for up to "), err
+                return json.loads(out)
+
+            for name, prompt, seconds in (("finish", "finish", 60), ("deadline", "hang", 2), ("idle", None, 60)):
+                store = state / name
+                host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+                hosts.append(host)
+                requests = len(endpoint.requests)
+                if prompt is not None:
+                    session = fixture.configure(state, store, f"configure-{name}", None, "gpt-6-sol")
+                    fixture.message(state, store, f"message-{name}", session, prompt)
+                    fixture.wait_for(lambda: len(endpoint.requests) == requests + 1, f"{name}: held provider request")
+                began = time.monotonic()
+                pause = drain(store, seconds)
+                pauses.append(pause)
+                if name == "finish":
+                    time.sleep(1.5)
+                    assert pause.poll() is None and host.poll() is None, "a drain stopped the Host while its model call ran"
+                    released.set()
+                reply = result(pause, seconds + 20)
+                elapsed = time.monotonic() - began
+                assert reply["retirement"] == "confirmed", (name, reply)
+                assert reply["drain"] == {"finish": "finished", "deadline": "deadline", "idle": "finished"}[name], (name, reply)
+                assert (store / "host.stopped").read_text() == reply["drain"], name
+                host.wait(timeout=10)
+                if name == "deadline":
+                    assert 2 <= elapsed < 15, elapsed
+                if name == "idle":
+                    assert elapsed < 10, elapsed
+                assert status(store) == "unavailable", name
+            print("host drain passed: a running model call finishes first, a hung one stops at the bound, an idle Host stops after one quiet second")
+        finally:
+            dispose_all(
+                released.set, held.set,
+                *(lambda pause=pause: pause.kill() if pause.poll() is None else None for pause in pauses),
+                *(lambda host=host: stop_process(host) for host in hosts),
+                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+            )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-host-stop-") as root:
         state = canonical_fixture_root(root)
@@ -412,4 +474,5 @@ if __name__ == "__main__":
     mixed_effect_drain(True)
     mixed_effect_drain(False)
     signal_stop()
+    drain_stop()
     main()
