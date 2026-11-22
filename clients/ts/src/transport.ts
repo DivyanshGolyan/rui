@@ -7,7 +7,6 @@ export const WIRE_VERSION = "22";
 
 const MAX_REPLY_BYTES = 64 * 1024 * 1024;
 
-const RESPONSE_WAIT_MS = 5_000;
 const TRANSFER_IDLE_MS = 60_000;
 
 export interface Post {
@@ -22,7 +21,6 @@ export interface Post {
 export interface ReplyLimits {
 	prefix?: number;
 	max?: number;
-	responseMs?: number;
 	idleMs?: number;
 }
 
@@ -45,7 +43,6 @@ export function post(call: Post): Promise<Buffer> {
 		const idle = call.limits?.idleMs ?? TRANSFER_IDLE_MS;
 		outgoing.setTimeout(idle);
 		outgoing.on("timeout", () => outgoing.destroy(new Error("the Host made no progress in time")));
-		outgoing.on("finish", () => outgoing.setTimeout(call.limits?.responseMs ?? RESPONSE_WAIT_MS));
 		outgoing.on("error", (error) => reject(new ConnectionError(error.message, { cause: error })));
 		outgoing.on("response", (incoming) => {
 			outgoing.setTimeout(idle);

@@ -139,7 +139,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 					deadline.throwIfAborted();
 					const bytes = await rui.exchange("/v1/model-list", (canonicalStore) => JSON.stringify({
 						version: WIRE_VERSION, kind: "model_list", store: canonicalStore,
-					}), undefined, { responseMs: 1000 });
+					}), undefined, { idleMs: 1000 });
 					const reply = JSON.parse(bytes.toString("utf8")) as components["schemas"]["ModelListReply"];
 					const current = reply.providers.find((entry) => entry.provider === "chatgpt");
 					if (current?.source === "live" && current.models.some((model) => model.id === "gpt-6.1-sol")) break;
