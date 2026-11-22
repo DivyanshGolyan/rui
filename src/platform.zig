@@ -227,24 +227,38 @@ pub const StoreLease = struct {
         };
     }
 
-    pub fn recordStopAsked(self: *StoreLease) !void {
-        const record = try self.store_dir.createFile(self.io, stop_record_name, .{ .permissions = .fromMode(0o600) });
-        record.close(self.io);
+    /// Writes the Host's stop record. An empty record is a plain stop, as
+    /// every earlier Host wrote; a draining pause writes its state, then its
+    /// outcome (`host_drain.Record`).
+    pub fn recordStop(self: *StoreLease, text: []const u8) !void {
+        const record = try self.store_dir.createFile(self.io, stop_record_name, .{ .permissions = .fromMode(0o600), .truncate = true });
+        defer record.close(self.io);
+        try record.writeStreamingAll(self.io, text);
     }
 
     pub const LastStop = @import("host_restart.zig").LastStop;
 
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
+        const asked = stopRecord(io, supplied_path).wasAsked() orelse return .unknown;
+        return if (asked) .asked else .unasked;
+    }
+
+    /// What the last Host's stop record says; read after the lease is free.
+    /// The one reader of the record: a record that is not a plain file is unreadable.
+    pub fn stopRecord(io: std.Io, supplied_path: []const u8) @import("host_drain.zig").Record {
         const selected = resolveClientSelection(supplied_path);
-        const paths = selected.paths(io) catch return .unknown;
+        const paths = selected.paths(io) catch return .unreadable;
         const directory = if (paths.kind == .mysql) paths.runtimeHint().? else paths.store_identity.slice();
-        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
+        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unreadable;
         defer dir.close(io);
         const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
-            error.FileNotFound => .unasked,
-            else => .unknown,
+            error.FileNotFound => .absent,
+            else => .unreadable,
         };
-        return if (stat.kind == .file) .asked else .unknown;
+        if (stat.kind != .file) return .unreadable;
+        var buffer: [32]u8 = undefined;
+        const bytes = dir.readFile(io, stop_record_name, &buffer) catch return .unreadable;
+        return .parse(bytes);
     }
 
     pub fn useRuntimeDirectory(self: *StoreLease, runtime_path: []const u8, socket_path: []const u8) error{ RuntimeDirectoryInUse, RuntimeDirectoryUnusable }!void {
@@ -785,8 +799,8 @@ test "the stop record reads asked only when present as a file, and unknown when 
         var lease = try StoreLease.acquire(io, path);
         defer lease.release();
         try std.testing.expectEqual(StoreLease.LastStop.unasked, StoreLease.lastStop(io, path));
-        try lease.recordStopAsked();
-        try lease.recordStopAsked();
+        try lease.recordStop("");
+        try lease.recordStop("");
     }
     try std.testing.expectEqual(StoreLease.LastStop.asked, StoreLease.lastStop(io, path));
     try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);

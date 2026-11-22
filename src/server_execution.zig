@@ -29,6 +29,7 @@ const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
+const host_drain = @import("host_drain.zig");
 const signal_stack = @import("signal_stack.zig");
 const tools = @import("tools.zig");
 const test_poll = @import("test_poll");
@@ -627,6 +628,7 @@ pub fn executionMain(host: *Host) void {
     workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
+    var drain: ?host_drain.Watch = null;
     while (!host.executionEnding()) {
         var native = NativeTurn{
             .host = host,
@@ -639,16 +641,19 @@ pub fn executionMain(host: *Host) void {
             .fenced = false,
         };
         host.dispatch_wake.reset();
-        switch (execution_turn.run(&workspace.turn_state, &native)) {
+        const outcome = execution_turn.run(&workspace.turn_state, &native);
+        const drain_wait_ms = if (watchDrain(host, &drain, workspace, &native, outcome)) |wait| wait else break;
+        switch (outcome) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
-                awaitDispatchWake(host, switch (kind) {
+                const kind_ms: u32 = switch (kind) {
                     .transport => if (mcp_calls.any()) 25 else transportWaitMs(slots),
                     .bash => 25,
                     .idle => 100,
-                });
+                };
+                awaitDispatchWake(host, @intCast(@min(drain_wait_ms, kind_ms)));
                 const wait_finished = std.Io.Clock.Timestamp.now(host.io, .awake);
                 measurement.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
             },
@@ -670,6 +675,28 @@ pub fn executionMain(host: *Host) void {
         );
     }
     traceLifecycleService(host, measurement.maximum_gap_ns);
+}
+
+/// Judges a draining pause after each pass. Returns how long the loop may
+/// wait before deciding again, or null once the drain has ended the Host.
+fn watchDrain(host: *Host, drain: *?host_drain.Watch, workspace: *Workspace, native: *NativeTurn, outcome: execution_turn.Outcome) ?u64 {
+    const until = host.drainUntil() orelse return std.math.maxInt(u64);
+    if (drain.* == null) drain.* = .{ .until_ns = until };
+    drain.*.?.until_ns = until;
+    const decision = drain.*.?.observe(.{
+        .now_ns = server_host.nowNs(host),
+        .idle = outcome == .wait and !native.workInFlight(),
+        .running = host.custody.running(),
+        // A fenced Host admits no retry, so a retry row cannot hold the drain.
+        .retry = if (native.dispatchFenced()) .none else workspace.turn_state.retryOutlook(native.unixMilliseconds()),
+    });
+    switch (decision) {
+        .wait_at_most_ns => |ns| return std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable,
+        .stop => |ended| {
+            if (host.finishDrain(ended)) server_host.wakeListener(host);
+            return null;
+        },
+    }
 }
 
 // executionMain runs every NativeTurn step through execution_turn.run. Steps
@@ -821,6 +848,13 @@ const NativeTurn = struct {
         return true;
     }
 
+    /// A model call, Bash command, MCP call or image read holds execution.
+    /// Pooled provider connections and catalog listings are not Turn work.
+    pub fn workInFlight(self: *const NativeTurn) bool {
+        if (hasOwnedSlots(self.slots) or self.mcp.any()) return true;
+        return if (self.images) |images| images.any() else false;
+    }
+
     pub fn hasTransport(self: *const NativeTurn) bool {
         if (slotsHaveTransport(self.slots)) return true;
         const reactor = self.reactor orelse return false;
@@ -934,7 +968,7 @@ const NativeTurn = struct {
     }
 
     pub fn turnsPaused(self: *const NativeTurn) bool {
-        return self.host.turns_paused.load(.acquire);
+        return self.host.turnsHeld();
     }
 
     pub fn admitToolContinuation(self: *NativeTurn) execution_turn.Admission {

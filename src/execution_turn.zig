@@ -59,7 +59,41 @@ pub const State = struct {
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
     retry_deadlines: ?struct { through: u64, generation: u64, next: ?u64 } = null,
+
+    /// When the next model retry falls due, as the last pass left it.
+    pub fn retryOutlook(self: *const State, now_unix_ms: ?u64) @import("host_drain.zig").RetryOutlook {
+        if (self.work) |work| if (!work.found.retry) return .none;
+        if (self.idle_retry == null) return .unknown;
+        const due = self.next_retry_unix_ms orelse return .none;
+        const now_ms = now_unix_ms orelse return .unknown;
+        return .{ .in_ns = (due -| now_ms) *| 1_000_000 };
+    }
 };
+
+test "a retry outlook is none without retry work, unknown until a pass read it, and otherwise the time left" {
+    const RetryOutlook = @import("host_drain.zig").RetryOutlook;
+    const key: RetryKey = .{ .generation = 1, .slot_changes = 0 };
+    const at_ms: u64 = 50_000;
+    const Case = struct { work: ?bool, read: bool, due: ?u64, now: ?u64, want: RetryOutlook };
+    const cases = [_]Case{
+        // No scan yet: retries may exist.
+        .{ .work = null, .read = false, .due = null, .now = at_ms, .want = .unknown },
+        .{ .work = false, .read = false, .due = null, .now = at_ms, .want = .none },
+        .{ .work = false, .read = true, .due = at_ms + 1, .now = at_ms, .want = .none },
+        .{ .work = true, .read = false, .due = null, .now = at_ms, .want = .unknown },
+        .{ .work = true, .read = true, .due = null, .now = at_ms, .want = .none },
+        .{ .work = true, .read = true, .due = at_ms + 2, .now = null, .want = .unknown },
+        .{ .work = true, .read = true, .due = at_ms - 1, .now = at_ms, .want = .{ .in_ns = 0 } },
+        .{ .work = true, .read = true, .due = at_ms + 2, .now = at_ms, .want = .{ .in_ns = 2 * std.time.ns_per_ms } },
+    };
+    for (cases) |case| {
+        var state: State = .{};
+        if (case.work) |retry| state.work = .{ .key = .{ .generation = 1, .paused = false, .capacity = undefined }, .found = .{ .retry = retry } };
+        if (case.read) state.idle_retry = key;
+        state.next_retry_unix_ms = case.due;
+        try std.testing.expectEqual(case.want, state.retryOutlook(case.now));
+    }
+}
 
 pub fn serviceLifecycle(state: *State, context: anytype) bool {
     context.noteLifecycleOpportunity();

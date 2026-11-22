@@ -137,9 +137,9 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/control/host-stop",
         .kind = .host_stop,
-        .summary = "Stops the Host after its work drains.",
-        .variants = &.{variant(protocol.host_stop_request, .{})},
-        .reply = jsonReply(.{.{protocol.host_stop_ack}}),
+        .summary = "Stops the Host, or with drain_seconds holds new Turns and stops once running work ends or the bound passes.",
+        .variants = &.{ variant(protocol.host_stop_request, .{}), variant(protocol.host_drain_request, .{}) },
+        .reply = jsonReply(.{ .{protocol.host_stop_ack}, protocol.host_drain_reply }),
     },
     .{
         .path = "/v1/control/host-pause",
@@ -1370,8 +1370,9 @@ fn publishedRequestSchemas() !void {
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
             .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
-            // Live and since reads, or an Archived window: a one-of over the two request forms.
-            .list_sessions => {
+            // Live and since reads, or an Archived window; a plain or a draining
+            // stop: a one-of over the two request forms.
+            .list_sessions, .host_stop => {
                 try std.testing.expectEqual(@as(usize, 2), route.variants.len);
                 try std.testing.expect(schema.contains("anyOf"));
             },

@@ -26,6 +26,7 @@ const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const command_spec = @import("command_spec.zig");
 const host_reply = @import("host_reply.zig");
+const host_drain = @import("host_drain.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
@@ -1804,7 +1805,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .descriptor_soft_limit = host.descriptor_soft_limit,
                 .started_at = host.started_at,
                 .custody_occupied = host.custody.held(),
-                .paused = host.turns_paused.load(.acquire),
+                .paused = host.turnsHeld(),
                 .routes = host.providers.routes(),
                 .doublewrite = host.store.admissionDiagnostic().doublewrite,
                 .settings_digest = host.settings_digest,
@@ -1813,11 +1814,22 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             host.turns_paused.store(pause.paused, .release);
-            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{pause.paused});
+            // A drain's hold outlasts an operator's release; reply the hold in force.
+            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{host.turnsHeld()});
         },
-        .host_stop => {
-            if (host.stopAsked()) wakeListener(host);
-            if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
+        .host_stop => |stop| {
+            const bound = host_drain.Bound.seconds(stop.drain_seconds) catch unreachable;
+            const answer = host.askStop(bound);
+            if (answer == .stop_now) wakeListener(host);
+            if (header.drop == .after_commit) return;
+            switch (answer) {
+                .stop_now, .already_stopping => try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack}),
+                .drain => |drain| {
+                    const left_ms = (drain.until_ns -| nowNs(host)) / std.time.ns_per_ms;
+                    const until_unix_ms = (std.math.cast(u64, store_module.readUnixMilliseconds(host.io) catch 0) orelse 0) +| left_ms;
+                    try fd.json(200, comptime protocol.shapeBytes(protocol.host_drain_reply), host_reply.renderHostDrain, .{until_unix_ms});
+                },
+            }
         },
         .configure => |*command| try prepareConfigure(host, fd, header, command),
         .message => |*command| {

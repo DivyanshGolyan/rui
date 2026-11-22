@@ -228,6 +228,86 @@ def signal_stop():
         print(f"host signal stop passed: SIGTERM, SIGINT and SIGHUP end as host-stop {asked}; SIGKILL {endings['SIGKILL']}")
 
 
+def drain_stop():
+    """`host pause --drain` lets a running model call finish, stops at its bound
+    when the call never ends, stops an idle Host or one parked on an approval
+    after one quiet second, and yields to a plain pause."""
+    with tempfile.TemporaryDirectory(prefix="rui-host-drain-") as root:
+        state = canonical_fixture_root(root)
+        released = threading.Event()
+        held = threading.Event()
+        proposal = fixture.sse_tool_calls("bash-proposal", [
+            ("bash", "bash-call", json.dumps({"cmd": "true", "timeout_ms": None, "description": "Wait for approval"}))])
+        endpoint = fixture.SuccessEndpoint([], responses_by_input={
+            "finish": (fixture.ResponseSpec(fixture.sse_answer("finish", "r", "answer", "finished")[0], {}), released),
+            "hang": (fixture.ResponseSpec(fixture.sse_answer("hang", "r", "answer", "never")[0], {}), held),
+            "yield": (fixture.ResponseSpec(fixture.sse_answer("yield", "r", "answer", "never")[0], {}), held),
+            "bash": proposal})
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        hosts = []
+        pauses = []
+        try:
+            def drain(store, seconds):
+                return subprocess.Popen([RUI, "host", "pause", "--store", store, "--drain", "--drain-seconds", str(seconds)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            def result(pause, timeout):
+                out, err = pause.communicate(timeout=timeout)
+                assert pause.returncode == 0, (pause.returncode, out, err)
+                assert err.startswith("rui: pause holds new turns, lets running work finish for up to "), err
+                return json.loads(out)
+
+            expected = {"finish": "finished", "deadline": "deadline", "idle": "finished", "approval": "finished", "superseded": "superseded"}
+            for name, prompt, seconds in (("finish", "finish", 60), ("deadline", "hang", 2), ("idle", None, 60),
+                                          ("approval", "bash", 60), ("superseded", "yield", 60)):
+                store = state / name
+                host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+                hosts.append(host)
+                requests = len(endpoint.requests)
+                if prompt == "bash":
+                    session = bash_fixture.configure(state, store, f"configure-{name}")
+                    fixture.message(state, store, f"message-{name}", session, prompt)
+                    fixture.wait_for(lambda: bash_fixture.action_for(store, session), f"{name}: Bash waiting on approval")
+                elif prompt is not None:
+                    session = fixture.configure(state, store, f"configure-{name}", None, "gpt-6-sol")
+                    fixture.message(state, store, f"message-{name}", session, prompt)
+                    fixture.wait_for(lambda: len(endpoint.requests) == requests + 1, f"{name}: held provider request")
+                began = time.monotonic()
+                pause = drain(store, seconds)
+                pauses.append(pause)
+                if name == "finish":
+                    # Release the call only once the drain is in force, so an early stop would cut it.
+                    fixture.wait_for(lambda: (store / "host.stopped").exists() and (store / "host.stopped").read_text() == "draining", "drain in force")
+                    assert pause.poll() is None and host.poll() is None, "a drain stopped the Host while its model call ran"
+                    released.set()
+                if name == "superseded":
+                    fixture.wait_for(lambda: (store / "host.stopped").exists() and (store / "host.stopped").read_text() == "draining", "drain in force")
+                    plain = subprocess.run([RUI, "host", "pause", "--store", store], capture_output=True, text=True, timeout=20)
+                    assert plain.returncode == 0 and "drain" not in json.loads(plain.stdout), plain
+                reply = result(pause, seconds + 20)
+                elapsed = time.monotonic() - began
+                assert reply["retirement"] == "confirmed", (name, reply)
+                assert reply["drain"] == expected[name], (name, reply)
+                assert (store / "host.stopped").read_text() == reply["drain"], name
+                host.wait(timeout=10)
+                if name == "finish":
+                    assert bash_fixture.rows(store, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL") == [(0,)], "the drain cut the running model call"
+                if name == "deadline":
+                    assert 2 <= elapsed < 15, elapsed
+                if name in ("idle", "approval", "superseded"):
+                    assert elapsed < 10, (name, elapsed)
+                assert status(store) == "unavailable", name
+            print("host drain passed: a running model call finishes first, a hung one stops at the bound, an idle Host and one waiting on approval stop after one quiet second, a plain pause supersedes")
+        finally:
+            dispose_all(
+                released.set, held.set,
+                *(lambda pause=pause: pause.kill() if pause.poll() is None else None for pause in pauses),
+                *(lambda host=host: stop_process(host) for host in hosts),
+                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+            )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-host-stop-") as root:
         state = canonical_fixture_root(root)
@@ -412,4 +492,5 @@ if __name__ == "__main__":
     mixed_effect_drain(True)
     mixed_effect_drain(False)
     signal_stop()
+    drain_stop()
     main()
