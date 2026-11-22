@@ -84,7 +84,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([name for name, body in sorted(workflows.items())
                           if "gh workflow run race-sweep.yml" in body], ["promote.yml"])
         caller = re.search(r"(?ms)^  race_sweep:\n(.*?)(?=^  [\w-]+:\n|\Z)", workflows["promote.yml"]).group(1)
-        self.assertIn("if: ${{ needs.batch.outputs.daily == 'true' }}", caller)
+        self.assertIn("if: ${{ !cancelled() && needs.batch.outputs.daily == 'true' }}", caller)
         self.assertIn("gh workflow run race-sweep.yml", caller)
         self.assertIn('echo "daily=$daily" >> "$GITHUB_OUTPUT"', workflows["promote.yml"])
 

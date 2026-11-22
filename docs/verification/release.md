@@ -53,7 +53,9 @@ Correctness failures are fixed on the PR before it reaches `main`.
 
 [Promote](../../.github/workflows/promote.yml) runs every three hours, with empty inputs, so it promotes main HEAD.
 When [stable](#promote) already holds HEAD it does nothing.
-When HEAD has a red `main-qualified` record it skips quietly, since the failing run already filed its issues.
+When HEAD has a red `main-qualified` record it skips qualification, since the failing run filed its issues under its own label (`main-red` when scheduled, `promotion-red` by hand).
+The scheduled run then fails with a `main HEAD failed qualification` error that names the red run and the way out: merge a fix to main, or, for a flake or infrastructure red, rerun that run's failed jobs with `gh run rerun <id> --failed`, which reruns the `qualified` recorder and rewrites the record.
+While the red stands, an infrastructure failure in `dependency_lag` or `race_sweep` is not retried automatically, since the run already has a check failure in `batch`; infra-retry never reruns the scheduled run either.
 Otherwise it qualifies HEAD, or publishes the archives of HEAD's green record, exactly as a manual promotion does below, and a green HEAD that main has moved past since the last release becomes a release without anyone dispatching it.
 The batch runs from `stable`, the last promoted commit, so a failing step's suspects are the commits since the last release.
 A failing job files or updates one `main-red` issue per cause, with its failed steps' suspects on it; a manual promotion files `promotion-red` instead.
@@ -71,7 +73,7 @@ A scheduled tick that replaces a waiting dispatch promotes main HEAD, as a defau
 It publishes main HEAD by default; `-f sha=<commit>` names a first-parent `main` commit after `stable`, and `-f sha=qualified` the newest one with a green record.
 When that commit's `main-qualified` record is green, its run still holds the release archives, and the release plan still gives the version that run built, Promote publishes those archives at once and qualifies nothing.
 A red record refuses a manual promotion: fix forward and promote a later commit, or promote an earlier green one.
-Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so the next scheduled run skips it.
+Otherwise only main HEAD can be promoted, and Promote qualifies it as below and records the verdict on it, so the next scheduled run skips it, and fails naming its run while it is red.
 Promote is the sole caller of the one owner of the tier and its verdict, [qualification-tier.yml](../../.github/workflows/qualification-tier.yml): it builds and tests, records `main-qualified` and files issues under the label Promote passes (`main-red` on schedule, `promotion-red` by hand), and Promote publishes after it. Its jobs appear as `qualify / <job>`.
 Promote qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, Linux `mysql-wire-integration`, the upgrade check on both systems and the renderer contracts.
 A failing suite, upgrade or contract job ranks suspects for each step that failed without replaying anything: the batch's first-parent commits whose changed lines name identifiers in the step's failing output (test names, assertion and file references; plain words do not count), most shared first, then the commits that the selector maps to that step's targets, most direct first (a commit owning the target's own source or script, then one whose import, link or path rule reaches it, then one only a fallback selects), newer first within a tier; the top five, each with its PR number, the reason it ranks and the touched files that match.
