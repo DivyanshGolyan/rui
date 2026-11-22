@@ -1187,7 +1187,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .rule = @import("widget_style.zig").line(rule_caps, .horizontal),
+        .title_style = self.onGround(.{ .bold = true }),
+        .hover_style = self.onGround(.{ .ul_style = .single }),
+        .rule = self.stitch(rule_caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - frame.height - footer_height }));
@@ -1277,8 +1279,8 @@ fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocato
     @memset(surface.buffer, .{ .style = self.style });
     var caps = self.caps;
     caps.unicode = self.unicode;
-    const across = @import("widget_style.zig").line(caps, .horizontal);
-    const upright = @import("widget_style.zig").line(caps, .vertical);
+    const across = self.stitch(caps, .horizontal);
+    const upright = self.stitch(caps, .vertical);
     for (1..size.width - 1) |col| {
         surface.writeCell(@intCast(col), 1, across);
         surface.writeCell(@intCast(col), size.height - 2, across);
@@ -1288,6 +1290,19 @@ fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocato
         surface.writeCell(size.width - 2, @intCast(row), upright);
     }
     return surface;
+}
+
+/// `style` laid on the dialog's own ground, so no cell of the dialog shows the ground beneath.
+fn onGround(self: *const Self, style: vaxis.Style) vaxis.Style {
+    var result = style;
+    result.bg = self.style.bg;
+    return result;
+}
+
+fn stitch(self: *const Self, caps: @import("overview_view.zig").Caps, which: @import("widget_style.zig").Line) vaxis.Cell {
+    var cell = @import("widget_style.zig").line(caps, which);
+    cell.style.bg = self.style.bg;
+    return cell;
 }
 
 test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {
@@ -2831,6 +2846,46 @@ test "Sign-in every guided page and focused control stays bounded and masked ove
         }
     };
     try std.testing.expectEqualStrings("never-render-this-key", form.key.text());
+}
+
+test "Sign-in lays every cell of its dialog on its own ground on every page, focus and size" {
+    // The dialog is a raised surface above a dimmed screen; one cell left on the terminal's
+    // ground (a rule, a title, a hovered row, a stitch) would be a hole in the card.
+    var page: Self = .{ .style = .{ .bg = .{ .index = 3 } }, .selection_style = .{ .bg = .{ .index = 4 } }, .quiet = .{ .fg = .{ .index = 5 }, .bg = .{ .index = 3 } } };
+    defer page.closeForm();
+    const form = try page.ensureForm();
+    _ = form.key.set("key", 3);
+    try page.code.set("DRAWN-1234");
+    try page.target.set("/synthetic store");
+    const pages_ = [_]core.Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .expired, .retry = .browser } }, .pending, .connected };
+    const sizes = [_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 80, .height = 24 }, .{ .width = 46, .height = 30 }, .{ .width = 40, .height = 10 }, .{ .width = 39, .height = 24 }, .{ .width = 80, .height = 9 } };
+    for ([_]bool{ false, true }) |unicode| for (pages_) |page_| {
+        page.state.page = page_;
+        page.unicode = unicode;
+        for (page.state.controls()) |focus| {
+            page.state.focus = focus;
+            for (sizes) |size| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const drawn = try testingDraw(&page, a, size.width, size.height);
+                var screen = try vaxis.Screen.init(a, .{ .cols = size.width, .rows = size.height, .x_pixel = 0, .y_pixel = 0 });
+                const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &screen };
+                try drawn.render(window, page.widget());
+                // Framed, the dialog is the card's rectangle; unframed, it is the whole screen.
+                const framed = drawn.buffer.len == 0;
+                const laid = drawn.children[drawn.children.len - 1];
+                const left: usize = if (framed) @intCast(laid.origin.col) else 0;
+                const top: usize = if (framed) @intCast(laid.origin.row) else 0;
+                const width: usize = if (framed) laid.surface.size.width else size.width;
+                const height: usize = if (framed) laid.surface.size.height else size.height;
+                for (top..top + height) |row| for (left..left + width) |col| {
+                    const bg = screen.buf[row * size.width + col].style.bg;
+                    try std.testing.expect(bg.eql(page.style.bg) or bg.eql(page.selection_style.bg));
+                };
+            }
+        }
+    };
 }
 
 test "Sign-in pending and uncertain API receipts survive replacement by either ChatGPT method without lending authority" {

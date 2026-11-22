@@ -10,7 +10,8 @@ pub const Colour = enum {
     on_band,
 };
 
-pub const Background = enum { ground, bar, input_surface, user_message, selection, hover, band };
+/// `raised` is a dialog laid above the screen; `scrim` is the screen it covers.
+pub const Background = enum { ground, bar, input_surface, user_message, selection, hover, band, raised, scrim };
 
 pub const Style = struct {
     colour: Colour = .normal,

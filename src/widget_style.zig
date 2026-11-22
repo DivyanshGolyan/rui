@@ -32,22 +32,39 @@ test "line stitches use thread in every capability" {
     }
 }
 
-/// How a screen covered by a dialog draws: every cell in the thread colour on the ground,
-/// quieter than any text, so it reads as cloth behind the card. Without colour it is faint.
+/// How a screen covered by a dialog draws: every cell in the thread colour on the scrim, a
+/// ground darker than the cloth, so the raised card above it stands apart (a dimmed screen and
+/// a lifted surface, as dialogs separate in dark and light themes). Without colour it is faint.
 pub fn backdrop(caps: view.Caps) vaxis.Style {
-    return if (caps.depth == .none) .{ .dim = true } else of(caps, .{ .colour = .rule });
+    return if (caps.depth == .none) .{ .dim = true } else of(caps, .{ .colour = .rule, .background = .scrim });
 }
 
-test "backdrop is the thread colour on the ground, or faint without colour" {
+test "backdrop is the thread on a scrim darker than the ground and the raised card, or faint without colour" {
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for (std.enums.values(view.Caps.Depth)) |depth| {
         const caps: view.Caps = .{ .depth = depth, .background = background };
         const style = backdrop(caps);
         if (depth == .none) {
             try std.testing.expectEqual(vaxis.Style{ .dim = true }, style);
-        } else {
-            try std.testing.expectEqual(line(caps, .horizontal).style, style);
-            try std.testing.expect(!style.bold and !style.reverse);
+            continue;
         }
+        try std.testing.expectEqual(line(caps, .horizontal).style.fg, style.fg);
+        try std.testing.expect(!style.bold and !style.reverse);
+        const lum = struct {
+            fn of_(color: vaxis.Color) f64 {
+                return theme.relativeLuminance(switch (color) {
+                    .rgb => |value| value,
+                    .index => |i| theme.xtermRgb(i),
+                    else => unreachable,
+                });
+            }
+        }.of_;
+        const scrim = lum(style.bg);
+        const ground = lum(of(caps, .{}).bg);
+        const raised = lum(of(caps, .{ .background = .raised }).bg);
+        try std.testing.expect(scrim < ground);
+        try std.testing.expect(scrim < raised);
+        // Indexed day cloth may round the raised card and the ground to one entry.
+        try std.testing.expect(if (depth == .direct) raised > ground else raised >= ground);
     };
 }
 
@@ -104,6 +121,8 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
         .selection => .selection,
         .hover => .hover,
         .band => .alert,
+        .raised => .raised,
+        .scrim => .scrim,
     };
     const fg: theme.Color = switch (role.colour) {
         .strong => theme.text(mode, depth, .strong, background),
@@ -247,7 +266,7 @@ test "widget text meets WCAG contrast on each used ground" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
         for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
             const caps: view.Caps = .{ .depth = depth, .background = terminal };
-            for ([_]view.Background{ .ground, .bar, .input_surface, .selection, .hover }) |ground| {
+            for ([_]view.Background{ .ground, .bar, .input_surface, .selection, .hover, .raised }) |ground| {
                 for ([_]view.Colour{ .strong, .ink, .normal, .quiet, .mark, .attention, .failure }) |colour| {
                     try Check.check(caps, .{ .colour = colour, .background = ground });
                 }

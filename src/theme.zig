@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const Rgb = [3]u8;
 pub const Mode = enum { light, dark };
-pub const Background = enum { ground, selvedge, user_message, selection, hover, alert };
+pub const Background = enum { ground, selvedge, user_message, selection, hover, alert, raised, scrim };
 pub const Text = enum { strong, body, indigo, quiet, attention, failure, on_alert };
 pub const Depth = enum { direct, indexed };
 pub const Color = union(Depth) { direct: Rgb, indexed: u8 };
@@ -11,6 +11,8 @@ const Palette = struct {
     ground: Rgb,
     selvedge: Rgb,
     selection: Rgb,
+    raised: Rgb,
+    scrim: Rgb,
     strong: Rgb,
     body: Rgb,
     indigo: Rgb,
@@ -24,6 +26,8 @@ const light: Palette = .{
     .ground = .{ 0xf3, 0xee, 0xe2 },
     .selvedge = .{ 0xea, 0xe2, 0xcf },
     .selection = .{ 0xe2, 0xd7, 0xbd },
+    .raised = .{ 0xfb, 0xf8, 0xf1 },
+    .scrim = .{ 0xe3, 0xdb, 0xc8 },
     .strong = .{ 0x1a, 0x18, 0x14 },
     .body = .{ 0x2f, 0x2b, 0x25 },
     .indigo = .{ 0x1f, 0x2d, 0x6b },
@@ -36,6 +40,8 @@ const dark: Palette = .{
     .ground = .{ 0x1b, 0x21, 0x36 },
     .selvedge = .{ 0x24, 0x2b, 0x45 },
     .selection = .{ 0x30, 0x37, 0x4f },
+    .raised = .{ 0x24, 0x2b, 0x45 },
+    .scrim = .{ 0x12, 0x16, 0x25 },
     .strong = .{ 0xf4, 0xed, 0xdc },
     .body = .{ 0xdd, 0xd5, 0xc3 },
     .indigo = .{ 0xb7, 0xc2, 0xe8 },
@@ -67,6 +73,8 @@ pub fn background(mode: Mode, depth: Depth, role: Background) Color {
         .selection => p.selection,
         .hover => midpoint(p.selvedge, p.selection),
         .alert => Rgb{ 0xe9, 0xb1, 0x30 },
+        .raised => p.raised,
+        .scrim => p.scrim,
     };
     return switch (depth) {
         .direct => .{ .direct = rgb },
@@ -265,7 +273,7 @@ test "THM-4 readable text meets WCAG contrast on its layout backgrounds" {
         }
     };
     for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
-        for ([_]Background{ .ground, .selvedge, .user_message, .selection, .hover }) |bg| {
+        for ([_]Background{ .ground, .selvedge, .user_message, .selection, .hover, .raised }) |bg| {
             for ([_]Text{ .strong, .body, .indigo, .quiet, .attention, .failure }) |fg| {
                 const contrast = Check.contrast(text(mode, depth, fg, bg), background(mode, depth, bg));
                 if (contrast < 4.5) std.debug.print("{s} {s}: {s} on {s}: {d:.3}\n", .{ @tagName(mode), @tagName(depth), @tagName(fg), @tagName(bg), contrast });

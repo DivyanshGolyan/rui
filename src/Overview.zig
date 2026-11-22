@@ -1081,11 +1081,11 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     if (part == .whole) _ = try view.step(&self.state, .{ .launch_size = .{ .size = .{ .width = size.width, .height = size.height }, .wide = size.width >= Root.split_at } });
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
-    self.sign_in.style = normal;
+    self.sign_in.style = @import("widget_style.zig").of(self.caps, .{ .background = .raised });
     self.sign_in.unicode = self.caps.unicode;
     self.sign_in.caps = self.caps;
     self.sign_in.selection_style = @import("widget_style.zig").of(self.caps, .{ .background = .selection });
-    self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .raised });
     self.app_screen.style = normal;
     if (self.signInIsFirstRun() or (part == .whole and self.state.hidesOverview())) {
         const ground = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);

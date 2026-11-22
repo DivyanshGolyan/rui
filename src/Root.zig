@@ -1040,7 +1040,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
     }
 }
 
-test "Sign-in fades the covered screen in the thread colour of the caps app settings draws with" {
+test "Sign-in fades the covered screen onto the scrim of the caps app settings draws with" {
     const Backend = struct {
         fn read(_: *anyopaque) !@import("preferences.zig").Values {
             return .{};
@@ -1070,11 +1070,12 @@ test "Sign-in fades the covered screen in the thread colour of the caps app sett
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
-    const thread = @import("widget_style.zig").line(Backend.caps(&context), .horizontal).style;
+    const day = @import("widget_style.zig").backdrop(Backend.caps(&context));
     // Day cloth: unlike the night default, so a Root that ignored app settings' caps fails.
-    try std.testing.expect(!thread.eql(@import("widget_style.zig").backdrop(.{})));
+    try std.testing.expect(!day.eql(@import("widget_style.zig").backdrop(.{})));
+    try std.testing.expectEqual(@import("widget_style.zig").line(Backend.caps(&context), .horizontal).style.fg, day.fg);
     try std.testing.expect(surface.children[0].surface.buffer.len > 0);
-    for (surface.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(thread));
+    for (surface.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(day));
 }
 
 test "A faded screen holds what rendering shows: children above their parents in z order, clipped to them" {
