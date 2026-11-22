@@ -3759,12 +3759,36 @@ test "Host processing wait starts inactivity only after the first response byte"
     try std.testing.expectEqual(@as(u16, 200), head.status);
 }
 
+/// A fake Host that sends `rest` only if the client is still reading two
+/// seconds later. A working deadline returns long before that, so no thread
+/// stall lets the rest arrive in time; a broken one reads the rest and fails
+/// at once instead of waiting out a fallback inactivity (#1989).
+const LateRest = struct {
+    given_up: std.Io.Event = .unset,
+    thread: std.Thread = undefined,
+
+    fn start(self: *LateRest, fd: std.posix.fd_t, rest: []const u8) !void {
+        self.* = .{};
+        self.thread = try std.Thread.spawn(.{}, run, .{ self, fd, rest });
+    }
+
+    fn run(self: *LateRest, fd: std.posix.fd_t, rest: []const u8) void {
+        self.given_up.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } }) catch writeAll(fd, rest) catch {};
+    }
+
+    fn finish(self: *LateRest) void {
+        self.given_up.set(std.testing.io);
+        self.thread.join();
+    }
+};
+
 test "Host-info first byte is bounded independently of normal processing waits" {
-    // The Host stays silent until the client has given up, so no scheduling
-    // delay can let a late answer arrive inside the deadline (#1989).
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
+    var late: LateRest = undefined;
+    try late.start(sockets[1], empty_test_response);
+    defer late.finish();
     var buffer: ReplyBuffer = .{};
     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
     try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, .{}, until));
@@ -3775,12 +3799,14 @@ test "response deadlines include partial header and body" {
     const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
     for ([_]bool{ false, true }) |mutation| {
         for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
-            // The rest stays unsent until the client has given up (#1989).
             const sockets = try socketPair();
             defer closeTestDescriptor(sockets[0]);
             defer closeTestDescriptor(sockets[1]);
             try addNonblocking(sockets[0]);
             try writeAll(sockets[1], response[0..prefix_len]);
+            var late: LateRest = undefined;
+            try late.start(sockets[1], response[prefix_len..]);
+            defer late.finish();
             var buffer: ReplyBuffer = .{};
             const until: ?i128 = if (mutation) null else std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
             const timing: ResponseTiming = if (mutation) .{ .inactivity_ms = 10, .wait_for_first_byte = false } else .{};
@@ -3834,11 +3860,13 @@ test "Host processing wait does not consume response transfer inactivity" {
 }
 
 test "response transfer inactivity begins after the first byte" {
-    // The rest stays unsent until the client has given up (#1989).
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
     try writeAll(sockets[1], empty_test_response[0..1]);
+    var late: LateRest = undefined;
+    try late.start(sockets[1], empty_test_response[1..]);
+    defer late.finish();
     try std.testing.expectError(
         error.ResponseInactive,
         readResponseHeadWithInactivity(sockets[0], 10),
