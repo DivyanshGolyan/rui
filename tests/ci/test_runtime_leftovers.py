@@ -346,6 +346,16 @@ class DisposedStore(unittest.TestCase):
                 self.assertEqual(expected, HOST.disposed_store(process))
 
 
+class OneRetirer(unittest.TestCase):
+    def test_fixtures_retire_a_reaped_host_only_through_retire_settled(self):
+        # A bare retire right after a kill can find the socket still accepting and keep it (#2017).
+        # model_fixture retires crashed Stores at suite exit, long after their Hosts died.
+        allowed = {"host_process.py", "model_fixture.py", "runtime_leftovers.py"}
+        callers = sorted(path.name for path in (ROOT / "tests/integration").glob("*.py")
+                         if path.name not in allowed and "runtime_leftovers.retire(" in path.read_text())
+        self.assertEqual([], callers)
+
+
 class ForcedCrashCleanup(unittest.TestCase):
     """forced_crash_cleanup finds, kills and reaps the detached Host on a Store, then retires its
     socket. The stand-in runs as `python host serve --store S`, the argv shape the real census matches,
@@ -363,7 +373,7 @@ class ForcedCrashCleanup(unittest.TestCase):
                         else os.environ.__setitem__(runtime_leftovers.OVERRIDE, previous))
         self.env = dict(os.environ)
 
-    def test_forced_crash_cleanup_retires_the_killed_host(self):
+    def launch_fixture(self):
         saved = sys.argv
         sys.argv = [saved[0], sys.executable]
         try:
@@ -372,6 +382,29 @@ class ForcedCrashCleanup(unittest.TestCase):
             spec.loader.exec_module(launch)
         finally:
             sys.argv = saved
+        return launch
+
+    def test_forced_crash_cleanup_waits_for_a_reaped_host_socket_to_close(self):
+        # A killed Host leaves the process census (its exe link goes with its memory) before the kernel
+        # closes its files, so its socket can still accept for a moment after the reap (#2017).
+        launch = self.launch_fixture()
+        store = pathlib.Path(self.tmp.name) / "store"
+        store.mkdir()
+        store = store.resolve()
+        path = self.runtime / "closing.sock"
+        listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listening.close)
+        listening.bind(str(path))
+        listening.listen(1)
+        path.with_suffix(".store").write_text(str(store))
+        closer = threading.Timer(0.3, listening.close)
+        self.addCleanup(closer.cancel)
+        closer.start()
+        launch.forced_crash_cleanup(store)
+        self.assertFalse(path.exists() or path.with_suffix(".store").exists())
+
+    def test_forced_crash_cleanup_retires_the_killed_host(self):
+        launch = self.launch_fixture()
         store = pathlib.Path(self.tmp.name) / "store"
         store.mkdir()
         store = store.resolve()
