@@ -768,7 +768,7 @@ def proxy_swap_cases(state):
     from types import SimpleNamespace
     from unittest import mock
     path = state / "proxy-swap.sock"
-    host = socketserver.UnixStreamServer(str(path), socketserver.BaseRequestHandler)
+    host = os_semantics.UnixStreamServer(str(path), socketserver.BaseRequestHandler)
     live = {os.stat(path).st_ino}
     missing = []
     def probe(step):

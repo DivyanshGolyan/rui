@@ -368,7 +368,7 @@ func delta(before, after measurement.ProcessSample) map[string]any {
 }
 
 func openPartial(socket string) (net.Conn, error) {
-	connection, err := net.DialTimeout("unix", socket, 3*time.Second)
+	connection, err := measurement.DialUnix(socket, 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -803,7 +803,7 @@ func (e *successEndpoint) Close() error {
 }
 
 func rawUnixRequest(socketPath, route string, body []byte, receiveBuffer int) (net.Conn, error) {
-	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	connection, err := measurement.DialUnix(socketPath, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -833,7 +833,7 @@ type preparedRequest struct {
 }
 
 func prepareUnixRequest(deadline measurement.Deadline, socketPath, route string, body []byte) (preparedRequest, error) {
-	connection, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	connection, err := measurement.DialUnix(socketPath, 5*time.Second)
 	if err != nil {
 		return preparedRequest{}, err
 	}
@@ -1153,7 +1153,7 @@ func repeatedDigest(value byte, count int) string {
 }
 
 func ordinaryBusy(socketPath string) error {
-	connection, err := net.DialTimeout("unix", socketPath, 3*time.Second)
+	connection, err := measurement.DialUnix(socketPath, 3*time.Second)
 	if err != nil {
 		return err
 	}

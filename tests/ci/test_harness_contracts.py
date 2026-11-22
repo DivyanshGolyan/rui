@@ -627,5 +627,66 @@ print('body/drop failure matrix passed')
         self.assertEqual(result.stdout, "body/drop failure matrix passed\n")
 
 
+class UnixPathLimitTest(unittest.TestCase):
+    """The AF_UNIX path limit (#1948) is checked on every platform; 104 bytes is Darwin's sun_path."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests/integration"))
+        self.addCleanup(sys.path.remove, str(ROOT / "tests/integration"))
+        import os_semantics
+        self.semantics = os_semantics
+
+    def test_a_path_of_the_limit_or_more_is_refused_with_its_length_on_every_platform(self):
+        rows = (("/" + "a" * 102, True),
+                ("/" + "a" * 103, False),
+                ("/" + "a" * 107, False),
+                ("/tmp/" + "\u00e9" * 50, False))  # 105 bytes in UTF-8: the byte count, not characters
+        for path, accepted in rows:
+            length = len(path.encode())
+            with self.subTest(length=length, path=path):
+                if accepted:
+                    self.assertIs(self.semantics.check_unix_path(path), path)
+                    continue
+                with self.assertRaises(self.semantics.UnixPathTooLong) as raised:
+                    self.semantics.check_unix_path(path)
+                self.assertIsInstance(raised.exception, ValueError)
+                self.assertEqual(raised.exception.length, length)
+                self.assertEqual(raised.exception.path, path)
+                self.assertIn(f"{length} bytes", str(raised.exception))
+                self.assertIn(repr(path), str(raised.exception))
+
+    def test_a_103_byte_path_really_binds_and_connects_under_a_short_directory(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="ul") as directory:
+            fill = 103 - len(directory) - len("/") - len(".sock")
+            self.assertGreater(fill, 0)
+            path = f"{directory}/{'a' * fill}.sock"
+            self.assertEqual(len(path.encode()), 103)
+            with self.semantics.unix_stream() as listener:
+                listener.bind(path)
+                listener.listen(1)
+                with self.semantics.unix_stream() as client:
+                    client.connect(path)
+
+    def test_the_socket_fixture_refuses_a_long_bind_and_connect_before_the_kernel_sees_it(self):
+        long_path = "/" + "a" * 103
+        with self.semantics.unix_stream() as stream:
+            with self.assertRaises(self.semantics.UnixPathTooLong):
+                stream.bind(long_path)
+            with self.assertRaises(self.semantics.UnixPathTooLong):
+                stream.connect(long_path)
+            with self.assertRaises(self.semantics.UnixPathTooLong):
+                stream.connect_ex(long_path)
+
+    def test_the_checked_server_and_asyncio_wrappers_refuse_before_binding(self):
+        import asyncio
+        long_path = "/" + "a" * 103
+        with self.assertRaises(self.semantics.UnixPathTooLong):
+            self.semantics.UnixStreamServer(long_path, lambda *args: None)
+        with self.assertRaises(self.semantics.UnixPathTooLong):
+            asyncio.run(self.semantics.start_unix_server(lambda *args: None, long_path))
+        with self.assertRaises(self.semantics.UnixPathTooLong):
+            asyncio.run(self.semantics.open_unix_connection(long_path))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
+import os_semantics  # noqa: E402
 import runtime_leftovers  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("host_process", ROOT / "tests/integration/host_process.py")
@@ -168,14 +169,20 @@ class RuntimeLeftovers(unittest.TestCase):
             self.assertFalse(path.exists() or path.with_suffix(".store").exists())
 
     def test_probe_failure_other_than_refusal_keeps_the_socket(self):
-        # A socket path past the AF_UNIX limit makes connect fail with an OSError that has no
-        # refusal errno. Nothing proves the socket dead, so it is live and kept.
+        # The parent of the path is a file, so connect fails with ENOTDIR: no refusal errno.
+        # Nothing proves the socket dead, so it is live and kept.
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
-            root = pathlib.Path(raw) / ("d" * 60) / ("e" * 60)
-            root.mkdir(parents=True)
+            root = pathlib.Path(raw)
+            (root / "plain").write_text("")
+            self.assertTrue(runtime_leftovers.answers(root / "plain" / "p.sock"))
+
+    def test_a_live_socket_is_kept_by_leftovers_and_retire(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw, os_semantics.unix_stream() as live:
+            root = pathlib.Path(raw)
             path = root / "p.sock"
-            path.write_text("")
-            gone = str(pathlib.Path(raw) / "gone")
+            live.bind(str(path))
+            live.listen(8)
+            gone = str(root / "gone")
             path.with_suffix(".store").write_text(gone)
             self.assertTrue(runtime_leftovers.answers(path))
             self.assertEqual([], runtime_leftovers.leftovers(root))
