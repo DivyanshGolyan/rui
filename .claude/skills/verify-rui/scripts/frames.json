@@ -6341,12 +6341,12 @@
         {"text": "Kept while stopped"},
         {"wait": "Kept while stopped"},
         {"keys": ["Enter"]},
-        {"wait": "Host not ready; nothing sent"}
+        {"wait": "Host not ready"}
       ],
       "expect": [
         "Host stop witness",
         "Kept while stopped",
-        "Host not ready; nothing sent. Draft retained.",
+        "Host not ready. Draft retained.",
         "Host stopped"
       ],
       "absent": [

@@ -628,7 +628,17 @@ fn clickCommand(self: *Self, text: []const u8) !void {
 /// The one set of facts that decides whether Enter may send, read by the key
 /// step and by the refusal notice alike.
 fn sendFacts(self: *const Self) session_keys.Facts.Send {
-    return .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null or self.submission.messageHeld() };
+    const held = self.heldOriginal();
+    return .{
+        .command_active = self.input.queuedCommand() != null or self.inspection.command_running,
+        .upgrade = self.upgradeHeld(),
+        .saving = self.info_edit != null,
+        .rejected = held != null and held.?.state == .rejected,
+        .host_held = self.hostHeld(),
+        .opening = self.reading.opening,
+        .preparing = self.reading.phase == .permission,
+        .submitting = self.submission.intent != null or self.submission.messageHeld(),
+    };
 }
 
 fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
@@ -636,13 +646,11 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
         self.refreshAcceptedMessage();
         return;
     }
-    const phase = self.upgradePhase();
-    const command = self.input.queuedCommand() != null or self.inspection.command_running;
     const refusal = self.sendFacts().refusal();
     // The Host line is a past reading: a send refused on it asks for a fresh
     // one, so a Host that came back is seen at once (#1947).
     if (refusal == .host) _ = self.hostFailure();
-    self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .refusal = refusal, .held = self.heldOriginal(), .action = action, .letter = letter });
+    self.notice = if (refusal == .upgrade) session_upgrade.refusal(self.upgradePhase()) else session_notice.busy(.{ .refusal = refusal, .held = self.heldOriginal(), .action = action, .letter = letter });
 }
 
 pub fn titleName(self: *const Self) []const u8 {

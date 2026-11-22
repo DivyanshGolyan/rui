@@ -194,18 +194,29 @@ pub const Facts = struct {
     };
 
     pub const Send = struct {
+        /// A typed command is queued or running.
+        command_active: bool = false,
+        /// An Upgrade holds this Session.
+        upgrade: bool = false,
+        /// A chat info edit is being saved.
+        saving: bool = false,
+        /// The held original was rejected and waits for /discard or an edit.
+        rejected: bool = false,
         host_held: bool = false,
         opening: bool = false,
         preparing: bool = false,
-        command_active: bool = false,
         submitting: bool = false,
 
-        /// Why Enter sends nothing, most pressing first; the refusal notice
-        /// reads this same value, so every refused send names its reason.
-        pub const Refusal = enum { command, host, opening, preparing, submitting };
+        /// Why Enter sends nothing, most pressing first. The key step and the
+        /// refusal notice both read this one value, so every refused send
+        /// names its own reason.
+        pub const Refusal = enum { command, upgrade, saving, rejected, host, opening, preparing, submitting };
 
         pub fn refusal(send: Send) ?Refusal {
             if (send.command_active) return .command;
+            if (send.upgrade) return .upgrade;
+            if (send.saving) return .saving;
+            if (send.rejected) return .rejected;
             if (send.host_held) return .host;
             if (send.opening) return .opening;
             if (send.preparing) return .preparing;

@@ -90,17 +90,20 @@ pub const Busy = struct {
     letter: bool,
 };
 
-pub const host_not_ready = "! Host not ready; nothing sent. Draft retained.";
-pub const opening_not_ready = "! Chat still opening; nothing sent. Draft retained.";
+pub const host_not_ready = "! Host not ready. Draft retained.";
+pub const opening_not_ready = "! Chat still opening. Draft retained.";
 
+/// The notice for a refused send. `.upgrade` is not here: its words depend on
+/// the Upgrade's phase, which `session_upgrade.refusal` owns.
 pub fn busy(facts: Busy) []const u8 {
-    if (facts.refusal == .command) return "! Command still running. Draft retained.";
-    if (facts.held) |held| if (held.state == .rejected) return "! Original rejected. Keep editing; /discard releases it. Draft retained.";
     if (facts.refusal) |refusal| switch (refusal) {
+        .command, .saving => return "! Command still running. Draft retained.",
+        .upgrade => unreachable,
+        .rejected => return "! Original rejected. Keep editing; /discard releases it. Draft retained.",
         .host => return host_not_ready,
         .opening => return opening_not_ready,
         .preparing => return "! Action needs a decision. Draft retained.",
-        .command, .submitting => {},
+        .submitting => {},
     };
     if (facts.action) |action| {
         if (!action.reason) return decision(action);
@@ -186,7 +189,7 @@ test "Enter in the draft says the most pressing reason it sent nothing" {
     const pending: Held = .{ .kind = .decision, .state = .unconfirmed };
     const cases = [_]struct { Busy, []const u8 }{
         .{ .{ .refusal = .command, .held = rejected, .action = reason, .letter = false }, "! Command still running. Draft retained." },
-        .{ .{ .refusal = .preparing, .held = rejected, .action = reason, .letter = false }, "! Original rejected. Keep editing; /discard releases it. Draft retained." },
+        .{ .{ .refusal = .rejected, .held = rejected, .action = reason, .letter = false }, "! Original rejected. Keep editing; /discard releases it. Draft retained." },
         .{ .{ .refusal = .preparing, .held = pending, .action = reason, .letter = false }, "! Action needs a decision. Draft retained." },
         .{ .{ .refusal = null, .held = pending, .action = reason, .letter = false }, reason_not_ready },
         .{ .{ .refusal = null, .held = null, .action = reason, .letter = true }, "! Use ←→ and Enter to choose; a message denies the call." },
@@ -198,28 +201,37 @@ test "Enter in the draft says the most pressing reason it sent nothing" {
     try std.testing.expect(std.mem.indexOf(u8, reason_not_ready, ConsentPolicy.deny_words) != null);
 }
 
-test "every way Enter is refused names its own reason, never a pending original that is not there" {
+test "every way Enter is refused names its own reason, whatever original or Action is held" {
     const Send = @import("session_keys.zig").Facts.Send;
-    var bits: u5 = 0;
+    const helds = [_]?Held{ null, .{ .kind = .message, .state = .unconfirmed }, .{ .kind = .decision, .state = .unconfirmed }, .{ .kind = .message, .state = .rejected } };
+    const actions = [_]?Action{ null, .{ .preview = false, .visible = true, .reason = true }, .{ .preview = true, .visible = false, .reason = false } };
+    var bits: u8 = 0;
     while (true) : (bits += 1) {
-        const send: Send = .{ .command_active = bits & 1 != 0, .host_held = bits & 2 != 0, .opening = bits & 4 != 0, .preparing = bits & 8 != 0, .submitting = bits & 16 != 0 };
+        const send: Send = .{ .command_active = bits & 1 != 0, .upgrade = bits & 2 != 0, .saving = bits & 4 != 0, .rejected = bits & 8 != 0, .host_held = bits & 16 != 0, .opening = bits & 32 != 0, .preparing = bits & 64 != 0, .submitting = bits & 128 != 0 };
         errdefer std.debug.print("send={any}\n", .{send});
         try std.testing.expectEqual(bits == 0, send.allowed());
-        const expected: ?[]const u8 = if (send.command_active)
+        // The first refusing fact in the contract's order, listed here
+        // independently of `Send.refusal`.
+        const expected: ?[]const u8 = if (send.command_active or (!send.upgrade and send.saving))
             "! Command still running. Draft retained."
+        else if (send.upgrade)
+            null
+        else if (send.rejected)
+            "! Original rejected. Keep editing; /discard releases it. Draft retained."
         else if (send.host_held)
             host_not_ready
         else if (send.opening)
             opening_not_ready
         else if (send.preparing)
             "! Action needs a decision. Draft retained."
-        else if (send.submitting)
-            "! Input still pending. Keep editing; Ctrl-R retries the original."
         else
             null;
-        if (expected) |words| try std.testing.expectEqualStrings(words, busy(.{ .refusal = send.refusal(), .held = null, .action = null, .letter = false }));
-        if (bits == std.math.maxInt(u5)) break;
+        if (expected) |words| for (helds) |held| for (actions) |action| for ([_]bool{ false, true }) |letter| {
+            try std.testing.expectEqualStrings(words, busy(.{ .refusal = send.refusal(), .held = held, .action = action, .letter = letter }));
+        };
+        if (bits == std.math.maxInt(u8)) break;
     }
+    for ([_][]const u8{ host_not_ready, opening_not_ready }) |words| try std.testing.expect(words.len <= 46);
 }
 
 test "a waiting Action that is a preview says it is decided in the shell, whether or not it is on screen" {
