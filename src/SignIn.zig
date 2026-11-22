@@ -203,7 +203,9 @@ userdata: ?*anyopaque = null,
 on_done: ?*const fn (*anyopaque, *vxfw.EventContext, Activation) anyerror!void = null,
 on_close: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 unicode: bool = true,
-caps: @import("overview_view.zig").Caps = .{},
+/// The app's capabilities, read where they live so the card and the scrim Root draws beneath
+/// it always share one skin.
+caps: *const @import("overview_view.zig").Caps = &default_caps,
 form: ?pages.Mapped(Form) = null,
 issue: ?[]const u8 = null,
 paste: Paste = .none,
@@ -1288,8 +1290,10 @@ fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocato
 /// faded onto the darker scrim; every cell of it (title, rule, stitch, text) carries that ground.
 const Look = struct { ground: vaxis.Style, quiet: vaxis.Style, selection: vaxis.Style, title: vaxis.Style, caps: @import("overview_view.zig").Caps };
 
+const default_caps: @import("overview_view.zig").Caps = .{};
+
 fn look(self: *const Self) Look {
-    var caps = self.caps;
+    var caps = self.caps.*;
     caps.unicode = self.unicode;
     const of = @import("widget_style.zig").of;
     return .{
@@ -2886,6 +2890,23 @@ test "Sign-in lays every cell of its dialog on its own ground on every page, foc
                 };
             }
         }
+    };
+}
+
+test "Sign-in draws its card in the app's current skin and depth, as the scrim beneath it does" {
+    var caps: @import("overview_view.zig").Caps = .{};
+    var page: Self = .{ .caps = &caps };
+    for ([_]?@import("overview_view.zig").Rgb{ null, .{ 0xf4, 0xef, 0xe2 } }) |background| for ([_]@import("overview_view.zig").Caps.Depth{ .direct, .indexed }) |depth| {
+        // The app learns its skin after Sign-in exists; the card follows without being told.
+        caps.background = background;
+        caps.depth = depth;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const drawn = try testingDraw(&page, arena.allocator(), 80, 24);
+        const laid = drawn.children[1].surface;
+        const raised = @import("widget_style.zig").of(caps, .{ .background = .raised });
+        try std.testing.expect(laid.readCell(0, 0).style.bg.eql(raised.bg));
+        try std.testing.expect(!raised.bg.eql(@import("widget_style.zig").backdrop(caps).bg));
     };
 }
 

@@ -1082,7 +1082,6 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
     self.sign_in.unicode = self.caps.unicode;
-    self.sign_in.caps = self.caps;
     self.app_screen.style = normal;
     if (self.signInIsFirstRun() or (part == .whole and self.state.hidesOverview())) {
         const ground = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
@@ -1176,7 +1175,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .settings_input_host = self.inputHostWidget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
-    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
+    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .caps = &self.caps };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();

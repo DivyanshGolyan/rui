@@ -982,7 +982,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
     var page: @import("SignIn.zig") = .{};
     // Unframed, the dialog fills the screen with its own raised ground.
-    const raised = @import("widget_style.zig").of(page.caps, .{ .background = .raised });
+    const raised = @import("widget_style.zig").of(page.caps.*, .{ .background = .raised });
     var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
