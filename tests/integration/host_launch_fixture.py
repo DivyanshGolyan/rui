@@ -4,9 +4,8 @@ import signal
 import subprocess
 import sys
 
-from host_process import close_stdin, dispose_all, host_store, stop_process, wait_for
+from host_process import close_stdin, dispose_all, host_store, retire_settled, stop_process, wait_for
 import os_semantics
-import runtime_leftovers
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -62,5 +61,7 @@ def forced_crash_cleanup(store, *, descendants=False):
     wait_for(lambda: matching_processes(store, descendants=descendants), "forced-crash cleanup to reap the detached Host",
              timeout=5, interval=0.02, ready=lambda found: not found)
     # The reaped Hosts left their sockets and .store hints behind; retire them before the caller deletes the Store.
-    for stored in {pathlib.Path(store).resolve(), *(pathlib.Path(selected) for _, selected in hosts)}:
-        runtime_leftovers.retire(stored)
+    # A killed process can leave the process list (on Linux its /proc exe link goes with its memory) before its
+    # files close, so its socket can still accept for a moment: retire_settled waits for that, as stop_process does.
+    for stored in sorted({pathlib.Path(store).resolve(), *(pathlib.Path(selected) for _, selected in hosts)}):
+        retire_settled(stored)
