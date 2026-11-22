@@ -37,10 +37,17 @@ def admission(event_name, event, actor, triggering_actor, repository, allowlist=
     return True, "The run satisfies the trusted Mac admission policy."
 
 
+def readable(runners):
+    """Whether a runner status snapshot can say if rui-mac is online: a list of rows, each with a status and labels."""
+    return isinstance(runners, list) and all(
+        isinstance(row, dict) and isinstance(row.get("status"), str) and isinstance(row.get("labels"), list)
+        for row in runners)
+
+
 def decide(event_name, event, actor, triggering_actor, repository, inputs, switch, runners, queue=None):
     """Return runs-on, one sentence explaining the scheduling snapshot, and whether rui-mac is offline.
 
-    The offline flag is true only for an admitted run whose runner status was read and has no online rui-mac runner.
+    The offline flag is true only for an admitted run whose runner status is readable and has no online rui-mac runner.
     """
     if switch == "off":
         return HOSTED, "Hosted macOS is selected because RUI_MAC_RUNNER is off.", False
@@ -51,25 +58,24 @@ def decide(event_name, event, actor, triggering_actor, repository, inputs, switc
     admitted, reason = admission(event_name, event, actor, triggering_actor, repository)
     if not admitted:
         return HOSTED, reason, False
-    if runners is None:
+    if not readable(runners):
         return HOSTED, "Hosted macOS is selected because runner status is unavailable.", False
     keys = ("mac_queued", "hosted_queued", "hosted_running")
     valid_queue = isinstance(queue, dict) and all(type(queue.get(key)) is int and queue[key] >= 0 for key in keys)
     counts = (f" Mac queued: {queue['mac_queued']}, hosted queued: {queue['hosted_queued']},"
               f" hosted running: {queue['hosted_running']}." if valid_queue else " Queue data is unavailable.")
     online = False
-    if isinstance(runners, list):
-        for runner in runners:
-            runner = _object(runner)
-            labels = runner.get("labels")
-            if (runner.get("status") == "online" and isinstance(labels, list)
-                    and any(_object(label).get("name") == "rui-mac" for label in labels)):
-                online = True
-                if runner.get("busy") is False:
-                    return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner." + counts, False
-                if (runner.get("busy") is True and valid_queue
-                        and queue["mac_queued"] < queue["hosted_queued"] + (queue["hosted_running"] >= 5)):
-                    return SELF_HOSTED.copy(), "The online rui-mac queue is shorter than the hosted backlog." + counts, False
+    for runner in runners:
+        runner = _object(runner)
+        labels = runner.get("labels")
+        if (runner.get("status") == "online" and isinstance(labels, list)
+                and any(_object(label).get("name") == "rui-mac" for label in labels)):
+            online = True
+            if runner.get("busy") is False:
+                return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner." + counts, False
+            if (runner.get("busy") is True and valid_queue
+                    and queue["mac_queued"] < queue["hosted_queued"] + (queue["hosted_running"] >= 5)):
+                return SELF_HOSTED.copy(), "The online rui-mac queue is shorter than the hosted backlog." + counts, False
     if not online:
         return HOSTED, "Hosted macOS is selected because the rui-mac runner is offline." + counts, True
     return HOSTED, "Hosted macOS is selected because no eligible rui-mac runner has a shorter queue or is idle." + counts, False
@@ -147,8 +153,8 @@ def main():
         status = Path(os.environ.get("RUNNERS_PATH", "runners.json"))
         if status.exists():
             payload = json.loads(status.read_text())
-            if isinstance(payload, dict) and isinstance(payload.get("runners"), list):
-                runners = payload["runners"]
+            if isinstance(payload, dict):
+                runners = payload.get("runners")
         queue = None
         try:
             queue = json.loads(Path(os.environ.get("QUEUE_PATH", "queue.json")).read_text())

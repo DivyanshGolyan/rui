@@ -46,22 +46,23 @@ def cases():
                     and (event_name == "workflow_dispatch"
                          or (event_name == "pull_request" and same_repo and author == TRUSTED)))
         expected = SELF if eligible and state in (4, 6) else HOSTED
+        offline = eligible and state in (1, 2, 5)
         yield (event_name, event, actor, trigger, REPO,
-               {"promotion": promotion, "compile_only": compile_only}, switch, states[state]), expected
+               {"promotion": promotion, "compile_only": compile_only}, switch, states[state]), (expected, offline)
 
 
 class DecisionTest(unittest.TestCase):
     def test_whole_domain(self):
-        for args, expected in cases():
+        for args, (expected, expected_offline) in cases():
             actual, reason, offline = mac_runner.decide(*args)
             self.assertEqual(actual, expected, args)
+            self.assertEqual(offline, expected_offline, args)
             self.assertTrue(reason.endswith("."), reason)
-            self.assertFalse(offline and expected == SELF, args)
             self.assertNotIn("\n", reason)
 
     def test_shared_admission_domain(self):
         count = 0
-        for args, expected in cases():
+        for args, (expected, _) in cases():
             if args[5] != {"promotion": False, "compile_only": False} or args[6] is not None or args[7] != [runner()]:
                 continue
             admitted, reason = mac_runner.admission(*args[:5])
@@ -85,7 +86,7 @@ class DecisionTest(unittest.TestCase):
             ('runner.get("busy") is False', 'True'),
             ('_object(label).get("name") == "rui-mac"', 'True'),
         ]
-        witnesses = list(cases())
+        witnesses = [(args, expected) for args, (expected, _) in cases()]
         for before, after in mutations:
             with self.subTest(condition=before):
                 self.assertIn(before, source)
@@ -165,6 +166,10 @@ OFFLINE_CASES = [
     ("not admitted", {"event_name": "push"}, [runner("offline")], None, HOSTED, False),
     ("compile only", {"inputs": {"compile_only": True}}, [runner("offline")], None, HOSTED, False),
     ("status unavailable", {}, None, None, HOSTED, False),
+    ("status not a list", {}, {}, None, HOSTED, False),
+    ("status row not an object", {}, [None], None, HOSTED, False),
+    ("rui-mac row without a status", {}, [{"labels": [{"name": "rui-mac"}]}], None, HOSTED, False),
+    ("labels not a list", {}, [dict(runner("offline"), labels="rui-mac")], None, HOSTED, False),
     ("runner offline", {}, [runner("offline")], None, HOSTED, True),
     ("no rui-mac runner", {}, [runner(label="other")], None, HOSTED, True),
     ("online idle", {}, [runner()], None, SELF, False),
@@ -219,7 +224,7 @@ class OfflineWarningTest(unittest.TestCase):
         source = Path(mac_runner.__file__).read_text()
         mutations = [
             ("if not online:", "if False:"),
-            ("                online = True\n", ""),
+            ("            online = True\n", ""),
         ]
         for before, after in mutations:
             with self.subTest(mutation=before):
