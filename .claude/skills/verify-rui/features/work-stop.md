@@ -18,9 +18,11 @@ Send a request, then send a follow-up while it is working to see the queue. Pres
 
 Run `$V frames FULLSHA --only chat-working,chat-queued,tools-running,stop,stop-narrow,stopped,chat-failed,host-stopped,host-stopped-chat,host-back`.
 
-Frame states: `chat-working`, `chat-queued`, `tools-running`, `stop`, `stop-narrow`, `stopped`, `chat-failed`, `host-stopped`, `host-stopped-chat`, `host-back`, `provider-unserved-night`
+Frame states: `chat-working`, `chat-queued`, `tools-running`, `stop`, `stop-narrow`, `stopped`, `chat-failed`, `host-stopped`, `host-stopped-chat`, `host-back`, `provider-unserved-night`, `send-host-stopped`
 
 Run `$V frames FULLSHA --only provider-unserved-night --sizes 140x40,46x30` for a chat whose Session provider the running Host no longer serves: the Host restarts serving only `openai` through the `restart` host step. The state is a generic witness of that step; it expects the cast message and footer model on the restarted chat.
+
+Run `$V frames FULLSHA --only send-host-stopped --sizes 140x40,46x30` for Enter in a chat whose Host is stopped: it expects the draft kept and `! Host not ready. Draft retained.` on the footer, never the pending-original text.
 
 These recipes own separate slow chats so they do not borrow another state's work. Check **Thinking**, the queued text, both active tool rows and the stop result at both widths. Host recipes pause and start only the fixture-owned Host. **host-back** waits for the stopped notice to disappear and the session list to return.
 
