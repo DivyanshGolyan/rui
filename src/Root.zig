@@ -355,7 +355,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     self.bottom = @import("draft_layout.zig").fixedBottom(size.height, 0, .overview);
-    self.settings_page.narrow = size.width < split_at;
     if (self.presentation_hold) |hold| if (hold.held(hold.context, size.width)) {
         return try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     };
@@ -371,9 +370,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const pane = switch (layout.pane) {
         .overview => self.overview,
         .session => self.session.?,
-        .sign_in => self.sign_in.?,
-        // Settings is a dialog over the main pane, never a pane of its own.
-        .settings => self.session orelse self.overview,
+        // Sign-in and Settings are dialogs over the main pane, never panes of their own.
+        .sign_in, .settings => unreachable,
     };
     const child = if (layout.split) split: {
         const split = try ctx.arena.create(Split);
@@ -387,7 +385,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.widget()) else child };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.dialogWidget()) else child };
     self.projectFocus(child, layout);
     if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (signing) try self.sign_in.?.draw(ctx) else try self.settingsDialog(ctx, size) };
     self.frames += 1;
@@ -397,12 +395,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 /// The covered screen as one flat layer in the `backdrop` style: what it showed stays in
 /// place, quiet behind the dialog, with no colour, cursor, link, image or highlight of its own.
 /// vxfw's own render composes it, so the faded screen holds exactly what would have shown.
-/// `outside` is a widget with no cursor in `screen`, so rendering shows none.
+/// `outside` is a widget with no cursor in `screen`, so rendering shows none, and with no
+/// handlers: the faded layer is its own, so no click or wheel on it reaches the screen it shows.
 fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style, outside: vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
     var scratch = try vaxis.Screen.init(ctx.cell_arena, .{ .cols = screen.size.width, .rows = screen.size.height, .x_pixel = 0, .y_pixel = 0 });
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.size.width, .height = screen.size.height, .screen = &scratch };
     try screen.render(window, outside);
-    const flat = try vxfw.Surface.init(ctx.cell_arena, screen.widget, screen.size);
+    const flat = try vxfw.Surface.init(ctx.cell_arena, outside, screen.size);
     for (flat.buffer, scratch.buf) |*cell, drawn| cell.* = .{ .char = drawn.char, .style = backdrop };
     return flat;
 }
@@ -413,14 +412,20 @@ fn settingsDialog(self: *Self, ctx: vxfw.DrawContext, size: vxfw.Size) std.mem.A
     const fit = Dialog.bound(size);
     const footer_height: u16 = @intFromBool(fit.height > 1);
     const body = try self.settings_page.widget().draw(ctx.withConstraints(.{}, .{ .width = fit.width, .height = fit.height - footer_height }));
-    var content = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = fit.width, .height = body.size.height + footer_height });
+    var content = try vxfw.Surface.init(ctx.cell_arena, self.dialogWidget(), .{ .width = fit.width, .height = body.size.height + footer_height });
     @memset(content.buffer, .{ .style = look.ground });
     const parts = try ctx.arena.alloc(vxfw.SubSurface, @as(usize, 1) + footer_height);
     parts[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = body };
     if (footer_height == 1) parts[1] = .{ .origin = .{ .row = @intCast(body.size.height), .col = 0 }, .surface = try self.settings_page.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = fit.width, .height = 1 })) };
     content.children = parts;
-    content.cursor = body.cursor;
-    return Dialog.lay(ctx, self.widget(), look, content, size);
+    return Dialog.lay(ctx, self.dialogWidget(), look, content, size);
+}
+
+/// Root's drawing with no handlers, owning the faded screen and the dialog's own surfaces: a
+/// click or wheel the dialog does not use reaches nothing behind it, and Root's capture sits
+/// in each event's path once.
+fn dialogWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .drawFn = draw };
 }
 
 /// The capabilities the app draws with, as app settings reads them.
@@ -611,11 +616,10 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expect(ctx.cmds.items[0].request_focus.eql(root.settings_page.widget()));
         try std.testing.expectEqual(width >= split_at, root.listVisible());
         const opened = try root.widget().draw(draw_context);
-        try std.testing.expectEqual(width < split_at, root.settings_page.narrow);
         // Settings is a dialog above the main screen, which stays in place but faded.
         try std.testing.expectEqual(@as(usize, 2), opened.children.len);
         try std.testing.expectEqual(@as(usize, 0), opened.children[0].surface.children.len);
-        try std.testing.expect(opened.children[1].surface.widget.eql(root.widget()));
+        try std.testing.expect(opened.children[1].surface.widget.eql(root.dialogWidget()));
         try std.testing.expect(containsWidget(opened.children[1].surface, root.settings_page.widget()));
 
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
@@ -1018,7 +1022,7 @@ test "Settings opens as a dialog over the faded screen, and Sign-in from it take
         try std.testing.expectEqual(!signing, containsWidget(layer, root.settings_page.widget()));
         try std.testing.expectEqual(signing, layer.widget.eql(page.widget()));
         if (signing) continue;
-        try std.testing.expect(layer.widget.eql(root.widget()));
+        try std.testing.expect(layer.widget.eql(root.dialogWidget()));
         try std.testing.expectEqual(@as(usize, if (Dialog.framed(size)) 2 else 1), layer.children.len);
         const content = layer.children[0];
         try std.testing.expect(content.surface.size.width <= Dialog.max_width);
@@ -1041,7 +1045,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
             defer arena.deinit();
             const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
             try std.testing.expectEqual(@as(usize, 2), surface.children.len);
-            try std.testing.expect(surface.children[0].surface.widget.eql(background.widget()));
+            try std.testing.expect(surface.children[0].surface.widget.eql(root.dialogWidget()));
             const cover = surface.children[1].surface;
             if (width == 0 or height == 0) continue;
             // The covered screen stays in place but faded; the layer above paints nothing of

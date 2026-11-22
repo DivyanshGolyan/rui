@@ -35,7 +35,6 @@ pub const Row = enum { model, effort, permissions, notifications, sign_in, versi
 const row_count = std.enums.values(Row).len;
 
 backend: ?Backend = null,
-narrow: bool = false,
 keys_open: bool = false,
 keys_offset: usize = 0,
 keys_rows: usize = 0,
@@ -55,10 +54,6 @@ upgrade_buffer: [upgrade_status.max_line_bytes]u8 = undefined,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
-}
-
-pub fn bodyWidget(self: *Self) vxfw.Widget {
-    return self.widget();
 }
 
 pub fn footerWidget(self: *Self) vxfw.Widget {
@@ -605,7 +600,7 @@ test "App settings and nested Keys share Composer input lines and preserve the d
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var input: @import("InputArea.zig") = .{
         .composer = .{ .editor = &editor, .caret = false },
-        .panel = .{ .full = page.bodyWidget() },
+        .panel = .{ .full = page.widget() },
         .facts = page.footerWidget(),
         .status = null,
     };
@@ -618,7 +613,7 @@ test "App settings and nested Keys share Composer input lines and preserve the d
             const composer = shown.children[0].surface;
             try std.testing.expect(composer.widget.eql(input.composer.widget()));
             try std.testing.expectEqual(@as(i17, 1), composer.children[0].origin.row);
-            try std.testing.expect(composer.children[0].surface.widget.eql(page.bodyWidget()));
+            try std.testing.expect(composer.children[0].surface.widget.eql(page.widget()));
             try std.testing.expectEqualStrings("┄", composer.readCell(0, 0).char.grapheme);
             try std.testing.expectEqualStrings("┄", composer.readCell(0, composer.size.height - 1).char.grapheme);
             try std.testing.expectEqualStrings("r", composer.readCell(3, composer.size.height - 2).char.grapheme);
@@ -656,7 +651,6 @@ test "App settings page text and ground at 99x20 and 46x20" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 99, 46 }) |width| {
-        page.narrow = width == 46;
         const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
         try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
@@ -851,7 +845,6 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 46, 99 }) |width| {
-        page.narrow = width == 46;
         for (0..4) |state| {
             page.cancelChoice();
             if (state == 1) {
@@ -1103,7 +1096,7 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
         var editor: @import("DraftEditor.zig") = .initText(&storage, draft, draft.len);
         var input: @import("InputArea.zig") = .{
             .composer = .{ .editor = &editor, .caret = false },
-            .panel = .{ .full = page.bodyWidget() },
+            .panel = .{ .full = page.widget() },
             .facts = page.footerWidget(),
             .status = null,
         };

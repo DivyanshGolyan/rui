@@ -3641,11 +3641,12 @@ test "Settings composes the Overview list at most once with and without a retain
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
-            // Settings is a dialog over the faded main screen, which may show the list once.
-            try std.testing.expect(Count.widget(surface, overview.app_sessions.widget()) <= 1);
-            try std.testing.expect(Count.widget(surface, overview.app_new_session.widget()) <= 1);
-            try std.testing.expect(Count.widget(surface, overview.app_settings_line.widget()) <= 1);
-            try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.root.settings_page.bodyWidget()));
+            // Settings is a dialog over the faded main screen, one flat layer: no live list
+            // widget sits beneath the dialog, so none can take its input.
+            try std.testing.expectEqual(@as(usize, 0), Count.widget(surface, overview.app_sessions.widget()));
+            try std.testing.expectEqual(@as(usize, 0), Count.widget(surface, overview.app_new_session.widget()));
+            try std.testing.expectEqual(@as(usize, 0), Count.widget(surface, overview.app_settings_line.widget()));
+            try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.root.settings_page.widget()));
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
             try std.testing.expect(std.mem.count(u8, try shown.text(), "+ New chat") <= 1);
@@ -5698,7 +5699,6 @@ fn sui4SettingsEntry() !void {
             try focus.handleEvent(&ctx, .focus_in);
             const opened = try overview.root.widget().draw(draw_context);
             try std.testing.expect(Settings.origin(opened, focus, .{ .row = 0, .col = 0 }) != null);
-            try std.testing.expectEqual(width < Root.split_at, overview.root.settings_page.narrow);
             try std.testing.expectEqual(width >= Root.split_at, overview.root.listVisible());
             var shown = try rig.shown(width, 24);
             defer shown.deinit();
