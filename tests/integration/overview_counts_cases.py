@@ -3,9 +3,9 @@ from contextlib import contextmanager
 import json
 import os
 import re
-import signal
 import threading
 
+import canonical_fixture
 import model_fixture as fixture
 from overview_fixture import world
 from human_cli_fixture import conversation_text, composer_line, chat_footer_row
@@ -103,7 +103,11 @@ def unconfirmed_status():
             screen.keys(b"\r")
             screen.wait(lambda f: "first done" in f and "Talk ·" in f, "the conversation")
             before = requests(w)
-            os.kill(w.host.pid, signal.SIGSTOP)
+            # The reply is lost: the Message never reaches the Host and the
+            # connection closes, so the send ends unconfirmed at once instead
+            # of after the client's 60-second wait for a silent Host.
+            proxy = canonical_fixture.ReplyProxy(w.host, "/v1/message", lambda response: response,
+                before_forward=lambda record: False)
             try:
                 screen.keys(b"lost")
                 screen.contains("lost")
@@ -111,7 +115,7 @@ def unconfirmed_status():
                 note = "Not confirmed · ctrl+r retries original"
                 frame = screen.wait(lambda f: note in conversation_text(f)
                     and conversation_text(f).count("› lost") == 1,
-                    "unconfirmed note attached to the original sent Message", timeout=30)
+                    "unconfirmed note attached to the original sent Message", timeout=15)
                 transcript = conversation_text(frame)
                 assert transcript.count(note) == 1 and transcript.index("› lost") < transcript.index(note), frame
                 assert "! Not confirmed" not in frame and "Sending" not in frame, frame
@@ -119,7 +123,7 @@ def unconfirmed_status():
                 assert note not in "\n".join(composer_line(frame, index)
                     for index in range(footer, len(frame.split("\n")))), frame
             finally:
-                os.kill(w.host.pid, signal.SIGCONT)
+                proxy.close()
             saved = requests(w) - before
             assert len(saved) == 1, (before, saved)
             key = saved.pop()

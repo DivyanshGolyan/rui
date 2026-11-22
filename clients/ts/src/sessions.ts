@@ -518,9 +518,7 @@ export async function models(link: Link): Promise<ModelSummary[]> {
 			version: WIRE_VERSION,
 			kind: "model_list",
 			store,
-		} satisfies Schemas["ModelListRequest"]), undefined, {
-			responseMs: 30_000,
-		}),
+		} satisfies Schemas["ModelListRequest"])),
 	);
 	return reply.providers.flatMap((entry) => entry.models.map((model) => ({ provider: entry.provider, id: model.id, known: model.known })));
 }
