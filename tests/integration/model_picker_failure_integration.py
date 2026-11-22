@@ -9,7 +9,7 @@ import codex_fixture
 import host_process
 import model_fixture as fixture
 from terminal_screen import split_pane_row
-from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, dialog_content, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -46,7 +46,9 @@ def main():
         filtered = app_model_open(master, b"luna", catalog=catalog)
         assert "gpt-5.6-luna" in filtered and "gpt-6-luna" in filtered, filtered
         moved = model_choice_frame(master, b"\x1b[B", query="luna", more=False)
-        assert len(moved.splitlines()) == 12, moved
+        # The open list stays inside the 12-row screen with the dialog's footer still shown.
+        assert len(moved.split("\n")) <= 12, moved
+        assert any(dialog_content(row).split() == ["Settings", "esc"] for row in moved.split("\n")), moved
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors

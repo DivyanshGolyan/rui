@@ -159,7 +159,7 @@ def dialog_content(row):
     """A row as a dialog lays it: inside the card's stitched edges past their column of
     ground, or the pane's own content when no card edge crosses the row."""
     edges = [index for index, char in enumerate(row) if char in DIALOG_EDGES]
-    return row[edges[0] + 2:edges[-1]] if len(edges) >= 2 else pane_content(row)
+    return row[edges[0] + 2:edges[-1]].rstrip() if len(edges) >= 2 else pane_content(row)
 
 
 def composer_line(screen, y):
