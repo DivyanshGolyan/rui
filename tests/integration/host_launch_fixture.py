@@ -61,7 +61,7 @@ def forced_crash_cleanup(store, *, descendants=False):
     wait_for(lambda: matching_processes(store, descendants=descendants), "forced-crash cleanup to reap the detached Host",
              timeout=5, interval=0.02, ready=lambda found: not found)
     # The reaped Hosts left their sockets and .store hints behind; retire them before the caller deletes the Store.
-    # A killed process leaves the census (its exe link goes with its memory) before the kernel closes its
-    # files, so its socket can still accept for a moment: retire_settled waits for that, as stop_process does.
+    # A killed process can leave the process list (on Linux its /proc exe link goes with its memory) before its
+    # files close, so its socket can still accept for a moment: retire_settled waits for that, as stop_process does.
     for stored in sorted({pathlib.Path(store).resolve(), *(pathlib.Path(selected) for _, selected in hosts)}):
         retire_settled(stored)

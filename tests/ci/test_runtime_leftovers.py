@@ -385,8 +385,8 @@ class ForcedCrashCleanup(unittest.TestCase):
         return launch
 
     def test_forced_crash_cleanup_waits_for_a_reaped_host_socket_to_close(self):
-        # A killed Host leaves the process census (its exe link goes with its memory) before the kernel
-        # closes its files, so its socket can still accept for a moment after the reap (#2017).
+        # A killed Host can leave the process list (on Linux its /proc exe link goes with its memory) before its
+        # files close, so its socket can still accept for a moment after the reap (#2017).
         launch = self.launch_fixture()
         store = pathlib.Path(self.tmp.name) / "store"
         store.mkdir()
