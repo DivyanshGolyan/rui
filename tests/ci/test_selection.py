@@ -2860,5 +2860,97 @@ class PolicyPrepushTest(unittest.TestCase):
         self.assertIn('select(paths, "development", available)["policy_skips"]', source)
 
 
+class PrTierHostAndOwnFileTest(unittest.TestCase):
+    """The PR tier's stack-frames and own-file rules over their domain, decided in fast_tier from the raw selection."""
+
+    def ready(self, paths, contents=None):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        selected = select(paths, "review", AVAILABLE, contents=contents or {})
+        outputs = plan(selected, event_name="pull_request", draft=False, promotion=False,
+                       change_kind=ChangeKind.NORMAL).outputs
+        return selected, outputs
+
+    def test_every_host_source_file_picks_stack_frames_on_the_pr_tier(self):
+        graph = tree_graph()
+        hosts = sorted(path for path in graph.host if path.startswith("src/") and path.endswith(".zig"))
+        self.assertGreater(len(hosts), 100)
+        for path in hosts:
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertIn("stack-frames", selected["fast_targets"])
+                self.assertIn("stack-frames", outputs["targets"])
+
+    def test_host_path_that_check_covers_still_runs_stack_frames(self):
+        # The raw selection holds check and stack-frames; normalize drops stack-frames under check, and check
+        # never runs on the PR, so only the raw Host reason keeps it.
+        selected, outputs = self.ready(["src/wire_version.zig"])
+        self.assertIn("check", selected["targets"])
+        self.assertNotIn("stack-frames", selected["targets"])
+        self.assertIn("stack-frames", outputs["targets"])
+        self.assertNotIn("check", outputs["targets"])
+
+    def test_non_host_stack_frames_inputs_do_not_add_it(self):
+        bump = sqlite_bump()
+        cases = (("build.zig.zon", {DEPENDENCY_MANIFEST: bump}), ("build.zig", None),
+                 ("tests/ci/stack_frames.py", None), ("tests/ci/stack_frames.json", None),
+                 ("src/fetch_dependencies.sh", None))
+        for path, contents in cases:
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path], contents)
+                self.assertIn("stack-frames", selected["targets"])
+                self.assertNotIn("stack-frames", selected["fast_targets"])
+                self.assertNotIn("stack-frames", outputs["targets"])
+
+    def test_go_measurement_file_picks_measurement_check(self):
+        for path in ("tests/qualification/call-classification/main.go",
+                     "tests/qualification/call-classification/main_test.go"):
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertIn("measurement-check", selected["fast_targets"])
+                self.assertIn("measurement-check", outputs["targets"])
+
+    def test_measurement_check_reached_by_a_non_own_file_stays_off_the_pr_tier(self):
+        for path in ("build/measurement.zig", ".github/actions/setup/fixtures/action.yml"):
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertIn("measurement-check", selected["targets"])
+                self.assertNotIn("measurement-check", selected["fast_targets"])
+                self.assertNotIn("measurement-check", outputs["targets"])
+
+    def test_mysql_wire_own_file_picks_mysql_wire_integration(self):
+        for path in ("tests/integration/mysql_wire_integration.py", "tests/integration/mysql_wire_test.zig"):
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertIn("mysql-wire-integration", selected["fast_targets"])
+                self.assertIn("mysql-wire-integration", outputs["targets"])
+
+    def test_mysql_wire_reached_by_a_non_own_file_stays_off_the_pr_tier(self):
+        for path in ("build/unit.zig", "src/store/wire/mysql_connection.zig"):
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertIn("mysql-wire-integration", selected["targets"])
+                self.assertNotIn("mysql-wire-integration", selected["fast_targets"])
+                self.assertNotIn("mysql-wire-integration", outputs["targets"])
+
+    def test_docs_pick_no_pr_target(self):
+        for path in ("docs/verification/gates.md", "README.md"):
+            with self.subTest(path=path):
+                selected, outputs = self.ready([path])
+                self.assertEqual(selected["fast_targets"], [])
+                self.assertEqual(outputs["targets"], [])
+
+    def test_draft_pr_runs_none_of_them(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        for paths in (["src/BashLifecycle.zig"], ["tests/qualification/call-classification/main.go"],
+                      ["tests/integration/mysql_wire_test.zig"]):
+            with self.subTest(paths=paths):
+                selected = select(paths, "review", AVAILABLE)
+                draft = plan(selected, event_name="pull_request", draft=True, promotion=False,
+                             change_kind=ChangeKind.NORMAL).outputs
+                self.assertEqual(draft["targets"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -737,22 +737,31 @@ CI_RUNNABLE = frozenset(PR_UNIT_ROOTS | CHECK_COVERS | {covered for cases in FIX
 STORE_PATHS = ("src/store.zig", "src/store/*")
 
 
+# Targets the PR tier runs only when the diff touches their own files, never through an import:
+# the live-MySQL wire client (its MySQL 8.4 runs in its own Docker container, not the job's) and the
+# Go measurement packages. stack-frames is not here: it is kept for a Host path (fast_tier).
+PR_OWN_FILE_TARGETS = frozenset({"mysql-wire-integration", "measurement-check"})
+
+
 def own_fixture(target, paths):
-    """Whether the diff touches the fixture's own script, executable or FIXTURES owner."""
-    scripts, executables, owners = FIXTURES[target]
-    return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
+    """Whether the diff touches the target's own script, executable, declared owner, unit root or extra input (own_patterns)."""
+    return any(matches(path, own_patterns(target)) for path in paths)
 
 
-def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False):
+def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False, host_paths=frozenset()):
     """The PR tier of a raw (unnormalized) selection.
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
-    alone selected it; `test-store` only for Store paths) and the fixtures
-    whose own sources the diff touches. A fixture the diff reaches only
-    through imports runs on main and in promotion, never on the PR.
+    alone selected it; `test-store` only for Store paths) and the targets whose
+    own files the diff touches (fixtures, PR_OWN_FILE_TARGETS). A fixture the diff
+    reaches only through imports runs on main and in promotion, never on the PR.
     `linked` are the unit roots a changed dependency links, kept whatever the
-    paths are. An unclassified path selects every PR unit root.
+    paths are. An unclassified path selects every PR unit root. `host_paths` are
+    the changed paths the Host reaches: a Host path keeps `stack-frames`, read from
+    the raw selection, because `normalize` drops it under `check` and `check`
+    never runs on the PR. Other stack-frames inputs (build.zig, the frame gate,
+    a dependency pin) do not add it.
     """
     targets = set(targets)
     fast = targets & PR_UNIT_ROOTS
@@ -765,8 +774,10 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
     fast |= set(linked) & PR_UNIT_ROOTS
     if unclassified:
         fast = set(PR_UNIT_ROOTS)
-    fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
+    fast |= {target for target in (targets & (FIXTURES.keys() | PR_OWN_FILE_TARGETS)) - PR_UNIT_ROOTS
              if own_fixture(target, paths)}
+    if "stack-frames" in targets and host_paths:
+        fast.add("stack-frames")
     for broad, covered in FIXTURE_COVERS.items():
         if broad in fast:
             fast -= covered
@@ -880,6 +891,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                        if any(matches(path, patterns) and (path not in contents or changed(path, *contents[path]))
                               for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
+    host_paths = set()
     live_targets, live_reasons = set(), set()
     unclassified = False
     live_needs = set()
@@ -896,6 +908,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
         elif (path in graph.host if path.startswith("src/") and path.endswith(".zig")
               else any(fnmatch.fnmatchcase(path, pattern) for pattern in STACK_FRAMES)):
             targets.add("stack-frames")
+            if path in graph.host:
+                host_paths.add(path)
             reasons.add("Host stack frames: the ReleaseSafe frame gate (tests/ci/stack_frames.py)")
         if ci_policy(path):
             reasons.add("CI policy: the policy job runs selector and workflow checks")
@@ -1017,7 +1031,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     product = [path for path in changed if path not in bootstrap]
     bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
-    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified)
+    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified, host_paths=host_paths)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -1087,11 +1101,14 @@ EXTRA_OWN_FILES = {"stack-frames": (STACK_FRAMES_GATE, "tests/ci/stack_frames.py
 STATEMENT_TABLE_TARGETS = ("test-native", "test-store", "session-list-integration")
 
 
-def own_patterns(target, read):
-    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them."""
+def own_patterns(target, read=None):
+    """The files that are a target's own sources, scripts or declared inputs, as the build and selector name them.
+
+    `read` (a repository reader) is needed only for rsql-table's statement-table list; without it that list is absent.
+    """
     scripts, executables, owners = FIXTURES.get(target, ((), (), ()))
     own = [*scripts, *executables, *owners, *UNIT_ROOTS.get(target, ()), *EXTRA_OWN_FILES.get(target, ())]
-    if target == "rsql-table":
+    if target == "rsql-table" and read is not None:
         # build/product.zig owns the statement-table inputs; the list moves with the commit, so read it there.
         text = read("build/product.zig") or ""
         listed = re.search(r"pub const rsql_table_inputs = \[_\]\[\]const u8\{([^}]*)\}", text)

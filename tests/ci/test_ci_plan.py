@@ -194,9 +194,10 @@ class PlanTest(unittest.TestCase):
         from select_tests import select
         available = set(build_files.steps())
         for paths, ready_compile in (
-                (['src/store/schema.zig'], ['test', 'test-native', 'test-store']),
-                (['src/request_encoding.zig'], ['test-logic', 'test-native']),
-                (['README.md', 'src/request_encoding.zig'], ['test-logic', 'test-native'])):
+                # Host sources (src/store/schema.zig, src/request_encoding.zig) also keep stack-frames on the PR tier.
+                (['src/store/schema.zig'], ['stack-frames', 'test', 'test-native', 'test-store']),
+                (['src/request_encoding.zig'], ['stack-frames', 'test-logic', 'test-native']),
+                (['README.md', 'src/request_encoding.zig'], ['stack-frames', 'test-logic', 'test-native'])):
             with self.subTest(paths=paths):
                 selected = select(paths, 'review', available)
                 self.assertEqual(selected['unit_compile_required'], paths == ['src/store/schema.zig'])
