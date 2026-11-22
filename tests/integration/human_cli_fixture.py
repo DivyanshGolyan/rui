@@ -152,6 +152,16 @@ def conversation_text(frame):
                      for _, divider, content in rows)
 
 
+DIALOG_EDGES = "\u2506|"
+
+
+def dialog_content(row):
+    """A row as a dialog lays it: inside the card's stitched edges past their column of
+    ground, or the pane's own content when no card edge crosses the row."""
+    edges = [index for index, char in enumerate(row) if char in DIALOG_EDGES]
+    return row[edges[0] + 2:edges[-1]].rstrip() if len(edges) >= 2 else pane_content(row)
+
+
 def composer_line(screen, y):
     lines = screen.split("\n")
     return pane_content(lines[y]) if y < len(lines) else ""
@@ -292,12 +302,14 @@ def chat_info_frame(master, timeout=15):
 
 def app_settings_open(master):
     overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
-    return panel_frame(master, lambda screen: composer_line(screen, len(screen.split("\n")) - 1).split() == ["Settings", "esc"], b"\r")
+    # Settings is a dialog: its footer is the last row inside the card, or the screen's last
+    # row when the screen is too small for a card.
+    return panel_frame(master, lambda screen: any(dialog_content(row).split() == ["Settings", "esc"] for row in screen.split("\n")), b"\r")
 
 
 
 def model_choice_details(screen):
-    rows = [pane_content(row) for row in screen.split("\n")]
+    rows = [dialog_content(row) for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
     more = None

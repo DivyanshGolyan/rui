@@ -13,6 +13,7 @@ const pages = @import("os/pages.zig");
 const preferences = @import("preferences.zig");
 const selection = @import("new_session_selection.zig");
 const Panel = @import("widgets/Panel.zig");
+const Dialog = @import("Dialog.zig");
 const line = @import("widgets/cell_line.zig");
 const Editor = @import("DraftEditor.zig");
 const protocol = @import("protocol.zig");
@@ -1019,11 +1020,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.drawn = .{ .attempt = self.state.attempt, .page = std.meta.activeTag(self.state.page) };
     if (size.width == 0 or size.height == 0) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = &.{} };
-    // With room, the dialog is a card: a stitched edge with one column of ground inside it and
-    // one cell of ground outside it, so the faded screen Root draws never touches the edge.
-    const framed = size.width >= min_framed.width and size.height >= min_framed.height;
-    const frame: vxfw.Size = if (framed) .{ .width = 2 * card_inset.width, .height = 2 * card_inset.height } else .{};
-    const width = @min(size.width - frame.width, 72);
+    // With room, the dialog is a card (Dialog owns its geometry and palette).
+    const look = self.palette();
+    const fit = Dialog.bound(size);
+    const width = fit.width;
     var rows: std.ArrayList(Row) = .empty;
     var buttons: std.ArrayList(Button) = .empty;
     var code_field: ?usize = null;
@@ -1164,9 +1164,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var footer_surface: ?vxfw.Surface = null;
     if (width > 6 and self.state.page == .device) {
         const footer = try a.create(vxfw.Text);
-        footer.* = .{ .text = "C copies code. Esc back.", .style = self.look().quiet, .width_basis = .parent };
+        footer.* = .{ .text = "C copies code. Esc back.", .style = look.quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
-        if (natural.size.height + 3 + frame.height <= size.height) footer_surface = natural;
+        if (natural.size.height + 3 + size.height - fit.height <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
     var panel: Panel = .{
@@ -1178,21 +1178,21 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .action_gap = 1,
         .stacked_actions = button_width > width,
         .natural_height = true,
-        .top_rule = !framed,
+        .top_rule = !Dialog.framed(size),
         .centered_heading = true,
         .selected = selected,
-        .ground = self.look().ground,
-        .selection = self.look().selection,
-        .quiet = self.look().quiet,
-        .title_style = self.look().title,
-        .rule = stitch(self.look().caps, .horizontal),
+        .ground = look.ground,
+        .selection = look.selection,
+        .quiet = look.quiet,
+        .title_style = look.title,
+        .rule = look.stitch(.horizontal),
         .scroll = self.scroll,
     };
-    const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - frame.height - footer_height }));
+    const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = fit.height - footer_height }));
     const height = panel_surface.size.height + footer_height;
-    const origin: vxfw.RelativePoint = .{ .row = @intCast((size.height - height) / 2), .col = @intCast((size.width - width) / 2) };
+    const origin = Dialog.origin(size, .{ .width = width, .height = height });
     var child = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
-    @memset(child.buffer, .{ .style = self.look().ground });
+    @memset(child.buffer, .{ .style = look.ground });
     @memcpy(child.buffer[0..panel_surface.buffer.len], panel_surface.buffer);
     child.cursor = panel_surface.cursor;
     const extra: usize = @intFromBool(footer_surface != null);
@@ -1216,27 +1216,27 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (action == .copy and self.drawn.copy == null) continue;
             if (target_.index == selected) focused_visible = true;
             if (action == .open and field) {
-                const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.look().ground, action.open);
+                const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, look.ground, action.open);
                 for (@min(Panel.value_column, Panel.valueEnd(width))..Panel.valueEnd(width)) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
             }
             try hits.append(a, .{ .row = @intCast(origin.row + target_.row), .start = @intCast(origin.col + target_.start), .end = @intCast(origin.col + target_.end), .action = action });
         }
     }
     if (height <= 2) {
-        @memset(child.buffer, .{ .style = self.look().ground });
+        @memset(child.buffer, .{ .style = look.ground });
         const selected_action = if (selected < rows.items.len) rows.items[selected].action else buttons.items[selected - rows.items.len].action;
         const selected_label = if (selected < rows.items.len) rows.items[selected].label else buttons.items[selected - rows.items.len].label;
         if (selected_action != null and selected_action.? == .copy and selected_action.?.copy.len <= width) {
             self.drawn.copy = selected_action.?.copy;
-            _ = line.paint(ctx, child, try a.dupe(u8, selected_action.?.copy.slice()), 0, 0, self.look().selection, width);
+            _ = line.paint(ctx, child, try a.dupe(u8, selected_action.?.copy.slice()), 0, 0, look.selection, width);
         } else if (selected_action != null and selected_action.? == .field and self.form != null) {
             const field = selected_action.?.field;
             const view = try editView(ctx, self.form.?.value.editor(field), field == .key, width);
-            _ = line.paint(ctx, child, view.text, 0, 0, self.look().selection, width);
+            _ = line.paint(ctx, child, view.text, 0, 0, look.selection, width);
             child.cursor = .{ .row = 0, .col = view.caret };
         } else {
             if (self.state.page == .device) self.drawn.copy = null;
-            _ = line.paint(ctx, child, selected_label, 0, 0, self.look().selection, width);
+            _ = line.paint(ctx, child, selected_label, 0, 0, look.selection, width);
         }
         if (selected_action) |action| {
             if (action != .copy or self.drawn.copy != null) {
@@ -1247,68 +1247,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     self.drawn.hits = hits.items;
     if (!focused_visible) self.drawn.focused = null;
-    // The card, when it fits, lies beneath the content by z index (rendering sorts by it).
-    const children = try a.alloc(vxfw.SubSurface, if (framed) 2 else 1);
-    children[0] = .{ .origin = origin, .surface = child, .z_index = 1 };
-    if (framed) children[1] = .{ .origin = .{ .row = origin.row - card_inset.height, .col = origin.col - card_inset.width }, .surface = try self.card(ctx, child.size) };
-    // Framed, the layer paints nothing of its own, so the faded screen shows around the card's
-    // margin. Without room for the card, the layer fills the screen with the ground, so no
-    // covered text can sit beside the dialog's rows. Either way every click lands here.
-    if (framed) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
-    var cover = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(cover.buffer, .{ .style = self.look().ground });
-    cover.children = children;
-    return cover;
+    return Dialog.lay(ctx, self.widget(), look, child, size);
 }
 
-// Narrower screens give the dialog every column, so codes and links keep their width.
-const min_framed: vxfw.Size = .{ .width = 40, .height = 10 };
-/// From the card's outer edge to its content: one cell of margin, the stitch, then on the
-/// sides one column of ground.
-const card_inset: vxfw.Size = .{ .width = 3, .height = 2 };
-
-/// The card under a dialog of `content` size: a margin of ground, then the running stitch
-/// on top and bottom and its upright at the sides, then one column of ground before content.
-fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocator.Error!vxfw.Surface {
-    const size: vxfw.Size = .{ .width = content.width + 2 * card_inset.width, .height = content.height + 2 * card_inset.height };
-    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(surface.buffer, .{ .style = self.look().ground });
-    const across = stitch(self.look().caps, .horizontal);
-    const upright = stitch(self.look().caps, .vertical);
-    for (1..size.width - 1) |col| {
-        surface.writeCell(@intCast(col), 1, across);
-        surface.writeCell(@intCast(col), size.height - 2, across);
-    }
-    for (2..size.height - 2) |row| {
-        surface.writeCell(1, @intCast(row), upright);
-        surface.writeCell(size.width - 2, @intCast(row), upright);
-    }
-    return surface;
-}
-
-/// The dialog's palette. It lies on the raised ground, lighter than the cloth, above a screen
-/// faded onto the darker scrim; every cell of it (title, rule, stitch, text) carries that ground.
-const Look = struct { ground: vaxis.Style, quiet: vaxis.Style, selection: vaxis.Style, title: vaxis.Style, caps: @import("overview_view.zig").Caps };
-
-const default_caps: @import("overview_view.zig").Caps = .{};
-
-fn look(self: *const Self) Look {
+fn palette(self: *const Self) Dialog.Look {
     var caps = self.caps.*;
     caps.unicode = self.unicode;
-    const of = @import("widget_style.zig").of;
-    return .{
-        .ground = of(caps, .{ .background = .raised }),
-        .quiet = of(caps, .{ .colour = .quiet, .background = .raised }),
-        .selection = of(caps, .{ .background = .selection }),
-        .title = of(caps, .{ .colour = .strong, .background = .raised, .bold = true }),
-        .caps = caps,
-    };
+    return .of(caps);
 }
 
-/// The running stitch in the thread colour, on the dialog's raised ground.
-fn stitch(caps: @import("overview_view.zig").Caps, which: @import("widget_style.zig").Line) vaxis.Cell {
-    return @import("widgets/Stitch.zig").cell(caps.unicode, which, @import("widget_style.zig").of(caps, .{ .colour = .rule, .background = .raised }));
-}
+const default_caps: @import("overview_view.zig").Caps = .{};
 
 test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {
     const mapped = try pages.Mapped(Browser).map();
@@ -2886,7 +2834,7 @@ test "Sign-in lays every cell of its dialog on its own ground on every page, foc
                 const height: usize = if (framed) laid.surface.size.height else size.height;
                 for (top..top + height) |row| for (left..left + width) |col| {
                     const bg = screen.buf[row * size.width + col].style.bg;
-                    try std.testing.expect(bg.eql(page.look().ground.bg) or bg.eql(page.look().selection.bg));
+                    try std.testing.expect(bg.eql(page.palette().ground.bg) or bg.eql(page.palette().selection.bg));
                 };
             }
         }
