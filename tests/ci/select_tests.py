@@ -188,7 +188,7 @@ class Graph:
 
     def __init__(self, names, read):
         names = set(names)
-        self.production, self.every, self.python = {}, {}, {}
+        self.production, self.every, self.python, self.missing = {}, {}, {}, {}
         entries = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
         mysql_cases = set()
         for name in sorted(names):
@@ -201,10 +201,15 @@ class Graph:
                     mysql_cases.add(name)
                 strings = (" ".join(token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
                                     if token.type == tokenize.STRING) if name.endswith(".py") else source)
-                self.python[name] = ({f"{I}{module}.py" for match in PYTHON_IMPORT.finditer(source)
-                                      for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
-                                     | set(SOURCE_READ.findall(strings))
-                                     | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
+                imported = ({f"{I}{module}.py" for match in PYTHON_IMPORT.finditer(source)
+                             for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
+                            | set(SOURCE_READ.findall(strings))
+                            | {"src/" + joined for joined in SOURCE_JOIN.findall(source)})
+                self.python[name] = imported & names - {name}
+                # An import of a deleted helper has no edge; kept apart so a stale importer still selects its fixtures.
+                for module in imported - names:
+                    if module.startswith(I) and module.endswith(".py"):
+                        self.missing.setdefault(module, set()).add(name)
             elif name in entries and name.endswith(".ts"):
                 self.python[name] = set()
                 if "RUI_TEST_MYSQL_" in read(name):
@@ -749,14 +754,43 @@ def touches_own_files(target, paths):
     return any(matches(path, own_patterns(target)) for path in paths)
 
 
-def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False):
+# The PR tier's cap on helper fan-out, over every changed shared helper together: when the fixtures that import
+# any of them reach this many, the PR adds none of their importers. A broad helper's importers would need one broad
+# execution target that runs them all in one job, which does not exist (docs/verification/gates.md#two-tiers).
+BROAD_HELPER_IMPORTERS = 30
+
+
+def shared_helper_importers(paths, graph):
+    """The fixtures that import the changed shared Python helpers, directly or transitively (CI-89).
+
+    A deleted helper keeps the fixtures that still import it (graph.missing). The union over all changed helpers
+    decides: at BROAD_HELPER_IMPORTERS or more, none is added. The import graph names every importer, so no second
+    list is kept here.
+    """
+    helpers = []
+    for path in paths:
+        if path.startswith(I) and path.endswith(".py"):
+            reached = {target for target in graph.targets(path) or () if target in FIXTURES}
+            if not reached and path in graph.missing:
+                reached = {target for target in FIXTURES if graph.reached.get(target, set()) & graph.missing[path]}
+            helpers.append(reached)
+    union = set().union(*helpers)
+    if not union or len(union) >= BROAD_HELPER_IMPORTERS:
+        return set()
+    # An import never selects a PR_OWN_FILE_TARGETS target: those run on the PR only for their own files.
+    return union - PR_OWN_FILE_TARGETS
+
+
+def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassified=False, importers=frozenset()):
     """The PR tier of a raw (unnormalized) selection.
 
     It keeps the unit roots the diff reaches (a whole-suite gate becomes
     `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
     alone selected it; `test-store` only for Store paths) and the targets whose
-    own files the diff touches (fixtures, PR_OWN_FILE_TARGETS). A fixture the diff
-    reaches only through imports runs on main and in promotion, never on the PR.
+    own files the diff touches (fixtures, PR_OWN_FILE_TARGETS). `importers` are
+    the fixtures that import a changed shared helper (`shared_helper_importers`);
+    they run on the PR too. A fixture the diff reaches only through a broad
+    helper's import runs on main and in promotion, never on the PR.
     `linked` are the unit roots a changed dependency links, kept whatever the
     paths are. An unclassified path selects every PR unit root.
     """
@@ -773,6 +807,7 @@ def fast_tier(targets, paths, bootstrap_only=False, linked=frozenset(), unclassi
         fast = set(PR_UNIT_ROOTS)
     fast |= {target for target in (targets & (FIXTURES.keys() | PR_OWN_FILE_TARGETS)) - PR_UNIT_ROOTS
              if touches_own_files(target, paths)}
+    fast |= set(importers) - PR_UNIT_ROOTS
     for broad, covered in FIXTURE_COVERS.items():
         if broad in fast:
             fast -= covered
@@ -1023,7 +1058,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     product = [path for path in changed if path not in bootstrap]
     bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
         product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
-    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified)
+    fast_targets = fast_tier(targets, paths, bootstrap_only, linked or set(), unclassified,
+                             shared_helper_importers(paths, graph))
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)

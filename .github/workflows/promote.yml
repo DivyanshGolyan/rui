@@ -2,8 +2,10 @@ name: Promote
 # Runs every three hours at :45 UTC (15 past the hour IST) and by hand. Publish a qualified main commit and
 # advance stable to it. On schedule the commit is main HEAD (inputs are empty,
 # so `inputs.sha` is ''); when stable already holds it, the run does nothing.
-# A HEAD with a red main-qualified record is skipped quietly, since the failing
-# run already filed its issues. By hand, the commit is main HEAD by default;
+# A HEAD with a red main-qualified record is skipped when scheduled, since the
+# failing run already filed its issues under its own label (main-red or
+# promotion-red); the scheduled run then fails, naming that run, until the red
+# is cleared. By hand, the commit is main HEAD by default;
 # `sha` names an earlier first-parent main commit after stable, or `qualified`
 # the newest one with a green main-qualified record. A commit that a scheduled
 # or earlier promotion qualified green publishes that run's archives at once.
@@ -104,6 +106,17 @@ jobs:
           if [ "$SCHEDULED" = true ] && [ "$hour" \> 17 ] && [ "$hour" \< 21 ]; then daily=true; fi
           echo "daily=$daily" >> "$GITHUB_OUTPUT"
           echo "daily race sweep: $daily"
+      - name: Fail a scheduled run whose main HEAD is red
+        # Last, so the outputs above are set. It is a check failure, not infrastructure
+        # (failure_cause.py), so infra-retry never reruns it.
+        if: ${{ steps.batch.outputs.red_run != '' }}
+        env:
+          RED_RUN: ${{ steps.batch.outputs.red_run }}
+          MAIN_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.batch.outputs.red_run }}
+        run: |
+          echo "::error title=main HEAD failed qualification::main HEAD $MAIN_SHA failed qualification in run $RUN_URL; to clear it, merge a fix to main, or for a flake or infrastructure red rerun that run's failed jobs with: gh run rerun $RED_RUN --failed"
+          exit 1
   qualify:
     # The shared tier and its verdict (qualification-tier.yml), only when the
     # chosen commit is main HEAD without a green record to reuse.
@@ -147,8 +160,9 @@ jobs:
       artifact-run: ${{ needs.batch.outputs.run }}
   dependency_lag:
     # Keeps the deps-behind issue current (#1893); a skipped job uses no runner.
+    # Runs when batch chose a weekly check even if batch then failed on a red HEAD.
     needs: batch
-    if: ${{ needs.batch.outputs.weekly == 'true' }}
+    if: ${{ !cancelled() && needs.batch.outputs.weekly == 'true' }}
     permissions:
       contents: read
       issues: write
@@ -156,8 +170,9 @@ jobs:
   race_sweep:
     # Starts the daily race sweep as its own run, so its result, issues and duration
     # stay apart from Promote's; a skipped job uses no runner.
+    # Runs when batch chose a daily sweep even if batch then failed on a red HEAD.
     needs: batch
-    if: ${{ needs.batch.outputs.daily == 'true' }}
+    if: ${{ !cancelled() && needs.batch.outputs.daily == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
