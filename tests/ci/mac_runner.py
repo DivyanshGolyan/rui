@@ -37,35 +37,48 @@ def admission(event_name, event, actor, triggering_actor, repository, allowlist=
     return True, "The run satisfies the trusted Mac admission policy."
 
 
+def readable(runners):
+    """Whether a runner status snapshot can say if rui-mac is online: a list of rows, each with a status and labels."""
+    return isinstance(runners, list) and all(
+        isinstance(row, dict) and isinstance(row.get("status"), str) and isinstance(row.get("labels"), list)
+        for row in runners)
+
+
 def decide(event_name, event, actor, triggering_actor, repository, inputs, switch, runners, queue=None):
-    """Return a runs-on value and one sentence explaining the scheduling snapshot."""
+    """Return runs-on, one sentence explaining the scheduling snapshot, and whether rui-mac is offline.
+
+    The offline flag is true only for an admitted run whose runner status is readable and has no online rui-mac runner.
+    """
     if switch == "off":
-        return HOSTED, "Hosted macOS is selected because RUI_MAC_RUNNER is off."
+        return HOSTED, "Hosted macOS is selected because RUI_MAC_RUNNER is off.", False
     inputs = _object(inputs)
     # Promotion routes like any trusted dispatch; compile-only main builds publish hosted caches.
     if _enabled(inputs.get("compile_only")):
-        return HOSTED, "Hosted macOS is required for compile-only runs."
+        return HOSTED, "Hosted macOS is required for compile-only runs.", False
     admitted, reason = admission(event_name, event, actor, triggering_actor, repository)
     if not admitted:
-        return HOSTED, reason
-    if runners is None:
-        return HOSTED, "Hosted macOS is selected because runner status is unavailable."
+        return HOSTED, reason, False
+    if not readable(runners):
+        return HOSTED, "Hosted macOS is selected because runner status is unavailable.", False
     keys = ("mac_queued", "hosted_queued", "hosted_running")
     valid_queue = isinstance(queue, dict) and all(type(queue.get(key)) is int and queue[key] >= 0 for key in keys)
     counts = (f" Mac queued: {queue['mac_queued']}, hosted queued: {queue['hosted_queued']},"
               f" hosted running: {queue['hosted_running']}." if valid_queue else " Queue data is unavailable.")
-    if isinstance(runners, list):
-        for runner in runners:
-            runner = _object(runner)
-            labels = runner.get("labels")
-            if (runner.get("status") == "online" and isinstance(labels, list)
-                    and any(_object(label).get("name") == "rui-mac" for label in labels)):
-                if runner.get("busy") is False:
-                    return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner." + counts
-                if (runner.get("busy") is True and valid_queue
-                        and queue["mac_queued"] < queue["hosted_queued"] + (queue["hosted_running"] >= 5)):
-                    return SELF_HOSTED.copy(), "The online rui-mac queue is shorter than the hosted backlog." + counts
-    return HOSTED, "Hosted macOS is selected because no eligible rui-mac runner has a shorter queue or is idle." + counts
+    online = False
+    for runner in runners:
+        runner = _object(runner)
+        labels = runner.get("labels")
+        if (runner.get("status") == "online" and isinstance(labels, list)
+                and any(_object(label).get("name") == "rui-mac" for label in labels)):
+            online = True
+            if runner.get("busy") is False:
+                return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner." + counts, False
+            if (runner.get("busy") is True and valid_queue
+                    and queue["mac_queued"] < queue["hosted_queued"] + (queue["hosted_running"] >= 5)):
+                return SELF_HOSTED.copy(), "The online rui-mac queue is shorter than the hosted backlog." + counts, False
+    if not online:
+        return HOSTED, "Hosted macOS is selected because the rui-mac runner is offline." + counts, True
+    return HOSTED, "Hosted macOS is selected because no eligible rui-mac runner has a shorter queue or is idle." + counts, False
 
 
 
@@ -134,20 +147,20 @@ def main():
     if sys.argv[1:] == ["allowlist"]:
         print("\n".join(ALLOWLIST))
         return
-    runs_on, reason = HOSTED, "Hosted macOS is selected because routing could not read its inputs."
+    runs_on, reason, offline = HOSTED, "Hosted macOS is selected because routing could not read its inputs.", False
     try:
         runners = None
         status = Path(os.environ.get("RUNNERS_PATH", "runners.json"))
         if status.exists():
             payload = json.loads(status.read_text())
-            if isinstance(payload, dict) and isinstance(payload.get("runners"), list):
-                runners = payload["runners"]
+            if isinstance(payload, dict):
+                runners = payload.get("runners")
         queue = None
         try:
             queue = json.loads(Path(os.environ.get("QUEUE_PATH", "queue.json")).read_text())
         except (OSError, ValueError):
             pass
-        runs_on, reason = decide(
+        runs_on, reason, offline = decide(
             os.environ.get("GITHUB_EVENT_NAME"),
             json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
             os.environ.get("GITHUB_ACTOR"), os.environ.get("GITHUB_TRIGGERING_ACTOR"),
@@ -161,6 +174,9 @@ def main():
     print(output, end="")
     # The step summary is easy to miss; keep the reason in the job log too.
     print(f"reason: {reason}")
+    # Unlike the job log and step summary, an annotation shows on the workflow run's summary page.
+    if offline:
+        print(f"::warning title=rui-mac offline::{reason}")
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write(output)

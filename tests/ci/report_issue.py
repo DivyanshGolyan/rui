@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import time
 
-from promotion import BISECT_PREFIX, SUSPECT_PREFIX
+from promotion_lines import BISECT_PREFIX, SUSPECT_PREFIX
 
 
 LABEL = "ci-red"

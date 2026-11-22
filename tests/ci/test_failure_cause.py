@@ -166,7 +166,8 @@ class WiringTest(unittest.TestCase):
         for condition in ("github.event.workflow_run.conclusion == 'failure'",
                           "github.event.workflow_run.event == 'pull_request'",
                           "github.event.workflow_run.name == 'Promote' && "
-                          "github.event.workflow_run.event == 'workflow_dispatch'",
+                          "(github.event.workflow_run.event == 'workflow_dispatch' || "
+                          "github.event.workflow_run.event == 'schedule')",
                           "github.event.workflow_run.run_attempt == 1"):
             self.assertIn(condition, text)
         self.assertIn("ref: ${{ github.sha }}", text)
@@ -187,6 +188,26 @@ class RetryTest(unittest.TestCase):
         unacquired = [("release / build (darwin-arm64)", "infra", "cancelled before any step ran")]
         self.assertIsNone(retry_refusal(self.PROMOTION, unacquired, 7))
 
+    def test_each_kind_of_run_retries_exactly_as_its_row_says(self):
+        # Rows: run kind, the run's head or the newest run of its workflow, and whether one rerun is allowed.
+        scheduled = dict(self.PROMOTION, event="schedule")
+        other_schedule = dict(self.RUN, name="Renderer contracts", event="schedule")
+        table = (
+            ("pull request on its head", self.RUN, self.INFRA, "a" * 40, True),
+            ("pull request on a moved head", self.RUN, self.INFRA, "b" * 40, False),
+            ("Promote dispatch, latest", self.PROMOTION, self.INFRA, 7, True),
+            ("Promote dispatch, superseded", self.PROMOTION, self.INFRA, 8, False),
+            ("Promote schedule, latest", scheduled, self.INFRA, 7, True),
+            ("Promote schedule, superseded by a dispatch", scheduled, self.INFRA, 8, False),
+            ("Promote schedule, superseded by a schedule", scheduled, self.INFRA, 9, False),
+            ("another workflow's schedule", other_schedule, self.INFRA, "a" * 40, False),
+            ("push", dict(self.RUN, event="push"), self.INFRA, "a" * 40, False),
+            ("Promote push", dict(self.PROMOTION, event="push"), self.INFRA, 7, False),
+        )
+        for name, run, found, current, retries in table:
+            with self.subTest(name):
+                self.assertEqual(retry_refusal(run, found, current) is None, retries)
+
     def test_anything_else_does_not_retry(self):
         cases = {
             "a check failed too": (self.RUN, self.INFRA + [("linux suites (check)", "check", "failure")], "a" * 40),
@@ -203,6 +224,10 @@ class RetryTest(unittest.TestCase):
             "a promotion already retried": (dict(self.PROMOTION, run_attempt=2), self.INFRA, 7),
             "a promotion cancelled": (dict(self.PROMOTION, conclusion="cancelled"), self.INFRA, 7),
             "a later promotion": (self.PROMOTION, self.INFRA, 8),
+            "a scheduled promotion, then a later one": (dict(self.PROMOTION, event="schedule"), self.INFRA, 8),
+            "a scheduled promotion's check failed": (dict(self.PROMOTION, event="schedule"),
+                                                     self.INFRA + [("qualify / selected / linux suites (check)",
+                                                                    "check", "failure")], 7),
             "no promotion listed": (self.PROMOTION, self.INFRA, None),
             "a promotion on the personal Mac": (self.PROMOTION, [("selected / macos_build", "infra", "lost" + PINNED)],
                                                 7),
