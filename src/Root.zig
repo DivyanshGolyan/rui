@@ -54,6 +54,8 @@ session: ?vxfw.Widget = null,
 session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
 sign_in: ?vxfw.Widget = null,
+/// The style a screen covered by the Sign-in dialog takes (`widget_style.backdrop`).
+backdrop: vaxis.Style = .{ .dim = true },
 input: app_input.State = .{},
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -383,23 +385,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child) else child };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, self.backdrop) else child };
     self.projectFocus(child, layout);
     if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.sign_in.?.draw(ctx) };
     self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
 
-/// The covered screen as one flat layer in faded text: what it showed stays in place, quiet
-/// behind the dialog, with no cursor, link, image or highlight of its own.
-fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface) std.mem.Allocator.Error!vxfw.Surface {
+/// The covered screen as one flat layer in the `backdrop` style: what it showed stays in
+/// place, quiet behind the dialog, with no colour, cursor, link, image or highlight of its own.
+fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style) std.mem.Allocator.Error!vxfw.Surface {
     const flat = try vxfw.Surface.init(ctx.cell_arena, screen.widget, screen.size);
     flatten(flat, screen, 0, 0, .{ .right = screen.size.width, .bottom = screen.size.height });
-    for (flat.buffer) |*cell| cell.* = .{
-        .char = cell.char,
-        .style = .{ .fg = cell.style.fg, .bg = cell.style.bg, .dim = true },
-        .default = cell.default,
-    };
+    for (flat.buffer) |*cell| cell.* = .{ .char = cell.char, .style = backdrop };
     return flat;
 }
 
@@ -994,7 +992,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
 test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
     var page: @import("SignIn.zig") = .{ .style = .{ .bg = .{ .rgb = .{ 0xf4, 0xef, 0xe2 } } } };
-    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
+    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } }, .backdrop = .{ .fg = .{ .index = 8 } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
         for (0..81) |width| for (0..25) |height| {
@@ -1010,7 +1008,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
             const screen = surface.children[0].surface;
             try std.testing.expectEqual(@as(usize, screen.size.width) * screen.size.height, screen.buffer.len);
             try std.testing.expectEqual(@as(usize, 0), screen.children.len);
-            for (screen.buffer) |cell| try std.testing.expect(cell.style.dim and !cell.style.bold and !cell.style.reverse);
+            for (screen.buffer) |cell| try std.testing.expect(cell.style.eql(root.backdrop));
             if (width >= 14) for ("Retained draft", 0..) |byte, col| try std.testing.expectEqual(byte, screen.buffer[col].char.grapheme[0]);
             try std.testing.expectEqual(@as(usize, 0), cover.buffer.len);
             try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);
@@ -1066,15 +1064,15 @@ test "A faded screen flattens children above their parents in z order, clipped t
     var screen = try Fill.of(a, .{ .width = 4, .height = 2 }, "a", .{ .fg = .{ .index = 3 } });
     screen.widget = none;
     screen.children = children;
-    const flat = try faded(ctx, screen);
+    const backdrop: vaxis.Style = .{ .fg = .{ .index = 8 } };
+    const flat = try faded(ctx, screen, backdrop);
     var text: [8]u8 = undefined;
     for (flat.buffer, 0..) |cell, i| {
         text[i] = cell.char.grapheme[0];
-        try std.testing.expect(cell.style.dim and !cell.style.bold and !cell.style.reverse);
+        try std.testing.expect(cell.style.eql(backdrop));
     }
     // "n" sits partly off screen; "z" lies under "b" by z order; "c" is clipped to "b"'s 2x2.
     try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
-    try std.testing.expectEqual(vaxis.Color{ .index = 3 }, flat.buffer[1].style.fg);
 }
 
 test "Sign-in captures every mouse action above settings without background activation" {

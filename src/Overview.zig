@@ -1086,6 +1086,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.sign_in.caps = self.caps;
     self.sign_in.selection_style = @import("widget_style.zig").of(self.caps, .{ .background = .selection });
     self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.root.backdrop = @import("widget_style.zig").backdrop(self.caps);
     self.app_screen.style = normal;
     if (self.signInIsFirstRun() or (part == .whole and self.state.hidesOverview())) {
         const ground = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
