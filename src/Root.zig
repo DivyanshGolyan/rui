@@ -383,11 +383,42 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child) else child };
     self.projectFocus(child, layout);
     if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.sign_in.?.draw(ctx) };
     self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
+}
+
+/// The covered screen as one flat layer in faded text: what it showed stays in place, quiet
+/// behind the dialog, with no cursor, link, image or highlight of its own.
+fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface) std.mem.Allocator.Error!vxfw.Surface {
+    const flat = try vxfw.Surface.init(ctx.cell_arena, screen.widget, screen.size);
+    flatten(flat, screen, 0, 0, .{ .right = screen.size.width, .bottom = screen.size.height });
+    for (flat.buffer) |*cell| cell.* = .{
+        .char = cell.char,
+        .style = .{ .fg = cell.style.fg, .bg = cell.style.bg, .dim = true },
+        .default = cell.default,
+    };
+    return flat;
+}
+
+const Clip = struct { left: u16 = 0, top: u16 = 0, right: u16, bottom: u16 };
+
+/// Copies `surface` and its children into `flat` the way rendering does: children above
+/// their parent in z order, each clipped to its parent's bounds.
+fn flatten(flat: vxfw.Surface, surface: vxfw.Surface, col: i32, row: i32, clip: Clip) void {
+    const bound: Clip = .{
+        .left = @intCast(std.math.clamp(col, clip.left, clip.right)),
+        .top = @intCast(std.math.clamp(row, clip.top, clip.bottom)),
+        .right = @intCast(std.math.clamp(col + surface.size.width, clip.left, clip.right)),
+        .bottom = @intCast(std.math.clamp(row + surface.size.height, clip.top, clip.bottom)),
+    };
+    if (surface.buffer.len > 0) for (bound.top..bound.bottom) |y| for (bound.left..bound.right) |x| {
+        flat.writeCell(@intCast(x), @intCast(y), surface.readCell(@intCast(@as(i32, @intCast(x)) - col), @intCast(@as(i32, @intCast(y)) - row)));
+    };
+    std.mem.sort(vxfw.SubSurface, surface.children, {}, vxfw.SubSurface.lessThan);
+    for (surface.children) |child| flatten(flat, child.surface, col + child.origin.col, row + child.origin.row, bound);
 }
 
 test "App root switches between overview and Session without retaining the hidden screen" {
@@ -974,13 +1005,33 @@ test "Sign-in is centered above the covered screen across every small bound" {
             try std.testing.expect(surface.children[0].surface.widget.eql(background.widget()));
             const cover = surface.children[1].surface;
             if (width == 0 or height == 0) continue;
-            // The cover owns every cell, so no covered text reads around the dialog.
-            try std.testing.expectEqual(@as(usize, width * height), cover.buffer.len);
-            for (cover.buffer) |cell| {
-                try std.testing.expect(cell.style.eql(page.style));
-                try std.testing.expect(cell.char.grapheme.len == 0 or std.mem.eql(u8, cell.char.grapheme, " "));
-            }
+            // The covered screen stays in place but faded; the layer above paints nothing of
+            // its own outside the card, so only the faded screen shows around it.
+            const screen = surface.children[0].surface;
+            try std.testing.expectEqual(@as(usize, screen.size.width) * screen.size.height, screen.buffer.len);
+            try std.testing.expectEqual(@as(usize, 0), screen.children.len);
+            for (screen.buffer) |cell| try std.testing.expect(cell.style.dim and !cell.style.bold and !cell.style.reverse);
+            if (width >= 14) for ("Retained draft", 0..) |byte, col| try std.testing.expectEqual(byte, screen.buffer[col].char.grapheme[0]);
+            try std.testing.expectEqual(@as(usize, 0), cover.buffer.len);
+            try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);
             const dialog = cover.children[0];
+            // With room the dialog is a card with a stitched edge; below that it fills its bound.
+            const framed = width >= 40 and height >= 8;
+            try std.testing.expectEqual(@as(usize, if (framed) 2 else 1), cover.children.len);
+            if (framed) {
+                const edge = cover.children[1];
+                try std.testing.expect(edge.z_index < dialog.z_index);
+                try std.testing.expectEqual(dialog.origin.row - 1, edge.origin.row);
+                try std.testing.expectEqual(dialog.origin.col - 2, edge.origin.col);
+                try std.testing.expectEqual(vxfw.Size{ .width = dialog.surface.size.width + 4, .height = dialog.surface.size.height + 2 }, edge.surface.size);
+                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", edge.surface.buffer[0].char.grapheme);
+                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", edge.surface.buffer[edge.surface.buffer.len - 1].char.grapheme);
+                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", edge.surface.buffer[edge.surface.size.width].char.grapheme);
+                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", edge.surface.buffer[2 * edge.surface.size.width - 1].char.grapheme);
+                try std.testing.expect(edge.origin.row >= 0 and edge.origin.col >= 0);
+                try std.testing.expect(edge.origin.row + edge.surface.size.height <= height and edge.origin.col + edge.surface.size.width <= width);
+                if (!unicode) for (edge.surface.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 128);
+            }
             try std.testing.expectEqual(@as(i17, @intCast((width - dialog.surface.size.width) / 2)), dialog.origin.col);
             try std.testing.expectEqual(@as(i17, @intCast((height - dialog.surface.size.height) / 2)), dialog.origin.row);
             try std.testing.expect(dialog.origin.row + dialog.surface.size.height <= height);
@@ -988,6 +1039,42 @@ test "Sign-in is centered above the covered screen across every small bound" {
             if (!unicode) for (dialog.surface.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 128);
         };
     }
+}
+
+test "A faded screen flattens children above their parents in z order, clipped to their parents" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ctx: vxfw.DrawContext = .{ .arena = a, .cell_arena = a, .min = .{}, .max = .{ .width = 4, .height = 2 }, .cell_size = .{} };
+    const none: vxfw.Widget = .{ .userdata = undefined, .drawFn = undefined };
+    const Fill = struct {
+        fn of(allocator: std.mem.Allocator, size: vxfw.Size, glyph: []const u8, style: vaxis.Style) !vxfw.Surface {
+            const surface = try vxfw.Surface.init(allocator, .{ .userdata = undefined, .drawFn = undefined }, size);
+            @memset(surface.buffer, .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = style });
+            return surface;
+        }
+    };
+    const inner = try Fill.of(a, .{ .width = 3, .height = 3 }, "c", .{ .bold = true });
+    var parent = try Fill.of(a, .{ .width = 2, .height = 2 }, "b", .{ .reverse = true });
+    const low = try Fill.of(a, .{ .width = 1, .height = 1 }, "z", .{});
+    parent.children = try a.dupe(vxfw.SubSurface, &.{.{ .origin = .{ .row = 1, .col = 1 }, .surface = inner }});
+    const children = try a.dupe(vxfw.SubSurface, &.{
+        .{ .origin = .{ .row = 0, .col = 2 }, .surface = parent, .z_index = 1 },
+        .{ .origin = .{ .row = 0, .col = 2 }, .surface = low, .z_index = 0 },
+        .{ .origin = .{ .row = -1, .col = -1 }, .surface = try Fill.of(a, .{ .width = 2, .height = 2 }, "n", .{}) },
+    });
+    var screen = try Fill.of(a, .{ .width = 4, .height = 2 }, "a", .{ .fg = .{ .index = 3 } });
+    screen.widget = none;
+    screen.children = children;
+    const flat = try faded(ctx, screen);
+    var text: [8]u8 = undefined;
+    for (flat.buffer, 0..) |cell, i| {
+        text[i] = cell.char.grapheme[0];
+        try std.testing.expect(cell.style.dim and !cell.style.bold and !cell.style.reverse);
+    }
+    // "n" sits partly off screen; "z" lies under "b" by z order; "c" is clipped to "b"'s 2x2.
+    try std.testing.expectEqualStrings("nabb" ++ "aabc", &text);
+    try std.testing.expectEqual(vaxis.Color{ .index = 3 }, flat.buffer[1].style.fg);
 }
 
 test "Sign-in captures every mouse action above settings without background activation" {

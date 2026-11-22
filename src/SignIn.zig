@@ -1020,7 +1020,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.drawn = .{ .attempt = self.state.attempt, .page = std.meta.activeTag(self.state.page) };
     if (size.width == 0 or size.height == 0) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = &.{} };
-    const width = @min(size.width, 72);
+    // With room, the dialog is a card: a stitched edge and one column of ground inside it,
+    // drawn over the covered screen, which Root fades.
+    const framed = size.width >= min_framed.width and size.height >= min_framed.height;
+    const frame: vxfw.Size = if (framed) .{ .width = 4, .height = 2 } else .{};
+    const width = @min(size.width - frame.width, 72);
     var rows: std.ArrayList(Row) = .empty;
     var buttons: std.ArrayList(Button) = .empty;
     var code_field: ?usize = null;
@@ -1177,6 +1181,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .action_gap = 1,
         .stacked_actions = button_width > width,
         .natural_height = true,
+        .top_rule = !framed,
+        .centered_heading = true,
         .selected = selected,
         .ground = self.style,
         .selection = self.selection_style,
@@ -1184,7 +1190,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .rule = @import("widget_style.zig").line(rule_caps, .horizontal),
         .scroll = self.scroll,
     };
-    const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));
+    const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - frame.height - footer_height }));
     const height = panel_surface.size.height + footer_height;
     const origin: vxfw.RelativePoint = .{ .row = @intCast((size.height - height) / 2), .col = @intCast((size.width - width) / 2) };
     var child = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
@@ -1243,14 +1249,37 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     self.drawn.hits = hits.items;
     if (!focused_visible) self.drawn.focused = null;
-    const children = try a.alloc(vxfw.SubSurface, 1);
-    children[0] = .{ .origin = origin, .surface = child };
-    // The dialog covers the retained screen, so its layer owns every cell:
-    // nothing of the screen beneath may read as part of the dialog.
-    var cover = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(cover.buffer, .{ .style = self.style });
-    cover.children = children;
-    return cover;
+    // The content stays the layer's first child; a card, when it fits, lies beneath it.
+    const children = try a.alloc(vxfw.SubSurface, if (framed) 2 else 1);
+    children[0] = .{ .origin = origin, .surface = child, .z_index = 1 };
+    if (framed) children[1] = .{ .origin = .{ .row = origin.row - 1, .col = origin.col - 2 }, .surface = try self.card(ctx, child.size) };
+    // The layer spans the screen without painting it, so the faded screen shows around the
+    // card while every click still lands here.
+    return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
+}
+
+// Narrower screens give the dialog every column, so codes and links keep their width.
+const min_framed: vxfw.Size = .{ .width = 40, .height = 8 };
+
+/// The card under a dialog of `content` size: the running stitch on top and bottom, its
+/// upright at the sides, and one column of ground between edge and content.
+fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocator.Error!vxfw.Surface {
+    const size: vxfw.Size = .{ .width = content.width + 4, .height = content.height + 2 };
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
+    @memset(surface.buffer, .{ .style = self.style });
+    var caps = self.caps;
+    caps.unicode = self.unicode;
+    const across = @import("widget_style.zig").line(caps, .horizontal);
+    const upright = @import("widget_style.zig").line(caps, .vertical);
+    for (0..size.width) |col| {
+        surface.writeCell(@intCast(col), 0, across);
+        surface.writeCell(@intCast(col), size.height - 1, across);
+    }
+    for (1..size.height - 1) |row| {
+        surface.writeCell(0, @intCast(row), upright);
+        surface.writeCell(size.width - 1, @intCast(row), upright);
+    }
+    return surface;
 }
 
 test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {

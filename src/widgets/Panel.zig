@@ -33,6 +33,8 @@ subtitle: ?[]const u8 = null,
 body: struct { top: u16 = 2, height: u16 = 0 } = .{},
 natural_height: bool = false,
 top_rule: bool = true,
+/// A dialog centres its title and subtitle across the panel; settings pages keep them left.
+centered_heading: bool = false,
 show_title: bool = true,
 unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
@@ -227,8 +229,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var subtitle_surface: ?vxfw.Surface = null;
     if (self.subtitle) |text| if (available.width > 3 and available.height > base_header + 2 + bottom_padding) {
         const subtitle = try ctx.arena.create(vxfw.Text);
-        subtitle.* = .{ .text = text, .style = self.quiet, .width_basis = .parent };
-        subtitle_surface = try subtitle.draw(ctx.withConstraints(.{}, .{ .width = available.width - 3, .height = available.height - base_header - 2 - bottom_padding }));
+        subtitle.* = .{ .text = text, .style = self.quiet, .width_basis = .parent, .text_align = if (self.centered_heading) .center else .left };
+        subtitle_surface = try subtitle.draw(ctx.withConstraints(.{}, .{ .width = available.width - if (self.centered_heading) @as(u16, 2) else 3, .height = available.height - base_header - 2 - bottom_padding }));
     };
     const header: u16 = base_header + if (subtitle_surface) |surface| surface.size.height + 1 else @as(u16, 0);
     const available_body = available.height -| header -| bottom_padding;
@@ -252,12 +254,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, self.rule orelse @import("Stitch.zig").cell(self.unicode, .horizontal, .{}));
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
     if (self.show_title and size.height > title_row) {
-        _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, title_row, self.title_style);
+        const title = try displayText(ctx.arena, self.title, self.unicode);
+        const title_col: u16 = if (self.centered_heading) @intCast(@max(1, (size.width -| @as(u16, @intCast(@min(ctx.stringWidth(title), size.width)))) / 2)) else 1;
+        _ = paint(ctx, surface, title, title_col, title_row, self.title_style);
         if (self.title_widget) |title_widget| if (size.width > 1) {
             try children.append(.{ .origin = .{ .row = title_row, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
         };
     }
-    if (subtitle_surface) |surface_| try children.append(.{ .origin = .{ .row = base_header, .col = 3 }, .surface = surface_ });
+    if (subtitle_surface) |surface_| try children.append(.{ .origin = .{ .row = base_header, .col = if (self.centered_heading) 1 else 3 }, .surface = surface_ });
     const body_height = self.body.height;
     if (body_height == 0) {
         surface.children = children.items;
@@ -1089,6 +1093,34 @@ test "Panel explicit choice scope never persists into normal page events or draw
     try std.testing.expectEqual(@as(?usize, 0), fixture.activated);
     try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
+}
+
+test "Panel centres a dialog's title and subtitle and keeps settings headings left" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    for ([_]bool{ false, true }) |centered| for ([_]u16{ 0, 1, 2, 7, 8, 12, 13, 40 }) |width| {
+        var panel: Self = .{ .title = "Welcome", .subtitle = "Sign in.", .centered_heading = centered, .top_rule = false, .natural_height = true, .actions = &.{"Close"} };
+        const surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 10 }));
+        // Below 12 columns the subtitle wraps; the heading still draws in bounds.
+        if (width < 12) continue;
+        // "Welcome" is 7 wide: centred it starts at (width - 7) / 2, never left of column 1.
+        const title_col: u16 = if (centered) @max(1, (width - 7) / 2) else 1;
+        try std.testing.expectEqualStrings("W", surface.readCell(title_col, 0).char.grapheme);
+        try std.testing.expect(surface.readCell(title_col, 0).style.bold);
+        const subtitle = surface.children[0];
+        try std.testing.expectEqual(@as(i17, if (centered) 1 else 3), subtitle.origin.col);
+        var row: [64]u8 = undefined;
+        var len: usize = 0;
+        for (0..subtitle.surface.size.width) |col| {
+            const glyph = subtitle.surface.readCell(@intCast(col), 0).char.grapheme;
+            const byte: u8 = if (glyph.len == 0) ' ' else glyph[0];
+            row[len] = byte;
+            len += 1;
+        }
+        const start = std.mem.indexOf(u8, row[0..len], "Sign in.").?;
+        if (centered) try std.testing.expectEqual((width - 2 - 8) / 2, start) else try std.testing.expectEqual(@as(usize, 0), start);
+    };
 }
 
 test "Panel subtitle and visible field projection share actual bounded body geometry" {
