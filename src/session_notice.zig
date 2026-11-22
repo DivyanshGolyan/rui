@@ -92,12 +92,14 @@ pub const Busy = struct {
 
 pub const host_not_ready = "! Host not ready. Draft retained.";
 pub const opening_not_ready = "! Chat still opening. Draft retained.";
+pub const saving_not_ready = "! Chat info still saving. Draft retained.";
 
 /// The notice for a refused send. `.upgrade` is not here: its words depend on
 /// the Upgrade's phase, which `session_upgrade.refusal` owns.
 pub fn busy(facts: Busy) []const u8 {
     if (facts.refusal) |refusal| switch (refusal) {
-        .command, .saving => return "! Command still running. Draft retained.",
+        .command => return "! Command still running. Draft retained.",
+        .saving => return saving_not_ready,
         .upgrade => unreachable,
         .rejected => return "! Original rejected. Keep editing; /discard releases it. Draft retained.",
         .host => return host_not_ready,
@@ -212,10 +214,12 @@ test "every way Enter is refused names its own reason, whatever original or Acti
         try std.testing.expectEqual(bits == 0, send.allowed());
         // The first refusing fact in the contract's order, listed here
         // independently of `Send.refusal`.
-        const expected: ?[]const u8 = if (send.command_active or (!send.upgrade and send.saving))
+        const expected: ?[]const u8 = if (send.command_active)
             "! Command still running. Draft retained."
         else if (send.upgrade)
             null
+        else if (send.saving)
+            saving_not_ready
         else if (send.rejected)
             "! Original rejected. Keep editing; /discard releases it. Draft retained."
         else if (send.host_held)
@@ -229,9 +233,16 @@ test "every way Enter is refused names its own reason, whatever original or Acti
         if (expected) |words| for (helds) |held| for (actions) |action| for ([_]bool{ false, true }) |letter| {
             try std.testing.expectEqualStrings(words, busy(.{ .refusal = send.refusal(), .held = held, .action = action, .letter = letter }));
         };
+        // A send still under way refuses with no reason of its own: the held
+        // original or Action says what is pending.
+        if (send.refusal() == .submitting) {
+            try std.testing.expectEqualStrings("! Input still pending. Keep editing; Ctrl-R retries the original.", busy(.{ .refusal = .submitting, .held = null, .action = null, .letter = false }));
+            try std.testing.expectEqualStrings("! Decision pending. Keep editing; Ctrl-R retries that decision.", busy(.{ .refusal = .submitting, .held = helds[2], .action = null, .letter = false }));
+        }
         if (bits == std.math.maxInt(u8)) break;
     }
-    for ([_][]const u8{ host_not_ready, opening_not_ready }) |words| try std.testing.expect(words.len <= 46);
+    // The reasons this PR words fit the narrowest chat footer.
+    for ([_][]const u8{ host_not_ready, opening_not_ready, saving_not_ready }) |words| try std.testing.expect(words.len <= 46);
 }
 
 test "a waiting Action that is a preview says it is decided in the shell, whether or not it is on screen" {

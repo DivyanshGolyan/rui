@@ -642,11 +642,13 @@ fn sendFacts(self: *const Self) session_keys.Facts.Send {
 }
 
 fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
-    if (self.submission.messageHeld() and self.submission.intent == null) {
+    const refusal = self.sendFacts().refusal();
+    // An accepted Message not yet in the feed is pending only when nothing
+    // ahead of it in `Send.refusal` holds the send.
+    if (refusal == .submitting and self.submission.messageHeld() and self.submission.intent == null) {
         self.refreshAcceptedMessage();
         return;
     }
-    const refusal = self.sendFacts().refusal();
     // The Host line is a past reading: a send refused on it asks for a fresh
     // one, so a Host that came back is seen at once (#1947).
     if (refusal == .host) _ = self.hostFailure();
@@ -9284,7 +9286,9 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
             return null;
         }
     };
-    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |opening| {
+    // `accepted`: an earlier Message is accepted but not yet in the feed; the
+    // Host or opening still names the refusal ahead of it.
+    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |opening| for ([_]bool{ false, true }) |accepted| {
         if (!stopped and !opening) continue;
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -9293,8 +9297,11 @@ test "Enter while the Host line or opening holds sending keeps the draft, names 
         defer held.self.app_hooks.host = null;
         held.self.reading.opening = opening;
         defer held.self.reading.opening = false;
+        if (accepted) held.self.submission.settled_message = .{ .ticket = held.self.input.submitText("accepted earlier"), .key = @splat('K') };
+        defer if (accepted) held.self.submission.disposeMessage();
         try held.keys("sent right after a restart\r");
-        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+        try std.testing.expect(held.self.submission.intent == null);
+        if (!accepted) try std.testing.expect(held.self.input.submitted == null);
         try std.testing.expectEqualStrings("sent right after a restart", held.self.input.composition().bytes);
         try std.testing.expectEqualStrings(if (stopped) session_notice.host_not_ready else session_notice.opening_not_ready, held.self.shown_notice.current(held.self.nowMs()).?);
         try std.testing.expectEqual(@as(usize, @intFromBool(stopped)), host.reads);
