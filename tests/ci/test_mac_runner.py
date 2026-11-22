@@ -1,8 +1,6 @@
 """Runner policy domain, mutation controls and workflow/hook handoffs."""
 
-import contextlib
 import copy
-import io
 import itertools
 import json
 import os
@@ -185,7 +183,7 @@ class OfflineWarningTest(unittest.TestCase):
         return options
 
     def run_main(self, options, runners, queue):
-        # Drives the CLI in process: its env contract, its GITHUB_OUTPUT route and its stdout annotations.
+        # Drives the CLI as CI does: its env contract, its GITHUB_OUTPUT route and its stdout annotations.
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             (temp / "event").write_text("{}")
@@ -198,12 +196,10 @@ class OfflineWarningTest(unittest.TestCase):
                    "INPUTS": json.dumps(options["inputs"]), "RUI_MAC_RUNNER": options["switch"],
                    "RUNNERS_PATH": str(temp / "runners"), "QUEUE_PATH": str(temp / "queue"),
                    "GITHUB_OUTPUT": str(temp / "output"), "GITHUB_STEP_SUMMARY": str(temp / "summary")}
-            stdout = io.StringIO()
-            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["mac_runner.py"]), \
-                    contextlib.redirect_stdout(stdout):
-                mac_runner.main()
+            stdout = subprocess.run([sys.executable, str(ROOT / "tests/ci/mac_runner.py")], env=env, check=True,
+                                    capture_output=True, text=True).stdout
             lines = dict(line.split("=", 1) for line in (temp / "output").read_text().splitlines())
-            annotations = [line for line in stdout.getvalue().splitlines() if line.startswith("::")]
+            annotations = [line for line in stdout.splitlines() if line.startswith("::")]
             return json.loads(lines["runs_on"]), annotations
 
     def test_offline_flag_route_and_annotation_table(self):
