@@ -67,7 +67,8 @@ class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 
-        for prefix in (" ", "list text┆ ", "中       ┆ ", "list text│ ", "中       │ ", " " * 40 + "| ", "中" + " " * 38 + "| "):
+        for prefix in (" ", *(left + divider + " " for left in ("list text".ljust(40), "中" + " " * 38)
+                                    for divider in ("┆", "│", "|"))):
             for text, caret in (("café", 6), ("x │ y", 7)):
                 with self.subTest(prefix=prefix, text=text):
                     capture = ScreenCapture(columns=80, rows=4)
@@ -133,18 +134,22 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(split_pane_row(left + glyph + " pane", column), (left, glyph, " pane"))
                 self.assertEqual(split_pane_row(left + glyph + " pane", column - 1), ("", "", left + glyph + " pane"))
         self.assertEqual(split_pane_row("中" + " " * 38 + "| pane"), ("中" + " " * 38, "|", " pane"))
-        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New chat", "plain | text"):
+        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New chat", "plain | text",
+                     "   │ ◌ Second peer task" + " " * 60 + "now", "   ╰ ◜ First peer task",
+                     "   │ │ ╰ ◌ nested", "  ┆ a quoted line in a full-width chat",
+                     " " * 39 + "│ a tree guide one column early", " " * 40 + "+ plain text"):
             self.assertEqual(split_pane_row(text), ("", "", text))
 
     def test_conversation_text_preserves_content_across_panes(self):
         # SUI-37: gutter removal retains indentation and literal divider characters.
         from human_cli_fixture import conversation_text
 
-        self.assertEqual(conversation_text("list┆  › line1    01:23\nlist┆    line2\n    ┆  edited 2"),
+        sidebar = "list".ljust(40)
+        self.assertEqual(conversation_text(f"{sidebar}┆  › line1    01:23\n{sidebar}┆    line2\n{' ' * 40}┆  edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
         self.assertEqual(conversation_text(" › narrow\n   continued"), "› narrow\n  continued")
 
-        self.assertEqual(conversation_text("list│  message │ ┼ ┤ +\n › literal │ +"),
+        self.assertEqual(conversation_text("list".ljust(40) + "│  message │ ┼ ┤ +\n › literal │ +"),
                          "message │ ┼ ┤ +\n› literal │ +")
         self.assertEqual(conversation_text(" " * 40 + "|  message + |"), "message + |")
 
@@ -165,7 +170,8 @@ class TerminalProcessTest(unittest.TestCase):
             current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
             return current
 
-        for prefix in ([" "], ["l", "┆", " "], ["中", "", "┆", " "], ["l", "│", " "], ["中", "", "│", " "], [" "] * 40 + ["|", " "], ["中", ""] + [" "] * 38 + ["|", " "]):
+        for prefix in ([" "], *(left + [divider, " "] for left in (["l"] + [" "] * 39, ["中", ""] + [" "] * 38)
+                                for divider in ("┆", "│", "|"))):
             for prompt in ("› ", "> "):
                 for text in ("", "kept", "café", "é", "What shall we work on?"):
                     normalized = unicodedata.normalize("NFC", text)
@@ -196,7 +202,7 @@ class TerminalProcessTest(unittest.TestCase):
     def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
         from human_cli_fixture import composer_empty
 
-        for prefix in (" ", "list text┆ ", "中       ┆ "):
+        for prefix in (" ", "list text".ljust(40) + "┆ ", "中" + " " * 38 + "┆ "):
             for mark in ("›", ">"):
                 for text in ("", " What shall we work on?", " /copy", " draft", " What shall we work on? extra", " x │ y"):
                     with self.subTest(prefix=prefix, mark=mark, text=text):
@@ -251,7 +257,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(overview.call_args.args[2], b"\x1b[F")
         self.assertEqual(panel.call_args.args[2], b"\r")
         accept = panel.call_args.args[1]
-        for width, sidebar in ((50, ""), (161, " Memory 2 GB".ljust(31) + "┆")):
+        for width, sidebar in ((50, ""), (161, " Memory 2 GB".ljust(40) + "┆")):
             with self.subTest(width=width):
                 pane_width = width - len(sidebar)
                 def frame(footer):
@@ -259,7 +265,7 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertTrue(accept(frame(" Settings     esc")))
                 for footer in (" Settings", " esc", " Settings esc extra", " Model esc", ""):
                     self.assertFalse(accept(frame(footer)))
-        self.assertFalse(accept("body\n Settings esc".ljust(31) + "┆ Other esc"))
+        self.assertFalse(accept("body\n" + " Settings esc".ljust(40) + "┆ Other esc"))
 
     def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
         from human_cli_fixture import overview_frame
@@ -278,7 +284,7 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertTrue(relaxed(frame, 0, 0))
                 for marker in ("+ New chat", "Settings", notice):
                     self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
-                for editor in ("What shall we work on?", " › draft", " > draft", "sidebar ┆ › draft"):
+                for editor in ("What shall we work on?", " › draft", " > draft", "sidebar".ljust(40) + "┆ › draft"):
                     self.assertFalse(relaxed(frame + "\n" + editor, 3, 3))
 
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):

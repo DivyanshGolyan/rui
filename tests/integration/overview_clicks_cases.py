@@ -49,7 +49,7 @@ def finished(report):
 
 
 def row_of(frame, label):
-    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf"   . {re.escape(label)}( |$)", line)]
+    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf"   (?:[│╰ ] )*. {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
@@ -158,12 +158,14 @@ def flat_list():
             screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")
-            label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[0]
+            # The lead sent each peer its first Message, so every peer nests under it.
+            assert all(re.match(r"   [│╰]   peer-[0-6] ", lines[row_of(listed, peer) - 1]) for peer in peers_by_label), listed
+            label = max(peers_by_label, key=lambda peer: row_of(listed, peer))
             click_label(screen, listed, label)
             screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
                         f"a click opens the last peer {label}")
             back_to_overview(screen, f"   {label}")
-        print("overview clicks: all finished rows remain visible without headings or folds, and the last opens directly", flush=True)
+        print("overview clicks: all finished rows remain visible under their lead without headings or folds, and the last opens directly", flush=True)
 
 
 def empty_list():
