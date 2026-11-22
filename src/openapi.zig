@@ -137,9 +137,9 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/control/host-stop",
         .kind = .host_stop,
-        .summary = "Stops the Host after its work drains.",
-        .variants = &.{variant(protocol.host_stop_request, .{})},
-        .reply = jsonReply(.{.{protocol.host_stop_ack}}),
+        .summary = "Stops the Host, or with drain_seconds holds new Turns and stops once running work ends or the bound passes.",
+        .variants = &.{ variant(protocol.host_stop_request, .{}), variant(protocol.host_drain_request, .{}) },
+        .reply = jsonReply(.{ .{protocol.host_stop_ack}, protocol.host_drain_reply }),
     },
     .{
         .path = "/v1/control/host-pause",

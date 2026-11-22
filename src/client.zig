@@ -582,22 +582,34 @@ pub const ObservationBuffer = protocol.CommandObservationBuffer;
 pub const HostStopInput = struct {
     store: []const u8,
     instance: protocol.InstanceId,
+    /// Asks for a draining pause of this many seconds (1..86400).
+    drain_seconds: ?u32 = null,
     drop_reply: ?[]const u8 = null,
 };
 
-pub const HostStopResult = enum { acknowledged, instance_changed, unavailable };
+pub const HostStopResult = union(enum) {
+    acknowledged,
+    /// A draining pause is in force until this Unix time in milliseconds.
+    draining: u64,
+    instance_changed,
+    unavailable,
+};
 
 pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !HostStopResult {
     reply_buffer.len = 0;
     const paths = try resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.host_stop_request, .{paths.store_identity.slice()});
+    if (input.drain_seconds) |seconds|
+        try body.appendShape(protocol.host_drain_request, .{ paths.store_identity.slice(), seconds })
+    else
+        try body.appendShape(protocol.host_stop_request, .{paths.store_identity.slice()});
     const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, null, reply_buffer, null).get();
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
         err;
     if (result.status == 200 and std.mem.eql(u8, result.body, protocol.host_stop_ack)) return .acknowledged;
+    if (result.status == 200) if (drainUntil(result.body)) |until| return .{ .draining = until };
     if (result.status == 409) {
         const Failure = struct { version: []const u8, type: []const u8, code: []const u8 };
         var parse_storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
@@ -609,6 +621,25 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     }
     if (result.status == 503) return .unavailable;
     return error.InvalidHostStopResponse;
+}
+
+fn drainUntil(body: []const u8) ?u64 {
+    const head = protocol.host_drain_reply[0];
+    const tail = protocol.host_drain_reply[2];
+    if (!std.mem.startsWith(u8, body, head) or !std.mem.endsWith(u8, body, tail) or body.len <= head.len + tail.len) return null;
+    const digits = body[head.len .. body.len - tail.len];
+    if (digits.len > 1 and digits[0] == '0') return null;
+    for (digits) |byte| if (byte < '0' or byte > '9') return null;
+    return std.fmt.parseInt(u64, digits, 10) catch null;
+}
+
+test "a draining stop reply carries its deadline, and nothing else parses as one" {
+    var buffer: [256]u8 = undefined;
+    const valid = try std.fmt.bufPrint(&buffer, "{s}{d}{s}", .{ protocol.host_drain_reply[0], 1795356312000, protocol.host_drain_reply[2] });
+    try std.testing.expectEqual(@as(?u64, 1795356312000), drainUntil(valid));
+    for ([_][]const u8{ protocol.host_stop_ack, protocol.host_drain_reply[0] ++ protocol.host_drain_reply[2], protocol.host_drain_reply[0] ++ "01" ++ protocol.host_drain_reply[2], protocol.host_drain_reply[0] ++ "1x" ++ protocol.host_drain_reply[2], protocol.host_drain_reply[0] ++ "99999999999999999999" ++ protocol.host_drain_reply[2] }) |body| {
+        try std.testing.expectEqual(@as(?u64, null), drainUntil(body));
+    }
 }
 
 pub fn hostStatus(io: std.Io, store_path: []const u8) protocol_reply.HostStatus {

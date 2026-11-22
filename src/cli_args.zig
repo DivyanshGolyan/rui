@@ -2,6 +2,7 @@ const std = @import("std");
 const session_settings = @import("session_settings.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
+const host_drain = @import("host_drain.zig");
 const caller_error = @import("caller_error.zig");
 const cli_value = @import("cli_value.zig");
 const provider_name = @import("provider_name.zig");
@@ -113,7 +114,7 @@ pub const Command = enum {
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
             .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
-            .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
+            .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only. --drain first holds new Turns and lets running work finish, up to --drain-seconds (default {d}, 1..{d}; implies --drain): work waiting on a person or a held Turn never holds it open, and what is still running at the limit is interrupted as pause does. The Host keeps draining if this command is interrupted; a repeat can only make the stop sooner.", .{ product_defaults.host_shutdown_seconds, host_drain.default_seconds, host_drain.max_seconds }), .options = destination ++ &[_]Option{ value("instance", "HEX"), flag("drain"), numeric("drain-seconds", "N", 1, host_drain.max_seconds, .count_malformed) } },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
             .host_serve => serve_grammar.definition,
@@ -668,6 +669,7 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
+        .{ .command = .host_pause, .name = "drain-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
     };

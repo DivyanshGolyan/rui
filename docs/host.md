@@ -132,6 +132,18 @@ To stop every Session that Ctrl-X could stop, run `rui session stop --all`.
 It needs a running Host, so to cancel the work of a paused Host, start it with `rui host start` and run `rui session stop --all` right away; work resumes in between.
 Each stop is its own saved request with its own reply line, so a lost reply is recovered with `rui request recover`, as for a single stop.
 
+To let running work finish first, add `--drain`:
+
+```sh
+rui host pause --drain
+```
+
+The Host holds every new turn and stops once the work it can carry on by itself has ended: running model calls, tools and background actions.
+Work that waits on you, such as an approval, does not keep it running.
+It stops after 300 seconds at the latest, or after `--drain-seconds N` (1 to 86400).
+The result line adds `"drain"`: `finished` when the work ended, `deadline` when the bound cut it off, `superseded` when a plain pause came first, or `unconfirmed`.
+Asking again can only bring the stop earlier.
+
 An acknowledgment means Rui accepted the shutdown request.
 Cleanup can still be running.
 If the reply is lost, run the retry command that Rui printed.

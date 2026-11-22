@@ -41,6 +41,7 @@ const launch_transfer = @import("host_launch_transfer.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
+const host_drain = @import("host_drain.zig");
 const preferences = @import("preferences.zig");
 const defaults_report = @import("defaults_report.zig");
 const status_page = @import("status_page.zig");
@@ -987,7 +988,10 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         }
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
-    if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
+    if (command == .host_pause) {
+        const drain: ?u32 = if (parsed.has("drain") or parsed.has("drain-seconds")) (try parsed.number(u32, "drain-seconds")) orelse host_drain.default_seconds else null;
+        return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null, drain);
+    }
     const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
         error.FileNotFound => null,
         else => {
@@ -1036,7 +1040,7 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_di
     try output.finish();
 }
 
-fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
+fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId, drain_seconds: ?u32) !void {
     const target = explicit_instance orelse switch (client.hostStatus(io, selected)) {
         .ready => |ready| ready.instance,
         .unavailable, .owned_unavailable => {
@@ -1050,25 +1054,25 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
     const hex = std.fmt.bytesToHex(target, .lower);
     var notice_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
     var notice = std.Io.Writer.fixed(&notice_bytes);
-    try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
+    if (drain_seconds) |seconds|
+        try notice.print("rui: pause holds new turns, lets running work finish for up to {d} seconds, then stops all work in this Store until a Host starts again. Retry only this exact target: rui host pause --drain --drain-seconds {d} --store ", .{ seconds, seconds })
+    else
+        try notice.writeAll("rui: pause interrupts all work in this Store until a Host starts again. Retry only this exact target: rui host pause --store ");
     try TerminalText.writeShellWord(&notice, selected);
     try notice.print(" --instance {s}\n", .{&hex});
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
-    const outcome = client.stopHost(io, .{ .store = selected, .instance = target }, &reply) catch |err| {
+    const outcome = client.stopHost(io, .{ .store = selected, .instance = target, .drain_seconds = drain_seconds }, &reply) catch |err| {
         stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         return err;
     };
     switch (outcome) {
-        .acknowledged => {
-            var output: JsonOutput = undefined;
-            const writer = output.init(io, .stdout);
-            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
-            try std.json.Stringify.value(paths.store_identity.slice(), .{}, writer);
-            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, selected);
-            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
-            try output.finish();
-            if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
+        .acknowledged => try reportPause(io, selected, paths.store_identity.slice(), &hex, product_defaults.host_shutdown_seconds * std.time.ns_per_s, false),
+        .draining => |until_unix_ms| {
+            // The Host stops by its deadline; then cleanup gets the usual shutdown bound.
+            const now_ms: u64 = @intCast(@max(0, std.Io.Clock.real.now(io).toMilliseconds()));
+            const left_ns = (until_unix_ms -| now_ms) * std.time.ns_per_ms;
+            try reportPause(io, selected, paths.store_identity.slice(), &hex, left_ns + product_defaults.host_shutdown_seconds * std.time.ns_per_s, true);
         },
         .instance_changed => {
             stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
@@ -1079,6 +1083,21 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             return error.HostStopUnconfirmed;
         },
     }
+}
+
+/// Waits for the paused Host to leave this Store and prints the one pause result.
+/// A draining pause also reports how its drain ended, read from the Host's stop record.
+fn reportPause(io: std.Io, selected: []const u8, store_identity: []const u8, hex: []const u8, within_ns: u64, drained: bool) !void {
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
+    try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
+    try std.json.Stringify.value(store_identity, .{}, writer);
+    const retired = try @import("HostLifecycle.zig").awaitRetirementWithin(io, selected, within_ns);
+    try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"", .{ hex, if (retired) "confirmed" else "unconfirmed" });
+    if (drained) try writer.print(",\"drain\":\"{s}\"", .{platform.StoreLease.stopRecord(io, selected).reported()});
+    try writer.writeAll("}\n");
+    try output.finish();
+    if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store, usually because work or cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{});
 }
 
 const host_launch = @import("host_launch.zig");

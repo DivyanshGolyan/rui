@@ -297,6 +297,14 @@ Confirmed retirement means the old Host let go of the Store; it reports nothing 
 A missing/disconnected listener or timeout leaves completion unconfirmed.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
+`rui host pause --drain [--drain-seconds N]` sends the same request with `drain_seconds` (default 300, 1..86400; `host_drain.zig` owns the bound).
+The Host holds new Turns like `host-pause` and replies `{"status":"draining","until_unix_ms"}`; `host_info.paused` reports true while it drains.
+The execution owner stops the Host through the ordinary stopping path once one pass has been quiet for a second (no progress, no transport, Bash or MCP call in flight, no running custody and no model retry due before the deadline), or at the deadline.
+Work parked on a person, on a held new Turn or on a retry past the deadline never holds a drain open.
+A repeated drain can only bring the deadline earlier; a plain `host-stop` during a drain stops at once and the drain reports `superseded`.
+The stop record holds `draining`, then `finished`, `deadline` or `superseded`; a plain stop still writes an empty record, and any record reads as an asked stop.
+The CLI waits for retirement until the deadline plus `host_shutdown_seconds`, then reads the record into `"drain"` (`unconfirmed` when it still says draining or is gone).
+
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).
 While held, Messages are still admitted and queue, running Turns go on through their tool continuations, retries and Messages that join them at an input boundary, and no waiting Message starts a Turn: model admission selects only a Session whose open Turn takes input at its next model call.
 Clearing it lets them start in the usual order at the next admission pass, which reads the flag beside the commit generation, so a resume needs no commit.

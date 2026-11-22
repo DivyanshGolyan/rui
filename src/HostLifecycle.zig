@@ -200,7 +200,12 @@ fn sleepToward(io: std.Io, until: i96) !bool {
 }
 
 pub fn awaitRetirement(io: std.Io, store: []const u8) !bool {
-    const until = nowNanos(io) + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    return awaitRetirementWithin(io, store, product_defaults.host_shutdown_seconds * std.time.ns_per_s);
+}
+
+/// Waits up to `within_ns` for the Host to release this Store.
+pub fn awaitRetirementWithin(io: std.Io, store: []const u8, within_ns: u64) !bool {
+    const until = nowNanos(io) + within_ns;
     while (platform.StoreLease.observe(io, store) != .unowned) {
         if (!try sleepToward(io, until)) return false;
     }

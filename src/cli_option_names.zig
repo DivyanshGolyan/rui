@@ -13,6 +13,8 @@ pub const names = [_][]const u8{
     "clear-model",
     "compaction-trigger",
     "device-code",
+    "drain",
+    "drain-seconds",
     "engine",
     "failed-response",
     "fault",
