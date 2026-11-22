@@ -1020,10 +1020,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.drawn = .{ .attempt = self.state.attempt, .page = std.meta.activeTag(self.state.page) };
     if (size.width == 0 or size.height == 0) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = &.{} };
-    // With room, the dialog is a card: a stitched edge and one column of ground inside it,
-    // drawn over the covered screen, which Root fades.
+    // With room, the dialog is a card: a stitched edge with one column of ground inside it and
+    // one cell of ground outside it, so the faded screen Root draws never touches the edge.
     const framed = size.width >= min_framed.width and size.height >= min_framed.height;
-    const frame: vxfw.Size = if (framed) .{ .width = 4, .height = 2 } else .{};
+    const frame: vxfw.Size = if (framed) .{ .width = 2 * card_inset.width, .height = 2 * card_inset.height } else .{};
     const width = @min(size.width - frame.width, 72);
     var rows: std.ArrayList(Row) = .empty;
     var buttons: std.ArrayList(Button) = .empty;
@@ -1167,7 +1167,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const footer = try a.create(vxfw.Text);
         footer.* = .{ .text = "C copies code. Esc back.", .style = self.quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
-        if (natural.size.height + 3 <= size.height) footer_surface = natural;
+        if (natural.size.height + 3 + frame.height <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
     var rule_caps = self.caps;
@@ -1252,32 +1252,35 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // The content stays the layer's first child; a card, when it fits, lies beneath it.
     const children = try a.alloc(vxfw.SubSurface, if (framed) 2 else 1);
     children[0] = .{ .origin = origin, .surface = child, .z_index = 1 };
-    if (framed) children[1] = .{ .origin = .{ .row = origin.row - 1, .col = origin.col - 2 }, .surface = try self.card(ctx, child.size) };
+    if (framed) children[1] = .{ .origin = .{ .row = origin.row - card_inset.height, .col = origin.col - card_inset.width }, .surface = try self.card(ctx, child.size) };
     // The layer spans the screen without painting it, so the faded screen shows around the
     // card while every click still lands here.
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
 
 // Narrower screens give the dialog every column, so codes and links keep their width.
-const min_framed: vxfw.Size = .{ .width = 40, .height = 8 };
+const min_framed: vxfw.Size = .{ .width = 40, .height = 10 };
+/// From the card's outer edge to its content: one cell of margin, the stitch, then on the
+/// sides one column of ground.
+const card_inset: vxfw.Size = .{ .width = 3, .height = 2 };
 
-/// The card under a dialog of `content` size: the running stitch on top and bottom, its
-/// upright at the sides, and one column of ground between edge and content.
+/// The card under a dialog of `content` size: a margin of ground, then the running stitch
+/// on top and bottom and its upright at the sides, then one column of ground before content.
 fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocator.Error!vxfw.Surface {
-    const size: vxfw.Size = .{ .width = content.width + 4, .height = content.height + 2 };
+    const size: vxfw.Size = .{ .width = content.width + 2 * card_inset.width, .height = content.height + 2 * card_inset.height };
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     var caps = self.caps;
     caps.unicode = self.unicode;
     const across = @import("widget_style.zig").line(caps, .horizontal);
     const upright = @import("widget_style.zig").line(caps, .vertical);
-    for (0..size.width) |col| {
-        surface.writeCell(@intCast(col), 0, across);
-        surface.writeCell(@intCast(col), size.height - 1, across);
+    for (1..size.width - 1) |col| {
+        surface.writeCell(@intCast(col), 1, across);
+        surface.writeCell(@intCast(col), size.height - 2, across);
     }
-    for (1..size.height - 1) |row| {
-        surface.writeCell(0, @intCast(row), upright);
-        surface.writeCell(size.width - 1, @intCast(row), upright);
+    for (2..size.height - 2) |row| {
+        surface.writeCell(1, @intCast(row), upright);
+        surface.writeCell(size.width - 2, @intCast(row), upright);
     }
     return surface;
 }

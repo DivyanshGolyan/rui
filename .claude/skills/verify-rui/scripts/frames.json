@@ -2244,7 +2244,7 @@
     },
     {
       "name": "settings-signin",
-      "note": "App settings Sign-in: a stitched card above the faded Settings screen",
+      "note": "App settings Sign-in: a stitched card, with a margin of ground, above the Settings screen faded to the thread colour",
       "open": "overview",
       "steps": [
         {"wait": "+ New chat"},

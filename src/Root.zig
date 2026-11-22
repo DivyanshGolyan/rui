@@ -54,8 +54,6 @@ session: ?vxfw.Widget = null,
 session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
 sign_in: ?vxfw.Widget = null,
-/// The style a screen covered by the Sign-in dialog takes (`widget_style.backdrop`).
-backdrop: vaxis.Style = .{ .dim = true },
 input: app_input.State = .{},
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -385,7 +383,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, self.backdrop) else child };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps())) else child };
     self.projectFocus(child, layout);
     if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.sign_in.?.draw(ctx) };
     self.frames += 1;
@@ -394,29 +392,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 /// The covered screen as one flat layer in the `backdrop` style: what it showed stays in
 /// place, quiet behind the dialog, with no colour, cursor, link, image or highlight of its own.
+/// vxfw's own render composes it, so the faded screen holds exactly what would have shown.
 fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style) std.mem.Allocator.Error!vxfw.Surface {
+    var scratch = try vaxis.Screen.init(ctx.cell_arena, .{ .cols = screen.size.width, .rows = screen.size.height, .x_pixel = 0, .y_pixel = 0 });
+    const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.size.width, .height = screen.size.height, .screen = &scratch };
+    try screen.render(window, .{ .userdata = undefined, .drawFn = undefined });
     const flat = try vxfw.Surface.init(ctx.cell_arena, screen.widget, screen.size);
-    flatten(flat, screen, 0, 0, .{ .right = screen.size.width, .bottom = screen.size.height });
-    for (flat.buffer) |*cell| cell.* = .{ .char = cell.char, .style = backdrop };
+    for (flat.buffer, scratch.buf) |*cell, drawn| cell.* = .{ .char = drawn.char, .style = backdrop };
     return flat;
 }
 
-const Clip = struct { left: u16 = 0, top: u16 = 0, right: u16, bottom: u16 };
-
-/// Copies `surface` and its children into `flat` the way rendering does: children above
-/// their parent in z order, each clipped to its parent's bounds.
-fn flatten(flat: vxfw.Surface, surface: vxfw.Surface, col: i32, row: i32, clip: Clip) void {
-    const bound: Clip = .{
-        .left = @intCast(std.math.clamp(col, clip.left, clip.right)),
-        .top = @intCast(std.math.clamp(row, clip.top, clip.bottom)),
-        .right = @intCast(std.math.clamp(col + surface.size.width, clip.left, clip.right)),
-        .bottom = @intCast(std.math.clamp(row + surface.size.height, clip.top, clip.bottom)),
-    };
-    if (surface.buffer.len > 0) for (bound.top..bound.bottom) |y| for (bound.left..bound.right) |x| {
-        flat.writeCell(@intCast(x), @intCast(y), surface.readCell(@intCast(@as(i32, @intCast(x)) - col), @intCast(@as(i32, @intCast(y)) - row)));
-    };
-    std.mem.sort(vxfw.SubSurface, surface.children, {}, vxfw.SubSurface.lessThan);
-    for (surface.children) |child| flatten(flat, child.surface, col + child.origin.col, row + child.origin.row, bound);
+/// The capabilities the app draws with, as app settings reads them.
+fn appCaps(self: *const Self) @import("overview_view.zig").Caps {
+    return if (self.settings_page.backend) |backend| backend.caps(backend.context) else .{};
 }
 
 test "App root switches between overview and Session without retaining the hidden screen" {
@@ -992,7 +980,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
 test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
     var page: @import("SignIn.zig") = .{ .style = .{ .bg = .{ .rgb = .{ 0xf4, 0xef, 0xe2 } } } };
-    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } }, .backdrop = .{ .fg = .{ .index = 8 } } };
+    var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
         for (0..81) |width| for (0..25) |height| {
@@ -1008,24 +996,30 @@ test "Sign-in is centered above the covered screen across every small bound" {
             const screen = surface.children[0].surface;
             try std.testing.expectEqual(@as(usize, screen.size.width) * screen.size.height, screen.buffer.len);
             try std.testing.expectEqual(@as(usize, 0), screen.children.len);
-            for (screen.buffer) |cell| try std.testing.expect(cell.style.eql(root.backdrop));
+            for (screen.buffer) |cell| try std.testing.expect(cell.style.eql(@import("widget_style.zig").backdrop(.{})));
             if (width >= 14) for ("Retained draft", 0..) |byte, col| try std.testing.expectEqual(byte, screen.buffer[col].char.grapheme[0]);
             try std.testing.expectEqual(@as(usize, 0), cover.buffer.len);
             try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);
             const dialog = cover.children[0];
             // With room the dialog is a card with a stitched edge; below that it fills its bound.
-            const framed = width >= 40 and height >= 8;
+            const framed = width >= 40 and height >= 10;
             try std.testing.expectEqual(@as(usize, if (framed) 2 else 1), cover.children.len);
             if (framed) {
+                // A margin of ground, the stitch, then (at the sides) a column of ground.
                 const edge = cover.children[1];
+                const across = if (unicode) "┄" else "-";
+                const upright = if (unicode) "┆" else "|";
+                const w = edge.surface.size.width;
                 try std.testing.expect(edge.z_index < dialog.z_index);
-                try std.testing.expectEqual(dialog.origin.row - 1, edge.origin.row);
-                try std.testing.expectEqual(dialog.origin.col - 2, edge.origin.col);
-                try std.testing.expectEqual(vxfw.Size{ .width = dialog.surface.size.width + 4, .height = dialog.surface.size.height + 2 }, edge.surface.size);
-                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", edge.surface.buffer[0].char.grapheme);
-                try std.testing.expectEqualStrings(if (unicode) "┄" else "-", edge.surface.buffer[edge.surface.buffer.len - 1].char.grapheme);
-                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", edge.surface.buffer[edge.surface.size.width].char.grapheme);
-                try std.testing.expectEqualStrings(if (unicode) "┆" else "|", edge.surface.buffer[2 * edge.surface.size.width - 1].char.grapheme);
+                try std.testing.expectEqual(dialog.origin.row - 2, edge.origin.row);
+                try std.testing.expectEqual(dialog.origin.col - 3, edge.origin.col);
+                try std.testing.expectEqual(vxfw.Size{ .width = dialog.surface.size.width + 6, .height = dialog.surface.size.height + 4 }, edge.surface.size);
+                for (0..w) |col| try std.testing.expect(edge.surface.buffer[col].char.grapheme.len == 0 or std.mem.eql(u8, edge.surface.buffer[col].char.grapheme, " "));
+                try std.testing.expectEqualStrings(across, edge.surface.readCell(1, 1).char.grapheme);
+                try std.testing.expectEqualStrings(across, edge.surface.readCell(w - 2, edge.surface.size.height - 2).char.grapheme);
+                try std.testing.expectEqualStrings(upright, edge.surface.readCell(1, 2).char.grapheme);
+                try std.testing.expectEqualStrings(upright, edge.surface.readCell(w - 2, 2).char.grapheme);
+                try std.testing.expect(edge.surface.readCell(0, 2).char.grapheme.len == 0 or std.mem.eql(u8, edge.surface.readCell(0, 2).char.grapheme, " "));
                 try std.testing.expect(edge.origin.row >= 0 and edge.origin.col >= 0);
                 try std.testing.expect(edge.origin.row + edge.surface.size.height <= height and edge.origin.col + edge.surface.size.width <= width);
                 if (!unicode) for (edge.surface.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 128);
@@ -1039,7 +1033,44 @@ test "Sign-in is centered above the covered screen across every small bound" {
     }
 }
 
-test "A faded screen flattens children above their parents in z order, clipped to their parents" {
+test "Sign-in fades the covered screen in the thread colour of the caps app settings draws with" {
+    const Backend = struct {
+        fn read(_: *anyopaque) !@import("preferences.zig").Values {
+            return .{};
+        }
+        fn save(_: *anyopaque, _: @import("preferences.zig").Edit) !void {}
+        fn saveState(_: *anyopaque) AppSettings.SaveState {
+            return .pending;
+        }
+        fn upgrade(_: *anyopaque) !void {}
+        fn run(_: *anyopaque) ?@import("upgrade_status.zig").Run {
+            return null;
+        }
+        fn caps(_: *anyopaque) @import("overview_view.zig").Caps {
+            return .{ .depth = .direct, .background = .{ 0xf4, 0xef, 0xe2 } };
+        }
+    };
+    var context: u8 = 0;
+    const background: vxfw.Text = .{ .text = "Covered" };
+    var page: @import("SignIn.zig") = .{};
+    var root: Self = .{
+        .overview = background.widget(),
+        .list = background.widget(),
+        .sign_in = page.widget(),
+        .settings_page = .{ .backend = .{ .context = &context, .read = Backend.read, .save = Backend.save, .save_state = Backend.saveState, .upgrade = Backend.upgrade, .run = Backend.run, .caps = Backend.caps } },
+        .input = .{ .layer = .{ .sign_in = .{ .over = .main } } },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+    const thread = @import("widget_style.zig").line(Backend.caps(&context), .horizontal).style;
+    // Day cloth: unlike the night default, so a Root that ignored app settings' caps fails.
+    try std.testing.expect(!thread.eql(@import("widget_style.zig").backdrop(.{})));
+    try std.testing.expect(surface.children[0].surface.buffer.len > 0);
+    for (surface.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(thread));
+}
+
+test "A faded screen holds what rendering shows: children above their parents in z order, clipped to them" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
