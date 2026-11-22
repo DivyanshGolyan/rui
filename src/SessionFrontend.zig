@@ -1318,7 +1318,9 @@ test "Settings over an approval keeps the faded chat inert to the wheel and clic
         for ([_][2]u16{ .{ 0, 0 }, .{ height / 2, 0 }, .{ height - 1, width - 1 }, .{ height / 2, width - 1 }, .{ height - 1, 0 } }) |point| {
             var hits: std.ArrayList(vxfw.HitResult) = .empty;
             try frame.hitTest(held.arena.allocator(), &hits, .{ .row = point[0], .col = point[1] });
-            for (hits.items) |hit| try std.testing.expect(hit.widget.userdata == @as(*anyopaque, &held.root));
+            // Root alone: its capture runs once, and nothing behind the dialog sees the event.
+            try std.testing.expectEqual(@as(usize, 1), hits.items.len);
+            try std.testing.expect(hits.items[0].widget.eql(held.root.widget()));
             for ([_]vaxis.Mouse.Button{ .wheel_up, .wheel_down, .left }) |button| for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
                 try @import("testing/app_events.zig").mouse(&ctx, frame, .{ .row = @intCast(point[0]), .col = @intCast(point[1]), .button = button, .mods = .{}, .type = kind });
             };

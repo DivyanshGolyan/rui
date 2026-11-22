@@ -433,6 +433,12 @@ fn appCaps(self: *const Self) @import("overview_view.zig").Caps {
     return if (self.settings_page.backend) |backend| backend.caps(backend.context) else .{};
 }
 
+/// A surface of the dialog or the faded screen takes no event itself: Root's own capture is
+/// the only handler in each event's path.
+fn inert(owner: vxfw.Widget) bool {
+    return owner.eventHandler == null and owner.captureHandler == null;
+}
+
 test "App root switches between overview and Session without retaining the hidden screen" {
     const overview: vxfw.Text = .{ .text = "Overview" };
     const session: vxfw.Text = .{ .text = "Session" };
@@ -619,7 +625,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         // Settings is a dialog above the main screen, which stays in place but faded.
         try std.testing.expectEqual(@as(usize, 2), opened.children.len);
         try std.testing.expectEqual(@as(usize, 0), opened.children[0].surface.children.len);
-        try std.testing.expect(opened.children[1].surface.widget.eql(root.dialogWidget()));
+        try std.testing.expect(inert(opened.children[1].surface.widget));
         try std.testing.expect(containsWidget(opened.children[1].surface, root.settings_page.widget()));
 
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
@@ -1022,7 +1028,7 @@ test "Settings opens as a dialog over the faded screen, and Sign-in from it take
         try std.testing.expectEqual(!signing, containsWidget(layer, root.settings_page.widget()));
         try std.testing.expectEqual(signing, layer.widget.eql(page.widget()));
         if (signing) continue;
-        try std.testing.expect(layer.widget.eql(root.dialogWidget()));
+        try std.testing.expect(inert(layer.widget));
         try std.testing.expectEqual(@as(usize, if (Dialog.framed(size)) 2 else 1), layer.children.len);
         const content = layer.children[0];
         try std.testing.expect(content.surface.size.width <= Dialog.max_width);
@@ -1045,7 +1051,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
             defer arena.deinit();
             const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
             try std.testing.expectEqual(@as(usize, 2), surface.children.len);
-            try std.testing.expect(surface.children[0].surface.widget.eql(root.dialogWidget()));
+            try std.testing.expect(inert(surface.children[0].surface.widget));
             const cover = surface.children[1].surface;
             if (width == 0 or height == 0) continue;
             // The covered screen stays in place but faded; the layer above paints nothing of
