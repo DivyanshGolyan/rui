@@ -14,26 +14,33 @@ with patch.object(sys, "argv", [__file__, "/candidate/rui"]):
 
 
 class HostFixtureSettingsTest(unittest.TestCase):
-    def test_unconfigured_fixture_remains_provider_free(self):
-        argv = ["rui", "host", "serve", "--store", "/missing-fixture-host"]
-        self.assertEqual(host_process.isolated_host_arguments(argv), argv + ["--set", "providers={}"])
-        self.assertEqual(argv[-1], "/missing-fixture-host", "must not mutate caller argv")
-
-    def test_explicit_sources_and_provider_endpoints_keep_selection(self):
-        for options in (["--settings", "document.json"], ["--settings", "-"],
-                        ["--set", 'providers={"openai":{}}'],
-                        ["--set", "providers.codex.unauthenticated=true"],
-                        ["--set", "providers.chatgpt.endpoint=http://127.0.0.1/responses"],
-                        ["--set", "providers.openai.endpoint=http://127.0.0.1/responses"]):
-            with self.subTest(options=options):
-                argv = ["rui", "host", "serve", *options]
-                self.assertEqual(host_process.isolated_host_arguments(argv), argv)
-
-    def test_saved_settings_remain_authoritative(self):
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "host.json").write_text('{"providers":{"codex":{}}}')
-            argv = ["rui", "host", "serve", "--store", directory]
-            self.assertEqual(host_process.isolated_host_arguments(argv), argv)
+    def test_a_fixture_host_serves_no_provider_and_reads_no_live_catalog_unless_chosen(self):
+        none, catalog = ["--set", "providers={}"], ["--set", "models.catalogUrl=" + host_process.UNREACHABLE_CATALOG]
+        cases = (
+            # (options, saved host.json or None, added arguments)
+            ([], None, none + catalog),
+            (["--settings", "document.json"], None, []),
+            (["--settings", "-"], '{"providers":{}}', []),
+            (["--set", 'providers={"openai":{}}'], None, catalog),
+            (["--set", "providers.codex.unauthenticated=true"], None, catalog),
+            (["--set", "providers.chatgpt.endpoint=http://127.0.0.1/responses"], None, catalog),
+            (["--set", "providers.openai.endpoint=http://127.0.0.1/responses"], None, catalog),
+            (["--set", "models.catalogUrl=https://localhost:1/api.json"], None, none),
+            (["--set", 'models={"catalogUrl":"https://localhost:1/api.json"}'], None, none),
+            (["--set", "providers={}", "--set", "models.catalogUrl=https://localhost:1/api.json"], None, []),
+            ([], '{"providers":{"codex":{}}}', catalog),
+            ([], '{"providers":{},"models":{"catalogUrl":"https://localhost:1/api.json"}}', []),
+            ([], '{"models":{"catalogUrl":"https://localhost:1/api.json"}}', []),
+            (["--set", "models.catalogUrl=https://localhost:1/api.json"], '{"providers":{"codex":{}}}', []),
+        )
+        for options, saved, added in cases:
+            with self.subTest(options=options, saved=saved), tempfile.TemporaryDirectory() as directory:
+                if saved is not None:
+                    (Path(directory) / "host.json").write_text(saved)
+                argv = ["rui", "host", "serve", "--store", directory, *options]
+                before = list(argv)
+                self.assertEqual(host_process.isolated_host_arguments(argv), before + added)
+                self.assertEqual(argv, before, "must not mutate caller argv")
 
     def test_model_endpoint_is_exact_and_credential_free(self):
         argv = model_fixture.host_arguments("/store", "http://127.0.0.1/responses",

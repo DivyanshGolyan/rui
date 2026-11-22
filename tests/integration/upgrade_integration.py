@@ -172,7 +172,7 @@ class Case:
         provider = [] if any(str(value).startswith("providers.") or str(value).startswith("providers=") for value in extra) else ["--set", 'providers={"codex":{}}']
         defaults = [] if sources_only else ["--set", 'execution.activeCapacity=2', *provider]
         process, ready = start_ready_process(
-            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env, isolate_providers=not sources_only)
+            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env, isolate_settings=not sources_only)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()
@@ -841,9 +841,10 @@ class TerminalScreen:
             raise AssertionError(frame)
         self.contains("Notifications")
         frame = self.contains("Version")
+        # Settings is a card over the overview, so its Version row is found by its label, not by a screen column.
         for row, line in enumerate(frame.splitlines()):
-            if "Version" in line[40:]:
-                column = line.index("Version", 40)
+            if "Version" in line:
+                column = line.index("Version")
                 self.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
                 break
         else:
@@ -1045,7 +1046,7 @@ def adopted_replacement_case(root, binary, releases):
             child, ready = start_ready_process(
                 [alternate / "bin/rui", "host", "serve", "--store", c.store,
                  "--set", "providers={}", "--set", "execution.activeCapacity=" + previous["active_capacity"]],
-                env=c.env, isolate_providers=False)
+                env=c.env, isolate_settings=False)
             c.hosts.append(child)
             assert c.status()["instance"] == ready["instance"] != previous["instance"]
             assert gate.exists() and restart.poll() is None, "our starter was not held until the external Host was ready"
@@ -1068,7 +1069,7 @@ def known_target_case(root, binary, releases, baseline, known_bad):
         shutil.copy2(baseline, retained / "bin/rui")
         old_binary = retained / "bin/rui"
         old, ready = start_ready_process([old_binary, "host", "serve", "--store", c.store, "--active-capacity", "2"],
-                                         env=c.env, isolate_providers=False)
+                                         env=c.env, isolate_settings=False)
         c.hosts.append(old)
         c.ready = ready
 

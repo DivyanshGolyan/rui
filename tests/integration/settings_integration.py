@@ -360,7 +360,7 @@ def signin_dispatch_matrix():
                 host = None
                 count = len(endpoint.requests)
                 try:
-                    host, _ = host_process.start_ready_process(args, env=env, isolate_providers=False)
+                    host, _ = host_process.start_ready_process(args, env=env, isolate_settings=False)
                     session = model.configure(case, store, "configure", None, "gpt-6-sol")
                     model.message(case, store, "dispatch", session, "Credential location witness")
                     observed = model.wait_for(lambda: model.observe(store, "dispatch").get("result"), "credential dispatch result")

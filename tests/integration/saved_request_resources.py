@@ -128,7 +128,7 @@ def main():
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(capture(state, binary, label, size, repetition)), flush=True)
         host, _ = start_ready_process(HostServeDialect(baseline).host_arguments(state / "live-store"),
-                                      isolate_providers=False)
+                                      isolate_settings=False)
         try:
             cli.fixture.RUI = baseline
             cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",

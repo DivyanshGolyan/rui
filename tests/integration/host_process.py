@@ -1315,20 +1315,28 @@ def _start_error(reason, process, stdout, stderr_tail):
     )
 
 
+# A catalog URL that refuses every connection. A fixture Host never fetches the live models.dev catalog: its answer
+# commits model facts whenever it arrives, so a check that a step committed nothing would depend on a remote server.
+UNREACHABLE_CATALOG = "http://127.0.0.1:1/api.json"
+
+
 def isolated_host_arguments(args):
+    """A fixture Host serves no provider and reads no live catalog unless its arguments or saved settings choose them."""
     args = list(map(str, args))
-    if "--settings" not in args:
-        provider_settings = any(value.startswith(("providers=", "providers.")) for value in args)
-        saved = ("--store" in args and
-                 (pathlib.Path(args[args.index("--store") + 1]) / "host.json").exists())
-        if not provider_settings and not saved:
-            args += ["--set", "providers={}"]
+    if "--settings" in args:
+        return args
+    saved_path = pathlib.Path(args[args.index("--store") + 1]) / "host.json" if "--store" in args else None
+    saved = saved_path.read_text() if saved_path is not None and saved_path.exists() else None
+    if saved is None and not any(value.startswith(("providers=", "providers.")) for value in args):
+        args += ["--set", "providers={}"]
+    if not any(value.startswith(("models=", "models.catalogUrl=")) for value in args) and '"catalogUrl"' not in (saved or ""):
+        args += ["--set", "models.catalogUrl=" + UNREACHABLE_CATALOG]
     return args
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_providers=True, pause=None):
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_settings=True, pause=None):
     args = list(map(str, args))
-    if isolate_providers:
+    if isolate_settings:
         args = isolated_host_arguments(args)
     if pause is not None:
         args += pause.arguments()
