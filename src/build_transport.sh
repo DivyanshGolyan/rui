@@ -70,9 +70,13 @@ SHIM
 chmod +x "$no_packages"
 
 # Linux runners have a host pkg-config and the Mac runner has none (#1932). PATH here
-# links every other command and leaves pkg-config out, so no step can reach a host copy.
-hidden_path="$build_root/path"
-mkdir -p "$hidden_path"
+# mirrors every entry, in order, as its own link directory with pkg-config left out,
+# so no step can reach a host copy. Keeping one directory per entry keeps a wrapper
+# that runs "the next command of its name on PATH" (an rm guard, a compiler cache)
+# able to find that next command, which one flat directory would hide.
+hidden_root="$build_root/path"
+hidden_path=
+entry_index=0
 old_ifs=$IFS
 IFS=:
 set -f
@@ -83,15 +87,19 @@ for dir in $PATH; do
         /*) ;;
         *) continue ;;
     esac
+    entry_index=$((entry_index + 1))
+    mirror="$hidden_root/$entry_index"
+    mkdir -p "$mirror"
     for entry in "$dir"/*; do
         name=${entry##*/}
         case "$name" in
             *pkg-config|pkgconf*) continue ;;
         esac
-        if [ -f "$entry" ] && [ -x "$entry" ] && [ ! -e "$hidden_path/$name" ]; then
-            ln -s "$entry" "$hidden_path/$name"
+        if [ -f "$entry" ] && [ -x "$entry" ]; then
+            ln -s "$entry" "$mirror/$name"
         fi
     done
+    hidden_path=$hidden_path${hidden_path:+:}$mirror
 done
 set +f
 IFS=$old_ifs
