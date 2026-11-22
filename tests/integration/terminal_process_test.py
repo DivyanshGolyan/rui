@@ -768,6 +768,31 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(seen["session_leader"], seen)
         self.assertEqual(seen["session"], process.leader.process.pid, seen)
 
+    def hand_over(self, mode):
+        master, slave = open_pty()
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        calls, ran = os.path.join(folder, "calls"), os.path.join(folder, "ran")
+        fixture = subprocess.run([sys.executable, "-I", "-c", HAND_OVER, os.path.dirname(os.path.abspath(__file__)),
+                                  mode, calls, ran], stdin=slave, stdout=subprocess.PIPE, start_new_session=True,
+                                 timeout=10, check=True)
+        seen = json.loads(fixture.stdout)
+        with open(calls) as log:
+            seen["calls"] = [json.loads(line) for line in log]
+        seen["ran"] = os.path.exists(ran)
+        return seen
+
+    def test_only_the_leader_moves_a_held_job_to_the_foreground(self):
+        seen = self.hand_over("hand")
+        self.assertIn("pid", seen["reply"], seen)
+        self.assertEqual(seen["calls"], [["setpgid", seen["leader"]], ["tcsetpgrp", seen["leader"]]], seen)
+        self.assertEqual((seen["status"], seen["ran"]), (0, True), seen)
+
+    def test_refused_hand_over_stops_the_job_before_it_runs(self):
+        seen = self.hand_over("refuse")
+        self.assertEqual(seen["reply"], {"errno": errno.EPERM, "filename": "tcsetpgrp"}, seen)
+        self.assertEqual(seen["calls"], [["setpgid", seen["leader"]], ["tcsetpgrp", seen["leader"]]], seen)
+        self.assertFalse(seen["ran"], seen)
+
     def test_shell_leaves_the_terminal_usable(self):
         master, slave = open_pty()
         shell = spawn(["bash", "-c", "sleep 0.2"], stdin=slave, stdout=slave, stderr=slave)
@@ -943,6 +968,34 @@ else:
     seen["same_terminal"] = not stdin[3] & termios.ECHO and stdin[6][termios.VMIN] in (7, b"\\x07")
 os.write(REPORT, json.dumps(seen).encode())
 os.write(1, b"abc")
+"""
+
+HAND_OVER = """
+import errno, fcntl, json, os, sys, termios
+sys.path.insert(0, sys.argv[1])
+import terminal_leader
+mode, calls, ran = sys.argv[2:5]
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+def recorded(name, call):
+    def record(*args):
+        with open(calls, "a") as log:
+            log.write(json.dumps([name, os.getpid()]) + "\\n")
+        if mode == "refuse" and name == "tcsetpgrp":
+            raise PermissionError(errno.EPERM, "refused by the test")
+        return call(*args)
+    return record
+
+
+os.setpgid = recorded("setpgid", os.setpgid)
+os.tcsetpgrp = recorded("tcsetpgrp", os.tcsetpgrp)
+request = {"args": [sys.executable, "-I", "-c", "import sys; open(sys.argv[1], 'w').close()", ran],
+           "env": dict(os.environ), "cwd": None, "umask": 0o22, "limits": [], "targets": [0, 1, 2],
+           "mask": [], "ignored": [], "default_signals": []}
+reply = terminal_leader.start(request, [os.dup(0), os.dup(0), os.dup(0)])
+status = os.waitstatus_to_exitcode(os.waitpid(reply["pid"], 0)[1]) if "pid" in reply else None
+print(json.dumps({"reply": reply, "leader": os.getpid(), "status": status}))
 """
 
 DESCRIPTORS = """
