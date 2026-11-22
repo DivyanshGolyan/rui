@@ -413,11 +413,13 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(edit[edit.index('--add-label') + 1], 'stable-red')
         self.assertEqual([call[2] for call in fake.made('reopen')], ['5'])
 
-    def test_an_unparsed_failure_is_still_filed_under_its_job(self):
-        fake = FakeGitHub([dict(id=1, name='macos / resources', conclusion='failure')], {1: logged('boom')})
+    def test_an_unparsed_failure_is_still_filed_under_its_job_and_step(self):
+        steps = [dict(name='Run the resources', conclusion='failure')]
+        fake = FakeGitHub([dict(id=1, name='macos / resources', conclusion='failure', steps=steps)], {1: logged('boom')})
         self.run_main(fake)
         [create] = fake.made('create')
-        self.assertIn("job 'macos / resources' failed; cause not parsed", create[create.index('--title') + 1])
+        self.assertIn("job 'macos / resources' failed at step 'Run the resources'", create[create.index('--title') + 1])
+        self.assertIn('boom', create[create.index('--body') + 1])
 
     def test_a_recurrence_after_a_claimed_fix_reopens_the_issue(self):
         signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
@@ -543,6 +545,103 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(len(titles), 2)
         self.assertIn("job 'macos / native' log unavailable", titles[0])
         self.assertIn('::warning::', out)
+
+
+def numbered_log(count, prefix='build output line'):
+    return logged(*(f"{prefix} {number}" for number in range(1, count + 1)))
+
+
+class JobCauseTest(unittest.TestCase):
+    def setUp(self):
+        self.cases = report_issue.fixtures()
+
+    def causes(self, log, name, steps, workflow='Promote'):
+        job = dict(name=name, steps=[dict(name=step, conclusion=conclusion) for step, conclusion in steps])
+        return report_issue.job_causes(log, self.cases, workflow, job)
+
+    def test_aggregate_failing_only_on_its_requirement_is_skipped(self):
+        for steps in ([('Set up job', 'success'), ('Require every selected Linux part', 'failure')],
+                      [('Require every selected qualification tier', 'failure')]):
+            with self.subTest(steps=steps):
+                job = dict(name='qualify / selected / linux',
+                           steps=[dict(name=name, conclusion=conclusion) for name, conclusion in steps])
+                self.assertTrue(report_issue.aggregate_only(job))
+
+    def test_aggregate_failing_on_its_requirement_and_explain_step_is_skipped(self):
+        for steps in (
+            [('Require every selected Linux part', 'failure'), ('Name each failed job and its cause', 'failure')],
+            [('Require every selected Apple Silicon part', 'failure'),
+             ('Name each failed job and its cause', 'failure')],
+            [('Name each failed job and its cause', 'failure')],
+        ):
+            with self.subTest(steps=steps):
+                job = dict(name='qualify / selected / macos',
+                           steps=[dict(name=name, conclusion=conclusion) for name, conclusion in steps])
+                self.assertTrue(report_issue.aggregate_only(job))
+
+    def test_a_job_with_a_real_failed_step_beside_an_aggregate_step_is_not_skipped(self):
+        job = dict(name='build (linux-x86_64)', steps=[dict(name='Build the artifact', conclusion='failure'),
+                                                       dict(name='Name each failed job and its cause', conclusion='failure')])
+        self.assertFalse(report_issue.aggregate_only(job))
+
+    def test_a_matrix_job_with_an_unparsed_log_names_its_failed_step_and_keeps_the_log_tail(self):
+        steps = [('Set up job', 'success'), ('Build the artifact', 'failure'), ('Upload', 'skipped')]
+        first = self.causes(numbered_log(60), 'release_build / build (linux-x86_64)', steps,
+                            workflow='Promote')
+        second = self.causes(numbered_log(75, prefix='build output line, rerun'), 'release_build / build (linux-x86_64)',
+                             steps, workflow='Promote')
+        self.assertEqual([cause.signature for cause in first],
+                         ["Promote: job 'release_build / build (linux-x86_64)' failed at step 'Build the artifact'"])
+        self.assertEqual([cause.signature for cause in second], [cause.signature for cause in first])
+        self.assertEqual(len(first[0].detail.splitlines()), report_issue.UNPARSED_TAIL_LINES)
+        self.assertIn('build output line 60', first[0].detail)
+        self.assertNotIn('build output line 1\n', first[0].detail + '\n')
+        self.assertNotIn('2026-', first[0].detail)
+
+    def test_several_failed_steps_are_all_named_in_the_signature(self):
+        steps = [('Build the artifact', 'failure'), ('Test the artifact', 'failure')]
+        [cause] = self.causes(numbered_log(3), 'linux suites (native)', steps)
+        self.assertEqual(cause.signature,
+                         "Promote: job 'linux suites (native)' failed at steps 'Build the artifact', 'Test the artifact'")
+
+    def test_a_job_with_no_failed_step_recorded_still_has_a_stable_signature(self):
+        [cause] = self.causes(numbered_log(2), 'plan', [('Set up job', 'cancelled')])
+        self.assertEqual(cause.signature, "Promote: job 'plan' failed with no failed step recorded")
+
+    def test_a_job_whose_log_carries_excerpt_lines_is_described_by_them_not_by_its_tail(self):
+        log = (numbered_log(50, prefix='early output')
+               + logged('stack-frames: failed (exit 1)',
+                        'Promotion excerpt: stack-frames: last 2 lines of the failed step\'s output:',
+                        'Promotion excerpt: stack-frames: boom',
+                        'Promotion excerpt: stack-frames: end of excerpt'))
+        [cause] = self.causes(log, 'linux suites (stack-frames)', [('stack-frames', 'failure')])
+        self.assertEqual(cause.signature, "Promote: job 'linux suites (stack-frames)' failed at step 'stack-frames'")
+        self.assertIn('Promotion excerpt: stack-frames: boom', cause.detail)
+        self.assertIn('Promotion excerpt: stack-frames: end of excerpt', cause.detail)
+        self.assertNotIn('early output', cause.detail)
+
+    def test_a_job_with_parsed_causes_keeps_its_signature_and_no_tail(self):
+        [cause] = self.causes(BASH, 'macos suites (native)', [('Run the native tests', 'failure')])
+        self.assertEqual(cause.signature,
+                         'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError')
+        self.assertEqual(cause.detail, 'AssertionError')
+        self.assertNotIn('bash failed', cause.detail)
+
+    def test_a_job_with_parsed_causes_keeps_the_promotion_lines_that_locate_them(self):
+        verdict = 'Promotion bisect: bash: first fails at ' + 'd' * 40 + ' (Change the bash owner)'
+        [cause] = self.causes(BASH + logged(verdict), 'linux suites (check)', [('check', 'failure')])
+        self.assertEqual(cause.detail, 'AssertionError\n' + verdict)
+
+    def test_an_excerpt_only_log_has_no_fallback_cause(self):
+        log = logged('Promotion excerpt: check: nothing parsed here')
+        [cause] = self.causes(log, 'linux suites (check)', [('check', 'failure')])
+        self.assertEqual(cause.detail, 'Promotion excerpt: check: nothing parsed here')
+
+    def test_a_coloured_unparsed_log_tail_is_stripped_of_escape_codes(self):
+        [cause] = self.causes(logged('\x1b[36;1mrunning\x1b[0m the step'), 'macos / resources',
+                              [('Run the resources', 'failure')], workflow='W')
+        self.assertIn('running the step', cause.detail)
+        self.assertNotIn('\x1b', cause.detail)
 
 
 if __name__ == '__main__':
