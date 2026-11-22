@@ -383,7 +383,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps())) else child };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = if (covering) try faded(ctx, child, @import("widget_style.zig").backdrop(self.appCaps()), self.widget()) else child };
     self.projectFocus(child, layout);
     if (covering) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.sign_in.?.draw(ctx) };
     self.frames += 1;
@@ -393,10 +393,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 /// The covered screen as one flat layer in the `backdrop` style: what it showed stays in
 /// place, quiet behind the dialog, with no colour, cursor, link, image or highlight of its own.
 /// vxfw's own render composes it, so the faded screen holds exactly what would have shown.
-fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style) std.mem.Allocator.Error!vxfw.Surface {
+/// `outside` is a widget with no cursor in `screen`, so rendering shows none.
+fn faded(ctx: vxfw.DrawContext, screen: vxfw.Surface, backdrop: vaxis.Style, outside: vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
     var scratch = try vaxis.Screen.init(ctx.cell_arena, .{ .cols = screen.size.width, .rows = screen.size.height, .x_pixel = 0, .y_pixel = 0 });
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.size.width, .height = screen.size.height, .screen = &scratch };
-    try screen.render(window, .{ .userdata = undefined, .drawFn = undefined });
+    try screen.render(window, outside);
     const flat = try vxfw.Surface.init(ctx.cell_arena, screen.widget, screen.size);
     for (flat.buffer, scratch.buf) |*cell, drawn| cell.* = .{ .char = drawn.char, .style = backdrop };
     return flat;
@@ -998,7 +999,13 @@ test "Sign-in is centered above the covered screen across every small bound" {
             try std.testing.expectEqual(@as(usize, 0), screen.children.len);
             for (screen.buffer) |cell| try std.testing.expect(cell.style.eql(@import("widget_style.zig").backdrop(.{})));
             if (width >= 14) for ("Retained draft", 0..) |byte, col| try std.testing.expectEqual(byte, screen.buffer[col].char.grapheme[0]);
-            try std.testing.expectEqual(@as(usize, 0), cover.buffer.len);
+            // Framed, the layer paints nothing, so the faded screen shows around the card;
+            // unframed, it fills the screen with the ground so nothing covered sits beside it.
+            try std.testing.expectEqual(@as(usize, if (width >= 40 and height >= 10) 0 else width * height), cover.buffer.len);
+            for (cover.buffer) |cell| {
+                try std.testing.expect(cell.style.eql(page.style));
+                try std.testing.expect(cell.char.grapheme.len == 0 or std.mem.eql(u8, cell.char.grapheme, " "));
+            }
             try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);
             const dialog = cover.children[0];
             // With room the dialog is a card with a stitched edge; below that it fills its bound.
@@ -1075,10 +1082,12 @@ test "A faded screen holds what rendering shows: children above their parents in
     defer arena.deinit();
     const a = arena.allocator();
     const ctx: vxfw.DrawContext = .{ .arena = a, .cell_arena = a, .min = .{}, .max = .{ .width = 4, .height = 2 }, .cell_size = .{} };
-    const none: vxfw.Widget = .{ .userdata = undefined, .drawFn = undefined };
+    const blank: vxfw.Text = .{ .text = "" };
+    const none = blank.widget();
     const Fill = struct {
         fn of(allocator: std.mem.Allocator, size: vxfw.Size, glyph: []const u8, style: vaxis.Style) !vxfw.Surface {
-            const surface = try vxfw.Surface.init(allocator, .{ .userdata = undefined, .drawFn = undefined }, size);
+            const text: vxfw.Text = .{ .text = "" };
+            const surface = try vxfw.Surface.init(allocator, text.widget(), size);
             @memset(surface.buffer, .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = style });
             return surface;
         }
@@ -1096,7 +1105,8 @@ test "A faded screen holds what rendering shows: children above their parents in
     screen.widget = none;
     screen.children = children;
     const backdrop: vaxis.Style = .{ .fg = .{ .index = 8 } };
-    const flat = try faded(ctx, screen, backdrop);
+    var root: Self = .{ .overview = none, .list = none };
+    const flat = try faded(ctx, screen, backdrop, root.widget());
     var text: [8]u8 = undefined;
     for (flat.buffer, 0..) |cell, i| {
         text[i] = cell.char.grapheme[0];

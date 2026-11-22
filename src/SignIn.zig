@@ -1249,13 +1249,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     self.drawn.hits = hits.items;
     if (!focused_visible) self.drawn.focused = null;
-    // The content stays the layer's first child; a card, when it fits, lies beneath it.
+    // The card, when it fits, lies beneath the content by z index (rendering sorts by it).
     const children = try a.alloc(vxfw.SubSurface, if (framed) 2 else 1);
     children[0] = .{ .origin = origin, .surface = child, .z_index = 1 };
     if (framed) children[1] = .{ .origin = .{ .row = origin.row - card_inset.height, .col = origin.col - card_inset.width }, .surface = try self.card(ctx, child.size) };
-    // The layer spans the screen without painting it, so the faded screen shows around the
-    // card while every click still lands here.
-    return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
+    // Framed, the layer paints nothing of its own, so the faded screen shows around the card's
+    // margin. Without room for the card, the layer fills the screen with the ground, so no
+    // covered text can sit beside the dialog's rows. Either way every click lands here.
+    if (framed) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
+    var cover = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
+    @memset(cover.buffer, .{ .style = self.style });
+    cover.children = children;
+    return cover;
 }
 
 // Narrower screens give the dialog every column, so codes and links keep their width.
