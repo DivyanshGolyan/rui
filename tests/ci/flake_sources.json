@@ -28,21 +28,9 @@
         1,
         "peer sleeps before replying against the client's real inactivity deadline"
       ],
-      "Host-info first byte is bounded independently of normal processing waits": [
-        1,
-        "peer sleeps before replying against the client's real inactivity deadline"
-      ],
       "mutation response progress renews inactivity through header and body": [
-        2,
-        "producer sleeps 4.5 s and 1 s against a 5 s inactivity limit"
-      ],
-      "response deadlines include partial header and body": [
         1,
-        "peer sleeps before replying against the client's real response deadline"
-      ],
-      "response transfer inactivity begins after the first byte": [
-        1,
-        "peer sleeps before replying against the client's real inactivity deadline"
+        "producer sleeps 400 ms between pieces against a 1 s inactivity limit; 1.2 s total proves renewal"
       ],
       "transport cancellation quanta neither expire nor renew inactivity and observed stop wins": [
         1,
