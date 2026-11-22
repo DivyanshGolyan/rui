@@ -1098,7 +1098,7 @@ fn reportPause(io: std.Io, selected: []const u8, store_identity: []const u8, hex
     if (drained) try writer.print(",\"drain\":\"{s}\"", .{platform.StoreLease.stopRecord(io, selected).reported()});
     try writer.writeAll("}\n");
     try output.finish();
-    if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store, usually because work or cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{});
+    if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because work or cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{std.math.divCeil(u64, within_ns, std.time.ns_per_s) catch unreachable});
 }
 
 const host_launch = @import("host_launch.zig");
