@@ -2092,6 +2092,11 @@ while True:
                 with self.subTest(title=title):
                     self.assertTrue(predicate(types.SimpleNamespace(completed=screen)))
                     self.assertFalse(predicate(types.SimpleNamespace(completed=screen.replace(close, ""))))
+                for side in ("┆", "|"):
+                    carded = "".join(f"  {side}  {row[1:]:<40}{side}\n" for row in screen.splitlines())
+                    with self.subTest(title=title, side=side):
+                        self.assertTrue(predicate(types.SimpleNamespace(completed=carded)))
+                        self.assertFalse(predicate(types.SimpleNamespace(completed=carded.replace(close, " " * len(close)))))
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
 
     def test_readiness_wording_domain_uses_one_compatibility_owner(self):

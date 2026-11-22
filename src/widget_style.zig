@@ -32,6 +32,25 @@ test "line stitches use thread in every capability" {
     }
 }
 
+/// How a screen covered by a dialog draws: every cell in the thread colour on the ground,
+/// quieter than any text, so it reads as cloth behind the card. Without colour it is faint.
+pub fn backdrop(caps: view.Caps) vaxis.Style {
+    return if (caps.depth == .none) .{ .dim = true } else of(caps, .{ .colour = .rule });
+}
+
+test "backdrop is the thread colour on the ground, or faint without colour" {
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for (std.enums.values(view.Caps.Depth)) |depth| {
+        const caps: view.Caps = .{ .depth = depth, .background = background };
+        const style = backdrop(caps);
+        if (depth == .none) {
+            try std.testing.expectEqual(vaxis.Style{ .dim = true }, style);
+        } else {
+            try std.testing.expectEqual(line(caps, .horizontal).style, style);
+            try std.testing.expect(!style.bold and !style.reverse);
+        }
+    };
+}
+
 // The returned segments and their text borrow the frame arena and the input, respectively.
 pub fn segments(arena: std.mem.Allocator, caps: view.Caps, input: []const view.Segment, background: ?view.Background) std.mem.Allocator.Error![]vaxis.Segment {
     const result = try arena.alloc(vaxis.Segment, input.len);

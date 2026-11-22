@@ -2244,7 +2244,7 @@
     },
     {
       "name": "settings-signin",
-      "note": "App settings Sign-in: the dialog covers the retained screen and paints every cell around it in the ground, so no covered text shows",
+      "note": "App settings Sign-in: a stitched card, with a margin of ground, above the Settings screen faded to the thread colour",
       "open": "overview",
       "steps": [
         {"wait": "+ New chat"},
@@ -2257,15 +2257,13 @@
         {"wait": "Welcome to Rui"}
       ],
       "expect": [
+        "Notifications",
         "Welcome to Rui",
         "ChatGPT",
         "API key",
         "Close"
       ],
-      "absent": [
-        "Notifications",
-        "Version"
-      ],
+      "absent": [],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
