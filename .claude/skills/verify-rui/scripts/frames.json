@@ -6321,6 +6321,40 @@
       ]
     },
     {
+      "name": "send-host-stopped",
+      "note": "Enter in a chat whose Host is stopped sends nothing, keeps the draft and says the Host is not ready (#1947)",
+      "open": "Stopped send witness",
+      "cast": [
+        {
+          "label": "Stopped send witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Host stop witness"
+          ]
+        }
+      ],
+      "steps": [
+        {"wait": "Host stop witness"},
+        {"host": "pause"},
+        {"wait": "Host stopped"},
+        {"text": "Kept while stopped"},
+        {"wait": "Kept while stopped"},
+        {"keys": ["Enter"]},
+        {"wait": "Host not ready; nothing sent"}
+      ],
+      "expect": [
+        "Host stop witness",
+        "Kept while stopped",
+        "Host not ready; nothing sent. Draft retained.",
+        "Host stopped"
+      ],
+      "absent": [
+        "Input still pending",
+        "Not confirmed"
+      ]
+    },
+    {
       "name": "provider-unserved-night",
       "note": "A cast Session on codex keeps its chat after the Host restarts serving only openai; a message typed in the composer then says its provider isn't served by this Host (the cast turn's earlier Sign-in notice stays in history)",
       "theme": "night",

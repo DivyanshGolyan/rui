@@ -625,6 +625,12 @@ fn clickCommand(self: *Self, text: []const u8) !void {
     try self.slashCommand(text);
 }
 
+/// The one set of facts that decides whether Enter may send, read by the key
+/// step and by the refusal notice alike.
+fn sendFacts(self: *const Self) session_keys.Facts.Send {
+    return .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null or self.submission.messageHeld() };
+}
+
 fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
     if (self.submission.messageHeld() and self.submission.intent == null) {
         self.refreshAcceptedMessage();
@@ -632,7 +638,11 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
     }
     const phase = self.upgradePhase();
     const command = self.input.queuedCommand() != null or self.inspection.command_running;
-    self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
+    const refusal = self.sendFacts().refusal();
+    // The Host line is a past reading: a send refused on it asks for a fresh
+    // one, so a Host that came back is seen at once (#1947).
+    if (refusal == .host) _ = self.hostFailure();
+    self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .refusal = refusal, .held = self.heldOriginal(), .action = action, .letter = letter });
 }
 
 pub fn titleName(self: *const Self) []const u8 {
@@ -819,7 +829,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .draft_empty = self.input.composition().bytes.len == 0,
         .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
         .shown_row = accepted != null,
-        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null or self.submission.messageHeld() },
+        .send = self.sendFacts(),
     }, input);
     switch (take) {
         .taken => {},
@@ -9247,6 +9257,40 @@ test "chat info archive owner errors propagate instead of becoming ordinary admi
     try std.testing.expect(held.self.app_info.failures[7] == null);
     try std.testing.expectEqual(.idle, held.self.info_effect);
     try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+}
+
+test "Enter while the Host line or opening holds sending keeps the draft, names that reason, and a held Host is read again" {
+    const Host = struct {
+        stopped: bool,
+        reads: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            return @as(*@This(), @ptrCast(@alignCast(raw))).stopped;
+        }
+        fn lost(raw: *anyopaque) void {
+            @as(*@This(), @ptrCast(@alignCast(raw))).reads += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.UnexpectedHostStart;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |opening| {
+        if (!stopped and !opening) continue;
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var host: Host = .{ .stopped = stopped };
+        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .startable = TestHost.never, .start = Host.start, .notice = Host.notice };
+        defer held.self.app_hooks.host = null;
+        held.self.reading.opening = opening;
+        defer held.self.reading.opening = false;
+        try held.keys("sent right after a restart\r");
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+        try std.testing.expectEqualStrings("sent right after a restart", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings(if (stopped) session_notice.host_not_ready else session_notice.opening_not_ready, held.self.shown_notice.current(held.self.nowMs()).?);
+        try std.testing.expectEqual(@as(usize, @intFromBool(stopped)), host.reads);
+    };
 }
 
 test "chat info Configure and Copy admission either owns work or refuses before publishing pending" {

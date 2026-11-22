@@ -200,8 +200,21 @@ pub const Facts = struct {
         command_active: bool = false,
         submitting: bool = false,
 
+        /// Why Enter sends nothing, most pressing first; the refusal notice
+        /// reads this same value, so every refused send names its reason.
+        pub const Refusal = enum { command, host, opening, preparing, submitting };
+
+        pub fn refusal(send: Send) ?Refusal {
+            if (send.command_active) return .command;
+            if (send.host_held) return .host;
+            if (send.opening) return .opening;
+            if (send.preparing) return .preparing;
+            if (send.submitting) return .submitting;
+            return null;
+        }
+
         pub fn allowed(send: Send) bool {
-            return !send.host_held and !send.opening and !send.preparing and !send.command_active and !send.submitting;
+            return send.refusal() == null;
         }
     };
 };
