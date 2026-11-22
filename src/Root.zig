@@ -980,7 +980,9 @@ test "App root routes typed and pasted settings text only to the Model filter wi
 
 test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
-    var page: @import("SignIn.zig") = .{ .style = .{ .bg = .{ .rgb = .{ 0xf4, 0xef, 0xe2 } } } };
+    var page: @import("SignIn.zig") = .{};
+    // Unframed, the dialog fills the screen with its own raised ground.
+    const raised = @import("widget_style.zig").of(page.caps, .{ .background = .raised });
     var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
@@ -1003,7 +1005,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
             // unframed, it fills the screen with the ground so nothing covered sits beside it.
             try std.testing.expectEqual(@as(usize, if (width >= 40 and height >= 10) 0 else width * height), cover.buffer.len);
             for (cover.buffer) |cell| {
-                try std.testing.expect(cell.style.eql(page.style));
+                try std.testing.expect(cell.style.eql(raised));
                 try std.testing.expect(cell.char.grapheme.len == 0 or std.mem.eql(u8, cell.char.grapheme, " "));
             }
             try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);

@@ -153,7 +153,9 @@ const indexed = blk: {
     for (std.enums.values(Mode)) |mode| {
         const table = tables.getPtr(mode);
         for (std.enums.values(Background)) |ground| {
-            table.backgrounds.set(ground, if (mode == .dark and ground == .selection) 238 else nearestIndex(background(mode, .direct, ground).direct));
+            // The day card rounds to pure white (231), which the cloth never uses; it keeps the
+            // ground's entry instead, and the scrim alone sets it apart.
+            table.backgrounds.set(ground, if (mode == .dark and ground == .selection) 238 else if (mode == .light and ground == .raised) nearestIndex(light.ground) else nearestIndex(background(mode, .direct, ground).direct));
             var colours = std.enums.EnumArray(Text, u8).initUndefined();
             for (std.enums.values(Text)) |role| {
                 colours.set(role, if (mode == .light and role == .attention) 58 else if (mode == .dark and ground == .selection and role == .quiet) 249 else nearestIndex(text(mode, .direct, role, ground).direct));
@@ -231,7 +233,8 @@ test "THM-1 palette roles retain their cloth colours" {
 test "THM-2 indexed colours use nearest xterm entries with accessible distinct surfaces" {
     for (std.enums.values(Mode)) |mode| {
         for (std.enums.values(Background)) |bg| {
-            const expected: u8 = if (mode == .dark and bg == .selection) 238 else nearestIndex(background(mode, .direct, bg).direct);
+            const expected: u8 = if (mode == .dark and bg == .selection) 238 else if (mode == .light and bg == .raised) nearestIndex(light.ground) else nearestIndex(background(mode, .direct, bg).direct);
+            try std.testing.expect(expected != 231 and expected != 16);
             try std.testing.expectEqual(expected, background(mode, .indexed, bg).indexed);
             for (std.enums.values(Text)) |fg| {
                 const ink: u8 = if (mode == .light and fg == .attention) 58 else if (mode == .dark and bg == .selection and fg == .quiet) 249 else nearestIndex(text(mode, .direct, fg, bg).direct);

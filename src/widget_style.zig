@@ -63,7 +63,7 @@ test "backdrop is the thread on a scrim darker than the ground and the raised ca
         const raised = lum(of(caps, .{ .background = .raised }).bg);
         try std.testing.expect(scrim < ground);
         try std.testing.expect(scrim < raised);
-        // Indexed day cloth may round the raised card and the ground to one entry.
+        // Indexed day cloth gives the raised card the ground's entry rather than pure white.
         try std.testing.expect(if (depth == .direct) raised > ground else raised >= ground);
     };
 }
@@ -238,7 +238,7 @@ test "widget indexed colours use nearest xterm entries and decided pins" {
             const direct = of(.{ .background = terminal }, role);
             const indexed = of(.{ .depth = .indexed, .background = terminal }, role);
             const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else if (terminal == null and ground == .selection and (colour == .quiet or colour == .mark)) 249 else Check.nearest(direct.fg.rgb);
-            const expected_bg: u8 = if (terminal == null and ground == .selection) 238 else Check.nearest(direct.bg.rgb);
+            const expected_bg: u8 = if (terminal == null and ground == .selection) 238 else if (terminal != null and ground == .raised) Check.nearest(of(.{ .background = terminal }, .{}).bg.rgb) else Check.nearest(direct.bg.rgb);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_fg }, indexed.fg);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_bg }, indexed.bg);
         };

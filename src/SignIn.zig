@@ -202,9 +202,6 @@ reporting_failure: ?anyerror = null,
 userdata: ?*anyopaque = null,
 on_done: ?*const fn (*anyopaque, *vxfw.EventContext, Activation) anyerror!void = null,
 on_close: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
-style: vaxis.Style = .{},
-quiet: vaxis.Style = .{},
-selection_style: vaxis.Style = .{ .reverse = true },
 unicode: bool = true,
 caps: @import("overview_view.zig").Caps = .{},
 form: ?pages.Mapped(Form) = null,
@@ -1165,13 +1162,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var footer_surface: ?vxfw.Surface = null;
     if (width > 6 and self.state.page == .device) {
         const footer = try a.create(vxfw.Text);
-        footer.* = .{ .text = "C copies code. Esc back.", .style = self.quiet, .width_basis = .parent };
+        footer.* = .{ .text = "C copies code. Esc back.", .style = self.look().quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
         if (natural.size.height + 3 + frame.height <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
-    var rule_caps = self.caps;
-    rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
         .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
@@ -1184,19 +1179,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .top_rule = !framed,
         .centered_heading = true,
         .selected = selected,
-        .ground = self.style,
-        .selection = self.selection_style,
-        .quiet = self.quiet,
-        .title_style = self.onGround(.{ .bold = true }),
-        .hover_style = self.onGround(.{ .ul_style = .single }),
-        .rule = self.stitch(rule_caps, .horizontal),
+        .ground = self.look().ground,
+        .selection = self.look().selection,
+        .quiet = self.look().quiet,
+        .title_style = self.look().title,
+        .rule = stitch(self.look().caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - frame.height - footer_height }));
     const height = panel_surface.size.height + footer_height;
     const origin: vxfw.RelativePoint = .{ .row = @intCast((size.height - height) / 2), .col = @intCast((size.width - width) / 2) };
     var child = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
-    @memset(child.buffer, .{ .style = self.style });
+    @memset(child.buffer, .{ .style = self.look().ground });
     @memcpy(child.buffer[0..panel_surface.buffer.len], panel_surface.buffer);
     child.cursor = panel_surface.cursor;
     const extra: usize = @intFromBool(footer_surface != null);
@@ -1220,27 +1214,27 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (action == .copy and self.drawn.copy == null) continue;
             if (target_.index == selected) focused_visible = true;
             if (action == .open and field) {
-                const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.style, action.open);
+                const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.look().ground, action.open);
                 for (@min(Panel.value_column, Panel.valueEnd(width))..Panel.valueEnd(width)) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
             }
             try hits.append(a, .{ .row = @intCast(origin.row + target_.row), .start = @intCast(origin.col + target_.start), .end = @intCast(origin.col + target_.end), .action = action });
         }
     }
     if (height <= 2) {
-        @memset(child.buffer, .{ .style = self.style });
+        @memset(child.buffer, .{ .style = self.look().ground });
         const selected_action = if (selected < rows.items.len) rows.items[selected].action else buttons.items[selected - rows.items.len].action;
         const selected_label = if (selected < rows.items.len) rows.items[selected].label else buttons.items[selected - rows.items.len].label;
         if (selected_action != null and selected_action.? == .copy and selected_action.?.copy.len <= width) {
             self.drawn.copy = selected_action.?.copy;
-            _ = line.paint(ctx, child, try a.dupe(u8, selected_action.?.copy.slice()), 0, 0, self.selection_style, width);
+            _ = line.paint(ctx, child, try a.dupe(u8, selected_action.?.copy.slice()), 0, 0, self.look().selection, width);
         } else if (selected_action != null and selected_action.? == .field and self.form != null) {
             const field = selected_action.?.field;
             const view = try editView(ctx, self.form.?.value.editor(field), field == .key, width);
-            _ = line.paint(ctx, child, view.text, 0, 0, self.selection_style, width);
+            _ = line.paint(ctx, child, view.text, 0, 0, self.look().selection, width);
             child.cursor = .{ .row = 0, .col = view.caret };
         } else {
             if (self.state.page == .device) self.drawn.copy = null;
-            _ = line.paint(ctx, child, selected_label, 0, 0, self.selection_style, width);
+            _ = line.paint(ctx, child, selected_label, 0, 0, self.look().selection, width);
         }
         if (selected_action) |action| {
             if (action != .copy or self.drawn.copy != null) {
@@ -1260,7 +1254,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // covered text can sit beside the dialog's rows. Either way every click lands here.
     if (framed) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
     var cover = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(cover.buffer, .{ .style = self.style });
+    @memset(cover.buffer, .{ .style = self.look().ground });
     cover.children = children;
     return cover;
 }
@@ -1276,11 +1270,9 @@ const card_inset: vxfw.Size = .{ .width = 3, .height = 2 };
 fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocator.Error!vxfw.Surface {
     const size: vxfw.Size = .{ .width = content.width + 2 * card_inset.width, .height = content.height + 2 * card_inset.height };
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-    @memset(surface.buffer, .{ .style = self.style });
-    var caps = self.caps;
-    caps.unicode = self.unicode;
-    const across = self.stitch(caps, .horizontal);
-    const upright = self.stitch(caps, .vertical);
+    @memset(surface.buffer, .{ .style = self.look().ground });
+    const across = stitch(self.look().caps, .horizontal);
+    const upright = stitch(self.look().caps, .vertical);
     for (1..size.width - 1) |col| {
         surface.writeCell(@intCast(col), 1, across);
         surface.writeCell(@intCast(col), size.height - 2, across);
@@ -1292,17 +1284,26 @@ fn card(self: *Self, ctx: vxfw.DrawContext, content: vxfw.Size) std.mem.Allocato
     return surface;
 }
 
-/// `style` laid on the dialog's own ground, so no cell of the dialog shows the ground beneath.
-fn onGround(self: *const Self, style: vaxis.Style) vaxis.Style {
-    var result = style;
-    result.bg = self.style.bg;
-    return result;
+/// The dialog's palette. It lies on the raised ground, lighter than the cloth, above a screen
+/// faded onto the darker scrim; every cell of it (title, rule, stitch, text) carries that ground.
+const Look = struct { ground: vaxis.Style, quiet: vaxis.Style, selection: vaxis.Style, title: vaxis.Style, caps: @import("overview_view.zig").Caps };
+
+fn look(self: *const Self) Look {
+    var caps = self.caps;
+    caps.unicode = self.unicode;
+    const of = @import("widget_style.zig").of;
+    return .{
+        .ground = of(caps, .{ .background = .raised }),
+        .quiet = of(caps, .{ .colour = .quiet, .background = .raised }),
+        .selection = of(caps, .{ .background = .selection }),
+        .title = of(caps, .{ .colour = .strong, .background = .raised, .bold = true }),
+        .caps = caps,
+    };
 }
 
-fn stitch(self: *const Self, caps: @import("overview_view.zig").Caps, which: @import("widget_style.zig").Line) vaxis.Cell {
-    var cell = @import("widget_style.zig").line(caps, which);
-    cell.style.bg = self.style.bg;
-    return cell;
+/// The running stitch in the thread colour, on the dialog's raised ground.
+fn stitch(caps: @import("overview_view.zig").Caps, which: @import("widget_style.zig").Line) vaxis.Cell {
+    return @import("widgets/Stitch.zig").cell(caps.unicode, which, @import("widget_style.zig").of(caps, .{ .colour = .rule, .background = .raised }));
 }
 
 test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {
@@ -2851,7 +2852,7 @@ test "Sign-in every guided page and focused control stays bounded and masked ove
 test "Sign-in lays every cell of its dialog on its own ground on every page, focus and size" {
     // The dialog is a raised surface above a dimmed screen; one cell left on the terminal's
     // ground (a rule, a title, a hovered row, a stitch) would be a hole in the card.
-    var page: Self = .{ .style = .{ .bg = .{ .index = 3 } }, .selection_style = .{ .bg = .{ .index = 4 } }, .quiet = .{ .fg = .{ .index = 5 }, .bg = .{ .index = 3 } } };
+    var page: Self = .{};
     defer page.closeForm();
     const form = try page.ensureForm();
     _ = form.key.set("key", 3);
@@ -2881,7 +2882,7 @@ test "Sign-in lays every cell of its dialog on its own ground on every page, foc
                 const height: usize = if (framed) laid.surface.size.height else size.height;
                 for (top..top + height) |row| for (left..left + width) |col| {
                     const bg = screen.buf[row * size.width + col].style.bg;
-                    try std.testing.expect(bg.eql(page.style.bg) or bg.eql(page.selection_style.bg));
+                    try std.testing.expect(bg.eql(page.look().ground.bg) or bg.eql(page.look().selection.bg));
                 };
             }
         }
