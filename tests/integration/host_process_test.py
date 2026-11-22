@@ -1859,7 +1859,7 @@ def prove_one_reply():
     sockets = []
     accepted = threading.Event()
 
-    class TrackedSocket(original_socket):
+    class Tracked:
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             sockets.append(self)
@@ -1868,6 +1868,18 @@ def prove_one_reply():
             result = super().accept()
             accepted.set()
             return result
+
+    class TrackedSocket(Tracked, original_socket):
+        pass
+
+    # unix_stream() builds os_semantics' own socket class, which socket.socket's patch cannot reach.
+    class TrackedUnixStream(Tracked, os_semantics._UnixStream):
+        pass
+
+    @contextlib.contextmanager
+    def tracked():
+        with patch("socket.socket", TrackedSocket), patch.object(os_semantics, "_UnixStream", TrackedUnixStream):
+            yield
 
     def request(length, padding=0):
         return (f"POST /fixture HTTP/1.1\r\nContent-Length: {length}\r\nX-Pad: ".encode()
@@ -1888,7 +1900,7 @@ def prove_one_reply():
         with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
             path = canonical_fixture_root(root) / "peer"
             try:
-                with patch("socket.socket", TrackedSocket):
+                with tracked():
                     yield path
             finally:
                 assert set(threading.enumerate()) == threads, "one-reply worker survived disposal"
@@ -1973,7 +1985,7 @@ def prove_one_reply():
         threads = set(threading.enumerate())
         with contextlib.ExitStack() as faults:
             try:
-                with patch("socket.socket", TrackedSocket):
+                with tracked():
                     with one_reply(path, b"unused"):
                         with connect(path) as client:
                             client.shutdown(socket.SHUT_WR)
