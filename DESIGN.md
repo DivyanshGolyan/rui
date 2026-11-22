@@ -62,7 +62,7 @@ The chat footer carries only news about that chat; app news, such as an upgrade,
 Rui means cotton, and the screens should feel like cloth, friendly and warm, not like a hacker's console.
 Grounds are cotton or dyed cotton: the night theme is indigo cloth, the day theme undyed cotton.
 Lines are stitches: rules and dividers use a dashed running stitch (`┄` horizontally, `┆` vertically) in the thread colour, quieter than any text. ASCII uses `-` and `|`; without colour the stitch remains uncoloured.
-A dialog above the screen is a card laid on the cloth: the screen behind fades in place, and the card's edge is the same stitch.
+A dialog above the screen is a card laid on the cloth: the screen behind fades in place onto a darker ground, the card is a lighter one, and the card's edge is the same stitch.
 Accents are dyes: indigo for links and names, turmeric for what needs the person, madder for what failed.
 Nothing glows: no neon, no pure black or pure white grounds, no reverse-video highlight.
 Words are warm too: a person has chats, not Sessions, and the screen speaks to them plainly ("No chats yet.").

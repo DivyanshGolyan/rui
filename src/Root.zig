@@ -980,7 +980,9 @@ test "App root routes typed and pasted settings text only to the Model filter wi
 
 test "Sign-in is centered above the covered screen across every small bound" {
     const background: vxfw.Text = .{ .text = "Retained draft" };
-    var page: @import("SignIn.zig") = .{ .style = .{ .bg = .{ .rgb = .{ 0xf4, 0xef, 0xe2 } } } };
+    var page: @import("SignIn.zig") = .{};
+    // Unframed, the dialog fills the screen with its own raised ground.
+    const raised = @import("widget_style.zig").of(page.caps.*, .{ .background = .raised });
     var root: Self = .{ .overview = background.widget(), .list = background.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     for ([_]bool{ false, true }) |unicode| {
         page.unicode = unicode;
@@ -1003,7 +1005,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
             // unframed, it fills the screen with the ground so nothing covered sits beside it.
             try std.testing.expectEqual(@as(usize, if (width >= 40 and height >= 10) 0 else width * height), cover.buffer.len);
             for (cover.buffer) |cell| {
-                try std.testing.expect(cell.style.eql(page.style));
+                try std.testing.expect(cell.style.eql(raised));
                 try std.testing.expect(cell.char.grapheme.len == 0 or std.mem.eql(u8, cell.char.grapheme, " "));
             }
             try std.testing.expectEqual(vxfw.Size{ .width = @intCast(width), .height = @intCast(height) }, cover.size);
@@ -1040,7 +1042,7 @@ test "Sign-in is centered above the covered screen across every small bound" {
     }
 }
 
-test "Sign-in fades the covered screen in the thread colour of the caps app settings draws with" {
+test "Sign-in fades the covered screen onto the scrim of the caps app settings draws with" {
     const Backend = struct {
         fn read(_: *anyopaque) !@import("preferences.zig").Values {
             return .{};
@@ -1070,11 +1072,12 @@ test "Sign-in fades the covered screen in the thread colour of the caps app sett
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
-    const thread = @import("widget_style.zig").line(Backend.caps(&context), .horizontal).style;
+    const day = @import("widget_style.zig").backdrop(Backend.caps(&context));
     // Day cloth: unlike the night default, so a Root that ignored app settings' caps fails.
-    try std.testing.expect(!thread.eql(@import("widget_style.zig").backdrop(.{})));
+    try std.testing.expect(!day.eql(@import("widget_style.zig").backdrop(.{})));
+    try std.testing.expectEqual(@import("widget_style.zig").line(Backend.caps(&context), .horizontal).style.fg, day.fg);
     try std.testing.expect(surface.children[0].surface.buffer.len > 0);
-    for (surface.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(thread));
+    for (surface.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.eql(day));
 }
 
 test "A faded screen holds what rendering shows: children above their parents in z order, clipped to them" {
