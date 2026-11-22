@@ -11276,6 +11276,15 @@ test "consent and full panels compose across adoption, nested choices, and draft
                 },
             }
         }
+        /// Whether the consent card shows: in the chat itself under Chat info, or, under the
+        /// Settings dialog, in the faded screen Root draws beneath the card.
+        fn consentShown(held: *HeldFrontend, panel: PanelCase) !bool {
+            const drawn = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+            if (panel == .info) return std.mem.indexOf(u8, try held.rendered(drawn), "Allow once") != null;
+            var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
+            for (drawn.children[0].surface.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            return std.mem.indexOf(u8, text.written(), "Allow once") != null;
+        }
         fn closeChoice(held: *HeldFrontend, panel: PanelCase) !void {
             switch (panel) {
                 .settings => held.root.settings_page.cancelChoice(),
@@ -11309,11 +11318,12 @@ test "consent and full panels compose across adoption, nested choices, and draft
         try std.testing.expect(held.self.app_input.permission == &held.self.app_card);
         // Chat info replaces the consent card; Settings is a dialog above the chat, where the
         // card stays visible but faded and takes no input.
-        const choice_text = try held.shownThroughRoot();
-        try std.testing.expectEqual(panel == .settings, std.mem.indexOf(u8, choice_text, "Allow once") != null);
-        try std.testing.expect(std.mem.indexOf(u8, choice_text, if (panel == .settings) "ask first" else "run without asking") != null);
+        // A draft typed before the request keeps focus, so the selector waits behind it.
+        const selector_shown = panel == .settings and !(adopt_before and draft);
+        try std.testing.expectEqual(selector_shown, try Steps.consentShown(held, panel));
+        try std.testing.expect(std.mem.indexOf(u8, try held.shownThroughRoot(), if (panel == .settings) "ask first" else "run without asking") != null);
         try Steps.closeChoice(held, panel);
-        try std.testing.expectEqual(panel == .settings, std.mem.indexOf(u8, try held.shownThroughRoot(), "Allow once") != null);
+        try std.testing.expectEqual(selector_shown, try Steps.consentShown(held, panel));
         try Steps.close(held, panel);
         if (!adopt_before and draft) {
             try held.keys("draft");
