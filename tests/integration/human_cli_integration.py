@@ -703,7 +703,9 @@ def chatgpt_method(master):
 
 def sign_in_focus(master, keys, previous, target):
     capture = terminal_capture(master)
-    rows = [row for row in capture.completed.splitlines() if row.lstrip().startswith(previous + " ")]
+    # The Sign-in card draws a stitched side before its items, so the label's indent counts from there.
+    items = [row.lstrip().removeprefix("┆") for row in capture.completed.splitlines()]
+    rows = [item for item in items if item.lstrip().startswith(previous + " ")]
     assert len(rows) == 1, (previous, capture.completed)
     column = len(rows[0]) - len(rows[0].lstrip())
 

@@ -1425,7 +1425,7 @@ def prove_partial_setup_cleanup():
                     ConnectionResetError("setup failed") if stage == "reset" else TimeoutError("setup failed")
                 )
                 getattr(connection, "sendall" if stage in ("broken-pipe", "reset", "not-connected") else stage).side_effect = failure
-            with patch.object(socket, "socket", return_value=connection):
+            with patch.object(os_semantics, "unix_stream", return_value=connection):
                 try:
                     candidate = open_partial("unused", "/v1/inspect-session", complete_headers=complete_headers)
                 except OSError as error:
