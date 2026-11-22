@@ -85,6 +85,8 @@ A step is one suite batch, one upgrade check or one contract; a suite job stops 
 Each failed step's suspect lines name the commits to read first, and a suspect is a candidate rather than a verdict; a manual bisect's verdict names the first failing commit, says the red did not reproduce at HEAD, or says it already fails at `stable`, and its replay logs are retained with the run.
 Two failed steps get separate suspect lists; the job's issues carry every suspect line, and a job with several causes says so.
 The run then files one `promotion-red` issue (`main-red` when scheduled) per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the suspects on it.
+Each new issue also carries an `escape:<class>` label and an `Escape class` line naming why the ready PR tier did not run the failing check (`macos`, `upgrade`, `live-mysql`, `stack-frames`, `cold-cache-timeout`, `pr-tier` or `unknown`; the job-to-class table is `ESCAPE_CLASSES` in report_issue.py).
+When a new issue's class already has an issue created within 14 days, the filer comments on it naming the earlier one and adds `escape-repeat`, which asks for a narrow `select_tests` rule; an `unknown` class never repeats.
 A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
 A suspect list never turns a promotion green, and a promotion never merges or reverts.
 From the start, beside the suites, [Release build](../../.github/workflows/release-build.yml) numbers the release and builds the cold versioned archives of main HEAD; it publishes nothing.

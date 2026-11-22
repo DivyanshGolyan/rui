@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -12,6 +13,7 @@ from unittest import mock
 import report_issue
 
 STAMP = "2026-10-29T13:44:55.1234567Z "
+NOW = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
 
 
 def logged(*lines):
@@ -364,20 +366,88 @@ class FakeGitHub:
         return [call for call in self.calls if call[:2] == ('issue', verb)]
 
 
-def issue(number, signature, paths, workflows, last_sha, state='OPEN'):
+def issue(number, signature, paths, workflows, last_sha, state='OPEN', escape='', created=NOW):
     recorded = dict(signature=signature, paths=paths, workflows=workflows, last_sha=last_sha)
-    return dict(number=number, state=state, body=report_issue.render(recorded, ''))
+    labels = [dict(name=f'escape:{escape}')] if escape else []
+    return dict(number=number, state=state, body=report_issue.render(recorded, ''), labels=labels,
+                createdAt=created.strftime('%Y-%m-%dT%H:%M:%SZ'))
+
+
+class EscapeClassTest(unittest.TestCase):
+    def test_each_escape_class_and_an_unmatched_job_map_from_the_job_and_its_stopping_step(self):
+        plain = report_issue.Cause('signature')
+        mysql = report_issue.Cause('signature', ['tests/integration/mysql_wire_integration.py'])
+        failed, cancelled = 'failure', 'cancelled'
+        rows = [
+            # job name, job conclusion, its steps (name, conclusion), cause, expected class
+            ('qualify / upgrade (macos-15)', 'failure', [('Start detached, then install', failed)], plain, 'upgrade'),
+            ('qualify / selected / linux suites (stack-frames)', 'failure', [('Run selected targets', failed)], plain,
+             'stack-frames'),
+            ('qualify / selected / macos suites (native)', 'failure', [('Run selected targets', failed)], plain, 'macos'),
+            ('qualify / selected / linux suites (mysql-wire-integration)', 'failure', [('Run selected targets', failed)],
+             plain, 'live-mysql'),
+            ('qualify / selected / linux suites (test-store)', 'failure', [('Run selected targets', failed)], mysql,
+             'live-mysql'),
+            ('qualify / selected / linux suites (test-logic)', 'timed_out', [('Run selected targets', cancelled)], plain,
+             'cold-cache-timeout'),
+            ('qualify / selected / linux_build', 'failure', [('Build the artifact', failed)], plain, 'pr-tier'),
+            ('qualify / selected / linux suites (test-native)', 'failure', [('Run selected targets', failed)], plain,
+             'pr-tier'),
+            ('qualify / renderer / contracts', 'failure', [('Run the contracts', failed)], plain, 'unknown'),
+        ]
+        self.assertEqual({expected for *_, expected in rows}, set(report_issue.ESCAPE_REASONS))
+        for name, conclusion, steps, cause, expected in rows:
+            job = dict(name=name, conclusion=conclusion, steps=[dict(name=step, conclusion=c) for step, c in steps])
+            with self.subTest(job=name):
+                self.assertEqual(report_issue.escape_class(job, cause), expected)
 
 
 class ReportTest(unittest.TestCase):
-    def run_main(self, fake, *args):
+    def run_main(self, fake, *args, now=NOW):
         argv = ['report_issue.py', '--workflow', 'Daily macOS qualification', '--run-id', '9', '--sha', 'c' * 40]
         with mock.patch.object(report_issue, 'gh', fake), mock.patch.object(sys, 'argv', argv + list(args)), \
                 mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
                 mock.patch.object(report_issue, 'LOG_RETRY_DELAYS', (0, 0)), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            report_issue.main()
+            report_issue.main(now=now)
         return out.getvalue()
+
+    def test_a_new_escape_repeating_its_class_within_14_days_is_flagged_once(self):
+        earlier = [(5, 'OPEN', {}, 'macos', NOW - timedelta(days=3))]
+        self.assertEqual(report_issue.repeat_of('macos', earlier, NOW), 5)
+        self.assertIsNone(report_issue.repeat_of('macos', [(5, 'CLOSED', {}, 'macos', NOW - timedelta(days=15))], NOW))
+        self.assertIsNone(report_issue.repeat_of('upgrade', earlier, NOW))
+        self.assertIsNone(report_issue.repeat_of('unknown', [(5, 'OPEN', {}, 'unknown', NOW)], NOW))
+
+        def run_against(*existing):
+            fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH}, list(existing))
+            self.run_main(fake)
+            return fake
+
+        signature = 'tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError'
+        flagged = run_against(issue(5, 'other', [], ['Promote'], 'a' * 40, escape='macos', created=NOW - timedelta(days=3)))
+        [create] = flagged.made('create')
+        labels = [create[i + 1] for i, arg in enumerate(create) if arg == '--label']
+        self.assertEqual(labels, ['ci-red', 'escape:macos', 'escape-repeat'])
+        self.assertIn('Escape class: macos: the ready PR tier runs no macOS job',
+                      create[create.index('--body') + 1])
+        [comment] = flagged.made('comment')
+        self.assertEqual(comment[comment.index('--body') + 1],
+                         'Second macos escape in 14 days (#5): add a narrow select_tests rule (see #1965 unit 2)')
+
+        older = run_against(issue(5, 'other', [], ['Promote'], 'a' * 40, escape='macos', created=NOW - timedelta(days=15)))
+        self.assertNotIn('escape-repeat', older.made('create')[0])
+        self.assertEqual(older.made('comment'), [])
+
+        other_class = run_against(issue(5, 'other', [], ['Promote'], 'a' * 40, escape='upgrade', created=NOW - timedelta(days=3)))
+        self.assertNotIn('escape-repeat', other_class.made('create')[0])
+        self.assertEqual(other_class.made('comment'), [])
+
+        recurrence = run_against(issue(5, signature, [], ['Promote'], 'a' * 40, escape='macos', created=NOW - timedelta(days=3)))
+        self.assertEqual(recurrence.made('create'), [])
+        [comment] = recurrence.made('comment')
+        self.assertEqual(comment[2], '5')
+        self.assertNotIn('Second', comment[comment.index('--body') + 1])
 
     def test_a_new_cause_opens_one_labelled_issue_and_a_recurrence_comments(self):
         fake = FakeGitHub([dict(id=1, name='macos / full-execution', conclusion='failure')], {1: BASH})
@@ -385,7 +455,7 @@ class ReportTest(unittest.TestCase):
         [create] = fake.made('create')
         self.assertIn('CI red: tests/integration/bash_integration.py: assert process_exists(child_pid) raised AssertionError', create)
         self.assertEqual([create[i + 1] for i, arg in enumerate(create) if arg == '--label'],
-                         ['ci-red', 'stable-red'])
+                         ['ci-red', 'stable-red', 'escape:macos'])
         state = report_issue.signature_state(create[create.index('--body') + 1])
         self.assertEqual(state['paths'], ['tests/integration/bash_integration.py'])
 
