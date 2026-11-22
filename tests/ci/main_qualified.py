@@ -6,8 +6,8 @@ qualification tier (qualification-tier.yml) on the commit it publishes when
 that commit has no verdict yet, and publishes a commit with a green record from
 the archives that run built and tested, without qualifying it again. Each run
 records its verdict as a commit status named `main-qualified` whose target is
-that run. A scheduled run skips a HEAD whose record is red: the failing run
-already filed its issues.
+that run. A scheduled run skips a HEAD whose record is red, since the failing
+run already filed its issues, and fails, naming that run, until main is fixed.
 
 Commands (each prints KEY=VALUE lines for $GITHUB_OUTPUT):
 
@@ -15,7 +15,8 @@ Commands (each prints KEY=VALUE lines for $GITHUB_OUTPUT):
       Promote's commit: main HEAD, a named first-parent commit of main after
       stable, or the newest green one; with `reuse`, `run` and `version` when
       its green record's archives can still be published. A scheduled run with
-      a red HEAD promotes nothing (size 0) instead of refusing.
+      a red HEAD promotes nothing (size 0) instead of refusing, and sets
+      `red_run` to the red record's run so Promote's batch job fails.
   verdict RESULT...
       The record's state for the tier job results.
   record --sha SHA --state STATE --run-id ID [--version V]
@@ -160,7 +161,7 @@ def plan(sha):
 def choose(main, sha, commits, record, publishable, scheduled=False):
     """Promote's commit among COMMITS after stable (newest, main first) and its green record when
     PUBLISHABLE(record, commit) finds no reason to qualify again: (commit, record or None, reason).
-    A SCHEDULED run whose commit failed promotes nothing: (None, None, reason)."""
+    A SCHEDULED run whose commit failed promotes nothing: (None, the red record, reason)."""
     if sha in ("", main):
         chosen = main
     elif sha == "qualified":
@@ -176,14 +177,21 @@ def choose(main, sha, commits, record, publishable, scheduled=False):
     own = record(chosen)
     if own is not None and own.state == "failure":
         if scheduled:
-            return None, None, (f"{chosen} failed qualification in run {own.run_id}; "
-                                "the next scheduled run waits for a fix on main")
+            if own.run_id is None:
+                raise SystemExit(f"{chosen} failed qualification, but its {CONTEXT} record names no run")
+            return None, own, (f"{chosen} failed qualification in run {own.run_id}; "
+                               "the next scheduled run waits for a fix on main")
         raise SystemExit(f"{chosen} failed qualification in run {own.run_id}; fix forward and promote a later "
                          "commit, or choose an earlier green one with sha=qualified")
     reason = publishable(own, chosen) if own is not None and own.state == "success" else "no green record"
     if reason is not None and chosen != main:
         raise SystemExit(f"{chosen} cannot be published as qualified ({reason}); Promote qualifies only main HEAD")
     return chosen, own if reason is None else None, reason
+
+
+def skipped(base, red):
+    """Promote's outputs for a scheduled run over a red HEAD: nothing promoted, and the red record's run named."""
+    return {"head": "", "base": base, "size": "0", "reuse": "false", "run": "", "version": "", "red_run": red.run_id}
 
 
 def record(repository, sha, state, run_id, version):
@@ -236,7 +244,7 @@ def main():
 
         chosen, own, reason = choose(args.main, args.sha, commits, recorded, publishable, args.scheduled)
         if chosen is None:
-            emit({"head": "", "base": floor, "size": "0", "reuse": "false", "run": "", "version": ""}, [reason])
+            emit(skipped(floor, own), [reason])
             return 0
         size = len(first_parent(floor, chosen))
         lines = [f"Promoting {size} main commits after stable {floor}, up to {chosen}:", *batch_log(floor, chosen)]

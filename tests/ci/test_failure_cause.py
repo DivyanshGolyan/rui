@@ -160,6 +160,25 @@ class WiringTest(unittest.TestCase):
                       "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release,
                       "Release runs only on a reused green record or a successful tier")
 
+    def test_a_red_scheduled_head_fails_as_a_check_so_no_retry_reruns_it(self):
+        # main_qualified's red HEAD: Promote's batch fails at the step after the choice, which must classify as a check.
+        text = (ROOT / ".github/workflows/promote.yml").read_text()
+        step = re.search(r"(?ms)^      - name: (Fail a scheduled run whose main HEAD is red)\n(.*?)(?=^      - name: |^  \w|\Z)",
+                         text)
+        self.assertIn("if: ${{ steps.batch.outputs.red_run != '' }}", step[2])
+        stamp = "2026-11-22T10:00:00Z"
+        job = {"id": 1, "name": "batch", "status": "completed", "conclusion": "failure", "labels": ["ubuntu-24.04"],
+               "steps": [{"name": "Set up job", "conclusion": "success", "started_at": stamp, "completed_at": stamp},
+                         {"name": step[1], "conclusion": "failure", "started_at": stamp, "completed_at": stamp}]}
+        found = causes([job], lambda _: [], lambda _: None)
+        self.assertEqual([kind for _, kind, _ in found], ["check"])
+        run = dict(id=7, name="Promote", event="schedule", conclusion="failure", run_attempt=1, head_sha="a" * 40)
+        self.assertEqual(retry_refusal(run, found, 7), "checks failed: batch")
+        # qualify has no status function, so a failed batch skips it; Release needs batch's result to be success.
+        qualify = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  \w)", text)[1]
+        self.assertIn("if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}", qualify)
+        self.assertNotIn("always()", qualify)
+
     def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):
         text = (ROOT / ".github/workflows/infra-retry.yml").read_text()
         self.assertIn("workflows: [Selected checks, Promote]", text)
