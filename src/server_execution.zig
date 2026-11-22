@@ -685,7 +685,7 @@ fn watchDrain(host: *Host, drain: *?host_drain.Watch, workspace: *Workspace, nat
     drain.*.?.until_ns = until;
     const decision = drain.*.?.observe(.{
         .now_ns = server_host.nowNs(host),
-        .idle = outcome == .wait and outcome.wait == .idle,
+        .idle = outcome == .wait and !native.workInFlight(),
         .running = host.custody.running(),
         .retry = workspace.turn_state.retryOutlook(native.unixMilliseconds()),
     });
@@ -845,6 +845,13 @@ const NativeTurn = struct {
             else => {},
         };
         return true;
+    }
+
+    /// A model call, Bash command, MCP call or image read holds execution.
+    /// Pooled provider connections and catalog listings are not Turn work.
+    pub fn workInFlight(self: *const NativeTurn) bool {
+        if (hasOwnedSlots(self.slots) or self.mcp.any()) return true;
+        return if (self.images) |images| images.any() else false;
     }
 
     pub fn hasTransport(self: *const NativeTurn) bool {

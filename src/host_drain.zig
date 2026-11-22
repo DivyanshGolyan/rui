@@ -68,7 +68,8 @@ pub const RetryOutlook = union(enum) {
 /// Facts from one completed execution pass.
 pub const Pass = struct {
     now_ns: u64,
-    /// Nothing progressed and no transport, Bash or MCP call is in flight.
+    /// Nothing progressed and no model call, Bash command, MCP call or image
+    /// read holds execution; an idle pooled connection does not count.
     idle: bool,
     /// Effects in custody still running or about to launch, background
     /// Actions included; retained cleanup is not counted.
