@@ -127,7 +127,7 @@ def main():
             host, _ = start_ready_process(
                 HostServeDialect(baseline).host_arguments(state / "store",
                     f"http://127.0.0.1:{endpoint.server_port}/responses", retry_waits=False),
-                isolate_providers=False)
+                isolate_settings=False)
             try:
                 cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
                     "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")

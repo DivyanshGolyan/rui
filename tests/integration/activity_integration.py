@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from control_fixture import command, configure, inspect_execution, message, observe, start_host as control_start_host, stop_session, successful_sse
+from control_fixture import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse
 from host_process import wait_for
 from conversation_page_fixture import host_resources
 from conversation_page_fixture import idle_resources, provider_connections
@@ -28,11 +28,6 @@ SESSION = None
 TEXT = "é中🙂\n\\\"/" * 12000
 CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
-
-
-def start_host(store, endpoint):
-    # Exclude external catalog connections from this reader-FD census.
-    return control_start_host(store, endpoint, "--set", "models.catalogUrl=http://127.0.0.1:1/api.json")
 
 
 def caller(store, mode, *args, session=None, ok=True, timeout=10):

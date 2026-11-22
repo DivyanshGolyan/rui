@@ -317,7 +317,7 @@ def main():
             seed, ready = start_ready_process(
                 dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                        retry_waits=not args.running_host),
-                required_fields={"execution": "enabled"}, isolate_providers=False,
+                required_fields={"execution": "enabled"}, isolate_settings=False,
             )
             session = dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
             dialect.message(root, store, "upgrade-message", session, "Save this real work.")
@@ -405,7 +405,7 @@ def main():
                 dialect = previous_cli
                 seed, _ = start_ready_process(
                     dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-                    required_fields={"execution": "enabled"}, isolate_providers=False,
+                    required_fields={"execution": "enabled"}, isolate_settings=False,
                 )
             recovered = dialect.observe(store, "upgrade-message")
             assert recovered["result"]["status"] == "completed", recovered

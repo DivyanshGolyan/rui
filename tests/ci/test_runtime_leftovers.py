@@ -215,7 +215,7 @@ class HostDisposal(unittest.TestCase):
 
     def start(self, store, mode="serve"):
         args = [sys.executable, str(self.script), "host", "serve", "--store", str(store), "--mode", mode]
-        return HOST.start_ready_process(args, env=self.env, isolate_providers=False)[0]
+        return HOST.start_ready_process(args, env=self.env, isolate_settings=False)[0]
 
     def kill(self, process):
         process.kill()

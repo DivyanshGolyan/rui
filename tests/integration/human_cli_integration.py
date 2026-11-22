@@ -1722,9 +1722,7 @@ def main(selected="all"):
     race_message_release = threading.Event()
     completed = False
     try:
-        # The overview checks below compare whole session lists, read_version included. A live models.dev answer
-        # commits model facts whenever it arrives and moves that version, so this Host never reaches models.dev.
-        host = fixture.start_host(store, url, "--set", "models.catalogUrl=http://127.0.0.1:1/api.json")
+        host = fixture.start_host(store, url)
         defaults(home, "--store", store)
         saved_capture_cases(state, store, workspace)
         preferences_home = state / "preferences-home"
