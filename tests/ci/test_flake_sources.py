@@ -215,9 +215,9 @@ class FlakeSourcesTest(unittest.TestCase):
             git('update-ref', 'refs/remotes/origin/main', 'HEAD')
             self.assertEqual(flake.trusted_allowance(root), {})
             self.assertEqual(flake.review_base_ceiling(root), {})
-            target.write_text(json.dumps({'tests/x.py': {'fixed_sleep': 1, 'bad_rule': 3}}))
+            target.write_text(json.dumps({'tests/x.py': {'bad_rule': 3}}))
             git('add', '.')
-            git('commit', '-qm', 'invalid legacy')
+            git('commit', '-qm', 'invalid rule')
             git('update-ref', 'refs/remotes/origin/main', 'HEAD')
             with self.assertRaises(ValueError):
                 flake.trusted_allowance(root)
