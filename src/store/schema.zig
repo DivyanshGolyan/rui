@@ -998,8 +998,7 @@ pub const migrations = [_]Migration{
             // from parent_ref by one recursive read.
             "ALTER TABLE session ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
             "ALTER TABLE session ADD COLUMN app_lane TEXT REFERENCES session(session_ref) CHECK(app_lane IS NULL OR length(CAST(app_lane AS BLOB))=6)",
-            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) " ++
-                "UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
+            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
         },
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT NULL, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
