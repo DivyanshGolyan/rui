@@ -164,7 +164,8 @@ Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
 It asks the terminal for its background as it opens and uses night when the terminal does not say.
-It uses 24-bit colour when `COLORTERM` is `truecolor` or `24bit`, and the nearest 256 colours otherwise.
+It uses 24-bit colour when `COLORTERM` is `truecolor` or `24bit` or Windows Terminal set `WT_SESSION` (WSL drops `COLORTERM` but keeps `WT_SESSION`), and the nearest 256 colours otherwise.
+It also sets the terminal's own background (OSC 11) to the colour its ground shows, so the window's padding and edge strips match it; `NO_COLOR` leaves the terminal's background alone.
 `NO_COLOR` keeps the terminal's own colours, with bold and reverse only.
 A conversation you open shows your terminal's own colours, and so does the shell after you leave.
 

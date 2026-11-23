@@ -504,10 +504,7 @@ fn paintCursor(self: *Self) !void {
 }
 
 fn paintGround(self: *Self) !void {
-    if (self.caps.depth != .direct) return;
-    const theme = @import("theme.zig");
-    const mode: theme.Mode = if (self.caps.skin() == .day) .light else .dark;
-    const colour = theme.background(mode, .direct, .ground).direct;
+    const colour = @import("widget_style.zig").terminalGround(self.caps) orelse return;
     try self.attention.vx.setTerminalBackgroundColor(self.attention.out, colour);
 }
 
@@ -1168,7 +1165,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .hooks = hooks,
         .ops = ops,
         .state = undefined,
-        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
+        .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM"), .wt_session = init.environ_map.get("WT_SESSION") }),
         .interrupted = interrupted,
     };
     self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .pointer_free = .{ .context = self, .free = appPointerFree }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
@@ -2485,7 +2482,7 @@ test "SUI-40 pinned Session separator is ground and inert" {
     };
 }
 
-test "App cursor contrasts with the painted ground after terminal theme reports" {
+test "App cursor contrasts with the painted ground, and the terminal background matches it, after terminal theme reports" {
     const Check = struct {
         const luminance = @import("theme.zig").relativeLuminance;
         fn rgb(colour: vaxis.Color) [3]u8 {
@@ -2519,20 +2516,16 @@ test "App cursor contrasts with the painted ground after terminal theme reports"
             defer shown.deinit();
             const ground = Check.rgb(shown.screen.readCell(79, 10).?.style.bg);
             const background_prefix = "\x1b]11;rgb:";
-            if (depth == .direct) {
-                const background_start = std.mem.indexOf(u8, emitted, background_prefix);
-                try std.testing.expectEqual(true, background_start != null);
-                const background = emitted[background_start.? + background_prefix.len ..];
-                try std.testing.expect(background.len >= 14);
-                const painted: [3]u8 = .{
-                    try std.fmt.parseInt(u8, background[0..2], 16),
-                    try std.fmt.parseInt(u8, background[5..7], 16),
-                    try std.fmt.parseInt(u8, background[10..12], 16),
-                };
-                try std.testing.expectEqual(ground, painted);
-            } else {
-                try std.testing.expect(std.mem.indexOf(u8, emitted, "\x1b]11;") == null);
-            }
+            // The terminal's own background, which fills the window padding, is the ground's RGB at both depths.
+            const background_start = std.mem.indexOf(u8, emitted, background_prefix) orelse return error.TestUnexpectedResult;
+            const background = emitted[background_start + background_prefix.len ..];
+            try std.testing.expect(background.len >= 14);
+            const painted: [3]u8 = .{
+                try std.fmt.parseInt(u8, background[0..2], 16),
+                try std.fmt.parseInt(u8, background[5..7], 16),
+                try std.fmt.parseInt(u8, background[10..12], 16),
+            };
+            try std.testing.expectEqual(ground, painted);
             const a = Check.luminance(cursor);
             const b = Check.luminance(ground);
             const contrast = (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
