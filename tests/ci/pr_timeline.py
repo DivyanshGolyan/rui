@@ -34,8 +34,8 @@ every issue's open spans (overlapping or touching spans merged, still-open
 spans ending at the report time); two issues open at once count each minute
 once. A closed stretch counts green even when the issue is later reopened, so
 this report agrees with those issues' open/closed history by construction.
-Intervals split at UTC midnight and today's end at report time. The record starts with #1430's merge
-(RED_MAIN_KNOWN_FROM, 2026-11-13T11:56:38Z): a day that starts before it is
+Intervals split at UTC midnight and today's end at report time. The record starts with the first main-red issue,
+#1794 (RED_MAIN_KNOWN_FROM, 2026-11-18T14:53:24Z): a day that starts before it is
 unknown, never zero red minutes.
 """
 import argparse
@@ -53,7 +53,7 @@ from report_issue import LABEL as CI_RED_LABEL
 
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
-RED_MAIN_KNOWN_FROM = "2026-11-13T11:56:38Z"
+RED_MAIN_KNOWN_FROM = "2026-11-18T14:53:24Z"
 # Scheduled Promote's per-cause issues (promote.yml, qualification-tier.yml).
 RED_MAIN_LABEL = "main-red"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
