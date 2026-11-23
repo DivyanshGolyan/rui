@@ -349,6 +349,8 @@ pub const Host = struct {
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     background_after_ms: u64 = @import("host_settings.zig").default_background_after_ms,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
+    /// The owner of MCP re-lists; null when no MCP server is configured.
+    mcp_relist: ?*@import("server_mcp_relist.zig").Relist = null,
     retention: *output_retention.Queue = undefined,
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },

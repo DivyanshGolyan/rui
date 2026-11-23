@@ -298,27 +298,29 @@ pub const Store = struct {
         return &owned.tools;
     }
 
+    /// Replaces the Host tool set. The caller keeps `offered` alive until a later
+    /// `saveHostToolSet` returns; readers of `hostTools()` read it only inside Store access.
+    /// The pair `hostTools()` reports is swapped inside the queued write that commits
+    /// the final `host_tool_set` row, so a queued reader sees the old pair or the new one.
     pub fn saveHostToolSet(self: *Store, offered: *const tool_record.HostToolSet) !void {
         if (!offered.valid()) return error.InvalidHostToolSet;
         for (std.enums.values(tool_record.Tool)) |tool| {
             const index = offered.find(@tagName(tool)) orelse return error.InvalidHostToolSet;
             if (!std.mem.eql(u8, &offered.digests[index], &tool_record.built_in_tool_set.digests[@backingInt(tool)])) return error.InvalidHostToolSet;
         }
-        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        owned.tools = .{ .host_tool_set = offered, .set_id = 0 };
         const digest = tool_set_domain.toolSetDigest(offered);
-        if (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, @as(?usize, null) })) |set_id| {
-            owned.tools.set_id = set_id;
-            return;
-        }
+        if (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, @as(?usize, null) })) |_| return;
         var start: usize = 0;
         while (start < offered.records.len) : (start += tool_set_domain.records_per_transaction)
             _ = try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, start });
-        owned.tools.set_id = (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, offered.records.len })).?;
+        _ = (try self.queue().write(saveHostToolSetHeld, .{ self, offered, &digest, offered.records.len })).?;
     }
 
     fn saveHostToolSetHeld(self: *Store, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
-        return transition.apply(self, tool_set_domain.SaveHostToolSet, .{ .offered = offered, .digest = digest, .start = start }, .{});
+        const set_id = (try transition.apply(self, tool_set_domain.SaveHostToolSet, .{ .offered = offered, .digest = digest, .start = start }, .{})) orelse return null;
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        owned.tools = .{ .host_tool_set = offered, .set_id = set_id };
+        return set_id;
     }
 
     pub fn readHostToolSet(self: *Store, allocator: std.mem.Allocator) !?SavedHostToolSet {

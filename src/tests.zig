@@ -65,6 +65,7 @@ test {
     _ = @import("BashLifecycle.zig");
     _ = @import("word_search.zig");
     _ = @import("server_mcp.zig");
+    _ = @import("server_mcp_relist.zig");
     _ = @import("api_key.zig");
     _ = @import("attempt.zig");
     _ = @import("chatgpt_plan_login.zig");
@@ -95,6 +96,7 @@ test {
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");
     _ = @import("mcp/offered.zig");
+    _ = @import("mcp/relist.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("command_spec.zig");
     _ = @import("protocol.zig");

@@ -184,18 +184,23 @@ pub const HostToolSet = struct {
     pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
     pub const max_refusal_message_bytes = 768;
 
+    /// The refusal text is rendered when the tool is missing, so it does not
+    /// borrow the HostToolSet: a later save may free the set it came from.
     pub const MissingTool = struct {
-        name: Bounded(tool_name.max_bytes),
-        host_tool_set: *const HostToolSet,
+        text: Bounded(max_refusal_message_bytes) = .{},
 
         pub fn write(self: *const MissingTool, out: *std.Io.Writer) !void {
-            try self.host_tool_set.writeMissingTool(self.name.slice(), out);
+            try out.writeAll(self.text.slice());
         }
     };
 
+    /// `catch unreachable` is backed by the offered.zig test that renders the
+    /// longest tool name with the longest launch-server list into this bound.
     pub fn missingTool(self: *const HostToolSet, name: []const u8) MissingTool {
-        var detail: MissingTool = .{ .name = .{ .len = 0 }, .host_tool_set = self };
-        detail.name.set(name) catch unreachable;
+        var detail: MissingTool = .{};
+        var writer = std.Io.Writer.fixed(&detail.text.bytes);
+        self.writeMissingTool(name, &writer) catch unreachable;
+        detail.text.len = writer.buffered().len;
         return detail;
     }
 

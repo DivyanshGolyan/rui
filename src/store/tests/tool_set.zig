@@ -762,6 +762,48 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
     }.run);
 }
 
+test "a replaced Host tool set can be freed once the save returns" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+            const records_source = comptime testingHostToolRecords(&.{.{ .name = "kept", .owner = .mcp, .server = "notes", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}" }});
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            const first_records = try memory.allocator().dupe(tool_defs.Record, &records_source);
+            const first_digests = try memory.allocator().alloc([32]u8, first_records.len);
+            for (first_records, first_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            var first: tool_defs.HostToolSet = .{
+                .records = first_records,
+                .digests = first_digests,
+                .configured_servers = try memory.allocator().dupe([]const u8, &.{"notes"}),
+            };
+            try storage.saveHostToolSet(&first);
+
+            var second = tool_defs.built_in_tool_set;
+            second.configured_servers = &.{"notes"};
+            try storage.saveHostToolSet(&second);
+            memory.deinit();
+
+            var create = try completeConfiguration("replaced-set-create", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "bash", "lookup" });
+            const reply = try storage.configure(&create, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqualStrings("mcp_server_unavailable", @tagName(reply.rejected.code));
+            var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer text.deinit();
+            if (reply.rejected.message) |detail| try detail.write(&text.writer);
+            try std.testing.expectEqualStrings("spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it", text.written());
+            try std.testing.expectEqual(@as(*const tool_defs.HostToolSet, &second), storage.hostTools().host_tool_set);
+        }
+    }.run);
+}
+
 test "a model admission freezes an offer the Host's tool set no longer holds, and a later one reuses the set it saved" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

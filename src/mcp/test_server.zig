@@ -9,6 +9,8 @@ reply: []const u8,
 more: []const []const u8 = &.{},
 hold_reply: bool = false,
 request_received: std.atomic.Value(bool) = .init(false),
+/// Requests answered so far, counted before the reply is sent.
+requests: std.atomic.Value(usize) = .init(0),
 connection_closed: std.atomic.Value(bool) = .init(false),
 stopping: std.atomic.Value(bool) = .init(false),
 seen: [4096]u8 = undefined,
@@ -42,6 +44,7 @@ fn serve(self: *Script, reply: []const u8) void {
         self.seen_len += @intCast(read);
     }
     self.request_received.store(true, .release);
+    _ = self.requests.fetchAdd(1, .acq_rel);
     if (self.hold_reply) {
         var byte: [1]u8 = undefined;
         const received = std.c.recv(fd_, &byte, byte.len, 0);
