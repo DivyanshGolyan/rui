@@ -1887,7 +1887,7 @@ test "anthropic-messages/1 interprets the recorded stream to its items, call, an
 test "anthropic-messages/1 names each broken stream by its reason" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingWire(&tmp, messages_codec, messages_cut_in_block, 64 * 1024, .assistant_response));
+    try std.testing.expectError(error.IncompleteSseEvent, validateTestingWire(&tmp, messages_codec, messages_cut_in_block, 64 * 1024, .assistant_response));
     const before_stop = messages_recorded[0 .. messages_recorded.len - messagesData(messages_stop).len];
     try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, before_stop, 64 * 1024, .assistant_response));
     const multi_line = comptime messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}") ++
