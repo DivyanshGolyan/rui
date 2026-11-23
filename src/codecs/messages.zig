@@ -1,9 +1,11 @@
 //! The `anthropic-messages/1` codec: Anthropic's Messages API, streamed.
 //!
 //! A functional core: imports only std, codec_abi and codecs/json.zig, and names
-//! no model and no provider. No provider pins it yet. `codecs.compacts` is false
-//! for it: this wire has no provider compaction, so a compaction Operation never
-//! reaches it.
+//! no model and no provider. It is not yet a served codec: codecs.zig does not
+//! dispatch it, because the Reactor's compile-time check requires every served codec
+//! to observe the same response headers (see docs/contracts/model-io.md). `compacts`
+//! is false for it: this wire has no provider compaction, so a compaction Operation
+//! never reaches it.
 //!
 //! Stream interpretation has two steps, using Unit 1's `normalize` hook:
 //!   normalize:      raw SSE events -> fragments that assemble whole events. A
@@ -115,7 +117,7 @@ pub const Stream = struct {
 };
 
 pub fn begin(operation: codec_abi.Operation) Stream {
-    // A compaction Operation never reaches this codec (`codecs.compacts` is false).
+    // A compaction Operation never reaches this codec (`compacts` is false).
     std.debug.assert(operation == .assistant_response);
     return .{ .operation = operation };
 }
@@ -126,6 +128,23 @@ pub fn finish(stream: *const Stream) ?Reason {
         .in_block, .held => .provider_connection_closed,
         else => .incomplete_provider_output,
     };
+}
+
+/// This wire has no provider compaction: `compaction_trigger` declines and no Operation is compaction.
+pub const compacts = false;
+
+/// This wire declares no tools for a compaction request: `declare_open` declines.
+pub fn declaresTools() bool {
+    return false;
+}
+
+/// Effort is written on each request as top-level `output_config`, not as a history item, so no
+/// effort change is ever refused as an item; an invalid effort fails the request like any other 400.
+pub fn effortChangeRefused(scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
+    _ = scratch;
+    _ = status;
+    _ = body;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +353,7 @@ pub const Encoder = struct {
                 self.carry.messages = .first;
             },
             .history_end => {},
-            // No provider compaction on this wire (`codecs.compacts` is false).
+            // No provider compaction on this wire (`compacts` is false).
             .compaction_trigger => return error.Declined,
             .tools_start => {
                 // The history needs a message; the open message closes here, then the array.
@@ -1223,6 +1242,31 @@ pub fn hostedCall(document: []const u8, item_value: *const codec_abi.OutputItem)
 }
 
 // ---------------------------------------------------------------------------
+// HTTP error bodies
+// ---------------------------------------------------------------------------
+
+/// The scratch an HTTP error body is read into: the stream's Scan, so both share one table.
+pub const ClassifyScratch = struct {
+    reader: json.Reader = undefined,
+    scan: Scan = .{},
+};
+
+/// Classifies an error body `{"type":"error","error":{"type":…,"message":…}}` by the table the stream's
+/// error event uses. A body that is not that shape reports nothing and classifies as no outcome.
+pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.ErrorBody) void {
+    out.* = .{ .context_overflow = false, .refusal = null, .resets_at = null, .report = .{ .code = null, .message = null } };
+    scratch.scan = .{};
+    scratch.reader.read(body, &scratch.scan) catch return;
+    const kind = contents(&scratch.scan, .error_type) catch return;
+    const message = optionalRange(&scratch.scan, .error_message) catch return;
+    const code: ?[]const u8 = if (scratch.scan.values.getPtrConst(.error_code).decoded()) |text| text else null;
+    const outcome = errorOutcome(rangeBytes(body, kind), code, if (message) |range| rangeBytes(body, range) else "");
+    out.context_overflow = outcome.overflow;
+    out.refusal = outcome.refusal;
+    out.report = .{ .code = report(kind), .message = report(message) };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1613,4 +1657,70 @@ test "MSG-15 an empty message writes nothing, and what the wire cannot take is d
     try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .{ .output_open = .{ .kind = .compaction, .phase = .unphased, .omit_reasoning_text = false } }, .handles = 0 }, &pieces));
     // A format with no effort operation before it has nothing to declare.
     try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .text_format, .handles = 0b1 }, &pieces));
+}
+
+test "MSG-16 an HTTP error body classifies by the table the stream's error event uses" {
+    var scratch: ClassifyScratch = undefined;
+    var out: codec_abi.ErrorBody = undefined;
+
+    const too_long = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 300000 tokens > 200000\"}}";
+    classify(&scratch, too_long, &out);
+    try std.testing.expect(out.context_overflow);
+    try std.testing.expectEqual(@as(?codec_abi.Refusal, null), out.refusal);
+    const code = out.report.code orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("invalid_request_error", too_long[@intCast(code.start)..][0..@intCast(code.length)]);
+
+    const billing = "{\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"Your credit balance is too low.\"}}";
+    classify(&scratch, billing, &out);
+    try std.testing.expect(!out.context_overflow);
+    try std.testing.expectEqual(@as(?codec_abi.Refusal, .quota), out.refusal);
+
+    const spend = "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"limit\",\"details\":{\"error_code\":\"enforced_spend_limit_reached\"}}}";
+    classify(&scratch, spend, &out);
+    try std.testing.expectEqual(@as(?codec_abi.Refusal, .quota), out.refusal);
+
+    // A body that is not an error object classifies as no outcome and reports nothing.
+    classify(&scratch, "{\"type\":\"other\"}", &out);
+    try std.testing.expect(!out.context_overflow);
+    try std.testing.expectEqual(@as(?codec_abi.Refusal, null), out.refusal);
+    try std.testing.expectEqual(@as(?codec_abi.ReportRange, null), out.report.code);
+}
+
+/// A recorded Anthropic stream's data events: thinking with its signature, text, a tool
+/// call whose arguments arrive in two fragments, usage, and the stop.
+const recorded_events = [_][]const u8{
+    "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}",
+    "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan.\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":0}",
+    "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":1}",
+    "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}}",
+    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}",
+    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}",
+    "{\"type\":\"content_block_stop\",\"index\":2}",
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":42}}",
+    stop_message,
+};
+
+test "MSG-17 a recorded Anthropic stream runs to its items and its completion, and each cut names its reason" {
+    var buffer: [8192]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try runForTesting(&recorded_events, &out);
+    const text = out.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "item reasoning ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "item message ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "item function_call ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"input_json\":\"{\\\"q\\\":1}\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "completed id=msg_01 model=claude-x") != null);
+
+    // A cut inside an open block is a closed connection; a cut before message_stop is incomplete output.
+    var cut_in_block: std.Io.Writer = .fixed(&buffer);
+    try runForTesting(recorded_events[0..7], &cut_in_block);
+    try std.testing.expect(std.mem.endsWith(u8, cut_in_block.buffered(), "finish provider_connection_closed\n"));
+    var before_stop: std.Io.Writer = .fixed(&buffer);
+    try runForTesting(recorded_events[0 .. recorded_events.len - 1], &before_stop);
+    try std.testing.expect(std.mem.endsWith(u8, before_stop.buffered(), "finish incomplete_provider_output\n"));
 }

@@ -29,6 +29,8 @@ fn Responses(comptime version: responses.Version) type {
         pub const nextMember = responses.nextMember;
         pub const hostedCall = responses.hostedCall;
         pub const finish = responses.finish;
+        /// Responses compacts: its compaction Operation and trigger are real.
+        pub const compacts = true;
 
         pub fn initial(starting_effort: ?codec_abi.Effort) responses.Carry {
             return responses.initial(version, starting_effort);
@@ -47,6 +49,14 @@ fn Responses(comptime version: responses.Version) type {
 pub fn declaresTools(codec: protocol.Codec) bool {
     return switch (codec) {
         inline else => |tag| module(tag).declaresTools(),
+    };
+}
+
+/// Whether a provider compacts a conversation on this codec. A codec that does not never
+/// receives a compaction Operation (`compaction_trigger` declines).
+pub fn compacts(codec: protocol.Codec) bool {
+    return switch (codec) {
+        inline else => |tag| module(tag).compacts,
     };
 }
 
