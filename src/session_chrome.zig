@@ -168,7 +168,7 @@ test "opening and decision progress share the footer while unresolved decisions 
     try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
-pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.capacity + " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.max_name_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + "100% context left".len + 4 * " · ".len + " · ".len + "Stopping and archiving".len;
 
 pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
     return factsSpans(buffer, facts, name, badge, width, method).text;
@@ -185,20 +185,19 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
         const short = @import("home_path.zig").shortPath(value.home, path);
         break :blk std.fmt.bufPrint(&folder_buffer, "{s}{s}", .{ short.prefix, short.rest }) catch unreachable;
     } else null else null;
-    const parts: [6]?[]const u8 = if (facts) |value| .{
+    const parts: [5]?[]const u8 = if (facts) |value| .{
         if (folder == null) value.name else null,
         value.model,
         if (value.effort) |effort| @tagName(effort) else null,
         if (if (folder == null and (value.left orelse 101) <= 50) value.left else null) |left| std.fmt.bufPrint(&percent, "{d}% context left", .{left}) catch unreachable else null,
-        if (folder == null and value.asks) "ask" else null,
         folder,
-    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null, null };
-    var kept: [6]?[]const u8 = @splat(null);
+    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null };
+    var kept: [5]?[]const u8 = @splat(null);
     var used: usize = 0;
     var count: usize = 0;
     var model_buffer: [facts_bytes]u8 = undefined;
     var name_buffer: [facts_bytes]u8 = undefined;
-    for (if (folder != null) [_]usize{ 2, 1, 5, 4, 3, 0 } else [_]usize{ 4, 2, 1, 3, 0, 5 }) |index| {
+    for (if (folder != null) [_]usize{ 2, 1, 4, 3, 0 } else [_]usize{ 2, 1, 3, 0, 4 }) |index| {
         const text = parts[index] orelse continue;
         if (text.len == 0) continue;
         const join = if (count != 0) separator else 0;
@@ -270,20 +269,20 @@ test "the facts row ends with the archive badge, which stays when the row is sho
     try std.testing.expect(session_line.cells(short, .unicode) <= 40);
 }
 
-test "a short facts row preserves editable words and ask before context and name" {
+test "a short facts row preserves editable words before context and name" {
     var buffer: [facts_bytes]u8 = undefined;
-    const facts: session_line.Facts = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100, .asks = true };
-    try std.testing.expectEqualStrings("Fix retry deadline · gpt-6.1-sol · high · ask", factsRow(&buffer, facts, "ref", null, 140, .unicode));
-    try std.testing.expectEqualStrings("Fix… · gpt-6.1-sol · high · ask", factsRow(&buffer, facts, "ref", null, 36, .unicode));
-    try std.testing.expectEqualStrings("Fix… · gpt-6.1-sol · high · ask", factsRow(&buffer, facts, "ref", null, 34, .unicode));
-    try std.testing.expectEqualStrings("gpt-6… · high · ask", factsRow(&buffer, facts, "ref", null, 19, .unicode));
-    try std.testing.expectEqualStrings("gpt-6… · high · ask · Archived", factsRow(&buffer, facts, "ref", "Archived", 30, .unicode));
+    const facts: session_line.Facts = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100 };
+    try std.testing.expectEqualStrings("Fix retry deadline · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 140, .unicode));
+    try std.testing.expectEqualStrings("Fix retry… · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 36, .unicode));
+    try std.testing.expectEqualStrings("Fix retry… · gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 34, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high", factsRow(&buffer, facts, "ref", null, 19, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-… · high", factsRow(&buffer, facts, "ref", null, 16, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high · Archived", factsRow(&buffer, facts, "ref", "Archived", 30, .unicode));
     for (0..141) |width| {
         const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
         try std.testing.expect(session_line.cells(fitted.text, .unicode) <= width);
-        if (width >= 19) {
-            try std.testing.expect(std.mem.indexOf(u8, fitted.text, "high") != null);
-            try std.testing.expect(std.mem.endsWith(u8, fitted.text, "ask"));
+        if (width >= 16) {
+            try std.testing.expect(std.mem.endsWith(u8, fitted.text, "high"));
             var fields: usize = 0;
             for (fitted.spans[0..fitted.len]) |span| fields += @intFromBool(span.field != null);
             try std.testing.expectEqual(@as(usize, 2), fields);
@@ -507,12 +506,12 @@ test "footer focus domain routes opening escape text and drawn click identity" {
 }
 
 test "footer spans identify only whole model and effort words across widths efforts and permissions" {
-    for ([_]usize{ 140, 46 }) |width| for ([_]?session_line.ReasoningEffort{ null, .low, .xhigh }) |effort| for ([_]bool{ false, true }) |asks| {
+    for ([_]usize{ 140, 46 }) |width| for ([_]?session_line.ReasoningEffort{ null, .low, .xhigh }) |effort| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .name = "Chat", .model = "model", .effort = effort, .left = 62, .asks = asks };
+        const facts: session_line.Facts = .{ .name = "Chat", .model = "model", .effort = effort, .left = 62 };
         const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
-        const want = try std.fmt.bufPrint(&expected, "Chat · model{s}{s}{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "", if (asks) " · ask" else "" });
+        const want = try std.fmt.bufPrint(&expected, "Chat · model{s}{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "" });
         try std.testing.expectEqualStrings(want, fitted.text);
         var offset: usize = 0;
         var model_count: usize = 0;
@@ -537,7 +536,7 @@ test "footer spans identify only whole model and effort words across widths effo
     };
     for (0..40) |width| {
         var buffer: [facts_bytes]u8 = undefined;
-        const fitted = factsSpans(&buffer, .{ .name = "model · low", .model = "model", .effort = .low, .asks = true }, "ref", null, width, .unicode);
+        const fitted = factsSpans(&buffer, .{ .name = "model · low", .model = "model", .effort = .low }, "ref", null, width, .unicode);
         for (fitted.spans[0..fitted.len]) |span| if (span.field) |field| {
             if (field == .effort) try std.testing.expectEqualStrings("low", span.text) else {
                 try std.testing.expect(std.mem.eql(u8, span.text, "model") or std.mem.endsWith(u8, span.text, session_line.ellipsis));
@@ -614,7 +613,7 @@ test "copy success shares short reply next-key replacement and expiry owner" {
 }
 
 test "empty chat facts fit model effort and home folder with semantic fields" {
-    const facts: session_line.Facts = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100, .asks = true };
+    const facts: session_line.Facts = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100 };
     for ([_]usize{ 33, 46, 140 }) |width| {
         var buffer: [facts_bytes]u8 = undefined;
         const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
@@ -641,14 +640,14 @@ test "empty chat facts fit model effort and home folder with semantic fields" {
 test "footer facts domain fits projected list visibility and context threshold at both widths" {
     for ([_]bool{ false, true }) |list_visible| for ([_]usize{ 46, 140 }) |width| for ([_]u8{ 49, 50, 51 }) |used| {
         var buffer: [facts_bytes]u8 = undefined;
-        const facts: session_line.Facts = .{ .name = if (list_visible) "" else "Chat", .model = "model", .effort = .high, .left = 100 - used, .asks = true };
+        const facts: session_line.Facts = .{ .name = if (list_visible) "" else "Chat", .model = "model", .effort = .high, .left = 100 - used };
         const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
         var expected: [facts_bytes]u8 = undefined;
         const prefix = if (list_visible) "" else "Chat · ";
         const want = if (used < 50)
-            try std.fmt.bufPrint(&expected, "{s}model · high · ask", .{prefix})
+            try std.fmt.bufPrint(&expected, "{s}model · high", .{prefix})
         else
-            try std.fmt.bufPrint(&expected, "{s}model · high · {d}% context left · ask", .{ prefix, 100 - used });
+            try std.fmt.bufPrint(&expected, "{s}model · high · {d}% context left", .{ prefix, 100 - used });
         try std.testing.expectEqualStrings(want, shown.text);
         try std.testing.expect(session_line.cells(shown.text, .unicode) <= width);
         var fields: usize = 0;

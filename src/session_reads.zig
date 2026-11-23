@@ -80,7 +80,6 @@ pub const Line = struct {
     provider: ?protocol.Provider = null,
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
-    asks: bool = false,
     archive_state: protocol.SessionArchiveState = .active,
 
     pub const First = struct { position: u64, content: content_value.Value };
@@ -104,7 +103,6 @@ pub const Line = struct {
             .provider = settings.provider.value,
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
-            .asks = settings.permission_mode.value == .ask,
             .archive_state = current.archive_state,
         };
     }
@@ -122,7 +120,6 @@ pub const Line = struct {
             .folder = if (self.folder) |*folder| folder.slice() else null,
             .effort = self.effort,
             .left = self.left,
-            .asks = self.asks,
         };
     }
 };
@@ -1051,7 +1048,6 @@ test "session_reads the Session line takes archive and other facts from Current 
             } else try std.testing.expect(facts.folder == null);
             try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
             try std.testing.expectEqual(case.left, facts.left);
-            try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
             try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
             try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first != null);
         }
