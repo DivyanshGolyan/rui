@@ -68,6 +68,35 @@ test "backdrop is the thread on a scrim darker than the ground and the raised ca
     };
 }
 
+/// The colour for the terminal's own background (OSC 11), which also fills the window padding and
+/// the leftover strips no cell covers: the RGB the ground cells show, at every colour depth, so the
+/// edges always match. Without colour the terminal keeps its own background.
+pub fn terminalGround(caps: view.Caps) ?view.Rgb {
+    if (caps.depth == .none) return null;
+    return switch (of(caps, .{}).bg) {
+        .rgb => |value| value,
+        // Entries 16-255 are the xterm palette every 256-colour terminal shares.
+        .index => |index| theme.xtermRgb(index),
+        else => unreachable,
+    };
+}
+
+test "the terminal's own background is the RGB the ground cells show at every depth and skin" {
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for (std.enums.values(view.Caps.Depth)) |depth| {
+        const caps: view.Caps = .{ .depth = depth, .background = background };
+        const ground = terminalGround(caps);
+        switch (depth) {
+            .none => try std.testing.expectEqual(null, ground),
+            .direct => try std.testing.expectEqual(of(caps, .{}).bg, vaxis.Color{ .rgb = ground.? }),
+            .indexed => {
+                const index = of(caps, .{}).bg.index;
+                try std.testing.expect(index >= 16);
+                try std.testing.expectEqual(theme.xtermRgb(index), ground.?);
+            },
+        }
+    };
+}
+
 // The returned segments and their text borrow the frame arena and the input, respectively.
 pub fn segments(arena: std.mem.Allocator, caps: view.Caps, input: []const view.Segment, background: ?view.Background) std.mem.Allocator.Error![]vaxis.Segment {
     const result = try arena.alloc(vaxis.Segment, input.len);

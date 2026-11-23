@@ -3042,6 +3042,8 @@ pub const Caps = struct {
         lang: ?[]const u8 = null,
         no_color: ?[]const u8 = null,
         colorterm: ?[]const u8 = null,
+        /// Windows Terminal sets WT_SESSION and forwards it into WSL, where COLORTERM does not reach.
+        wt_session: ?[]const u8 = null,
     };
 
     pub fn of(environment: Environment) Caps {
@@ -3053,9 +3055,10 @@ pub const Caps = struct {
         } else false else true;
         const colorterm: []const u8 = environment.colorterm orelse "";
         const no_color: []const u8 = environment.no_color orelse "";
+        const windows_terminal: []const u8 = environment.wt_session orelse "";
         const depth: Depth = if (no_color.len != 0)
             .none
-        else if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit"))
+        else if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit") or windows_terminal.len != 0)
             .direct
         else
             .indexed;
@@ -5168,7 +5171,7 @@ test "session resume opens its Session through the overview, which then keeps it
     try expectSelected(&state, "c3d4e5");
 }
 
-test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM" {
+test "caps follow the locale that sets the character set, NO_COLOR, COLORTERM and Windows Terminal" {
     for ([_]struct { Caps.Environment, Caps }{
         .{ .{}, .{ .depth = .indexed } },
         .{ .{ .lang = "en_US.UTF-8" }, .{ .depth = .indexed } },
@@ -5183,6 +5186,9 @@ test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM
         .{ .{ .colorterm = "truecolor" }, .{} },
         .{ .{ .colorterm = "24bit" }, .{} },
         .{ .{ .colorterm = "yes" }, .{ .depth = .indexed } },
+        .{ .{ .wt_session = "5f8a6c2e-3b1d-4e7a-9c0f-1a2b3c4d5e6f" }, .{} },
+        .{ .{ .wt_session = "" }, .{ .depth = .indexed } },
+        .{ .{ .wt_session = "5f8a6c2e-3b1d-4e7a-9c0f-1a2b3c4d5e6f", .no_color = "1" }, .{ .depth = .none } },
     }) |case| try std.testing.expectEqual(case[1], Caps.of(case[0]));
 }
 
