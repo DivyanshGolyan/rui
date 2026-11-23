@@ -36,6 +36,7 @@ Enter these at the chat’s `›` prompt. The overview has no input or slash com
 | `/requests` | Lists saved requests for recovery. |
 | `/result KEY` | Reads a saved answer. |
 | `/reload-skills` | Rescans skills and appends catalog changes without model work. |
+| `/reload-tools` | Lists every MCP server’s tools again and shows one line with each tool count, or the server that failed. |
 | `/new` | Starts a new empty chat; keeps the old chat unchanged. |
 | `/clear` | Same as `/new`: starts a new empty chat, not deletion of history. |
 

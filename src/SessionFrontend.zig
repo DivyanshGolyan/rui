@@ -1757,7 +1757,7 @@ fn parse(text: []const u8) Slash {
         .unpin => .{ .pin = false },
         .requests => .{ .inspection = .requests },
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .setup, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
+        .setup, .result, .rename, .effort, .@"reload-skills", .@"reload-tools" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
     };
@@ -2093,6 +2093,17 @@ test "a Session's /reload-skills drops the skills it listed, and the next read l
     const shown = try held.shown();
     try std.testing.expect(std.mem.indexOf(u8, shown, "/release") != null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
+}
+
+test "typing /reload-tools queues the conversation command that asks the Host for the tool lists" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.inspection.command_running = true;
+    try sendKeys(self, "/reload-tools\r");
+    try std.testing.expectEqualStrings("/reload-tools", self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqualDeep(Slash{ .inspection = .command }, parse("/reload-tools"));
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -11127,10 +11138,10 @@ test "every listed chat command dispatches to its existing owner" {
         .{ "/copy code", Slash{ .inspection = .{ .copy = .code } } }, .{ "/copy file", Slash{ .inspection = .{ .copy = .file } } },
         .{ "/effort high", Slash{ .inspection = .command } },         .{ "/setup", Slash{ .inspection = .command } },
         .{ "/requests", Slash{ .inspection = .requests } },           .{ "/result key", Slash{ .inspection = .command } },
-        .{ "/reload-skills", Slash{ .inspection = .command } },       .{ "/new", Slash.new_session },
-        .{ "/clear", Slash.new_session },                             .{ "/model", Slash.model },
-        .{ "/pin", Slash{ .pin = true } },                            .{ "/unpin", Slash{ .pin = false } },
-        .{ "/configurex", Slash.unknown },
+        .{ "/reload-skills", Slash{ .inspection = .command } },       .{ "/reload-tools", Slash{ .inspection = .command } },
+        .{ "/new", Slash.new_session },                               .{ "/clear", Slash.new_session },
+        .{ "/model", Slash.model },                                   .{ "/pin", Slash{ .pin = true } },
+        .{ "/unpin", Slash{ .pin = false } },                         .{ "/configurex", Slash.unknown },
     };
     inline for (cases) |case| try std.testing.expectEqualDeep(case[1], parse(case[0]));
 }

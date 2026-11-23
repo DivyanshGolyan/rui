@@ -1043,32 +1043,12 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_di
     try output.finish();
 }
 
-/// Asks the running Host to list again, then polls tools_status until each asked list has landed.
+/// Asks the running Host to list again, then waits for each asked list to land.
 /// Prints one JSON line with each asked server's outcome and tool count.
 fn reloadTools(io: std.Io, gpa: std.mem.Allocator, selected: []const u8, name: ?[]const u8) !void {
     const sender: client.Requests = .{ .io = io };
     const asked = try sender.reloadTools(gpa, selected, name);
-    var status: client.ToolsStatus = .{};
-    if (asked.len != 0) {
-        const deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
-        while (true) {
-            status = try sender.toolsStatus(gpa, selected);
-            var still: usize = 0;
-            for (asked.slice()) |ask| {
-                const row = try statusOf(&status, ask.server.slice());
-                if (row.finished < ask.generation) {
-                    still += 1;
-                    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) stderr.diagnostic("rui: MCP server {s} is still listing its tools after 60 seconds; its tools are not yet reloaded\n", .{ask.server.slice()});
-                }
-            }
-            if (still == 0) break;
-            if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) {
-                reportCallerCode(.wait_timed_out);
-                return error.CallerFailure;
-            }
-            try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-        }
-    }
+    const status = try awaitToolLists(sender, gpa, selected, &asked);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_reload_tools\",\"servers\":[", .{protocol.wire_version});
@@ -1087,6 +1067,61 @@ fn reloadTools(io: std.Io, gpa: std.mem.Allocator, selected: []const u8, name: ?
     }
     try writer.writeAll("]}\n");
     try output.finish();
+}
+
+/// Polls tools_status until every asked list has landed and returns the last status read. A wait longer than
+/// 60 seconds reports wait_timed_out and names no server that has landed.
+fn awaitToolLists(sender: client.Requests, gpa: std.mem.Allocator, selected: []const u8, asked: *const client.ToolsAsked) !client.ToolsStatus {
+    if (asked.len == 0) return .{};
+    const io = sender.io;
+    const deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+    while (true) {
+        const status = try sender.toolsStatus(gpa, selected);
+        var still: usize = 0;
+        for (asked.slice()) |ask| {
+            const row = try statusOf(&status, ask.server.slice());
+            if (row.finished < ask.generation) {
+                still += 1;
+                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) stderr.diagnostic("rui: MCP server {s} is still listing its tools after 60 seconds; its tools are not yet reloaded\n", .{ask.server.slice()});
+            }
+        }
+        if (still == 0) return status;
+        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) {
+            reportCallerCode(.wait_timed_out);
+            return error.CallerFailure;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+    }
+}
+
+const tools_notice_bytes = 64 + @import("host_settings.zig").max_mcp_servers * (@import("tool_record.zig").max_server_bytes + 24);
+
+/// The conversation's /reload-tools: asks the Host for every configured server, waits for the lists, and prints one
+/// notice line such as `Tools reloaded: docs 12, notes failed`.
+fn reloadToolsNotice(init: std.process.Init, sender: client.Requests, store: []const u8) !void {
+    const asked = try sender.reloadTools(init.gpa, store, null);
+    const status = try awaitToolLists(sender, init.gpa, store, &asked);
+    var buffer: [tools_notice_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeToolsNotice(&writer, &asked, &status);
+    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+}
+
+fn writeToolsNotice(writer: *std.Io.Writer, asked: *const client.ToolsAsked, status: *const client.ToolsStatus) !void {
+    if (asked.len == 0) return writer.writeAll("No MCP servers to reload\n");
+    try writer.writeAll("Tools reloaded: ");
+    for (asked.slice(), 0..) |ask, index| {
+        if (index != 0) try writer.writeAll(", ");
+        const row = try statusOf(status, ask.server.slice());
+        try writer.writeAll(ask.server.slice());
+        switch (row.last) {
+            .listed => try writer.print(" {d}", .{row.tools}),
+            .failed => try writer.writeAll(" failed"),
+            .collision => try writer.writeAll(" collision"),
+            .never => try writer.writeAll(" not listed"),
+        }
+    }
+    try writer.writeAll("\n");
 }
 
 fn statusOf(status: *const client.ToolsStatus, name: []const u8) !client.ToolServerStatus {
@@ -2794,6 +2829,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
         },
+        .@"reload-tools" => try reloadToolsNotice(init, requests_context, destination),
         .effort, .rename => {
             const typed_usage = liveUsage(command.name);
             var arguments: [live_capacity][]const u8 = undefined;
@@ -2825,6 +2861,31 @@ fn liveUsage(name: slash_commands.Name) []const u8 {
         inline .effort, .rename => |short| "Rui: Usage: " ++ comptime slash_commands.usage.get(short) ++ "\n",
         else => unreachable,
     };
+}
+
+test "/reload-tools writes one notice line naming each server's count or failure, or that none is configured" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    var none: client.ToolsAsked = .{};
+    try writeToolsNotice(&writer, &none, &.{});
+    try std.testing.expectEqualStrings("No MCP servers to reload\n", writer.buffered());
+
+    writer = std.Io.Writer.fixed(&buffer);
+    var asked: client.ToolsAsked = .{ .len = 2 };
+    try asked.items[0].server.set("docs");
+    asked.items[0].generation = 2;
+    try asked.items[1].server.set("notes");
+    asked.items[1].generation = 2;
+    var status: client.ToolsStatus = .{ .len = 2 };
+    try status.items[0].server.set("docs");
+    status.items[0].last = .listed;
+    status.items[0].finished = 2;
+    status.items[0].tools = 12;
+    try status.items[1].server.set("notes");
+    status.items[1].last = .failed;
+    status.items[1].finished = 2;
+    try writeToolsNotice(&writer, &asked, &status);
+    try std.testing.expectEqualStrings("Tools reloaded: docs 12, notes failed\n", writer.buffered());
 }
 
 test "/effort and /rename decode to typed configuration arguments" {

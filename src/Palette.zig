@@ -296,7 +296,7 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
 
 test "Palette renders every chat command and description in the same normal style" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/reload-tools", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
     };
     const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     inline for (cases) |case| {
