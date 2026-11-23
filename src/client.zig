@@ -743,23 +743,32 @@ pub const StatusFacts = struct {
 
 pub fn observeHostForUpgrade(allocator: std.mem.Allocator, io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
     const paths = try resolveClientPaths(io, store_path);
-    return observeHostForUpgradeAt(allocator, io, &paths, deadline);
+    return observeHostForUpgradeAt(allocator, io, &paths, hostObservationDeadline(io, deadline), .{});
 }
 
-fn observeHostForUpgradeAt(allocator: std.mem.Allocator, io: std.Io, paths: *const platform.Paths, deadline: ?i128) !HostControlObservation {
+/// `until` is the shared discovery budget for the socket exchange and, after a
+/// wrong-wire reply, for the foreign read.
+fn observeHostForUpgradeAt(allocator: std.mem.Allocator, io: std.Io, paths: *const platform.Paths, until: i128, foreign: ForeignHostReader) !HostControlObservation {
     // One current-wire exchange either observes the Host or advertises the wire
     // it speaks. Another wire is read through its own executable, so every
     // supported Host costs one socket exchange inside the shared discovery budget (#1835).
-    const until = hostObservationDeadline(io, deadline);
     return switch (try readHostControlAt(io, paths, until, .upgrade)) {
         .compatible => |observed| .{ .foreign = false, .facts = statusOf(observed.info), .pid = observed.pid, .host_directory = observed.host_directory },
-        .incompatible => |peer| foreign: {
+        .incompatible => |peer| foreign_observation: {
             // The DIR the caller holds addresses the Host's own `host status`.
             if (paths.host_directory.len == 0) return error.HostDirectoryUnavailable;
-            break :foreign .{ .foreign = true, .facts = try readForeignHost(allocator, io, peer.pid, paths.host_directory.slice(), until), .pid = peer.pid, .host_directory = paths.host_directory };
+            const facts = try readForeignHost(allocator, io, peer.pid, paths.host_directory.slice(), until, foreign);
+            break :foreign_observation .{ .foreign = true, .facts = facts, .pid = peer.pid, .host_directory = paths.host_directory };
         },
     };
 }
+
+/// The replaceable parts of a foreign read. Production reads the Host's own
+/// `host status` and the pid's kernel generation; tests substitute either one.
+pub const ForeignHostReader = struct {
+    status: *const fn (allocator: std.mem.Allocator, io: std.Io, executable: []const u8, directory: []const u8, until: i128) anyerror!StatusFacts = readForeignHostStatus,
+    generation: *const fn (pid: c_int) anyerror!u64 = @import("host_identity.zig").generation,
+};
 
 fn statusOf(info: protocol_reply.HostInfoFacts) StatusFacts {
     return .{ .instance = info.instance, .store = info.store, .active_capacity = info.active_capacity, .settings_digest = info.settings_digest };
@@ -767,13 +776,13 @@ fn statusOf(info: protocol_reply.HostInfoFacts) StatusFacts {
 
 /// Reads a Host on another wire through the executable that runs it. The
 /// executable is the pid's own snapshot, and the pid must keep its generation.
-fn readForeignHost(allocator: std.mem.Allocator, io: std.Io, pid: c_int, directory: []const u8, until: i128) !StatusFacts {
+fn readForeignHost(allocator: std.mem.Allocator, io: std.Io, pid: c_int, directory: []const u8, until: i128, reader: ForeignHostReader) !StatusFacts {
     const identity = @import("host_identity.zig");
     var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
     var snapshot = try identity.snapshot(wiping.allocator(), pid);
     defer snapshot.deinit(wiping.allocator());
-    const facts = try readForeignHostStatus(allocator, io, snapshot.executable, directory, until);
-    if ((identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
+    const facts = try reader.status(allocator, io, snapshot.executable, directory, until);
+    if ((reader.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
     return facts;
 }
 
@@ -847,7 +856,7 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    const observed = try observeHostForUpgradeAt(allocator, io, &paths, until);
+    const observed = try observeHostForUpgradeAt(allocator, io, &paths, until, .{});
     if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
     return .{ .observed = observed };
 }
@@ -1228,6 +1237,11 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
         activation_body_version,
         activation_wrong_store,
         activation_oversize,
+        wrong_wire,
+        wrong_wire_refused,
+        wrong_wire_pid_changed,
+        wrong_wire_without_directory,
+        wrong_wire_explicit_deadline,
     };
     const Phase = enum { temporary_store, store_permissions, store_path, lease, runtime, listener, peer_spawn, observation, verification, expired_current };
     const responseWire = struct {
@@ -1307,9 +1321,56 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
         }
     };
     const Observed = union(enum) { current: HostControlObservation, incompatible: c_int };
+    // The foreign reader a wrong-wire mode substitutes for the Host's own executable.
+    const ForeignFake = struct {
+        var mode: Mode = .current;
+        var calls: usize = 0;
+        var budget: i128 = 0;
+        var cap: i128 = std.math.maxInt(i128);
+        var until_seen: i128 = 0;
+        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var directory_len: usize = 0;
+
+        fn status(allocator: std.mem.Allocator, io: std.Io, executable: []const u8, directory: []const u8, until: i128) anyerror!StatusFacts {
+            _ = allocator;
+            _ = io;
+            _ = executable;
+            calls += 1;
+            until_seen = until;
+            @memcpy(directory_buffer[0..directory.len], directory);
+            directory_len = directory.len;
+            if (mode == .wrong_wire_refused) return error.ForeignHostStatusFailed;
+            var facts = std.mem.zeroes(StatusFacts);
+            facts.active_capacity = 17;
+            facts.instance[15] = 15;
+            return facts;
+        }
+
+        fn generation(pid: c_int) anyerror!u64 {
+            if (mode == .wrong_wire_pid_changed) return std.math.maxInt(u64);
+            return @import("host_identity.zig").generation(pid);
+        }
+
+        const reader: ForeignHostReader = .{ .status = status, .generation = generation };
+    };
     const Run = struct {
         fn observe(io: std.Io, root: []const u8, mode: Mode) !Observed {
             switch (mode) {
+                .wrong_wire,
+                .wrong_wire_refused,
+                .wrong_wire_pid_changed,
+                .wrong_wire_without_directory,
+                .wrong_wire_explicit_deadline,
+                => {
+                    var paths = try resolveClientPaths(io, root);
+                    if (mode == .wrong_wire_without_directory) paths.host_directory.len = 0;
+                    const explicit: ?i128 = if (mode == .wrong_wire_explicit_deadline) std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s / 2 else null;
+                    ForeignFake.cap = explicit orelse std.math.maxInt(i128);
+                    ForeignFake.mode = mode;
+                    ForeignFake.calls = 0;
+                    ForeignFake.budget = hostObservationDeadline(io, explicit);
+                    return .{ .current = try observeHostForUpgradeAt(std.testing.allocator, io, &paths, ForeignFake.budget, ForeignFake.reader) };
+                },
                 .activation_current,
                 .activation_200,
                 .activation_400,
@@ -1382,6 +1443,31 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
                     .activation_body_version,
                     .activation_wrong_store,
                     => try std.testing.expectError(error.InvalidHostInfo, result),
+                    .wrong_wire_without_directory => {
+                        try std.testing.expectError(error.HostDirectoryUnavailable, result);
+                        try std.testing.expectEqual(@as(usize, 0), ForeignFake.calls);
+                    },
+                    .wrong_wire_refused => {
+                        try std.testing.expectError(error.ForeignHostStatusFailed, result);
+                        try std.testing.expectEqual(@as(usize, 1), ForeignFake.calls);
+                    },
+                    .wrong_wire_pid_changed => {
+                        try std.testing.expectError(error.HostPeerPidMismatch, result);
+                        try std.testing.expectEqual(@as(usize, 1), ForeignFake.calls);
+                    },
+                    .wrong_wire, .wrong_wire_explicit_deadline => {
+                        const reading = try result;
+                        try std.testing.expect(reading.current.foreign);
+                        try std.testing.expectEqual(std.c.getpid(), reading.current.pid);
+                        try std.testing.expectEqual(@as(usize, 1), ForeignFake.calls);
+                        // DIR, not the socket or Store identity, addresses the reader's `--store`.
+                        try std.testing.expectEqualStrings(root, ForeignFake.directory_buffer[0..ForeignFake.directory_len]);
+                        try std.testing.expectEqual(@as(usize, 17), reading.current.facts.active_capacity);
+                        try std.testing.expectEqual(@as(u8, 15), reading.current.facts.instance[15]);
+                        // The foreign read shares the discovery budget, which an explicit caller deadline bounds.
+                        try std.testing.expectEqual(ForeignFake.budget, ForeignFake.until_seen);
+                        try std.testing.expect(ForeignFake.until_seen <= ForeignFake.cap);
+                    },
                     .malformed_header, .activation_malformed => try std.testing.expectError(error.InvalidResponse, result),
                     .activation_truncated => try std.testing.expectError(error.TruncatedResponse, result),
                     .activation_oversize => try std.testing.expectError(error.ResponseTooLarge, result),
