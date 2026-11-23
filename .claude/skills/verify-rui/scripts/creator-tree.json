@@ -330,8 +330,7 @@
       ],
       "expect": [
         "Tree root",
-        "Held arrival",
-        "order held"
+        "Held arrival"
       ],
       "comparison": {
         "before": {
@@ -381,17 +380,11 @@
             "do": "move"
           },
           "repaint": false
-        },
-        {
-          "gone": "order held"
         }
       ],
       "expect": [
         "Tree root",
         "Release arrival"
-      ],
-      "absent": [
-        "order held"
       ],
       "record": true,
       "note": "Pointer leaves; retained raw frames capture the release and any flash"
@@ -431,8 +424,7 @@
       ],
       "expect": [
         "Tree root",
-        "ASCII arrival",
-        ". order held"
+        "ASCII arrival"
       ],
       "comparison": {
         "before": {

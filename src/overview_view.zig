@@ -3718,11 +3718,11 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
             region_count += 1;
         }
     }
-    const held_at = text_column + "Chats".len + 2 + "Archived".len + 2;
+    const hint_at = text_column + "Chats".len + 2 + "Archived".len + 2;
     // The shaded tab names what the drop does; the words only say that it takes one, and fit a sidebar.
     if (drop != null) {
-        _ = try built.put(held_at, if (caps.unicode) "· drop here" else ". drop here", width -| held_at, .{ .colour = if (dropping) .strong else .quiet });
-    } else if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
+        _ = try built.put(hint_at, if (caps.unicode) "· drop here" else ". drop here", width -| hint_at, .{ .colour = if (dropping) .strong else .quiet });
+    }
     return .{
         .{ .segments = new_session, .target = .new_session },
         .{ .segments = try segmentsOf(arena, try built.finish(), width, .{}), .regions = try arena.dupe(Region, regions[0..region_count]) },
@@ -6024,7 +6024,6 @@ test "the tab that takes a carried chat is shaded, strongly while the pointer ho
         const tabs = (try controls(arena.allocator(), &state, 38, caps))[1].segments;
         const text = try segmentText(arena.allocator(), tabs);
         try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_caps) "Archived  · drop here" else "Archived  . drop here") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "order held") == null);
         const shaded = try styleOf(tabs, if (archived_row) "Chats" else "Archived");
         try std.testing.expectEqual(if (over_target) Background.selection else Background.hover, shaded.background);
         try std.testing.expectEqual(Colour.strong, shaded.colour);
