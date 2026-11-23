@@ -1213,7 +1213,11 @@ def restart_all_cases(root, binary, releases):
         assert first.status()["instance"] == current_first["instance"]
         assert second.status()["instance"] == current_second["instance"]
 
-        unreadable = pathlib.Path(first.ready["socket"]).parent / "restart-unreadable.sock"
+        # A socket in a derived interface directory with no rui.lock is unprovable: it fails, and
+        # discovery never removes it. The probe is the rui.sock of another derived directory.
+        probe_dir = pathlib.Path(first.ready["socket"]).parent.parent / hashlib.sha256(b"restart-unreadable").hexdigest()[:32]
+        unreadable = probe_dir / "rui.sock"
+        probe_dir.mkdir(mode=0o700)
         try:
             with os_semantics.unix_stream() as listener:
                 listener.bind(str(unreadable))
@@ -1223,16 +1227,16 @@ def restart_all_cases(root, binary, releases):
                 assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
                 assert "[host_restart_failed]" in output, output
                 assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            # #1855: once nothing listens, the leftover socket has no live owner.
-            output = first.run("host", "restart", "--all")
-            assert str(unreadable) not in output and "failed at discovery" not in output, output
-            assert "Skipped 1 leftover Host socket: it refused connections and no running Host process serves it" in output, output
-            assert "2 Hosts: 0 restarted, 2 already current, 0 left unchanged, 0 failed." in output, output
+            # Once nothing listens, the socket still has no lock, so it stays unprovable and fails.
+            output = first.run("host", "restart", "--all", expect=6)
+            assert str(unreadable) in output and "failed at discovery:" in output, output
+            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
         finally:
             unreadable.unlink(missing_ok=True)
+            probe_dir.rmdir()
         output = first.run("host", "restart", "--all")
         assert "2 Hosts: 0 restarted, 2 already current" in output, output
-        assert str(unreadable) not in output and "leftover" not in output, output
+        assert str(unreadable) not in output and "failed at discovery" not in output, output
 
     with case(root, binary, releases, "restart-all-managed-source") as c:
         old_host, previous = c.start_host("retained-older-source", source=True)
