@@ -42,7 +42,7 @@ MODULES = {
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
-    "openapi.json": "openapi.json",
+    "openapi.json": "openapi.json", "rejections.ts": "clients/ts/src/rejections.ts",
 }
 PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
             "transport_options", "build_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
@@ -448,8 +448,8 @@ RULES = (
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
-    (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
-     "WIR-4 published request schemas and generated wire contract"),
+    (("src/openapi*.zig", "openapi.json", "clients/ts/src/rejections.ts"), ("test",), ("test",),
+     "WIR-4 published request schemas, generated wire contract and the TS rejection sentences generated beside it"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
     (("clients/ts/test/fixtures/empty-creation.ts", "clients/ts/test/fixtures/preferences-bridge.ts"),
      ("settings-integration",), ("settings-integration",),
