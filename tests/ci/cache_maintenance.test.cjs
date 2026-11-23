@@ -357,12 +357,16 @@ test('mixed runner-image fleet keeps the newest snapshot of each identity', asyn
     {id: 8, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('a')}-${'e'.repeat(16)}-${seq(8)}`},
     {id: 9, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('c')}-${'e'.repeat(16)}-${seq(9)}`},
     {id: 10, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(10)}`},
-    {id: 11, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(11)}`},
+    {id: 11, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(11)}`},
     {id: 12, key: `rui-build-v2-Linux-X64-0.17.1-${tools('c')}-baseline.${tools('d')}-${seq(12)}`},
+    {id: 13, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(13)}-partial-9-1`},
+    {id: 14, key: `rui-build-v3-macOS-ARM64-0.17.1-${tools('a')}-compiled-unit.${tools('d')}-${seq(14)}`},
   ].map(({id, key}) => ({...cache(id, main), key}));
   const mixed = await run(fleet);
   assert.ifError(mixed.error);
-  assert.deepEqual(mixed.ids, [2, 3, 5, 6, 7, 8, 9, 11, 12]);
+  // 10 is the leftover v2 macOS compiled snapshot, pruned by the v3 snapshot 11 of its identity.
+  // 13 is a v3 partial in its own partial group; 14 is a v3 compiled-unit look-alike in its own group.
+  assert.deepEqual(mixed.ids, [2, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14]);
 });
 
 test('malformed v4 lookalikes never join the compiled group', async () => {
@@ -855,7 +859,7 @@ test('new work deadlines derive a save window and cover recorded green durations
     },
     'cache-maintenance.yml': {
       baseline: [568, '43433947643'],
-      compiled: [1117, '43720387127'],
+      compiled: [1877, '43720387127'],
       runner: [99, '43381025988'],
       previous_release: [354, '43381025988'],
     },

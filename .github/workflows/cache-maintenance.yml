@@ -142,7 +142,9 @@ jobs:
           check-part: ${{ matrix.part }}
       - name: Compile the same gates as the producers
         id: compile
-        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
+        # PROVISIONAL: 1877 s is the sum of the separate rest (1117 s) and unit (760 s)
+        # green runs, run 43720387127, until a combined run is recorded.
+        # Cache timing: green 1877 s, run 43720387127; minimum margin 120 s.
         # Equivalent consumer build; this new warm matrix has no main-run sample yet.
         # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 92
