@@ -131,6 +131,7 @@ const cores = .{
     .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
+    .{ "required_settings.zig", @import("required_settings.zig") },
     .{ "result_fault.zig", @import("result_fault.zig") },
     .{ "result_layout.zig", @import("result_layout.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },

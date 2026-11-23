@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 88;
+pub const schema_version: u32 = 89;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -68,6 +68,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
+    .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -895,6 +896,27 @@ pub const migrations = [_]Migration{
             "UPDATE session SET creator_ref=(SELECT opening.sender_session_ref FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref)) WHERE creator_ref IS NULL AND EXISTS(SELECT 1 FROM message_admission opening WHERE opening.admission_id=(SELECT MIN(m.admission_id) FROM message_admission m WHERE m.session_ref=session.session_ref) AND opening.sender_session_ref IS NOT NULL AND opening.sender_session_ref<>session.session_ref)",
         },
     },
+    // A new Session's refusal names every missing setting (#937): a saved `missing_settings`
+    // rejection keeps the set beside its code. Earlier saved refusals did not record which settings
+    // were missing, so the step deletes them rather than invent a set (Divyansh, 2026-11-23: no
+    // adoption to preserve); their keys become fresh.
+    .{
+        .from = 88,
+        .sqlite = &.{
+            "DELETE FROM sent_rejection WHERE command_key IN (SELECT command_key FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration')",
+            "DELETE FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration'",
+            "ALTER TABLE core_command RENAME TO core_command_before_89",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0),\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_89",
+            "DROP TABLE core_command_before_89",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+        },
+        .mysql = &.{
+            "DELETE FROM sent_rejection WHERE command_key IN (SELECT command_key FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration')",
+            "DELETE FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration'",
+            "ALTER TABLE core_command ADD COLUMN missing_settings BIGINT AFTER command_seq, ADD CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)",
+        },
+    },
 };
 
 comptime {
@@ -1347,6 +1369,8 @@ pub const tables = [_]Table{
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
+            // Bits of required_settings.Setting: set exactly with a missing_settings rejection.
+            .{ .name = "missing_settings", .type = .int, .nullable = true, .check = "missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7" },
         },
         .primary_key = &.{"command_seq"},
         .uniques = &.{&.{"command_key"}},
@@ -3034,6 +3058,14 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
+/// Today's canonical SQLite `core_command` as an older step wrote it: its kind range, and no
+/// `missing_settings` column (format 89).
+fn historicalCoreCommand(allocator: std.mem.Allocator, sql: []const u8, kind: []const u8) ![]u8 {
+    const ranged = try std.mem.replaceOwned(u8, allocator, sql, "kind BETWEEN 1 AND 9", kind);
+    defer allocator.free(ranged);
+    return std.mem.replaceOwned(u8, allocator, ranged, ",\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)", "");
+}
+
 test "schema 76 migration creates canonical promotion objects on SQLite and MySQL" {
     const step = migrations[75 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 75), step.from);
@@ -3045,7 +3077,7 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
                 const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
-                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 8")
+                    try historicalCoreCommand(std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8")
                 else
                     null;
                 defer if (historical) |text| std.testing.allocator.free(text);
@@ -3075,7 +3107,7 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
                 const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
-                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 7")
+                    try historicalCoreCommand(std.testing.allocator, object.sql, "kind BETWEEN 1 AND 7")
                 else
                     null;
                 defer if (historical) |text| std.testing.allocator.free(text);
@@ -3117,8 +3149,8 @@ test "schema 75 preserves Commands and references while adding empty pin organiz
     try sqlite.expectDone(meta);
     try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin_command"));
@@ -3312,8 +3344,8 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop EXCEPT SELECT * FROM original_stops)"));
     for (legacy_stops) |each| {

@@ -18,7 +18,7 @@ pub const Rejection = enum {
     loaded_tools_not_in_tools,
     loaded_tools_unreachable,
     invalid_label,
-    incomplete_initial_configuration,
+    missing_settings,
     unknown_preset,
     preset_on_update,
     parent_on_update,

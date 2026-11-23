@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "23",
+    "version": "24",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1512,7 +1512,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "action_background_reply"
@@ -1561,7 +1561,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1625,7 +1625,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1684,7 +1684,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "action_background"
@@ -1753,7 +1753,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "action_publish"
@@ -1793,7 +1793,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "action_stop_reply"
@@ -1842,7 +1842,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_stop_reply"
@@ -1896,7 +1896,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_stop_reply"
@@ -1955,7 +1955,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "action_stop"
@@ -1993,7 +1993,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "activity_content"
@@ -3189,7 +3189,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "activity_page"
@@ -3257,7 +3257,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "activity_page"
@@ -3285,7 +3285,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "activity_page"
@@ -3482,7 +3482,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "activity_search"
@@ -3516,7 +3516,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "activity_search"
@@ -3942,7 +3942,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "configuration_reply"
@@ -4004,7 +4004,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "configuration_reply"
@@ -4068,7 +4068,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "configuration_reply"
@@ -4217,7 +4217,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "configuration_reply"
@@ -4289,7 +4289,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "configuration_reply"
@@ -4328,7 +4328,8 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
+                      "settings_on_reload",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -4356,6 +4357,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -4363,7 +4385,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },
@@ -4398,7 +4421,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "configure"
@@ -4497,7 +4520,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "conversation_content"
@@ -4542,7 +4565,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "conversation_page"
@@ -4772,7 +4795,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "conversation_page"
@@ -5012,7 +5035,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "conversation_page"
@@ -5057,7 +5080,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "type": "string",
@@ -5127,7 +5150,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "host_info"
@@ -5243,7 +5266,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "host_info"
@@ -5265,7 +5288,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "host_pause_reply"
@@ -5285,7 +5308,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "host_pause"
@@ -6142,7 +6165,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "host_stop_reply"
@@ -6162,7 +6185,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "host_stop_reply"
@@ -6190,7 +6213,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "host_stop"
@@ -6212,7 +6235,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "host_stop"
@@ -6288,7 +6311,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_report"
@@ -6391,7 +6414,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_report"
@@ -6490,7 +6513,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_report"
@@ -6543,7 +6566,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_report"
@@ -6592,7 +6615,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "inspect_session"
@@ -6632,7 +6655,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "inspect_session"
@@ -6664,7 +6687,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "inspect_session"
@@ -6737,7 +6760,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_list"
@@ -6791,7 +6814,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_list"
@@ -6847,7 +6870,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_list"
@@ -6888,7 +6911,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_list"
@@ -6966,7 +6989,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "list_sessions"
@@ -7029,7 +7052,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "list_sessions"
@@ -7084,7 +7107,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "message_reply"
@@ -7255,7 +7278,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "message_reply"
@@ -7332,7 +7355,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "message_reply"
@@ -7494,7 +7517,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "message_reply"
@@ -7535,7 +7558,7 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -7566,6 +7589,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -7573,7 +7617,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },
@@ -7624,7 +7669,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "message_reply"
@@ -7665,7 +7710,7 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -7696,6 +7741,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -7703,7 +7769,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },
@@ -7758,7 +7825,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "message"
@@ -7857,7 +7924,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "message"
@@ -7949,7 +8016,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -8011,7 +8078,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -8067,7 +8134,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -8137,7 +8204,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "model_interruption"
@@ -8237,7 +8304,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "model_list"
@@ -8260,7 +8327,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "model_list"
@@ -8311,7 +8378,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -8354,7 +8421,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -8536,7 +8603,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -8672,7 +8739,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -8829,7 +8896,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -8990,7 +9057,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9139,7 +9206,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9309,7 +9376,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9483,7 +9550,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9589,7 +9656,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9732,7 +9799,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -9879,7 +9946,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -10006,7 +10073,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -10137,7 +10204,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -10264,7 +10331,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -10395,7 +10462,7 @@
                 "type": "object",
                 "properties": {
                   "version": {
-                    "const": "23"
+                    "const": "24"
                   },
                   "type": {
                     "const": "command_observation"
@@ -10469,7 +10536,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -10715,7 +10782,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -10921,7 +10988,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -11131,7 +11198,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -11337,7 +11404,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -11509,7 +11576,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -11767,7 +11834,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -12005,7 +12072,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "command_observation"
@@ -12039,7 +12106,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "observe_command"
@@ -12249,7 +12316,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -12306,7 +12373,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12357,7 +12424,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12422,7 +12489,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "permission_decision"
@@ -12574,7 +12641,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "public_part_content"
@@ -12617,7 +12684,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "public_parts"
@@ -12650,7 +12717,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "public_parts"
@@ -12717,7 +12784,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -12749,7 +12816,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -12783,7 +12850,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_read"
@@ -12869,7 +12936,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_read"
@@ -12996,7 +13063,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "action_read"
@@ -13102,7 +13169,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "read_action"
@@ -13140,7 +13207,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "read_result"
@@ -13168,7 +13235,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "session_archive_reply"
@@ -13226,7 +13293,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -13286,7 +13353,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -13349,7 +13416,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "session_archive"
@@ -13386,7 +13453,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "session_pin_reply"
@@ -13431,7 +13498,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -13474,7 +13541,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -13525,7 +13592,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "session_pin"
@@ -13751,7 +13818,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "session_stop_reply"
@@ -13809,7 +13876,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13889,7 +13956,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13951,7 +14018,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "kind": {
             "const": "session_stop"
@@ -14055,7 +14122,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "23"
+            "const": "24"
           },
           "type": {
             "const": "skill_suggestions"
@@ -14107,7 +14174,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -14141,7 +14208,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "23"
+                "const": "24"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -16194,7 +16261,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "23"
+          "const": "24"
         }
       },
       "HostInstance": {

@@ -1066,7 +1066,7 @@ test "start_agent validates its model before parent tool authority" {
                     else => .value,
                 };
                 const reason = if (index == 0)
-                    "Rui could not start the agent (incomplete_initial_configuration). Nothing was started."
+                    "Rui could not start the agent: its spec is missing [\"model\"] (missing_settings). Nothing was started."
                 else
                     "Rui could not start the agent (invalid_model). Nothing was started.";
                 try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "read", true, &child.configuration, null, .{}) == .failed);

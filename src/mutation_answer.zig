@@ -151,6 +151,8 @@ pub const Answer = struct {
         conflict,
     },
     replayed: bool,
+    /// The settings a `missing_settings` rejection named.
+    missing: ?@import("required_settings.zig").Missing = null,
 
     pub const Input = union(enum) {
         accepted: content_value.Value,
@@ -416,6 +418,7 @@ fn decide(comptime protocol: type, comptime kind: CommandKind, comptime accepted
     return .{
         .input = confirmed_input,
         .replayed = answer.replayed,
+        .missing = if (comptime !accepted and !conflict and @hasField(@TypeOf(answer), "missing")) answer.missing else null,
         .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value },
     };
 }
@@ -487,6 +490,7 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
         accepted_fields: []const u8 = "",
         accepted_tail: []const u8 = "",
         rejected_tail: []const u8 = "",
+        rejected_missing: []const u8 = "",
         conflict_tail: []const u8 = "",
     }{
         .{
@@ -495,6 +499,7 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             .accepted_fields = ",\"revision\":\"31\",\"created\":false",
             .accepted_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
             .rejected_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
+            .rejected_missing = ",\"missing\":null",
             .conflict_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
         },
         .{
@@ -503,6 +508,7 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             .accepted_fields = ",\"admission\":\"7\"",
             .accepted_tail = input ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}",
             .rejected_tail = input ++ ",\"execution\":{\"status\":\"queued\"}",
+            .rejected_missing = ",\"missing\":null",
             .conflict_tail = ",\"execution\":{\"status\":\"queued\"}",
         },
         .{
@@ -545,7 +551,7 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             const fields = if (accepted) case.accepted_fields else if (conflict) ",\"code\":\"idempotency_key_conflict\"" else ",\"code\":\"unknown_session\"";
             const tail = if (accepted) case.accepted_tail else if (conflict) case.conflict_tail else case.rejected_tail;
             for (reload_fields) |reload| {
-                const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false{s}{s}{s}}}{s}}}", .{ current, case.reply_type, status, case.binding, fields, reload.bytes, tail });
+                const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false{s}{s}{s}{s}}}{s}}}", .{ current, case.reply_type, status, case.binding, fields, if (accepted or conflict) "" else case.rejected_missing, reload.bytes, tail });
                 const reply = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), if (conflict) 409 else 200, body, "k7m2qx", case.target);
                 if (reload.expected != null and (!accepted or case.target != .configure)) {
                     try std.testing.expectError(error.InvalidResponse, reply.answer);
@@ -690,7 +696,7 @@ test "Action promotion replies bind the target and immutable receipt or final se
 test "mutation rejection preserves an empty original creation target" {
     const current = @import("protocol.zig").wire_version;
     const execution = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
-    const body = "{\"version\":\"" ++ current ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"\",\"code\":\"invalid_configuration\"}" ++ execution;
+    const body = "{\"version\":\"" ++ current ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"\",\"code\":\"invalid_configuration\",\"missing\":null}" ++ execution;
     const answer = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, "", .configure).answer;
     try std.testing.expect(answer.replayed);
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
@@ -737,7 +743,7 @@ test "ADM-23 Message mutation replies bind capture identity and accepted parts o
     }) |case| try std.testing.expectEqual(case[1], matchesMessageAdmission(case[0], 7));
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":";
     const accepted = "{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
-    const rejected = "{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
+    const rejected = "{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\",\"missing\":null}";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
     const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
     const owner = ",\"owner\":{\"message\":\"7\"}";
