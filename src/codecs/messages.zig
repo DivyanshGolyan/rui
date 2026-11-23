@@ -44,7 +44,7 @@ pub const manifest: codec_abi.Manifest = .{
 };
 
 /// Protocol headers only. The credential header is not the codec's: it is
-/// `Authorization: Bearer` on a gateway such as Marlin and `x-api-key` on
+/// `Authorization: Bearer` on a gateway and `x-api-key` on
 /// Anthropic's own API, a fact of the connection (#1862, connection_needs.zig).
 pub const RequestHeader = enum(u8) { accept, @"anthropic-version" };
 
