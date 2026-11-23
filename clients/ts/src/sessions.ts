@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
-import { RuiRequestError, type RequestAnswer } from "./errors.ts";
+import { RuiRequestError, RuiWaitTimeoutError, type RequestAnswer } from "./errors.ts";
 import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
@@ -531,4 +531,52 @@ export async function setPaused(link: Link, paused: boolean): Promise<void> {
 		store,
 		paused,
 	} satisfies Schemas["HostPauseRequest"]));
+}
+
+const RELOAD_POLL_MS = 250;
+const RELOAD_WAIT_MS = 60_000;
+
+export interface ToolReloadOutcome {
+	server: string;
+	outcome: "never" | "listed" | "failed" | "collision";
+	tools: number;
+}
+
+/**
+ * Asks the Host to list one MCP server, or every configured server, again, then polls `tools_status` until each asked
+ * generation has landed. Rejects with RuiWaitTimeoutError after 60 s.
+ */
+export async function reloadTools(link: Link, server?: string): Promise<ToolReloadOutcome[]> {
+	const asked = parse<Schemas["ToolsReloadReply"]>(
+		await link.exchange("/v1/control/tools-reload", (store) => JSON.stringify({
+			version: WIRE_VERSION,
+			kind: "tools_reload",
+			store,
+			...(server === undefined ? {} : { server }),
+		} satisfies Schemas["ToolsReloadRequest"])),
+	).asked;
+	const deadline = Date.now() + RELOAD_WAIT_MS;
+	for (;;) {
+		const status = parse<Schemas["ToolsStatusReply"]>(
+			await link.exchange("/v1/tools-status", (store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "tools_status",
+				store,
+			} satisfies Schemas["ToolsStatusRequest"])),
+		).servers;
+		const rows = asked.map((ask) => {
+			const row = status.find((entry) => entry.server === ask.server);
+			return { ask, row };
+		});
+		const landed = rows.every(({ ask, row }) => row !== undefined && BigInt(row.finished) >= BigInt(ask.generation));
+		if (landed) {
+			return rows.map(({ ask, row }) => ({ server: ask.server, outcome: row!.last, tools: Number(row!.tools) }));
+		}
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) {
+			const pending = rows.filter(({ ask, row }) => row === undefined || BigInt(row.finished) < BigInt(ask.generation)).map(({ ask }) => ask.server);
+			throw new RuiWaitTimeoutError(`MCP tool lists still pending after 60 seconds: ${pending.join(", ")}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, Math.min(RELOAD_POLL_MS, remaining)));
+	}
 }

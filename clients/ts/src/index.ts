@@ -1,5 +1,5 @@
 export { Rui, type HostSettings, type ClientOptions, type ExitEvent } from "./client.ts";
-export { ContentIsPartsError, RuiRequestError, RuiStartError, RuiUnavailableError, type MissingSetting } from "./errors.ts";
+export { ContentIsPartsError, RuiRequestError, RuiStartError, RuiUnavailableError, RuiWaitTimeoutError, type MissingSetting } from "./errors.ts";
 export {
 	Session,
 	Sessions,
@@ -19,6 +19,7 @@ export {
 	type InterruptTarget,
 	type SessionUpdate,
 	type WriteOptions,
+	type ToolReloadOutcome,
 } from "./sessions.ts";
 export { FEED_KINDS, INLINE_TEXT_BYTES, type FeedEntry, type FeedKind, type ListActivityOptions, type SearchActivityOptions, type ActivitySearchEntry } from "./feed.ts";
 
