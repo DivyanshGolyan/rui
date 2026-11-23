@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
-    "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
+    "src/host_coordinator.zig", "src/host_endpoint.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig", "src/self_executable.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts
     # and stay off this list.
@@ -255,6 +255,39 @@ def self_executable_violations(root=ROOT):
     return found
 
 
+# Only the holder of a Host's interface directory lock may remove its socket or
+# lock file. src/host_endpoint.zig proves the lock and owns every such unlink.
+HOST_ENDPOINT_OWNER = "src/host_endpoint.zig"
+UNLINK_CALLS = ("deleteFile", "deleteFileAbsolute", "unlink", "unlinkat")
+ENDPOINT_NAMES = ('"rui.sock"', '"rui.lock"', "socket_name", "lock_name")
+
+
+def host_socket_unlink_violations(root=ROOT):
+    found = []
+    for pattern in ("src/**/*.zig", "tests/integration/*.zig"):
+        for file in sorted(root.glob(pattern)):
+            path = file.relative_to(root).as_posix()
+            if path == HOST_ENDPOINT_OWNER:
+                continue
+            tokens = [m.group() for m in ZIG_TOKEN.finditer(file.read_text()) if not m.group().startswith(("//", "\\\\"))]
+            for i, token in enumerate(tokens[:-1]):
+                if token not in UNLINK_CALLS or tokens[i + 1] != "(":
+                    continue
+                depth, end = 0, i + 1
+                while end < len(tokens):
+                    depth += {"(": 1, ")": -1}.get(tokens[end], 0)
+                    if depth == 0:
+                        break
+                    end += 1
+                argument = tokens[i + 2:end]
+                names_endpoint = any(item in ENDPOINT_NAMES or (item == "socket" and j > 0 and argument[j - 1:j] == ["."])
+                                     for j, item in enumerate(argument))
+                if names_endpoint:
+                    found.append(f"{path}: {token} removes a Host socket or rui.lock; only {HOST_ENDPOINT_OWNER} "
+                                 "may unlink them, while holding the interface directory's rui.lock")
+    return found
+
+
 def mac_path(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in MAC_PATHS)
 
@@ -396,6 +429,7 @@ def main():
     builds = [(path.relative_to(ROOT).as_posix(), path.read_text()) for path in build_files.files()]
     messages = ([message for name, source in builds if not mac_path(name) for message in build_violations(source, name)]
                 + violations(sites()) + bind_violations(bind_sites()) + flag_violations() + self_executable_violations()
+                + host_socket_unlink_violations()
                 + [message for folder in ("integration", "qualification")
                    for path in sorted((ROOT / "tests" / folder).rglob("*.py"))
                    for message in pty_close_violations(path.read_text(), path.relative_to(ROOT).as_posix())])

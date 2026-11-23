@@ -8,8 +8,9 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, pty_close_violations, python_sites, self_executable_violations,  # noqa: E402
-                               shell_sites, sites, typescript_sites, unlistened_binds, violations, zig_sites)
+from platform_boundary import (bind_sites, build_violations, flag_violations, host_socket_unlink_violations, mac_path,  # noqa: E402
+                               pty_close_violations, python_sites, self_executable_violations, shell_sites, sites,
+                               typescript_sites, unlistened_binds, violations, zig_sites)
 import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
 
@@ -290,6 +291,27 @@ class PlatformBoundaryTest(unittest.TestCase):
             found = self_executable_violations(root)
         self.assertEqual(len(found), 1)
         self.assertTrue(found[0].startswith("src/os/spawn.zig: "), found)
+
+    def test_only_the_endpoint_owner_unlinks_host_sockets(self):
+        self.assertEqual(host_socket_unlink_violations(), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "tests" / "integration").mkdir(parents=True)
+            (root / "src" / "host_endpoint.zig").write_text("try self.dir.deleteFile(io, socket_name);\n")
+            (root / "src" / "client.zig").write_text(
+                'try dir.deleteFile(io, "rui.sock");\n'
+                "try std.posix.unlink(paths.socket.slice());\n"
+                "try dir.deleteFile(io, host_endpoint.lock_name);\n"
+                'try dir.deleteFile(io, "host.lock");\n'
+                '// try dir.deleteFile(io, "rui.lock");\n'
+                'const s = "deleteFile(io, socket_name)";\n')
+            (root / "src" / "server.zig").write_text("try tmp.dir.deleteFile(io, socket_name);\n")
+            (root / "tests" / "integration" / "fixture.zig").write_text("_ = std.c.unlinkat(fd, socket_name, 0);\n")
+            found = host_socket_unlink_violations(root)
+        self.assertEqual([line.split(":")[0] for line in found],
+                         ["src/client.zig", "src/client.zig", "src/client.zig", "src/server.zig", "tests/integration/fixture.zig"])
+        self.assertTrue(all("only src/host_endpoint.zig may unlink" in line for line in found), found)
 
     def test_sites_outside_mac_paths_are_violations(self):
         self.assertEqual(violations({}), [])
