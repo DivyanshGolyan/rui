@@ -147,23 +147,32 @@ fn refusal(facts: *const FactsRow) ?policy.StartError {
     });
 }
 
-/// Releases the Store's GET_LOCK before the connection closes. COM_QUIT
-/// alone frees it only once the server has ended the session, after close
-/// returns, so a Host reopening the Store at once (including after a refused
-/// admission) could find it locked.
+/// Releases the Store's GET_LOCK held by this session. COM_QUIT alone frees
+/// it only once the server has ended the session, after close returns, so a
+/// Host reopening the Store at once (including after a refused admission)
+/// could find it locked. A refusal can come mid-result, so the remaining
+/// results are read first; the server has already run those statements.
+pub fn releaseLock(conn: *wire.Connection) void {
+    while (!conn.isReady()) _ = conn.next() catch return;
+    if (conn.batchLen() != 0) return;
+    conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch return;
+    conn.sendBatch() catch return;
+    _ = conn.next() catch {};
+}
+
+/// Closes a connection that may hold the Store's lock, releasing it first.
 pub fn closeOwned(conn: *wire.Connection) void {
-    if (conn.isReady() and conn.batchLen() == 0) release: {
-        conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch break :release;
-        conn.sendBatch() catch break :release;
-        _ = conn.next() catch {};
-    }
+    releaseLock(conn);
     conn.close();
 }
 
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
 
 pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2 * schema.store_id_bytes]u8, epoch: u64, old_connection_id: u64) !Reclaimed {
-    errdefer conn.disconnect();
+    errdefer {
+        releaseLock(conn);
+        conn.disconnect();
+    }
     conn.useSettings(session_settings, schema.mysql_session.len);
     var w = conn.batch();
     try w.writeAll(facts_sql ++ ";SELECT IS_USED_LOCK(");
