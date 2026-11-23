@@ -53,7 +53,7 @@ export const INLINE_TEXT_BYTES = 16 * 1024;
 const PAGE_ROWS = 16;
 const FIRST_POLL_MS = 250;
 const MAX_POLL_MS = 2_000;
-const ENDINGS_WITH_TEXT = new Set(["provider_refused", "failed"]);
+const ENDINGS_WITH_TEXT = new Set(["provider_refused", "out_of_quota", "failed"]);
 
 export interface ListActivityOptions {
 	/** The `cursor` of the last entry read. Left out, the feed starts at its beginning. */
