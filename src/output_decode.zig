@@ -973,8 +973,8 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
 
 var testing_interpretation: Interpretation = undefined;
 
-fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, operation: output_format.ModelOperationKind) anyerror!Validated {
-    interpret(&testing_interpret, pinned, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
+fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, codec: protocol.Codec, operation: output_format.ModelOperationKind) anyerror!Validated {
+    interpret(&testing_interpret, codec, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
     return switch (testing_interpretation) {
         .accepted => |*accepted| accepted.output,
         .rejected => |*rejected| rejected.reason,
@@ -1187,6 +1187,7 @@ const TestingValidation = struct {
     first_part: ?output_format.OutputMetadataRecord,
     records: [24]output_format.OutputMetadataRecord,
     record_count: usize,
+    usage: ?output_format.Usage,
 };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
@@ -1194,6 +1195,10 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
 }
 
 fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
+    return validateTestingWire(tmp, pinned, bytes, metadata_limit, operation);
+}
+
+fn validateTestingWire(tmp: *std.testing.TmpDir, codec: protocol.Codec, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1215,7 +1220,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var event_data: EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(source, bytes.len, &metadata, &event_data, operation);
+    const validated = try validate(source, bytes.len, &metadata, &event_data, codec, operation);
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
     var result: TestingValidation = undefined;
@@ -1231,6 +1236,10 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
         if (record.tag == .item) break record;
         if (record.tag == .part and result.first_part == null) result.first_part = record;
     } else unreachable;
+    result.usage = null;
+    while (try reader.next()) |record| {
+        if (record.tag == .usage) result.usage = record.usage;
+    }
     metadata.deinit();
     source.close(std.testing.io);
     return result;
@@ -1530,13 +1539,13 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try std.testing.expectEqual(baseline + 2, (try descriptors.observe(std.testing.io)).open_descriptors);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         if (shortfall == 0) {
-            const result = try validate(source, raw.len, &metadata, &data, .assistant_response);
+            const result = try validate(source, raw.len, &metadata, &data, pinned, .assistant_response);
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(source, raw.len, &metadata, &data, pinned, .assistant_response));
             try std.testing.expectEqual(raw.len + done.len + 6 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -1577,7 +1586,7 @@ test "an event's data is charged whole before its metadata from a shared budget"
     var data: EventData = undefined;
     try data.init(std.testing.io, root, "data", budget, false, &retained);
     defer data.deinit();
-    try std.testing.expectError(error.MetadataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
+    try std.testing.expectError(error.MetadataScratchExhausted, validate(source, raw.len, &metadata, &data, pinned, .assistant_response));
     try std.testing.expectEqual(@as(u64, done.len), data.length);
     try std.testing.expectEqual(.item, testing_interpretation.rejected.location.stage);
 }
@@ -1831,6 +1840,70 @@ test "context overflow requires exact valid provider code over SSE" {
     }
 }
 
+const messages_codec: protocol.Codec = .@"anthropic-messages/1";
+
+fn messagesData(comptime event: []const u8) []const u8 {
+    return "data: " ++ event ++ "\n\n";
+}
+
+const messages_stop = "{\"type\":\"message_stop\"}";
+const messages_recorded = messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}") ++
+    messagesData("{\"type\":\"ping\"}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan.\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":0}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":1}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":2}") ++
+    messagesData("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":42}}") ++
+    messagesData(messages_stop);
+
+// Ends after the text block's content_block_delta: a closed connection inside an open block.
+const messages_cut_in_block = messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}");
+
+test "anthropic-messages/1 interprets the recorded stream to its items, call, answer and usage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingWire(&tmp, messages_codec, messages_recorded, 64 * 1024, .assistant_response);
+    try std.testing.expectEqual(@as(u64, 3), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, "Hi".len), accepted.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("Hi"), accepted.output.answer_digest);
+    try std.testing.expectEqualStrings("msg_01", accepted.output.evidence.response_id.slice());
+    try std.testing.expectEqualStrings("claude-x", accepted.output.evidence.served_model.slice());
+    const usage = accepted.usage orelse return error.MissingUsage;
+    try std.testing.expectEqual(@as(u64, 42), usage.output);
+    try std.testing.expectEqual(@as(u64, 3), usage.cache_read);
+    try std.testing.expectEqual(@as(u64, 2), usage.cache_write);
+}
+
+test "anthropic-messages/1 names each broken stream by its reason" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingWire(&tmp, messages_codec, messages_cut_in_block, 64 * 1024, .assistant_response));
+    const before_stop = messages_recorded[0 .. messages_recorded.len - messagesData(messages_stop).len];
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, before_stop, 64 * 1024, .assistant_response));
+    const multi_line = comptime messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}") ++
+        messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\n" ++
+        "data: \"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
+    try std.testing.expectError(error.UnsupportedNormalizedLayout, validateTestingWire(&tmp, messages_codec, multi_line, 64 * 1024, .assistant_response));
+}
+
+test "anthropic-messages/1 overloaded_error is a temporary provider failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const overloaded = messagesData("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
+    try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, overloaded, 64 * 1024, .assistant_response));
+}
+
 fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![]u8 {
     const answer = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
     return std.testing.allocator.print(
@@ -1880,7 +1953,7 @@ test "provider reasoning strings preserve raw items" {
         var data: EventData = undefined;
         try data.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
-        const accepted = try validate(source.file, sse.len, &metadata, &data, .assistant_response);
+        const accepted = try validate(source.file, sse.len, &metadata, &data, pinned, .assistant_response);
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
