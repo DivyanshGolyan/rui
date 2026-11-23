@@ -461,9 +461,9 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     };
 }
 
-test "SessionChrome identity includes short ask fact but omits archive command hints" {
+test "SessionChrome identity omits permission and archive command hints" {
     var bytes: [chrome.facts_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Chat · model · high · ask", (@as(Identity, .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = 62, .asks = true }, .name = "ref" })).fit(&bytes, 140, .unicode));
+    try std.testing.expectEqualStrings("Chat · model · high", (@as(Identity, .{ .current = .{ .name = "Chat", .model = "model", .effort = .high, .left = 62 }, .name = "ref" })).fit(&bytes, 140, .unicode));
     try std.testing.expectEqualStrings("ref · Archived", (@as(Identity, .{ .name = "ref", .archive = .archived })).fit(&bytes, 46, .unicode));
     try std.testing.expectEqualStrings("! Not confirmed", stateText("! Not confirmed · ctrl+r retries original", "ctrl+r retries original"));
     try std.testing.expectEqualStrings("Copied 12 lines", stateText("Copied 12 lines", ""));
@@ -545,13 +545,13 @@ test "Session chrome back control exists only while the shell hides the list" {
 }
 
 test "SessionChrome model and effort words are independent controls beside the info background" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| for ([_]@import("protocol.zig").SessionArchiveState{ .active, .archiving, .archived }) |archive| for ([_]bool{ false, true }) |asks| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| for ([_]@import("protocol.zig").SessionArchiveState{ .active, .archiving, .archived }) |archive| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62, .asks = asks }, .archive = archive };
+        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62 }, .archive = archive };
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer ctx.cmds.deinit(arena.allocator());
@@ -592,7 +592,7 @@ test "SessionChrome info background preserves control order without info focus s
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "model", .effort = if (has_effort) .low else null, .left = left, .asks = true } };
+        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "model", .effort = if (has_effort) .low else null, .left = left } };
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const controls = [_]vxfw.Widget{ self.facts.back.widget(), self.facts.model.widget(), self.facts.effort.widget() };
         const start: usize = @intFromBool(list_visible);
@@ -693,7 +693,7 @@ test "SessionChrome drawn field identity survives a newer model and nonbutton wo
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     self.list_visible = true;
-    self.facts.identity = .{ .current = .{ .name = "model", .model = "model", .effort = .low, .left = 62, .asks = true } };
+    self.facts.identity = .{ .current = .{ .name = "model", .model = "model", .effort = .low, .left = 62 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 1 }, .cell_size = .{} });
@@ -711,19 +711,19 @@ test "SessionChrome drawn field identity survives a newer model and nonbutton wo
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.status_page));
 }
 
-test "SessionChrome footer text and button styling cover both widths applied efforts and ask bypass" {
-    for ([_]u16{ 140, 46 }) |width| for ([_]chrome.FooterFocus{ .input, .model, .effort }) |focus| for ([_]bool{ false, true }) |explicit| for ([_]bool{ false, true }) |asks| {
+test "SessionChrome footer text and button styling cover both widths and applied efforts" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]chrome.FooterFocus{ .input, .model, .effort }) |focus| for ([_]bool{ false, true }) |explicit| {
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.facts.focus = focus;
-        self.facts.identity = .{ .current = .{ .name = "C", .model = "m", .effort = if (explicit) .low else .high, .left = 62, .asks = asks } };
+        self.facts.identity = .{ .current = .{ .name = "C", .model = "m", .effort = if (explicit) .low else .high, .left = 62 } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         const footer = try drawFooter(&self, draw);
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-        const left = try std.fmt.allocPrint(arena.allocator(), " ‹ C · m · {s}{s}", .{ if (explicit) "low" else "high", if (asks) " · ask" else "" });
+        const left = try std.fmt.allocPrint(arena.allocator(), " ‹ C · m · {s}", .{if (explicit) "low" else "high"});
         try std.testing.expectEqualStrings(left, std.mem.trimEnd(u8, text.written(), " "));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "alt+i") == null);
         var buttons: usize = 0;

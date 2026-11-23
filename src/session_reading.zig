@@ -46,18 +46,18 @@ pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
         .activity, .fill, .permission => .{ .say = "! Messages unavailable; scroll to retry." },
         .message => .{ .say = "! Message unavailable." },
         .tool => .{ .say = "! Tool output unavailable." },
-        .recall => .{ .say = "! Sent message unavailable; draft retained." },
-        .retry => .{ .say = "! Retry unavailable; nothing sent. Draft retained." },
-        .inspection => if (inspection == .copy) .copy else .{ .say = "! Inspection unavailable; draft retained." },
+        .recall => .{ .say = "! Sent message unavailable." },
+        .retry => .{ .say = "! Retry unavailable; nothing sent." },
+        .inspection => if (inspection == .copy) .copy else .{ .say = "! Inspection unavailable." },
     };
 }
 
 pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
     if (to_file) switch (err) {
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable.",
         else => {},
     };
-    return "! Copy unavailable; draft retained.";
+    return "! Copy unavailable.";
 }
 
 pub const Place = enum { feed, elsewhere };
@@ -120,12 +120,12 @@ test "a command's output settles when its page shows or its read ends early, nev
 test "a read that failed while preparing says which page is unavailable" {
     try std.testing.expectEqualStrings("! Message unavailable.", unavailable(.message, .other).say);
     try std.testing.expectEqualStrings("! Tool output unavailable.", unavailable(.tool, .other).say);
-    try std.testing.expectEqualStrings("! Sent message unavailable; draft retained.", unavailable(.recall, .other).say);
-    try std.testing.expectEqualStrings("! Retry unavailable; nothing sent. Draft retained.", unavailable(.retry, .other).say);
-    try std.testing.expectEqualStrings("! Inspection unavailable; draft retained.", unavailable(.inspection, .command).say);
+    try std.testing.expectEqualStrings("! Sent message unavailable.", unavailable(.recall, .other).say);
+    try std.testing.expectEqualStrings("! Retry unavailable; nothing sent.", unavailable(.retry, .other).say);
+    try std.testing.expectEqualStrings("! Inspection unavailable.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
     try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry.", unavailable(.fill, .copy).say);
-    try std.testing.expectEqualStrings("! This directory is not writable; draft retained.", copyFailure(true, error.ReadOnlyFileSystem));
-    try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(false, error.AccessDenied));
-    try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(true, error.BrokenPipe));
+    try std.testing.expectEqualStrings("! This directory is not writable.", copyFailure(true, error.ReadOnlyFileSystem));
+    try std.testing.expectEqualStrings("! Copy unavailable.", copyFailure(false, error.AccessDenied));
+    try std.testing.expectEqualStrings("! Copy unavailable.", copyFailure(true, error.BrokenPipe));
 }

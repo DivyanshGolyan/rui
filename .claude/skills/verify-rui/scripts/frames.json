@@ -436,7 +436,7 @@
         "Notifications",
         "Host paused",
         "enter open",
-        "Reading this Session",
+        "Reading this chat",
         "{upgrade_version}",
         "Update failed:"
       ],
@@ -679,7 +679,7 @@
         "Notifications",
         "Host paused",
         "enter open",
-        "Reading this Session",
+        "Reading this chat",
         "{upgrade_version}",
         "Update failed:"
       ],
@@ -3987,11 +3987,11 @@
         }
       ],
       "expect": [
-        " \u00b7 ask",
         "● Record thirty progress steps"
       ],
       "absent": [
         "? Record thirty progress steps",
+        " \u00b7 ask",
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
@@ -4034,10 +4034,10 @@
         "Tool: read_image",
         "{\"path\": \"design/checkout.png\"}",
         "Allow once",
-        "Deny",
-        " · ask"
+        "Deny"
       ],
       "absent": [
+        " · ask",
         "Server:",
         "enter sends"
       ],
@@ -6347,7 +6347,7 @@
       "expect": [
         "Host stop witness",
         "Kept while stopped",
-        "Host not ready. Draft retained.",
+        "Host not ready.",
         "Host stopped"
       ],
       "absent": [

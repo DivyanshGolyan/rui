@@ -1540,7 +1540,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} pin unsure; recover {s}. Nothing reordered locally.", .{ &ref, handle });
+                    state.say(.attention, "! {s} pin unsure; recover {s}.", .{ &ref, handle });
                 },
             }
             state.next_list_ms = 0;
@@ -1550,17 +1550,14 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             const at = state.pendingAt(kind, result.request.reference).?;
             const ref = result.request.reference;
             switch (result.outcome) {
-                .requested => {
-                    state.answer(at, .done, "");
-                    if (!result.request.archived) state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
-                },
+                .requested => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
                     state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.archived) "archived" else "restored", code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} {s} unsure; recover {s}. Nothing hidden locally.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
+                    state.say(.attention, "! {s} {s} unsure; recover {s}.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
                 },
             }
             state.next_list_ms = 0;
@@ -2663,7 +2660,7 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
-pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. Upgrade or reopen with the selected Rui.";
+pub const upgrade_recovery = session_upgrade.recovery;
 
 fn admitHostRequest(state: *State) bool {
     if (!state.holdsHost()) return true;
@@ -2901,7 +2898,6 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Int
     if (organizationHeld(state, request.reference)) return .refused;
     if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
         effects.add(.{ .archive = request });
-        if (!request.archived) state.say(.quiet, "Restore request pending for {s}; waiting for the Host.", .{&request.reference});
         return .admitted;
     }
     return .refused;
@@ -3046,6 +3042,8 @@ pub const Caps = struct {
         lang: ?[]const u8 = null,
         no_color: ?[]const u8 = null,
         colorterm: ?[]const u8 = null,
+        /// Windows Terminal sets WT_SESSION and forwards it into WSL, where COLORTERM does not reach.
+        wt_session: ?[]const u8 = null,
     };
 
     pub fn of(environment: Environment) Caps {
@@ -3057,9 +3055,10 @@ pub const Caps = struct {
         } else false else true;
         const colorterm: []const u8 = environment.colorterm orelse "";
         const no_color: []const u8 = environment.no_color orelse "";
+        const windows_terminal: []const u8 = environment.wt_session orelse "";
         const depth: Depth = if (no_color.len != 0)
             .none
-        else if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit"))
+        else if (std.mem.eql(u8, colorterm, "truecolor") or std.mem.eql(u8, colorterm, "24bit") or windows_terminal.len != 0)
             .direct
         else
             .indexed;
@@ -5172,7 +5171,7 @@ test "session resume opens its Session through the overview, which then keeps it
     try expectSelected(&state, "c3d4e5");
 }
 
-test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM" {
+test "caps follow the locale that sets the character set, NO_COLOR, COLORTERM and Windows Terminal" {
     for ([_]struct { Caps.Environment, Caps }{
         .{ .{}, .{ .depth = .indexed } },
         .{ .{ .lang = "en_US.UTF-8" }, .{ .depth = .indexed } },
@@ -5187,6 +5186,9 @@ test "caps follow the locale that sets the character set, NO_COLOR and COLORTERM
         .{ .{ .colorterm = "truecolor" }, .{} },
         .{ .{ .colorterm = "24bit" }, .{} },
         .{ .{ .colorterm = "yes" }, .{ .depth = .indexed } },
+        .{ .{ .wt_session = "5f8a6c2e-3b1d-4e7a-9c0f-1a2b3c4d5e6f" }, .{} },
+        .{ .{ .wt_session = "" }, .{ .depth = .indexed } },
+        .{ .{ .wt_session = "5f8a6c2e-3b1d-4e7a-9c0f-1a2b3c4d5e6f", .no_color = "1" }, .{ .depth = .none } },
     }) |case| try std.testing.expectEqual(case[1], Caps.of(case[0]));
 }
 

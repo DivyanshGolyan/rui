@@ -149,7 +149,8 @@ The overview paints its own look; the conversation and the shell keep the termin
 `overview_view` holds the two Khadi skins as data, one palette table each, and `render` names only roles (text colours and grounds).
 The shell asks the terminal for its background with OSC 11, followed by DA1 so that a terminal without OSC 11 ends the wait, and waits at most 200 ms before the first frame; an answer that comes later still applies.
 The core chooses night unless the answer is light.
-Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
+Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit`, or a non-empty `WT_SESSION` (Windows Terminal, which WSL forwards when it drops `COLORTERM`), and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
+After each background answer, `widget_style.terminalGround` sets the terminal's own background (OSC 11) to the RGB the ground cells show at either depth (the xterm palette entry under 256 colours), so window padding and strips no cell covers match the ground; leaving resets it with OSC 111. `NO_COLOR` leaves it alone.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
 Enter on the pinned `+ New chat` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
@@ -704,7 +705,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable.`, or `! This directory is not writable.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).

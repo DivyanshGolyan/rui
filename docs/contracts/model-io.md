@@ -48,7 +48,7 @@ The adapter derives the address from the originating Operation, including on rep
 It reconstructs this context after compaction and normal Host restart, separately from user instructions.
 The address is not a PID, execution slot, Workspace or provider continuation identifier, and grants no additional authority.
 
-The collaboration context adds only the Session's own address, a pointer to installed `rui --help` and the command that sets its own Label. It does not teach how to reach other Sessions: the built-in `start_agent` and `message_agent` tools, which every fresh Session loads, carry that in their own descriptions, so a tool's description is the one place it is explained.
+The collaboration context adds only the Session's own address, a pointer to installed `rui --help` and the commands that read and set its own Label. The model names an unnamed Session once and never renames it unless asked, so a long-running chat that moves through many topics, such as a coordinator, keeps the name it was given, whether by the person or by itself. It does not teach how to reach other Sessions: the built-in `start_agent` and `message_agent` tools, which every fresh Session loads, carry that in their own descriptions, so a tool's description is the one place it is explained.
 Scoped help and errors describe command syntax, model selection and recovery.
 The general agent preamble, Workspace fact and caller-authored Session instructions remain unchanged.
 Shared text files own context wording; request builders and fixtures independently encode their supplied facts.

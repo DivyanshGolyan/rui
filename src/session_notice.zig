@@ -73,8 +73,8 @@ pub const Action = struct {
 };
 
 pub fn decision(action: Action) []const u8 {
-    if (action.preview) return "! Action exceeds in-app preview. Approval disabled. Draft retained.";
-    return if (action.visible) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
+    if (action.preview) return "! Action exceeds in-app preview. Approval disabled.";
+    return if (action.visible) "! Action needs a decision; Esc returns to the choice." else "! Action needs a decision; Esc returns to it.";
 }
 
 pub const reason_not_ready = "! Not ready; nothing denied · " ++ ConsentPolicy.deny_words;
@@ -90,21 +90,21 @@ pub const Busy = struct {
     letter: bool,
 };
 
-pub const host_not_ready = "! Host not ready. Draft retained.";
-pub const opening_not_ready = "! Chat still opening. Draft retained.";
-pub const saving_not_ready = "! Chat info still saving. Draft retained.";
+pub const host_not_ready = "! Host not ready.";
+pub const opening_not_ready = "! Chat still opening.";
+pub const saving_not_ready = "! Chat info still saving.";
 
 /// The notice for a refused send. `.upgrade` is not here: its words depend on
 /// the Upgrade's phase, which `session_upgrade.refusal` owns.
 pub fn busy(facts: Busy) []const u8 {
     if (facts.refusal) |refusal| switch (refusal) {
-        .command => return "! Command still running. Draft retained.",
+        .command => return "! Command still running.",
         .saving => return saving_not_ready,
         .upgrade => unreachable,
-        .rejected => return "! Original rejected. Keep editing; /discard releases it. Draft retained.",
+        .rejected => return "! Original rejected. Keep editing; /discard releases it.",
         .host => return host_not_ready,
         .opening => return opening_not_ready,
-        .preparing => return "! Action needs a decision. Draft retained.",
+        .preparing => return "! Action needs a decision.",
         .submitting => {},
     };
     if (facts.action) |action| {
@@ -190,12 +190,12 @@ test "Enter in the draft says the most pressing reason it sent nothing" {
     const rejected: Held = .{ .kind = .message, .state = .rejected };
     const pending: Held = .{ .kind = .decision, .state = .unconfirmed };
     const cases = [_]struct { Busy, []const u8 }{
-        .{ .{ .refusal = .command, .held = rejected, .action = reason, .letter = false }, "! Command still running. Draft retained." },
-        .{ .{ .refusal = .rejected, .held = rejected, .action = reason, .letter = false }, "! Original rejected. Keep editing; /discard releases it. Draft retained." },
-        .{ .{ .refusal = .preparing, .held = pending, .action = reason, .letter = false }, "! Action needs a decision. Draft retained." },
+        .{ .{ .refusal = .command, .held = rejected, .action = reason, .letter = false }, "! Command still running." },
+        .{ .{ .refusal = .rejected, .held = rejected, .action = reason, .letter = false }, "! Original rejected. Keep editing; /discard releases it." },
+        .{ .{ .refusal = .preparing, .held = pending, .action = reason, .letter = false }, "! Action needs a decision." },
         .{ .{ .refusal = null, .held = pending, .action = reason, .letter = false }, reason_not_ready },
         .{ .{ .refusal = null, .held = null, .action = reason, .letter = true }, "! Use ←→ and Enter to choose; a message denies the call." },
-        .{ .{ .refusal = null, .held = null, .action = .{ .preview = false, .visible = false, .reason = false }, .letter = true }, "! Action needs a decision; Esc returns to it. Draft retained." },
+        .{ .{ .refusal = null, .held = null, .action = .{ .preview = false, .visible = false, .reason = false }, .letter = true }, "! Action needs a decision; Esc returns to it." },
         .{ .{ .refusal = null, .held = pending, .action = null, .letter = true }, "! Decision pending. Keep editing; Ctrl-R retries that decision." },
         .{ .{ .refusal = .submitting, .held = .{ .kind = .message, .state = .unconfirmed }, .action = null, .letter = false }, "! Input still pending. Keep editing; Ctrl-R retries the original." },
     };
@@ -215,19 +215,19 @@ test "every way Enter is refused names its own reason, whatever original or Acti
         // The first refusing fact in the contract's order, listed here
         // independently of `Send.refusal`.
         const expected: ?[]const u8 = if (send.command_active)
-            "! Command still running. Draft retained."
+            "! Command still running."
         else if (send.upgrade)
             null
         else if (send.saving)
             saving_not_ready
         else if (send.rejected)
-            "! Original rejected. Keep editing; /discard releases it. Draft retained."
+            "! Original rejected. Keep editing; /discard releases it."
         else if (send.host_held)
             host_not_ready
         else if (send.opening)
             opening_not_ready
         else if (send.preparing)
-            "! Action needs a decision. Draft retained."
+            "! Action needs a decision."
         else
             null;
         if (expected) |words| for (helds) |held| for (actions) |action| for ([_]bool{ false, true }) |letter| {
@@ -247,9 +247,9 @@ test "every way Enter is refused names its own reason, whatever original or Acti
 
 test "a waiting Action that is a preview says it is decided in the shell, whether or not it is on screen" {
     for ([_]bool{ false, true }) |visible| {
-        try std.testing.expectEqualStrings("! Action exceeds in-app preview. Approval disabled. Draft retained.", decision(.{ .preview = true, .visible = visible, .reason = false }));
+        try std.testing.expectEqualStrings("! Action exceeds in-app preview. Approval disabled.", decision(.{ .preview = true, .visible = visible, .reason = false }));
     }
-    try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice. Draft retained.", decision(.{ .preview = false, .visible = true, .reason = false }));
+    try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice.", decision(.{ .preview = false, .visible = true, .reason = false }));
 }
 
 test "Esc leaves the settled view with an empty draft unless the held original is not yet saved" {

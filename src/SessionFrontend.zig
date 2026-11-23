@@ -158,7 +158,6 @@ failure_buffer: [failure_capacity]u8 = undefined,
 chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
-shown: session_line.Shown = .{},
 
 const rejection_suffix = " · /discard";
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
@@ -2276,7 +2275,7 @@ fn update(self: *Self) !Updated {
         .quiescing => self.quiesceUpgrade() catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; select Version in app settings to retry.", .{@errorName(err)});
+            try writer.print("! Update stopped: {s}. Select Version in Settings to retry.", .{@errorName(err)});
             self.notice = writer.buffered();
             self.dirty = true;
             _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
@@ -2290,7 +2289,7 @@ fn update(self: *Self) !Updated {
                 self.settleReader() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Draft and original retained; select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Couldn't reopen this chat after the update: {s}. Select Version in Settings to retry, or open rui in a new terminal.", .{@errorName(err)});
                     self.notice = writer.buffered();
                     _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };
@@ -2391,7 +2390,7 @@ fn refreshAcceptedMessage(self: *Self) void {
     self.reading.opening = true;
     self.reading.fills = .{};
     self.poll_at = 0;
-    self.notice = "Message accepted; refreshing conversation. Draft retained.";
+    self.notice = "Message accepted; refreshing conversation.";
     self.dirty = true;
 }
 
@@ -3130,7 +3129,7 @@ fn presentReadDiagnostic(self: *Self) !void {
     var out = std.Io.Writer.fixed(&self.notice_buffer);
     try out.writeAll(switch (reader_policy.unavailable(pending.phase, self.readInspection())) {
         .say => |text| text,
-        .copy => "! Copy unavailable; draft retained.",
+        .copy => "! Copy unavailable.",
     });
     try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
@@ -3925,7 +3924,7 @@ test "each source admits a slash command while another is active as it always di
         try sendKeys(self, text);
         try sendKeys(self, "\r");
         try std.testing.expectEqualStrings(text, self.input.composition().bytes);
-        try std.testing.expectEqualStrings("! Command still running. Draft retained.", try barShows(held));
+        try std.testing.expectEqualStrings("! Command still running.", try barShows(held));
         try std.testing.expect(self.leaving == null);
         try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
         self.input.clear();
@@ -5780,11 +5779,11 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         if (transport) {
             try std.testing.expect(self.notice == null);
         } else {
-            try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
+            try std.testing.expectEqualStrings("! Copy unavailable.", self.notice.?);
             try self.afterInput(&fixture.ctx);
             const rows = try fixture.rows();
             for (rows) |line| {
-                if (std.mem.indexOf(u8, line, "Copy unavailable; draft retained.") != null) break;
+                if (std.mem.indexOf(u8, line, "Copy unavailable.") != null) break;
             } else {
                 for (rows) |line| std.debug.print("{s}\n", .{line});
                 return error.TestUnexpectedResult;
@@ -6761,7 +6760,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("/effort low", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "! Command still running. Draft retained.") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "! Command still running.") != null);
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
@@ -10278,10 +10277,9 @@ test "chat footer facts use current Session permission and applied default or ex
         try self.line.label.?.set("Chat");
         self.line.effort = inspected.effort;
         self.line.left = 62;
-        self.line.asks = ask;
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
         const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
-        const want = if (explicit) (if (ask) "Chat · model · low · ask" else "Chat · model · low") else (if (ask) "Chat · model · high · ask" else "Chat · model · high");
+        const want = if (explicit) "Chat · model · low" else "Chat · model · high";
         try std.testing.expectEqualStrings(want, text);
     };
 }
@@ -10486,10 +10484,8 @@ test "chat footer permission transitions follow the current line with absent cur
         self.line.left = 62;
         for ([_]bool{ before, !before }) |ask| {
             self.line.read.?.revision += 1;
-            self.line.asks = ask;
             if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
             const facts = self.footerFacts().?;
-            try std.testing.expectEqual(ask, facts.asks);
             try std.testing.expectEqualStrings("Chat", facts.name);
             try std.testing.expectEqualStrings("model", facts.model);
             try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
@@ -10497,7 +10493,7 @@ test "chat footer permission transitions follow the current line with absent cur
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
                 const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
-                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · ask" else "Chat · model · low", text);
+                try std.testing.expectEqualStrings("Chat · model · low", text);
             }
         }
         self.line.read = null;
@@ -11366,12 +11362,9 @@ test "SUI-44 empty chat welcome is centred until the first message" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "cotton") == null);
         held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .folder = .{} };
         try held.self.line.folder.?.set("/work");
-        for ([_]bool{ false, true }) |asks| {
-            held.self.line.asks = asks;
-            const welcome = try held.shown();
-            for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
-                try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
-        }
+        const welcome = try held.shown();
+        for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
+            try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
         const empty = try held.shown();
         var lines = std.mem.splitScalar(u8, empty, '\n');
         var found = false;
