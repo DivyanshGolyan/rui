@@ -1100,6 +1100,8 @@ fn serveOpened(
         .turns_paused = .init(settings.execution.paused.value),
         .mcp_relist = mcp_relist,
     };
+    defer host.find_reloads.deinit(allocator);
+    host.find_reloads.watermark = try storage.highestActionId();
     const test_pause = @import("testing/pause.zig");
     var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
     defer pause_owner.deinit();

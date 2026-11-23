@@ -64,6 +64,8 @@ const cores = .{
     .{ "excerpt.zig", @import("excerpt.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
+    .{ "find_tools_reload.zig", @import("find_tools_reload.zig") },
+    .{ "find_tools_reloads.zig", @import("find_tools_reloads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "first_line.zig", @import("first_line.zig") },
     .{ "hex_value.zig", @import("hex_value.zig") },

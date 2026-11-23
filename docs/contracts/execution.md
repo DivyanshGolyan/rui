@@ -124,6 +124,7 @@ A **core tool** call runs as one core command, with no process: `message_agent(i
 `find_tools(words)` searches the Session's currently available, not-yet-loaded projected tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
 SQL selects only unloaded candidates; the Host streams names and description windows through the shared `word_search.Matcher`, whose ASCII folding and carry give every Store engine the same answers (D216).
 It loads at most eight matches in name order, in one call-keyed command and one revision naming `loaded_tools`, committed with the call result.
+`find_tools` with `reload` true lists every configured MCP server again before any search, and reports the change in the same Tool Result (D110).
 A no-match call writes no revision.
 A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
 Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.

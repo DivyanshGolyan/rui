@@ -482,6 +482,14 @@ The Host lists every configured MCP server at startup and re-lists a server when
 One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
 A list that fails keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
 A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation, tool count and `left_out` count.
+The model can trigger the same reload with `find_tools` and `reload` true, with or without `words`.
+Its Action asks the owner once for every configured server and records, in memory on the Host by Action id, each server's asked generation and the Host tool set it saw, by offered name and digest.
+The Action stays unsettled, and the execution loop waits on the re-list, until every asked list has landed; then its one Tool Result names the tools added, removed or changed since the ask, and each server that failed to list.
+With `words`, the usual matches follow, read from the set now in force.
+With no MCP server configured, the result says so and nothing is asked.
+A reload Action with no record whose id is at or below the Store's highest Action id at startup predates this process: it reports the tools offered now, with no changes, and says that a restart happened.
+The record is not persisted, so a restart loses it; the tools the restarted Host lists at startup are newer than any ask.
+The Host keeps at most 32 such records and drops the oldest past that, so a reload stopped while it waits holds no memory for long; a still-pending reload that loses its record asks again.
 A server that is unreachable at startup keeps its saved tools until a retry lists it.
 Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge.
 The Host never refuses to start or to publish a list because of MCP tool names or tool counts.

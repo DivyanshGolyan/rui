@@ -1,6 +1,9 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
 const tool_settle = @import("tool_settle.zig");
+const find_tools_reload = @import("find_tools_reload.zig");
+const server_mcp_relist = @import("server_mcp_relist.zig");
+const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
 const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
@@ -1598,7 +1601,25 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
 noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    find_tools.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    var call = find_tools.read(host.store, arena.allocator(), input) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        else => {
+            fenceDispatch(host, "find_tools core command", err);
+            return .retry_later;
+        },
+    };
+    if (call.reloads()) {
+        const report = findToolsReload(host, input.binding.action_id, arena.allocator()) catch |err| switch (err) {
+            error.OutOfMemory => return .retry_later,
+            else => {
+                fenceDispatch(host, "find_tools reload", err);
+                return .retry_later;
+            },
+        };
+        // Null while an asked list is still out: the Action stays unsettled and the loop waits on the re-list.
+        call.words.report = report orelse return .retry_later;
+    }
+    find_tools.settle(host.store, input, &call, arena.allocator(), host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1607,6 +1628,49 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
         },
     };
     return .admitted;
+}
+
+/// One pass of a `find_tools` reload. The first pass asks every configured server through the re-list owner and
+/// records the Host tool set it saw; later passes wait until every asked list has landed, then report the change.
+/// Returns the report, or null while the reload waits.
+fn findToolsReload(host: *Host, action_id: u64, arena: std.mem.Allocator) !?[]const u8 {
+    const owner = host.mcp_relist;
+    const servers: usize = if (owner) |relist_owner| relist_owner.servers.len else 0;
+    const landed: ?bool = if (host.find_reloads.find(action_id)) |record| landed: {
+        for (record.generations, 0..) |generation, index| {
+            if (owner.?.status(index).finished < generation) break :landed false;
+        }
+        break :landed true;
+    } else null;
+    const current = host.store.hostTools().host_tool_set;
+    var out: std.Io.Writer.Allocating = .init(arena);
+    switch (find_tools_reload.decide(servers, landed, action_id, host.find_reloads.watermark)) {
+        .no_servers => try out.writer.writeAll("No MCP servers to reload"),
+        .wait => return null,
+        .ask => {
+            const relist_owner = owner.?;
+            var record_arena: std.heap.ArenaAllocator = .init(host.allocator);
+            errdefer record_arena.deinit();
+            const memory = record_arena.allocator();
+            const generations = try memory.alloc(u64, servers);
+            for (generations, 0..) |*generation, index| generation.* = relist_owner.ask(index);
+            const before = try find_tools_reload.snapshot(memory, current);
+            try host.find_reloads.remember(host.allocator, action_id, .{ .arena = record_arena, .generations = generations, .before = before });
+            return null;
+        },
+        .restarted => try find_tools_reload.restarted(&out.writer, current),
+        .report => {
+            var record = host.find_reloads.forget(action_id) orelse return error.CorruptStore;
+            defer record.arena.deinit();
+            const relist_owner = owner.?;
+            var failed: std.ArrayList([]const u8) = .empty;
+            for (relist_owner.servers, 0..) |*server, index| {
+                if (relist_owner.status(index).last == .failed) try failed.append(arena, server.name.slice());
+            }
+            try find_tools_reload.report(&out.writer, record.before, current, failed.items);
+        },
+    }
+    return out.written();
 }
 
 noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
@@ -5443,6 +5507,245 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     }
     try std.testing.expect(fail_index > 2);
     try std.testing.expect((try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len != entries.len);
+}
+
+/// A reload's test fixture: one configured docs server whose startup list is `startup`, then `later` in order.
+const ReloadScript = struct {
+    const Script = @import("mcp/test_server.zig");
+    script: Script,
+    url: [128]u8 = undefined,
+    servers: [1]server_mcp_settings.Server = .{.{}},
+    fn start(self: *ReloadScript, startup: []const u8, later: []const []const u8) !void {
+        self.script = .{ .reply = startup, .more = later };
+        try self.script.start();
+        try self.servers[0].name.set("docs");
+        @memcpy(self.servers[0].bearer_token.bytes[0..6], "secret");
+        self.servers[0].bearer_token.len = 6;
+        try self.servers[0].url.set(try std.fmt.bufPrint(&self.url, "http://127.0.0.1:{d}/mcp", .{self.script.port}));
+    }
+};
+
+fn listOf(comptime names: []const []const u8) []const u8 {
+    const Script = @import("mcp/test_server.zig");
+    const body = comptime blk: {
+        var text: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[";
+        for (names, 0..) |name, index| {
+            if (index != 0) text = text ++ ",";
+            text = text ++ "{\"name\":\"" ++ name ++ "\",\"inputSchema\":{\"type\":\"object\"}}";
+        }
+        break :blk text ++ "]}}";
+    };
+    return Script.jsonReply(body);
+}
+
+/// Runs a find_tools reload Action the way the execution loop does: a pass, then the owner's service when a list
+/// is out, until the Action settles. Returns the passes that waited.
+fn settleReload(host: *Host, owner: *server_mcp_relist.Relist, storage: *store_module.Store, input: *const store_module.CoreActionInput) !usize {
+    var failure: ?anyerror = null;
+    var waited: usize = 0;
+    while (true) : (waited += 1) {
+        if (waited == 1000) return error.ReloadDidNotSettle;
+        const admission = runFindTools(host, input);
+        if (admission == .admitted) break;
+        try std.testing.expectEqual(execution_turn.Admission.retry_later, admission);
+        if (owner.pending[0]) |pending| {
+            var poll_fd = [_]std.c.pollfd{.{ .fd = pending.fd(), .events = pending.events(), .revents = 0 }};
+            _ = std.c.poll(&poll_fd, 1, 100);
+        }
+        _ = owner.service(storage, 0, &failure);
+        try std.testing.expectEqual(@as(?anyerror, null), failure);
+    }
+    return waited;
+}
+
+fn reloadText(storage: *store_module.Store, session: @FieldType(@import("action_read.zig").Request, "session"), action_id: u64, out: []u8) ![]const u8 {
+    var read: @import("action_read.zig").Read = undefined;
+    try storage.readAction(&.{ .session = session, .action_id = action_id }, &read);
+    const text = read.status.resolved.window.text.slice();
+    @memcpy(out[0..text.len], text);
+    return out[0..text.len];
+}
+
+test "a model reload settles only after its list lands, names the tools added and removed, and a later Operation is offered the new tool" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{ "alpha", "gamma" }), &.{listOf(&.{ "alpha", "beta" })});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try testing.canonicalCwd(io, &cwd);
+    var configure = try testing.completeConfiguration("reload-config", "", workspace, "model-a");
+    configure.configuration.tools = try .of(&.{ "alpha", "find_tools", "gamma" });
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "reload-message", "reload-message", session.slice(), "reload the tools");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    try std.testing.expect(input.tool == .find_tools);
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    defer host.find_reloads.deinit(std.testing.allocator);
+
+    // The first pass asks and records; the Action waits while the list is out.
+    try std.testing.expectEqual(execution_turn.Admission.retry_later, runFindTools(&host, &input));
+    try std.testing.expect(host.find_reloads.find(input.binding.action_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), host.find_reloads.find(input.binding.action_id).?.generations.len);
+    try std.testing.expect((try settleReload(&host, &owner, &storage, &input)) > 0);
+    try std.testing.expect(host.find_reloads.find(input.binding.action_id) == null);
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Reloaded MCP tools. Added: beta. Removed: gamma.", try reloadText(&storage, session, input.binding.action_id, &text));
+    try std.testing.expect(storage.hostTools().host_tool_set.find("beta") != null);
+    try std.testing.expect(storage.hostTools().host_tool_set.find("gamma") == null);
+    try std.testing.expect(!storage.isFenced());
+
+    // The turn's next Operation is offered the tools now in force. A second Session that permits beta offers it.
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try testing.settleItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+    var later_configure = try testing.completeConfiguration("reload-later-config", "", workspace, "model-a");
+    later_configure.configuration.tools = try .of(&.{ "beta", "find_tools" });
+    const later = (try storage.configure(&later_configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "reload-later-message", "reload-later-message", later.slice(), "read");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id WHERE m.operation_id=?1 AND t.name='beta'", .{next.operation_id}));
+}
+
+test "a reload while a list is in flight folds into the next list, one extra list and not two" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const same = listOf(&.{"alpha"});
+    var fixture: ReloadScript = undefined;
+    try fixture.start(same, &.{ same, same });
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("fold-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "fold-message", "fold-message", session.slice(), "reload");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "fold-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    defer host.find_reloads.deinit(std.testing.allocator);
+
+    // A list is already in flight when the reload asks; the reload's generation waits for the list after it.
+    _ = owner.ask(0);
+    var failure: ?anyerror = null;
+    _ = owner.service(&storage, 0, &failure);
+    try std.testing.expect(owner.listing());
+    _ = try settleReload(&host, &owner, &storage, &input);
+    try std.testing.expectEqual(@as(usize, 3), fixture.script.requests.load(.acquire));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Reloaded MCP tools. No tools were added, removed or changed.", try reloadText(&storage, session, input.binding.action_id, &text));
+}
+
+test "a reload whose Action predates this process settles with the tools now offered and asks nothing" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("restart-reload-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "restart-reload-message", "restart-reload-message", session.slice(), "reload");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "restart-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    // The Host restarted after this Action was created: its watermark is the Store's highest Action id.
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    defer host.find_reloads.deinit(std.testing.allocator);
+    host.find_reloads.watermark = try storage.highestActionId();
+    try std.testing.expect(host.find_reloads.watermark >= input.binding.action_id);
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    try std.testing.expect(host.find_reloads.find(input.binding.action_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.script.requests.load(.acquire));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Rui restarted before this reload finished, so it cannot tell which tools changed and reports no changes. It offers 1 MCP tool(s) now.",
+        try reloadText(&storage, session, input.binding.action_id, &text),
+    );
+}
+
+test "a reload with no MCP server configured says so and asks nothing" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, io, .{});
+    defer storage.close() catch unreachable;
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("no-mcp-reload-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "no-mcp-reload-message", "no-mcp-reload-message", session.slice(), "reload");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "no-mcp-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":\\\"alpha\\\"}",
+        .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    defer host.find_reloads.deinit(std.testing.allocator);
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    try std.testing.expect(host.find_reloads.find(input.binding.action_id) == null);
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("No MCP servers to reload\nNo tools matched. 0 tools are still not loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
 }
 
 test "aggregate custody reconciles MCP and slots and rejects tokens shared across populations" {

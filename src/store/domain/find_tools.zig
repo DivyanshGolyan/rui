@@ -187,7 +187,7 @@ pub const FindTools = struct {
         const arena = t.input.arena;
         t.matches = try arena.create(Matches);
         t.matches.* = .{};
-        if (t.input.refusal != null) return t.writeResult(r);
+        if (t.input.refusal != null or t.input.words.count == 0) return t.writeResult(r);
         t.pending = try arena.create(Candidates);
         t.pending.* = .{};
         tool_offer.project(r, t.configured(), t.loadedIntent(), t.pending);
@@ -283,7 +283,14 @@ pub const FindTools = struct {
         const matches = t.matches;
         if (t.input.refusal) |reason| {
             try out.print("Rui could not find tools: {s}. Nothing was loaded.", .{reason});
-        } else if (matches.count == 0) {
+            return t.lookupOutcome(r);
+        }
+        if (t.input.words.report) |report| {
+            try out.writeAll(report);
+            if (t.input.words.count == 0) return t.lookupOutcome(r);
+            try out.writeAll("\n");
+        }
+        if (matches.count == 0) {
             try out.print("No tools matched. {d} tools are still not loaded.", .{matches.remaining});
         } else {
             try out.writeAll("Loaded these tools; they are available on your next request:\n");

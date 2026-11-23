@@ -26,10 +26,18 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
         error.OutOfMemory => return error.OutOfMemory,
         else => return refused("words must be the only field of one well-formed JSON object"),
     };
-    if (root != .object or root.object.count() != 1) return refused("words must be the only field of one JSON object");
-    const words = root.object.get("words") orelse return refused("words is required");
-    if (words != .string) return refused("words must be a string");
+    if (root != .object) return refused("words must be the only field of one JSON object");
+    if (unknownField(root.object, &.{ "words", "reload" })) |name| return refusedField(arena, name, "is not a words or reload field");
     out.* = .{};
+    if (root.object.get("reload")) |reload| {
+        if (reload != .bool) return refused("reload must be true or false");
+        out.reload = reload.bool;
+    }
+    const words = root.object.get("words") orelse {
+        if (out.reload) return .accepted;
+        return refused("words is required unless reload is true");
+    };
+    if (words != .string) return refused("words must be a string");
     var pieces = std.mem.splitScalar(u8, words.string, ' ');
     while (pieces.next()) |piece| {
         if (piece.len == 0) continue;
@@ -40,6 +48,38 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
     }
     if (out.count == 0) return refused("words must contain one to eight space-separated words");
     return .accepted;
+}
+
+test "find_tools arguments: words, reload, or both, and nothing else" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const allocator = memory.allocator();
+    const Case = struct { bytes: []const u8, words: ?usize, reload: bool };
+    for ([_]Case{
+        .{ .bytes = "{\"words\":\"one\"}", .words = 1, .reload = false },
+        .{ .bytes = "{\"reload\":true}", .words = 0, .reload = true },
+        .{ .bytes = "{\"reload\":true,\"words\":\"one two\"}", .words = 2, .reload = true },
+        .{ .bytes = "{\"reload\":false,\"words\":\"one\"}", .words = 1, .reload = false },
+        .{ .bytes = "{\"reload\":false}", .words = null, .reload = false },
+        .{ .bytes = "{}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":\"true\"}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":1,\"words\":\"one\"}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":null}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":true,\"words\":7}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":true,\"words\":\"\"}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":true,\"tools\":[]}", .words = null, .reload = false },
+        .{ .bytes = "{\"reload\":true,\"reload\":true}", .words = null, .reload = false },
+    }) |case| {
+        var arguments: FindTools = .{};
+        const check = try checkFindTools(allocator, case.bytes, &arguments);
+        if (case.words) |count| {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqual(count, arguments.count);
+            try std.testing.expectEqual(case.reload, arguments.reload);
+        } else {
+            try std.testing.expect(check == .rejected);
+        }
+    }
 }
 
 pub const read_action_max_argument_bytes = 4096;
