@@ -24,10 +24,10 @@ INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES
 (2,0,1),
 (4,0,1),
 (4,1,2);
-INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) VALUES
-('d8mv7p','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,1,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1),
-('brhkcj','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,2,0,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,2,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1),
-('rhvzwc','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1);
+INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key,app_tool_set_id,app_lane) VALUES
+('d8mv7p','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,1,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'d8mv7p'),
+('brhkcj','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,2,0,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,2,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'brhkcj'),
+('rhvzwc','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1,NULL,'rhvzwc');
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) VALUES
 ('fixture-answer-config',1,'d8mv7p',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,1),
 ('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',2,NULL,1,'',0,0,2),
