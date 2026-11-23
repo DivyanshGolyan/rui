@@ -52,7 +52,7 @@ function narrowed(entry: FeedEntry): void {
 			const sessionId: string = entry.sessionId;
 			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
-			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
+			const ending: "done" | "context_full" | "provider_refused" | "out_of_quota" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
 			const content: Schemas["ContentValue"] | null = entry.content;
 			void [sessionId, ending, content];
 			break;

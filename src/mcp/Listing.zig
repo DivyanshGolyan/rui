@@ -5,6 +5,7 @@ const post = @import("post.zig");
 const reply = @import("reply.zig");
 const shape = @import("shape.zig");
 const document = @import("document.zig");
+const stderr = @import("../stderr.zig");
 
 const Listing = @This();
 
@@ -27,7 +28,6 @@ pub const Storage = struct {
 pub const Error = Request.Error || post.Error || error{
     TooMany,
     NoRoom,
-    ToolNameCollision,
     BadSchema,
 };
 
@@ -48,7 +48,6 @@ cursor_bytes: [256]u8,
 count: usize,
 arena_used: usize,
 left_out: usize,
-collision: ?[]const u8,
 
 pub fn init(self: *Listing, server: post.Server, client: post.Client, storage: Storage) Error!void {
     self.* = .{
@@ -63,7 +62,6 @@ pub fn init(self: *Listing, server: post.Server, client: post.Client, storage: S
         .count = 0,
         .arena_used = 0,
         .left_out = 0,
-        .collision = null,
     };
     try self.openPage();
 }
@@ -127,7 +125,7 @@ fn take(self: *Listing, result: []const u8) Error!bool {
     const list = reply.readList(result) catch return error.BadSchema;
     var tools = reply.Tools.init(list);
     while (tools.next()) |listed| switch (listed) {
-        .left_out => self.left_out += 1,
+        .left_out => |left| self.leave(left.name, "bad definition"),
         .tool => |tool| try self.add(tool),
     };
     const cursor = list.next_cursor orelse return false;
@@ -137,18 +135,24 @@ fn take(self: *Listing, result: []const u8) Error!bool {
     return true;
 }
 
+/// Counts a tool the listing leaves out and logs it with its reason.
+fn leave(self: *Listing, name: ?[]const u8, reason: []const u8) void {
+    self.left_out += 1;
+    stderr.diagnostic("rui: MCP server {s}: tool {s} left out: {s}\n", .{ self.server.label, name orelse "(unnamed)", reason });
+}
+
+/// Keeps a listed tool whose definition is usable. A name two tools share is kept on both sides: the
+/// merge offers neither under a clashing name. A tool past the entry capacity or with a bad definition is left out.
 fn add(self: *Listing, tool: reply.Tool) Error!void {
-    if (!functionName(tool.name)) {
-        self.left_out += 1;
+    if (self.count == self.storage.entries.len) {
+        var reason: [64]u8 = undefined;
+        self.leave(tool.name, std.fmt.bufPrint(&reason, "more than {d} tools from this server", .{self.storage.entries.len}) catch "too many tools from this server");
         return;
     }
-    for (self.entries()) |earlier| {
-        if (std.mem.eql(u8, earlier.name, tool.name)) {
-            self.collision = earlier.name;
-            return error.ToolNameCollision;
-        }
+    if (!functionName(tool.name)) {
+        self.leave(tool.name, "bad definition");
+        return;
     }
-    if (self.count == self.storage.entries.len) return error.TooMany;
     const mark = self.arena_used;
     const name = try self.copy(tool.name);
     const description: ?[]const u8 = if (tool.description) |text| try self.copy(text) else null;
@@ -156,13 +160,9 @@ fn add(self: *Listing, tool: reply.Tool) Error!void {
     var writer: std.Io.Writer = .fixed(room);
     shape.writeSchema(&writer, tool.input_schema) catch |err| switch (err) {
         error.WriteFailed => return error.NoRoom,
-        error.NameTaken => {
-            self.collision = name;
-            return error.ToolNameCollision;
-        },
-        error.Malformed => {
+        error.NameTaken, error.Malformed => {
             self.arena_used = mark;
-            self.left_out += 1;
+            self.leave(tool.name, "bad definition");
             return;
         },
     };
@@ -267,21 +267,23 @@ test "a tool whose schema is malformed is left out and its siblings are kept" {
     try std.testing.expectEqual(listing.entries()[0].name.ptr, @as([*]const u8, &room.arena));
 }
 
-test "two tools of one name fail the listing and name the tool" {
+test "two tools of one name are both listed; the merge leaves both out" {
     var script: Script = .{ .reply = pageOf(write ++ "," ++ write, null) };
     var room: TestRoom = .{};
     var listing: Listing = undefined;
-    try std.testing.expectError(error.ToolNameCollision, run(&script, room.storage(), &listing));
-    try std.testing.expectEqualStrings("write", listing.collision.?);
+    try std.testing.expectEqual(Outcome.listed, try run(&script, room.storage(), &listing));
+    try std.testing.expectEqual(@as(usize, 2), listing.entries().len);
+    try std.testing.expectEqual(@as(usize, 0), listing.leftOut());
 }
 
-test "a schema that already names the description property fails the listing" {
+test "a schema that already names the description property leaves that tool out" {
     const taken = "{\"name\":\"t\",\"inputSchema\":{\"properties\":{\"rui_call_description\":{}}}}";
-    var script: Script = .{ .reply = pageOf(taken, null) };
+    var script: Script = .{ .reply = pageOf(taken ++ "," ++ write, null) };
     var room: TestRoom = .{};
     var listing: Listing = undefined;
-    try std.testing.expectError(error.ToolNameCollision, run(&script, room.storage(), &listing));
-    try std.testing.expectEqualStrings("t", listing.collision.?);
+    try std.testing.expectEqual(Outcome.listed, try run(&script, room.storage(), &listing));
+    try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
+    try std.testing.expectEqual(@as(usize, 1), listing.leftOut());
 }
 
 test "a JSON-RPC error or a bad status leaves the server unavailable" {
@@ -294,11 +296,13 @@ test "a JSON-RPC error or a bad status leaves the server unavailable" {
     try std.testing.expectEqual(Outcome.unavailable, try run(&status, room.storage(), &listing));
 }
 
-test "more tools than the storage holds is refused" {
+test "more tools than the storage holds are left out, not a failed listing" {
     var script: Script = .{ .reply = pageOf(search ++ "," ++ write, null) };
     var room: TestRoom = .{};
     var listing: Listing = undefined;
     var storage = room.storage();
     storage.entries = storage.entries[0..1];
-    try std.testing.expectError(error.TooMany, run(&script, storage, &listing));
+    try std.testing.expectEqual(Outcome.listed, try run(&script, storage, &listing));
+    try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
+    try std.testing.expectEqual(@as(usize, 1), listing.leftOut());
 }

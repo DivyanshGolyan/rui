@@ -345,7 +345,7 @@ pub const Store = struct {
         var text_bytes: usize = 0;
         for (rows, 0..) |*row, ordinal| {
             if (row.ordinal != ordinal or row.description_private or row.schema_private) return error.CorruptStore;
-            text_bytes += row.name.slice().len + row.server.slice().len;
+            text_bytes += row.name.slice().len + row.remote_name.slice().len + row.server.slice().len;
             text_bytes += std.math.cast(usize, row.description_length) orelse return error.CorruptStore;
             text_bytes += std.math.cast(usize, row.schema_length) orelse return error.CorruptStore;
         }
@@ -361,6 +361,8 @@ pub const Store = struct {
         for (rows, saved.records, saved.digests) |*row, *out, *digest| {
             const name = take(saved.texts, &used, row.name.slice().len);
             @memcpy(name, row.name.slice());
+            const remote = take(saved.texts, &used, row.remote_name.slice().len);
+            @memcpy(remote, row.remote_name.slice());
             const server = take(saved.texts, &used, row.server.slice().len);
             @memcpy(server, row.server.slice());
             const description = take(saved.texts, &used, @intCast(row.description_length));
@@ -369,7 +371,7 @@ pub const Store = struct {
             try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
             digest.* = tool_record.recordDigest(out);
         }
         if (!saved.toolSet().valid()) return error.CorruptStore;

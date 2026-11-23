@@ -332,7 +332,7 @@ pub fn renderToolsStatus(response: protocol.JsonOut, instance: protocol.Instance
     try response.appendShape(protocol.tools_status_reply.head, .{instance});
     for (servers, 0..) |row, index| {
         if (index != 0) try response.append(",");
-        try response.appendShape(protocol.tools_status_reply.entry, .{ row.server, row.status.state, row.status.last, row.status.finished, row.status.tools });
+        try response.appendShape(protocol.tools_status_reply.entry, .{ row.server, row.status.state, row.status.last, row.status.finished, row.status.tools, row.status.left_out });
     }
     try response.append(protocol.tools_status_reply.tail);
 }
