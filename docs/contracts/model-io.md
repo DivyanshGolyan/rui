@@ -482,6 +482,10 @@ The Host lists every configured MCP server at startup and re-lists a server when
 One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
 A list that fails keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
 A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation, tool count and `left_out` count.
+The model can trigger the same reload with `find_tools` and `reload` true, with or without `words`.
+Its Action asks every configured server through the same owner that `tools_reload` uses, and settles in the pass that asks: its one Tool Result names the servers asked, or says that none is configured. Its search, if it has words, uses the tools offered now.
+With `words`, the usual matches follow, read from the set now in force.
+The Action keeps no record and waits on no list; the asked lists land later on the execution loop, and a server's new tools are found with a later `find_tools` call.
 A server that is unreachable at startup keeps its saved tools until a retry lists it.
 Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge.
 The Host never refuses to start or to publish a list because of MCP tool names or tool counts.
