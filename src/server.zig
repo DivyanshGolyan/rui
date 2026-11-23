@@ -690,13 +690,18 @@ const Intake = struct {
     /// the Store is fenced or the Host stops.
     fn serveLineWake(self: *Intake) void {
         var bytes: [256]u8 = undefined;
-        while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+        var woke = false;
+        while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) woke = true;
         self.lines.rearm();
         if (self.lines.count == 0) return;
-        self.host.store.lockChanges();
-        self.lines.capture(self.host.store.changes);
-        self.host.store.unlockChanges();
-        self.lines.onWake();
+        // A pass with no wake byte has no commit to walk: a commit that is not yet
+        // drained writes its byte after its record, so it is seen on a later pass.
+        if (woke) {
+            self.host.store.lockChanges();
+            self.lines.capture(self.host.store.changes);
+            self.host.store.unlockChanges();
+            self.lines.onWake();
+        }
         const line_ms: u64 = nowNs(self.host) / std.time.ns_per_ms;
         if (self.host.store.isFenced()) self.lines.failAll(.store_failed, line_ms) else if (self.host.stopping()) self.lines.failAll(.host_stopping, line_ms);
     }
@@ -2609,7 +2614,11 @@ test "a line upgrades on the Host, takes its leftover watch, hears each commit t
     configure.key.set("line-host-second") catch unreachable;
     const second = (try storage.configure(&configure, .{})).accepted.session;
     try std.testing.expectEqual(@as(usize, 1), drainPeer(wake[0], &wake_bytes).len);
+    // The byte was counted above; put it back so the pass sees the wake it announces.
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(wake[1], "x", 1));
+    const walks_before_commit = intake.lines.captures;
     try passLines(&intake, 0);
+    try std.testing.expectEqual(walks_before_commit + 1, intake.lines.captures);
     const changed = drainPeer(pairs[0][1], &sink);
     try std.testing.expect(std.mem.indexOf(u8, changed, "{\"type\":\"changed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, changed, second.slice()) != null);
@@ -2618,6 +2627,9 @@ test "a line upgrades on the Host, takes its leftover watch, hears each commit t
     try passLines(&intake, 0);
     try std.testing.expectEqual(@as(usize, 0), drainPeer(pairs[0][1], &sink).len);
     try std.testing.expectEqual(@as(usize, 0), drainPeer(wake[0], &wake_bytes).len);
+    const walks = intake.lines.captures;
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(walks, intake.lines.captures);
 
     // A different Host instance is refused with 409 and leaves the open line alone.
     try sendRequest(pairs[1][1], &request, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "");

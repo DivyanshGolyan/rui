@@ -39,6 +39,8 @@ pub const Pool = struct {
     waker: Waker = .{},
     subscriber: store.CommitSubscriber = undefined,
     allocator: ?std.mem.Allocator = null,
+    /// Walks of the ring taken so far. Intake takes one only on a pass that drained a wake byte.
+    captures: usize = 0,
     /// The ring's walk fields, copied by `capture` under the ring's lock. About 56 KiB,
     /// so it is allocated with the first line and freed by `deinit`, not on a stack.
     view: ?*change_ring.Ring.View = null,
@@ -96,6 +98,7 @@ pub const Pool = struct {
     /// The caller holds the ring's lock. Copies what the line walk reads, so the walk
     /// (`onWake`) runs after the lock is released.
     pub fn capture(self: *Pool, ring: *const change_ring.Ring) void {
+        self.captures += 1;
         self.view.?.capture(ring);
     }
 

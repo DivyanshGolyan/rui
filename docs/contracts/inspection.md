@@ -594,6 +594,8 @@ Reconnection obtains a fresh complete observation, not a continuation of a parti
 | Pool full (16 lines) | 503 | `line_capacity_exhausted` |
 | Host stopping | 503 | `host_stopping` |
 | Store fenced (the fence reply, which opens no line) | 500 | `canonical_store_failure` |
+| Leftover bytes after the headers carry a frame of length 0 or above 16 KiB | 400 | `ProtocolError` (the line is not opened) |
+| Allocating the line fails | 503 | `OutOfMemory` (busy) |
 
 
 Each frame is a 4-byte big-endian length and a JSON object of at most 16 KiB. The line is notification-only: it carries no saved fact and no mutation. The app reads its feed from its own cursor when it hears `changed` or `resync`.
@@ -607,7 +609,7 @@ Each frame is a 4-byte big-endian length and a JSON object of at most 16 KiB. Th
 | Host to app | `{"type":"failed","code":"store_failed"}` or `"host_stopping"` | The Store fenced or the Host is stopping. The Host then closes the line. |
 | Host to app | `{"type":"ping"}` | Sent after 20 seconds with nothing else owed. |
 
-A commit reaches intake through the Store's second commit subscriber: it writes one byte to the intake wake pipe, at most once until intake re-arms it, and only while a line is open. Intake copies the ring's walk fields under the ring's lock (about 56 KiB, once per wake), then walks that copy into each line outside the lock and sets dirty state. The lock is also held for one read of the newest generation and the open flag when a line is admitted. It reads no Store row and starts no worker. A malformed frame, an unknown `type` or a watch set past 256 closes the line without a frame. The line's sockets count in the descriptor requirement. The frames `serve`, `progress`, `calls` and `cancel` belong to the client-tool slices and are not part of this one.
+A Store fence reaches an idle line on the next intake pass, and intake passes at least once a second, so an idle line hears `failed` within a second of the fence. A commit reaches intake through the Store's second commit subscriber: it writes one byte to the intake wake pipe, at most once until intake re-arms it, and only while a line is open. Intake copies the ring's walk fields under the ring's lock (about 56 KiB, once per wake), then walks that copy into each line outside the lock and sets dirty state. The lock is also held for one read of the newest generation and the open flag when a line is admitted. It reads no Store row and starts no worker. A malformed frame, an unknown `type` or a watch set past 256 closes the line without a frame. The line's sockets count in the descriptor requirement. The frames `serve`, `progress`, `calls` and `cancel` belong to the client-tool slices and are not part of this one.
 
 ### Live-control notification
 
