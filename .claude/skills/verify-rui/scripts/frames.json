@@ -6701,7 +6701,7 @@
     },
     {
       "name": "drag-to-archive",
-      "note": "A chat pressed and dragged onto Archived: the tab is shaded and the tabs line says drop to archive; L1 SGR press and drag",
+      "note": "A chat pressed and dragged onto Archived: the tab is shaded and the tabs line says drop here; L1 SGR press and drag",
       "cast": [
         {
           "label": "Drag me to Archived",
@@ -6731,7 +6731,7 @@
         },
         {
           "mouse": {
-            "at": "Schema migration",
+            "at": "Sidebar chat",
             "do": "move"
           }
         },
@@ -6744,7 +6744,7 @@
       ],
       "expect": [
         "Archived",
-        "drop to archive",
+        "drop here",
         "Drag me to Archived"
       ],
       "absent": [
@@ -6783,7 +6783,7 @@
         },
         {
           "mouse": {
-            "at": "Schema migration",
+            "at": "Sidebar chat",
             "do": "move"
           }
         },
@@ -6807,7 +6807,7 @@
         "· Archived"
       ],
       "absent": [
-        "drop to archive"
+        "drop here"
       ]
     }
   ]

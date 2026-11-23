@@ -5393,7 +5393,7 @@ test "a chat row pressed in the list and released on the Archived tab archives i
         try std.testing.expect(rig.overview.state.carry.carrying);
         var drawn = try rig.shown(140, 30);
         var hint = false;
-        for (0..30) |row| hint = hint or std.mem.indexOf(u8, try drawn.line(@intCast(row)), "Archived  · drop to archive") != null;
+        for (0..30) |row| hint = hint or std.mem.indexOf(u8, try drawn.line(@intCast(row)), "Archived  · drop here") != null;
         drawn.deinit();
         try std.testing.expect(hint);
         const release = if (on_tab) try Find.cell(rig, arena.allocator(), 140, .archived) else try Find.cell(rig, arena.allocator(), 140, .{ .row = other });

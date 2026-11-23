@@ -3708,9 +3708,9 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
         }
     }
     const held_at = text_column + "Chats".len + 2 + "Archived".len + 2;
-    if (drop) |target| {
-        const words = if (target == .archived) "drop to archive" else "drop to restore";
-        _ = try built.put(held_at, if (caps.unicode) "· " ++ words else ". " ++ words, width -| held_at, .{ .colour = if (dropping) .strong else .quiet });
+    // The shaded tab names what the drop does; the words only say that it takes one, and fit a sidebar.
+    if (drop != null) {
+        _ = try built.put(held_at, if (caps.unicode) "· drop here" else ". drop here", width -| held_at, .{ .colour = if (dropping) .strong else .quiet });
     } else if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
     return .{
         .{ .segments = new_session, .target = .new_session },
@@ -5980,8 +5980,7 @@ test "the tab that takes a carried chat is shaded, strongly while the pointer ho
         _ = try step(&state, .{ .pointer = .{ .over = if (over_target) target else null, .phase = .held } });
         const tabs = (try controls(arena.allocator(), &state, 38, caps))[1].segments;
         const text = try segmentText(arena.allocator(), tabs);
-        const words = if (archived_row) "drop to restore" else "drop to archive";
-        try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_caps) "· " ++ words else ". " ++ words) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_caps) "Archived  · drop here" else "Archived  . drop here") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "order held") == null);
         const shaded = try styleOf(tabs, if (archived_row) "Chats" else "Archived");
         try std.testing.expectEqual(if (over_target) Background.selection else Background.hover, shaded.background);
@@ -5992,7 +5991,7 @@ test "the tab that takes a carried chat is shaded, strongly while the pointer ho
         for (tabs) |segment| if (segment.style.background != .ground) try std.testing.expectEqualStrings(if (archived_row) "Chats" else "Archived", segment.text);
         _ = try step(&state, .{ .pointer = .{ .over = null, .phase = .free } });
         const after = try segmentText(arena.allocator(), (try controls(arena.allocator(), &state, 38, caps))[1].segments);
-        try std.testing.expect(std.mem.indexOf(u8, after, "drop to") == null);
+        try std.testing.expect(std.mem.indexOf(u8, after, "drop here") == null);
     };
 }
 
