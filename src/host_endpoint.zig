@@ -358,7 +358,9 @@ fn censusIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const u8, skip:
         try found.ensureUnusedCapacity(allocator, 1);
         found.appendAssumeCapacity(try std.fmt.allocPrint(allocator, "{s}/{s}", .{ interface.path(), socket_name }));
     }
-    std.mem.sort([]u8, found.items, {}, struct {
+    // Paths are distinct (each names a different directory entry), so an
+    // unstable sort gives the same order; pdq needs no stack cache.
+    std.mem.sortUnstable([]u8, found.items, {}, struct {
         fn less(_: void, a: []u8, b: []u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
