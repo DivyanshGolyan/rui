@@ -484,6 +484,7 @@ The Host lists every configured MCP server at startup and re-lists a server when
 One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
 A list that fails or collides keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
 A server that is unreachable at startup keeps its saved tools until a retry lists it.
+Startup drives the same lists, publishing each as it lands; a list that collides or exceeds the Host tool limit during startup refuses the start (`tool_name_collision`, `settings_invalid`), because the configuration is wrong now, while the same refusal later keeps the running Host's previous tools.
 Operations keep their frozen offer, and the next Operation is projected from the new set (D110).
 The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
 Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.
