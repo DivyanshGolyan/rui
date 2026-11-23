@@ -8,11 +8,11 @@ compare proving that the release tag contains the merge commit (not merely a
 later date). No checkout, fetch, tag, or GitHub mutation is performed.
 Every review stage (first review, Codex-clean, rounds) derives from one list
 of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
-findings), the mutable summary at its Code Review completion time (updated_at in
-its older format), and a maintainer's interim opus-review-state:v1 marker at its
-created_at (each interim review is a new comment; a later edit, even after the
-merge, does not move it). Rounds count reviews, receipts and interim markers; the summary is
-only a fallback for a head without a review or receipt. Codex-clean is the time
+findings), the mutable summary at its Code Review completion time, and a
+maintainer's interim opus-review-state:v1 marker at its created_at (each interim
+review is a new comment; a later edit, even after the merge, does not move it).
+Rounds count reviews, receipts and interim markers; the summary is only a
+fallback for a head without a review or receipt. Codex-clean is the time
 of the last outcome before merge when it is clean, on any head: landing.md lets
 test-only fixes, merges of main and stacked heads merge without another review,
 and only a later outcome with findings revokes it. A malformed summary or
@@ -26,10 +26,9 @@ and a missing endpoint stays blank rather than bridging to a different stage.
 
 Red-main minutes read the issues that record a red main instead of judging
 runs again: main is red while a `main-red` issue scheduled Promote filed
-(report_issue.py, one per cause, open until its fix closes it) or a
-"Main build red" issue the retired main build filed (the ci-red label and
-RED_MAIN_MARKER in its body) is open: from its creation, through its own
-closed and reopened events in time order, and still red now while one is open.
+(report_issue.py, one per cause, open until its fix closes it) is open: from
+its creation, through its own closed and reopened events in time order, and
+still red now while one is open.
 Main is red while any such issue is open, so red_main returns the union of
 every issue's open spans (overlapping or touching spans merged, still-open
 spans ending at the report time); two issues open at once count each minute
@@ -55,9 +54,6 @@ from report_issue import LABEL as CI_RED_LABEL
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
 RED_MAIN_KNOWN_FROM = "2026-11-13T11:56:38Z"
-# The retired main build's one issue (main_build.py until the qualification tier replaced it).
-RED_MAIN_MARKER = "<!-- main-build-red -->"
-RED_MAIN_TITLE = "Main build red"
 # Scheduled Promote's per-cause issues (promote.yml, qualification-tier.yml).
 RED_MAIN_LABEL = "main-red"
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
@@ -86,7 +82,9 @@ def minutes(start, end):
 def code_review_time(comment):
     row = next((line for line in comment["body"].splitlines() if "**Code Review**" in line), "")
     match = re.search(r'datetime="([^"]+)"', row)
-    return match[1] if match else comment["updated_at"]
+    if not match:
+        raise ValueError("no Code Review completion time")
+    return match[1]
 
 
 def push_count(pr, activity):
@@ -258,8 +256,7 @@ def containing_release(api, pr, releases):
 def red_main(api, now):
     spans = []
     for row in pages(api, f"repos/{REPO}/issues?state=all&labels={quote(CI_RED_LABEL)}"):
-        labelled = RED_MAIN_LABEL in {label["name"] for label in row.get("labels") or ()}
-        if "pull_request" in row or not (labelled or RED_MAIN_MARKER in (row.get("body") or "")):
+        if "pull_request" in row or RED_MAIN_LABEL not in {label["name"] for label in row.get("labels") or ()}:
             continue
         opened = utc(row["created_at"])
         events = pages(api, f"repos/{REPO}/issues/{row['number']}/events?")
@@ -327,7 +324,7 @@ def main():
         until = datetime.now(timezone.utc).isoformat()
         red = red_main(github, until)
         report = {"since": since, "as_of": utc(until), "release_source": "releases API published_at + REST compare ancestry",
-                  "red_main_source": f"open/closed {RED_MAIN_LABEL!r} and {RED_MAIN_TITLE!r} issues, "
+                  "red_main_source": f"open/closed {RED_MAIN_LABEL!r} issues, "
                                      f"recorded from {RED_MAIN_KNOWN_FROM}; earlier days are unknown",
                   "prs": rows, "days": daily(rows, since, until, red)}
     except (subprocess.CalledProcessError, ValueError, KeyError) as error:
