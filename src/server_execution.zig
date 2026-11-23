@@ -653,7 +653,7 @@ pub fn executionMain(host: *Host) void {
                     .bash => 25,
                     .idle => 100,
                 };
-                awaitDispatchWake(host, @intCast(@min(drain_wait_ms, kind_ms)));
+                awaitDispatchWake(host, @intCast(@min(drain_wait_ms, kind_ms, relistWaitMs(host))));
                 const wait_finished = std.Io.Clock.Timestamp.now(host.io, .awake);
                 measurement.wait_since_service_ns += @intCast(wait_started.durationTo(wait_finished).raw.nanoseconds);
             },
@@ -809,8 +809,9 @@ const NativeTurn = struct {
             }
         }
         const mcp_progress = self.mcp.service(self.host);
+        const relist_progress = serviceRelist(self.host);
         const image_progress = if (self.images) |images| images.service(self.host) else false;
-        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
+        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or relist_progress or image_progress;
     }
 
     pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -1219,6 +1220,23 @@ test "heap release is due once per return to all slots free" {
     try std.testing.expect(!release.due(&slots, true));
     try std.testing.expect(release.due(&slots, false));
     try std.testing.expect(!release.due(&slots, false));
+}
+
+/// How long the loop may wait for a re-list: 25 ms while one is listing, else until the
+/// earliest backoff retry or pending ask. Unbounded when no re-list is due.
+fn serviceRelist(host: *Host) bool {
+    const owner = host.mcp_relist orelse return false;
+    var failure: ?anyerror = null;
+    const progress = owner.service(host.store, server_host.nowNs(host) / std.time.ns_per_ms, &failure);
+    if (failure) |err| fenceDispatch(host, "MCP tool set publication", err);
+    return progress;
+}
+
+fn relistWaitMs(host: *Host) u64 {
+    const owner = host.mcp_relist orelse return std.math.maxInt(u64);
+    if (owner.listing()) return 25;
+    const at = owner.wakeAt() orelse return std.math.maxInt(u64);
+    return at -| server_host.nowNs(host) / std.time.ns_per_ms;
 }
 
 fn awaitDispatchWake(host: *Host, timeout_ms: u32) void {

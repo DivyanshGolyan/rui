@@ -91,6 +91,7 @@ const cores = .{
     .{ "mcp/EventStream.zig", @import("mcp/EventStream.zig") },
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/post.zig", @import("mcp/post.zig") },
+    .{ "mcp/relist.zig", @import("mcp/relist.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
     .{ "mcp/result_parts.zig", @import("mcp/result_parts.zig") },
     .{ "mcp/result_parts_legacy_test.zig", @import("mcp/result_parts_legacy_test.zig") },

@@ -4,7 +4,6 @@ const tools = @import("../tools.zig");
 const hs = @import("../host_settings.zig");
 const Connection = @import("../server_mcp_settings.zig").Server;
 const http1 = @import("../http1/request.zig");
-const deadline = @import("../deadline.zig");
 const stderr = @import("../stderr.zig");
 const Listing = @import("Listing.zig");
 const post = @import("post.zig");
@@ -40,22 +39,35 @@ fn before(_: void, a: Item, b: Item) bool {
     return std.mem.order(u8, a.record.name, b.record.name) == .lt;
 }
 
+/// Copies the bytes of an MCP-owned record into `arena`. Built-ins are static and stay borrowed.
+fn ownedRecord(arena: std.mem.Allocator, record: tools.Record) Error!tools.Record {
+    return .{
+        .name = try arena.dupe(u8, record.name),
+        .description = try arena.dupe(u8, record.description),
+        .input_schema = try arena.dupe(u8, record.input_schema),
+        .owner = record.owner,
+        .server = try arena.dupe(u8, record.server),
+    };
+}
+
+/// Builds a tool set whose bytes all live in `arena`: the result borrows nothing from
+/// `saved`, `sources` or the listed entries, so those may be freed as soon as this returns.
 pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet, sources: []const Source, collision: *Collision) Error!tools.HostToolSet {
     var items: std.ArrayList(Item) = .empty;
     for (tools.built_in_tool_set.records) |record| try items.append(arena, .{ .record = record, .source = built_in_source });
     for (sources) |source| {
         if (source.listed) |entries| {
-            for (entries) |entry| try items.append(arena, .{ .source = source.server, .record = .{
+            for (entries) |entry| try items.append(arena, .{ .source = source.server, .record = try ownedRecord(arena, .{
                 .name = entry.name,
                 .description = entry.description orelse "",
                 .input_schema = entry.input_schema,
                 .owner = .mcp,
                 .server = source.server,
-            } });
+            }) });
         } else if (saved) |tool_set| {
             for (tool_set.records) |record| {
                 if (record.owner == .mcp and std.mem.eql(u8, record.server, source.server))
-                    try items.append(arena, .{ .record = record, .source = source.server });
+                    try items.append(arena, .{ .record = try ownedRecord(arena, record), .source = source.server });
             }
         }
     }
@@ -78,88 +90,109 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
         digest.* = tools.recordDigest(record);
     }
     const configured_servers = try arena.alloc([]const u8, sources.len);
-    for (sources, configured_servers) |source, *name| name.* = source.server;
+    for (sources, configured_servers) |source, *name| name.* = try arena.dupe(u8, source.server);
     return .{ .records = records, .digests = digests, .configured_servers = configured_servers };
 }
 
-pub const Fetched = union(enum) {
-    listed: []const Listing.Entry,
-    unreachable_,
-    collision: []const u8,
-};
-
-pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: *const Connection, stop: ?std.posix.fd_t) Error!Fetched {
-    const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
-    const entries = try scratch.alloc(Listing.Entry, entries_per_server);
-    defer scratch.free(entries);
-    const room = pages.mapZeroed(u8, arena_bytes + answer_bytes + request_bytes) catch return error.OutOfMemory;
-    defer pages.unmapZeroed(room);
-    const listing = try scratch.create(Listing);
-    defer scratch.destroy(listing);
-    listing.init(
-        .{ .target = target, .bearer_token = server.bearer_token.slice() },
-        client,
-        .{
-            .entries = entries,
-            .arena = room[0..arena_bytes],
-            .answer = room[arena_bytes..][0..answer_bytes],
-            .request = room[arena_bytes + answer_bytes ..],
-        },
-    ) catch return .unreachable_;
-    defer listing.deinit();
-    const limit = deadline.after(std.Io.Clock.Timestamp.now(io, .awake), list_timeout_ms);
-    while (true) {
-        const outcome = listing.advance() catch |err| switch (err) {
-            error.ToolNameCollision => return .{ .collision = try arena.dupe(u8, listing.collision orelse "") },
-            else => return .unreachable_,
-        };
-        switch (outcome) {
-            .listed => break,
-            .unavailable => return .unreachable_,
-            .waiting => {},
-        }
-        if (deadline.reached(std.Io.Clock.Timestamp.now(io, .awake), limit)) return .unreachable_;
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = listing.fd(), .events = listing.events(), .revents = 0 },
-            .{ .fd = stop orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
-        };
-        _ = std.posix.poll(&fds, 100) catch return .unreachable_;
-        if (fds[1].revents != 0) return error.Stopped;
-    }
-    const copies = try arena.alloc(Listing.Entry, listing.entries().len);
-    for (listing.entries(), copies) |entry, *copy| copy.* = .{
-        .name = try arena.dupe(u8, entry.name),
-        .description = if (entry.description) |text| try arena.dupe(u8, text) else null,
-        .input_schema = try arena.dupe(u8, entry.input_schema),
-    };
-    if (listing.leftOut() != 0) stderr.diagnostic("rui: MCP server {s}: {d} tool(s) left out for a bad definition\n", .{ server.name.slice(), listing.leftOut() });
-    return .{ .listed = copies };
+pub fn nowMs(io: std.Io) u64 {
+    const nanoseconds = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    return @intCast(@divTrunc(nanoseconds, std.time.ns_per_ms));
 }
 
-pub noinline fn collect(
-    io: std.Io,
-    arena: std.mem.Allocator,
+/// One server's list in flight. It owns the room its Listing reads into and the
+/// entries it fills; `finish` frees them, so a listed server's entries are valid
+/// only until then. The cell is heap-allocated so the Listing's address is stable.
+pub const Pending = struct {
     scratch: std.mem.Allocator,
-    servers: []const Connection,
-    saved: ?*const tools.HostToolSet,
-    collision: *Collision,
-    stop: ?std.posix.fd_t,
-) Error!tools.HostToolSet {
-    const sources = try arena.alloc(Source, servers.len);
-    for (servers, sources) |*server, *source| {
-        const name = try arena.dupe(u8, server.name.slice());
-        source.* = .{ .server = name, .listed = null };
-        switch (try fetch(io, arena, scratch, server, stop)) {
-            .listed => |entries| source.listed = entries,
-            .unreachable_ => stderr.diagnostic("rui: MCP server {s} did not list its tools; keeping its saved tools\n", .{name}),
-            .collision => |tool| {
-                collision.* = .{ .name = tool, .first = name, .second = name };
-                return error.ToolNameCollision;
+    name: []const u8,
+    entries: []Listing.Entry,
+    room: []u8,
+    listing: Listing,
+    deadline_ms: u64,
+
+    pub const Step = union(enum) { waiting, listed, failed, collision: []const u8 };
+
+    /// Begins listing `server`. Null when the server cannot be listed at all (a bad URL or no room).
+    /// `collision` in a later `advance` is valid until `finish`.
+    pub fn start(scratch: std.mem.Allocator, server: *const Connection, now_ms: u64) ?*Pending {
+        const target = http1.parseTarget(server.url.slice()) catch return null;
+        const entries = scratch.alloc(Listing.Entry, entries_per_server) catch return null;
+        const room = pages.mapZeroed(u8, arena_bytes + answer_bytes + request_bytes) catch {
+            scratch.free(entries);
+            return null;
+        };
+        const self = scratch.create(Pending) catch {
+            pages.unmapZeroed(room);
+            scratch.free(entries);
+            return null;
+        };
+        self.* = .{
+            .scratch = scratch,
+            .name = server.name.slice(),
+            .entries = entries,
+            .room = room,
+            .listing = undefined,
+            .deadline_ms = now_ms +| list_timeout_ms,
+        };
+        self.listing.init(
+            .{ .target = target, .bearer_token = server.bearer_token.slice() },
+            client,
+            .{
+                .entries = entries,
+                .arena = room[0..arena_bytes],
+                .answer = room[arena_bytes..][0..answer_bytes],
+                .request = room[arena_bytes + answer_bytes ..],
             },
-        }
+        ) catch {
+            pages.unmapZeroed(room);
+            scratch.free(entries);
+            scratch.destroy(self);
+            return null;
+        };
+        return self;
     }
-    return merge(arena, saved, sources, collision);
-}
+
+    /// Reads what the server has sent so far. Call again only after `.waiting`.
+    pub fn advance(self: *Pending) Step {
+        const outcome = self.listing.advance() catch |err| switch (err) {
+            error.ToolNameCollision => return .{ .collision = self.listing.collision orelse "" },
+            else => return .failed,
+        };
+        return switch (outcome) {
+            .waiting => .waiting,
+            .unavailable => .failed,
+            .listed => {
+                if (self.listing.leftOut() != 0) stderr.diagnostic("rui: MCP server {s}: {d} tool(s) left out for a bad definition\n", .{ self.name, self.listing.leftOut() });
+                return .listed;
+            },
+        };
+    }
+
+    /// The tools of a listed server. Valid after `.listed` until `finish`.
+    pub fn listed(self: *const Pending) []const Listing.Entry {
+        return self.listing.entries();
+    }
+
+    pub fn fd(self: *const Pending) std.posix.fd_t {
+        return self.listing.fd();
+    }
+
+    pub fn events(self: *const Pending) i16 {
+        return self.listing.events();
+    }
+
+    pub fn expired(self: *const Pending, now_ms: u64) bool {
+        return now_ms >= self.deadline_ms;
+    }
+
+    /// Frees the list and its entries. Merge the entries first.
+    pub fn finish(self: *Pending) void {
+        self.listing.deinit();
+        pages.unmapZeroed(self.room);
+        self.scratch.free(self.entries);
+        self.scratch.destroy(self);
+    }
+};
 
 fn listed(name: []const u8) Listing.Entry {
     return .{ .name = name, .description = "d", .input_schema = "{\"type\":\"object\"}" };
@@ -289,4 +322,35 @@ test "MCP missing tools maximum launch names fit the request and start_agent dia
     try host_tool_set.writeMissingTool(&tool, &writer);
     try writer.writeAll(" (mcp_server_unavailable). Nothing was started.");
     for (names) |name| try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &name) != null);
+}
+
+test "MCP merged tool set owns its bytes, so the saved set and the listed entries can be freed" {
+    var saved_memory = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var listed_memory = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var merged_memory = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer merged_memory.deinit();
+    var collision: Collision = .{};
+    const old_up = [_]Listing.Entry{.{ .name = try listed_memory.allocator().dupe(u8, "old_up"), .description = "old", .input_schema = "{\"type\":\"object\"}" }};
+    const kept = [_]Listing.Entry{.{ .name = try listed_memory.allocator().dupe(u8, "kept"), .description = "stays", .input_schema = "{\"type\":\"object\"}" }};
+    const saved = try merge(saved_memory.allocator(), null, &.{
+        .{ .server = "up", .listed = &old_up },
+        .{ .server = "down", .listed = &kept },
+    }, &collision);
+    const fresh = [_]Listing.Entry{.{ .name = try listed_memory.allocator().dupe(u8, "new_up"), .description = "fresh", .input_schema = "{\"type\":\"object\"}" }};
+    const merged = try merge(merged_memory.allocator(), &saved, &.{
+        .{ .server = "up", .listed = &fresh },
+        .{ .server = "down", .listed = null },
+    }, &collision);
+    saved_memory.deinit();
+    listed_memory.deinit();
+    try std.testing.expectEqual(tools.built_in_tool_set.records.len + 2, merged.records.len);
+    const up_at = merged.find("new_up").?;
+    try std.testing.expectEqualStrings("up", merged.records[up_at].server);
+    try std.testing.expectEqualStrings("fresh", merged.records[up_at].description);
+    const kept_at = merged.find("kept").?;
+    try std.testing.expectEqualStrings("down", merged.records[kept_at].server);
+    try std.testing.expectEqualStrings("stays", merged.records[kept_at].description);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", merged.records[kept_at].input_schema);
+    try std.testing.expectEqualStrings("down", merged.configured_servers[1]);
+    try std.testing.expect(merged.valid());
 }

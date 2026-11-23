@@ -480,7 +480,12 @@ A removed tool stays declared in the history, and a call to it gets the tool res
 The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](../../research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
 Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
 
-The Host lists each MCP server only at startup; it never re-lists or handles list-change notifications while running (D110).
+The Host lists every configured MCP server at startup and re-lists a server when asked (D110).
+One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
+A list that fails or collides keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
+A server that is unreachable at startup keeps its saved tools until a retry lists it.
+Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge; a result that collides or exceeds the Host tool limit during startup refuses the start (`tool_name_collision`, `settings_invalid`), because the configuration is wrong now, while the same refusal later keeps the running Host's previous tools.
+Operations keep their frozen offer, and the next Operation is projected from the new set (D110).
 The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
 Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.
 `store/domain/tool_offer.zig` owns one projection from intent and the Host's saved tool set: permitted MCP names resolve to today's identity (including server), unavailable names disappear, and built-ins retain their saved identity.
