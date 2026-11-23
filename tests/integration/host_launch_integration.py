@@ -24,7 +24,7 @@ import termios
 import time
 
 import host_process
-from host_process import (canonical_fixture_root, start_ready_process, stop_process,
+from host_process import (canonical_fixture_root, start_ready_process, stop_process, store_endpoint,
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
 import codex_fixture
@@ -32,6 +32,7 @@ from model_fixture import stop_endpoint
 from product_defaults import DEFAULTS
 import os_semantics
 from host_launch_fixture import COMMAND_TIMEOUT, RUI, dispose_provider_case, forced_crash_cleanup, matching_processes, run_start
+from settings_fixture import offered_tool_names
 
 
 SCHEMA = STORE_SCHEMA
@@ -274,6 +275,10 @@ def assert_configure_defaults(root, store, env):
     assert settings(addressed) == ("gpt-6-sol", [], "ask")
 
 
+# Open lines: src/line.zig capacity, outside intake's exchange population.
+LINE_DESCRIPTORS = 16
+
+
 def managed_descriptor_rejection(store, env, limit):
     def limits():
         resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
@@ -292,8 +297,8 @@ def managed_descriptor_rejection(store, env, limit):
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 5 + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
-                    authentication=authentication, self_wake=2,
-                    required=inherited + fixed_host + clients + execution + authentication + 2)
+                    authentication=authentication, self_wake=2, lines=LINE_DESCRIPTORS,
+                    required=inherited + fixed_host + clients + execution + authentication + 2 + LINE_DESCRIPTORS)
     assert fields == expected, (fields, expected)
     assert not (store / "host.lock").exists() and not (store / "diagnostics").exists(), store
     assert status(store, env)["status"] != "ready"
@@ -330,7 +335,7 @@ def startup_limits(root, env):
             else:
                 assert capacity == INTAKE and int(reported["descriptor_limit"]) >= required, reported
             if hard == minimum:
-                socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
+                socket_path = str(store_endpoint(store))
                 borrowers = []
                 try:
                     for _ in range(capacity):
@@ -1242,12 +1247,22 @@ def saved_settings_served(root, env):
         for name, server in (("docs", docs), ("clash", clash)):
             save(mcp_store, f"tools.mcp.{name}.url", f"http://127.0.0.1:{server.server_port}/mcp")
             save(mcp_store, f"tools.mcp.{name}.bearerToken", "env:RUI_TEST_MCP_TOKEN")
-        refused = run_start(mcp_store, token_env)
-        assert refused.returncode != 0 and "[tool_name_collision]" in refused.stderr, refused
-        assert "clash" in refused.stderr and "bash" in refused.stderr, refused.stderr
+        # `bash` from clash clashes with the built-in: it is offered as clash__bash, and the built-in keeps `bash`.
+        started = run_start(mcp_store, token_env)
+        assert started.returncode == 0, started.stderr
+        assert "tool_name_collision" not in started.stderr, started.stderr
+        # A running Host holds the Store's lock, so its saved tool set is read once it has paused.
+        host_ok(env, "pause", "--store", mcp_store)
+        wait_for_processes(mcp_store, 0)
+        names = offered_tool_names(mcp_store)
+        assert {"bash", "clash__bash", "search"} <= names, sorted(names)
         host_ok(env, "unset", "--store", mcp_store, "tools.mcp.clash")
         started = run_start(mcp_store, token_env)
         assert started.returncode == 0, started.stderr
+        host_ok(env, "pause", "--store", mcp_store)
+        wait_for_processes(mcp_store, 0)
+        names = offered_tool_names(mcp_store)
+        assert "clash__bash" not in names and "bash" in names, sorted(names)
     finally:
         forced_crash_cleanup(mcp_store)
         for server in (docs, clash):
@@ -1271,7 +1286,7 @@ def saved_settings_served(root, env):
         save(store, "presets.review", f"@{preset_file}")
         started = run_start(store, env)
         assert started.returncode == 0, started.stderr
-        sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
+        sock = str(store_endpoint(store))
         create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
                   "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         created = post(sock, "configure", create)
@@ -1323,7 +1338,7 @@ def saved_settings_served(root, env):
         forced_crash_cleanup(tls_store)
         secure.shutdown()
         secure.server_close()
-    print("saved settings served: MCP tools listed and a collision refused, preset Session created,"
+    print("saved settings served: MCP tools listed and a clashing tool offered under its prefix, preset Session created,"
           " Bash timed out at the saved 500 ms, provider reached over TLS with the saved CA file", flush=True)
 
 

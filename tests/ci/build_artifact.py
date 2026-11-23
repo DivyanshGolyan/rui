@@ -14,6 +14,7 @@ import tempfile
 import zipfile
 
 import git_command
+import rsql_table
 
 
 class Mismatch(ValueError):
@@ -275,6 +276,14 @@ def restore(artifact_ids, targets):
             print(message, file=summary)
 
 
+def refuse_stale_table(root=rsql_table.ROOT):
+    """A stale Store table compiles every statement on the slow comptime path, costing minutes
+    before policy rejects the same table, so a build or local compile refuses it first."""
+    if stale := rsql_table.fingerprint_error(root):
+        print(f"{stale}; no gates executed.", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("build", "restore", "compile"),
@@ -285,6 +294,8 @@ def main():
                         help="A producer artifact; an empty value (an unsplit build) is ignored")
     args = parser.parse_args()
     targets = json.loads(args.targets)
+    if args.operation != "restore":
+        refuse_stale_table()
     try:
         if args.operation == "build":
             package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets, args.part), args.part)

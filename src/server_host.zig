@@ -27,6 +27,8 @@ const store_module = @import("store.zig");
 const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 const host_drain = @import("host_drain.zig");
+const host_settings = @import("host_settings.zig");
+const server_mcp_relist = @import("server_mcp_relist.zig");
 
 pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
 pub const default_bash_path = @import("host_settings.zig").default_bash_path;
@@ -654,6 +656,15 @@ pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 
 pub fn wakeListener(host: *Host) void {
     if (host.intake_wake) |fd| _ = std.c.write(fd, "x", 1);
+}
+
+/// The one ask for MCP lists from the Host: asks the re-list owner for `only` or every configured server, wakes the
+/// dispatch loop when anything was asked, and returns how many were asked. `tools_reload` and `find_tools` reload both
+/// call it, so neither path asks or wakes on its own.
+pub fn askMcpLists(host: *Host, only: ?[]const u8, out: *[host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked) usize {
+    const count: usize = if (host.mcp_relist) |owner| owner.askAll(only, out) else 0;
+    if (count != 0) host.dispatch_wake.set(host.io);
+    return count;
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {

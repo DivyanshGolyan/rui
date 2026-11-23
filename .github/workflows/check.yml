@@ -346,7 +346,8 @@ jobs:
         run: zig fmt --check --ast-check build.zig build src
       # Policy is Python and Node on mostly one core; the compile analyses each binary on one
       # thread. Policy runs beside it at lower priority; this step fails only for the compile,
-      # and the job's last step fails for policy, so a policy failure still lets tests run.
+      # and the job's last step fails for policy, so a policy failure still lets tests run
+      # (except a stale Store table, which the compile refuses before its slow comptime path).
       - name: Compile only the binaries the selected targets need
         id: compile
         env:

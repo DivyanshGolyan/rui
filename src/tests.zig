@@ -108,6 +108,7 @@ test {
     _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
+    _ = @import("host_endpoint.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");
     _ = @import("TestObservation.zig");
@@ -117,6 +118,8 @@ test {
     _ = @import("activity_golden_tests.zig");
     _ = @import("activity_reply.zig");
     _ = @import("server.zig");
+    _ = @import("line_intake.zig");
+    _ = @import("line.zig");
     _ = @import("server_execution.zig");
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");

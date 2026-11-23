@@ -578,7 +578,7 @@ test "core call writes roll back on injected faults and save every bound skill" 
 test "child ending Message includes bounded provider report done answer and quiet parent stop" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Ending = enum { failed, provider_refused, done, stopped, quiet };
+            const Ending = enum { failed, provider_refused, out_of_quota, done, stopped, quiet };
             inline for (std.enums.values(Ending)) |ending| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -603,7 +603,11 @@ test "child ending Message includes bounded provider report done answer and quie
                     var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
                     try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                 } else {
-                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = if (ending == .failed) "malformed_provider_output" else "provider_http_400", .request_id = .{}, .report = &report } }, .ordinary, .{});
+                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = switch (ending) {
+                        .failed => "malformed_provider_output",
+                        .out_of_quota => "provider_quota",
+                        else => "provider_http_400",
+                    }, .request_id = .{}, .report = &report } }, .ordinary, .{});
                 }
                 try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{}));
                 try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));

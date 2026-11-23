@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 
-import type { SessionNotifications } from "./notifications.ts";
+import type { Follows } from "./follow.ts";
 import { RuiRequestError, RuiWaitTimeoutError, type RequestAnswer } from "./errors.ts";
-import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { servedWork, listActivity, watchActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions, type WatchOptions } from "./feed.ts";
 import { readPartBytes, type ContentValue } from "./parts.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 export interface Link {
-	readonly activity?: SessionNotifications;
+	/** The client's one way to follow a Session. A link without it cannot `watch`. */
+	readonly follows?: Follows;
 	exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer>;
 }
 
@@ -216,12 +217,19 @@ export class Session {
 
 	/**
 	 * The Session's feed, in order, as an async iterator (D9). Without `follow`
-	 * it ends at the current end. With it, busy Sessions poll with backoff; idle Sessions
-	 * wait for a local write on this Rui instance (not writes from another process).
-	 * See `ListActivityOptions.follow`; `signal` abort also ends an idle wait.
+	 * it ends at the current end. With it, the iterator is `watch`.
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
 		return listActivity(this.#link, this.id, options, (target) => { this.#interruptTarget = target; });
+	}
+
+	/**
+	 * Follows the Session's feed from `after`, yielding each new entry once and in order. The Host's line nudges
+	 * this client when the Session commits; the iterator reads only then, so an idle Session makes no requests.
+	 * Every watcher of this client shares one line. `signal` abort ends the iterator, even while it waits.
+	 */
+	watch(options?: WatchOptions): AsyncGenerator<FeedEntry, void, undefined> {
+		return watchActivity(this.#link, this.id, options, (target) => { this.#interruptTarget = target; });
 	}
 
 	/** Search public feed text newest first, with bounded snippets. */
@@ -292,7 +300,6 @@ export class Session {
 			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));
 		const messageId = accepted(reply.answer).admission;
-		this.#link.activity?.notify(this.id);
 		return { messageId };
 	}
 
@@ -303,7 +310,6 @@ export class Session {
 			await this.#link.exchange("/v1/configure", (store) => configureBody(store, idempotencyKey, this.id, fields)),
 		);
 		accepted(reply.answer);
-		this.#link.activity?.notify(this.id);
 	}
 
 	/** Stops the current and queued work. The Session stays usable (D14). */
@@ -318,7 +324,6 @@ export class Session {
 				session: this.id,
 			} satisfies Schemas["SessionStopRequest"]);
 		accepted(parse<Schemas["SessionStopReply"]>(await this.#link.exchange("/v1/control/session-stop", body)).answer);
-		this.#link.activity?.notify(this.id);
 	}
 
 	/** Stops work and archives after real settlement, using one durable intent. */
@@ -347,7 +352,6 @@ export class Session {
 		const answer = accepted(reply.answer);
 		const completion = reply.completion.status;
 		if (completion === "unavailable") throw new RuiRequestError("invocation_error", "invalid_response");
-		this.#link.activity?.notify(this.id);
 		return { archived: answer.archived, completion };
 	}
 
@@ -375,7 +379,6 @@ export class Session {
 			} satisfies Schemas["SessionPinRequest"]),
 		));
 		const answer = accepted(reply.answer);
-		this.#link.activity?.notify(this.id);
 		return { pinned: answer.pinned };
 	}
 
@@ -390,7 +393,6 @@ export class Session {
 			} satisfies Schemas["ActionBackgroundRequest"]),
 		));
 		const answer = accepted(reply.answer);
-		this.#link.activity?.notify(this.id);
 		return answer.action_selection;
 	}
 
@@ -405,7 +407,6 @@ export class Session {
 			} satisfies Schemas["ActionStopRequest"]),
 		));
 		const answer = accepted(reply.answer);
-		this.#link.activity?.notify(this.id);
 		return answer.resolution_position;
 	}
 
@@ -439,7 +440,6 @@ export class Session {
 			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch");
 			if (!gone) throw error;
 		}
-		this.#link.activity?.notify(this.id);
 	}
 
 	/** Answers an approval. `requestId` is the Action id of the `approval_requested` entry (D15). */
@@ -457,7 +457,6 @@ export class Session {
 				decision: wire,
 			} satisfies Schemas["PermissionDecisionRequest"]);
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
-		this.#link.activity?.notify(this.id);
 	}
 }
 
@@ -539,8 +538,10 @@ const RELOAD_WAIT_MS = 60_000;
 export interface ToolReloadOutcome {
 	server: string;
 	/** The latest outcome of the asked list. */
-	outcome: "listed" | "failed" | "collision";
+	outcome: "listed" | "failed";
 	tools: number;
+	/** Tools the server listed that the offered set left out (a clashing name, a name too long after prefixing, or the record limit). */
+	leftOut: number;
 }
 
 type ToolsAsk = Schemas["ToolsReloadReply"]["asked"][number];
@@ -572,7 +573,7 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 		if (status !== undefined && pending.length === 0) {
 			return reply.asked.map((ask) => {
 				const row = statusRow(status, ask.server);
-				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools) };
+				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools), leftOut: Number(row.left_out) };
 			});
 		}
 		const remaining = deadline - Date.now();

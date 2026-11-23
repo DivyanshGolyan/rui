@@ -3,6 +3,8 @@ import codecs
 import http.server
 import json
 import os_semantics
+import pathlib
+import sqlite3
 import struct
 import threading
 
@@ -40,6 +42,14 @@ def output(process, timeout=20):
     """What the Host wrote, within `timeout`, after its stdin closes."""
     host_process.close_stdin(process)
     return process.communicate(timeout=timeout)
+
+
+def offered_tool_names(store):
+    """The tool names the Host offers: the Host tool set its Store saved last, read as the Host wrote it."""
+    with sqlite3.connect(f"file:{pathlib.Path(store) / 'rui.sqlite3'}?mode=ro", uri=True) as database:
+        return {name for (name,) in database.execute(
+            "SELECT tool.name FROM host_tool_set host JOIN tool_set_member member ON member.tool_set_id=host.tool_set_id "
+            "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id")}
 
 
 def wait_for_host(path, store, process):

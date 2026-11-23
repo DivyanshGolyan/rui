@@ -1352,6 +1352,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                     const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
                     rows = rows[0..start] ++ baseline[old_start..old_end] ++ rows[end..];
                 }
+                // Format 90 adds tool_record.remote_name; format 74 has no such column.
+                const tool_start = std.mem.indexOf(u8, rows, "INSERT INTO tool_record(").?;
+                const tool_end = tool_start + std.mem.indexOf(u8, rows[tool_start..], ";\n").? + 2;
+                rows = rows[0..tool_start] ++ "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES\n(1,'bash','rui','',14,15),\n(2,'web_search','provider','',1,1);\n" ++ rows[tool_end..];
                 break :blk rows;
             };
             try load(migrated_database_sql, format_74_rows, true);

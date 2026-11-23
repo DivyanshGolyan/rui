@@ -312,43 +312,30 @@ test("an explicitly named OpenAI environment source reaches the child, not the d
 	}
 });
 
-test("closing Rui rejects a parked follower and releases its watch without aborting", { skip, timeout: 10_000 }, async (t) => {
+test("closing Rui rejects a parked watch and leaves its signal alone", { skip, timeout: 10_000 }, async (t) => {
 	const rui = await connect(newStore());
 	const controller = new AbortController();
-	let follower: ReturnType<typeof rui.activity.watch> | undefined;
-	let park = () => {};
-	const parked = new Promise<void>((resolve) => { park = resolve; });
-	const watch = rui.activity.watch.bind(rui.activity);
-	t.mock.method(rui.activity, "watch", (session: string) => {
-		follower = watch(session);
-		const wait = follower.wait.bind(follower);
-		t.mock.method(follower, "wait", (...args: Parameters<typeof wait>) => {
-			const pending = wait(...args);
-			park();
-			return pending;
-		});
-		return follower;
+	let read!: () => void;
+	const readDone = new Promise<void>((resolve) => { read = resolve; });
+	t.mock.method(rui, "exchange", async () => {
+		read();
+		return Buffer.from(JSON.stringify({
+			delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
+		}));
 	});
-	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
-		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
-	})));
-	const feed = rui.getSession("s").listActivity({ follow: true, signal: controller.signal });
-	let failure: unknown;
-	const pending = feed.next().catch((error: unknown) => { failure = error; });
+	const watch = rui.getSession("k7m2qx").watch({ signal: controller.signal });
+	const pending = watch.next().then(() => undefined, (error: unknown) => error);
 	try {
-		await parked;
+		await readDone;
 		await rui.close();
 		assert.equal(controller.signal.aborted, false);
-		assert.ok(failure instanceof RuiUnavailableError, "close must reject the parked read before returning");
+		const failure = await pending;
+		assert.ok(failure instanceof RuiUnavailableError, "close must reject the parked watch");
 		assert.equal(failure.message, "the Rui client is closed");
-		await pending;
-		assert.ok(follower);
-		rui.activity.notify("s");
-		assert.equal(follower.revision, 0, "the follower's subscription must be released");
 	} finally {
 		controller.abort();
 		await pending;
-		await feed.return(undefined);
+		await watch.return(undefined);
 		await rui.close();
 	}
 });

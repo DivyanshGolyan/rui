@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 89;
+pub const schema_version: u32 = 90;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -69,6 +69,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
+    .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -917,6 +918,25 @@ pub const migrations = [_]Migration{
             "ALTER TABLE core_command ADD COLUMN missing_settings BIGINT AFTER command_seq, ADD CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)",
         },
     },
+    // Each MCP tool keeps the name its server listed beside the offered name: a tool whose listed name
+    // clashes is offered as `<server>__<name>` (offered.zig), and a call sends the listed name. The column
+    // holds a remote name only when it differs from the offered name; empty means the offered name, so
+    // every row saved before this step keeps its meaning and its digest.
+    .{
+        .from = 89,
+        .sqlite = &.{
+            "ALTER TABLE tool_record RENAME TO tool_record_89",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n remote_name TEXT NOT NULL CHECK(length(CAST(remote_name AS BLOB))<=64 AND (remote_name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(remote_name)=length(CAST(remote_name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,remote_name,owner,server,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) SELECT tool_record_id,name,'',owner,server,description_content_id,input_schema_content_id FROM tool_record_89",
+            "DROP TABLE tool_record_89",
+        },
+        .mysql = &.{
+            "ALTER TABLE tool_record ADD COLUMN remote_name VARCHAR(64) NOT NULL DEFAULT '' AFTER name",
+            "ALTER TABLE tool_record ALTER COLUMN remote_name DROP DEFAULT",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,remote_name,owner,server,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record ADD CHECK(OCTET_LENGTH(remote_name)<=64 AND (NOT REGEXP_LIKE(remote_name,'[^A-Za-z0-9_-]','c')))",
+        },
+    },
 };
 
 comptime {
@@ -1240,6 +1260,7 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
             .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
+            .{ .name = "remote_name", .type = .{ .text = .{ .min = 0, .max = tool_defs.max_name_bytes } }, .check = "@charset(remote_name,'A-Za-z0-9_-')" },
             .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp" } } },
             .{
                 .name = "server",
@@ -1250,7 +1271,7 @@ pub const tables = [_]Table{
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "remote_name", "owner", "server", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
@@ -3884,4 +3905,27 @@ comptime {
         }
         rsql.collectSchema("digest", std.fmt.comptimePrint("{d}", .{digest()}));
     }
+}
+
+test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {
+    const step = migrations[89 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 89), step.from);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 89) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    const before = try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='remote_name'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(before, try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='remote_name'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE remote_name<>''"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) SELECT 999999,'a__b','c d',owner,server,description_content_id,input_schema_content_id FROM tool_record LIMIT 1"));
 }

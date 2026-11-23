@@ -77,7 +77,7 @@ export function post(call: Post): Promise<Buffer> {
 	});
 }
 
-function refusal(status: number | undefined, reply: Buffer): Error {
+export function refusal(status: number | undefined, reply: Buffer): Error {
 	let parsed: (components["schemas"]["ErrorReply"] & { answer?: Partial<Extract<RequestAnswer, { code: string }>> }) | undefined;
 	try {
 		parsed = JSON.parse(reply.toString("utf8"));

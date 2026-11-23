@@ -325,7 +325,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     const start: Running.Input = .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
-        .name = input.runner.mcp.name.slice(),
+        .name = @import("tools.zig").remoteNameOf(input.runner.mcp.name.slice(), input.runner.mcp.remote_name.slice()),
         .input_schema = try readContent(host, arena, input.runner.mcp.input_schema),
         .arguments = arguments,
         .caller = .{
@@ -465,6 +465,69 @@ test "MCP full output hints follow the frozen Bash offer despite later settings"
         try std.testing.expectEqualStrings(expected, result);
         try std.testing.expectEqual(@as(usize, @intFromBool(bash_offered)), retention.occupied());
     }
+}
+
+test "MCP call of a prefixed tool sends the name its server listed" {
+    const store_testing = store.testing;
+    const tools = @import("tools.zig");
+    const output_retention = @import("output_retention.zig");
+    const Script = @import("mcp/test_server.zig");
+    const poll = @import("test_poll");
+    const gpa = std.testing.allocator;
+    const records = comptime store_testing.hostToolRecordsWith(&.{.{ .name = "docs__fetch_page", .remote_name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+    var digests: [records.len][32]u8 = undefined;
+    for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store.Store = undefined;
+    try store_testing.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var configure = try store_testing.completeConfiguration("mcp-prefix-configure", "", workspace, "model-a");
+    configure.configuration.tools = try .of(&.{"docs__fetch_page"});
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("bypass");
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try store_testing.submitTestMessage(&storage, &tmp, "task", "mcp-prefix-task", session.slice(), "fetch");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store.settleCallsForTesting(&storage, &tmp, model, "mcp-prefix-calls", &.{.{ .item_id = "item", .name = "docs__fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
+    const selected = (try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })).?;
+    var script: Script = .{ .reply = reply };
+    try script.start();
+    defer script.stop();
+    var url_buffer: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{script.port});
+    var server_name = "docs".*;
+    var token = "t".*;
+    var configs = [_]Server{.{ .name = &server_name, .url = url, .token = &token, .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = 10_000 }};
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [2]output_retention.Entry = @splat(.{});
+    var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
+    defer retention.cleanupAll();
+    var custody_records: [2]execution.CustodyRecord = @splat(.{});
+    var host: Host = .{ .custody = execution.CustodyPool.initialize(&custody_records), .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+    var calls: Calls = .{};
+    defer calls.shutdown(&host);
+    try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
+    const Drive = struct {
+        calls: *Calls,
+        host: *Host,
+        fn step(self: *@This()) !bool {
+            _ = self.calls.service(self.host);
+            return !self.calls.any();
+        }
+    };
+    var drive: Drive = .{ .calls = &calls, .host = &host };
+    try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &drive, Drive.step);
+    try std.testing.expect(script.request_received.load(.acquire));
+    const sent = script.seen[0..script.seen_len];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "\"name\":\"fetch_page\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "docs__fetch_page") == null);
 }
 
 test "MCP ordinary custody covers preparation failure init failure stop shutdown and settlement failure" {

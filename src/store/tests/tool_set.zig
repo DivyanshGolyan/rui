@@ -812,7 +812,7 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
                 .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const digests = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
+                @setEvalBranchQuota(10_000_000);
                 var out: [records.len][32]u8 = undefined;
                 for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
@@ -836,7 +836,7 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
                 .{ .name = "read_page", .owner = .mcp, .server = "docs", .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
             });
             const kept_digests = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
+                @setEvalBranchQuota(10_000_000);
                 var out: [kept.len][32]u8 = undefined;
                 for (&kept, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
                 break :blk out;
@@ -893,7 +893,7 @@ test "stop_action effective offer preserves the historical settings limit" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const extras = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
+                @setEvalBranchQuota(10_000_000);
                 var records: [126]tool_defs.Record = undefined;
                 const remaining_bytes = protocol.max_tool_list_name_bytes - "find_tools".len - "read_action".len;
                 for (&records, 0..) |*record, i| {
@@ -901,6 +901,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                     const length = remaining_bytes / records.len + @intFromBool(i < remaining_bytes % records.len);
                     record.* = .{
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .remote_name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
                         .description = "Read a page.",
@@ -1004,7 +1005,7 @@ test "creation receipts retain maximum configured and loaded tools" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const extras = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
+                @setEvalBranchQuota(10_000_000);
                 var records: [127]tool_defs.Record = undefined;
                 const bytes = protocol.max_tool_list_name_bytes - "find_tools".len;
                 for (&records, 0..) |*record, index| {
@@ -1012,6 +1013,7 @@ test "creation receipts retain maximum configured and loaded tools" {
                     const length = bytes / records.len + @intFromBool(index < bytes % records.len);
                     record.* = .{
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .remote_name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
                         .description = "Read a page.",

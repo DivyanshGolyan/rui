@@ -1,6 +1,6 @@
 
 import type { InterruptTarget, Link, ServedWork } from "./sessions.ts";
-import { ContentIsPartsError, RuiRequestError } from "./errors.ts";
+import { ContentIsPartsError, RuiRequestError, RuiUnavailableError } from "./errors.ts";
 import { listParts, readPartBytes, type ContentValue, type Part } from "./parts.ts";
 import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
@@ -51,25 +51,21 @@ void complete;
 /** Entry text is inline up to this many bytes (D168). */
 export const INLINE_TEXT_BYTES = 16 * 1024;
 const PAGE_ROWS = 16;
-const FIRST_POLL_MS = 250;
-const MAX_POLL_MS = 2_000;
-const ENDINGS_WITH_TEXT = new Set(["provider_refused", "failed"]);
+const ENDINGS_WITH_TEXT = new Set(["provider_refused", "out_of_quota", "failed"]);
 
-export interface ListActivityOptions {
+/** Options for following a Session's feed on the client's line. */
+export interface WatchOptions {
 	/** The `cursor` of the last entry read. Left out, the feed starts at its beginning. */
 	after?: string;
-	/**
-	 * Follows new entries, polling at 250 ms rising to 2 s only while busy.
-	 * An empty idle/finished/failed/stopped page with nothing queued sleeps without a timer
-	 * until send/update/decide/interrupt/stop succeeds through any handle for this Session
-	 * on this Rui instance. Writes from another process to the same Store are not noticed
-	 * while asleep. `signal` abort ends the iterator even while asleep.
-	 */
-	follow?: boolean;
 	/** Only these kinds, by their wire names. Left out, every kind. */
 	kinds?: readonly FeedKind[];
 	/** Ends the iterator, even while it waits for new entries: a pending `next()` then resolves as done. */
 	signal?: AbortSignal;
+}
+
+export interface ListActivityOptions extends WatchOptions {
+	/** Follows new entries through `watch`, so the wait ends on the Host's nudges, not on a timer. */
+	follow?: boolean;
 }
 
 type CamelKey<Key extends string> = Key extends `${infer Head}_${infer Tail}` ? `${Head}${Capitalize<CamelKey<Tail>>}` : Key;
@@ -183,107 +179,103 @@ export async function readContent(link: Link, session: string, entry: { position
 	return (await readContentBytes(link, session, entry)).toString("utf8");
 }
 
-function pause(ms: number | undefined, signal: AbortSignal | undefined): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal?.aborted) return resolve();
-		const done = () => {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", done);
-			resolve();
-		};
-		const timer = ms === undefined ? undefined : setTimeout(done, ms);
-		signal?.addEventListener("abort", done, { once: true });
-	});
+/** A page request: the next row's cursor, the `since` token of the last full reply, and the kinds. `end` pins a bounded traversal. */
+export interface PageRequest {
+	end: string | null;
+	position: string;
+	ordinal: string | null;
+	since: string | null;
+	kinds: readonly FeedKind[];
 }
 
-export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}, observe?: (target: InterruptTarget | null) => void): AsyncGenerator<FeedEntry, void, undefined> {
-	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
-	let position = "0";
-	let ordinal: string | null = null;
-	if (options.after !== undefined) {
-		const cursor = decodeCursor(options.after);
-		position = cursor.position;
-		ordinal = cursor.ordinal;
-	}
-	let pinnedEnd: string | null = null;
-	let wait = FIRST_POLL_MS;
-	let since: string | null = null;
-	let idle = false;
-	const { signal } = options;
-	const watcher = options.follow ? link.activity?.watch(session) : undefined;
-	try {
-		while (!signal?.aborted) {
-			const revision = watcher?.revision ?? 0;
-			const page = JSON.parse(
-				(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds, since }))).toString("utf8"),
-			) as Schemas["ActivityPageReply"];
-			let receivedItems = false;
-			if (page.delta === "not_modified") {
-				since = page.since;
-			} else {
-				const served = servedWork(page.work);
-				observe?.(served.interruptTarget);
-				for (const row of page.items) {
+export async function readPage(link: Link, session: string, request: PageRequest): Promise<Schemas["ActivityPageReply"]> {
+	const reply = await link.exchange("/v1/activity-page", (store) => activityBody(store, session, request));
+	return JSON.parse(reply.toString("utf8")) as Schemas["ActivityPageReply"];
+}
+
+function kindsOf(kinds: readonly FeedKind[] | undefined): readonly FeedKind[] {
+	return kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => kinds.includes(kind));
+}
+
+function startOf(after: string | undefined): { position: string; ordinal: string | null } {
+	return after === undefined ? { position: "0", ordinal: null } : decodeCursor(after);
+}
+
+/** One page's rows as entries, with their inline content read in order. Stops at an abort. */
+async function* entriesOf(link: Link, session: string, items: readonly Row[], signal: AbortSignal | undefined): AsyncGenerator<FeedEntry, void, undefined> {
+	for (const row of items) {
+		if (signal?.aborted) return;
+		const { entry, reference } = entryOf(row);
+		if (reference && "content" in entry) {
+			if (reference.type === "parts") {
+				entry.parts = await listParts(link, session, reference.owner);
+				// One entry inlines at most INLINE_TEXT_BYTES across its Text parts, as a text entry does.
+				let inline = INLINE_TEXT_BYTES;
+				for (const part of entry.parts) {
+					if (part.type !== "text") continue;
 					if (signal?.aborted) return;
-					const { entry, reference } = entryOf(row);
-					if (reference && "content" in entry) {
-						if (reference.type === "parts") {
-							entry.parts = await listParts(link, session, reference.owner);
-							// One entry inlines at most INLINE_TEXT_BYTES across its Text parts, as a text entry does.
-							let inline = INLINE_TEXT_BYTES;
-							for (const part of entry.parts) {
-								if (part.type !== "text") continue;
-								if (signal?.aborted) return;
-								const bytes = Number(part.bytes);
-								if (bytes > inline) {
-									part.truncated = true;
-									continue;
-								}
-								inline -= bytes;
-								part.text = (await readPartBytes(link, session, reference.owner, part.ordinal, { prefix: INLINE_TEXT_BYTES })).toString("utf8");
-							}
-						} else if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
-							entry.truncated = true;
-						} else {
-							const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
-							entry.text = prefix.toString("utf8");
-						}
+					const bytes = Number(part.bytes);
+					if (bytes > inline) {
+						part.truncated = true;
+						continue;
 					}
-					if (signal?.aborted) return;
-					yield entry;
-					position = row.position;
-					ordinal = row.ordinal;
+					inline -= bytes;
+					part.text = (await readPartBytes(link, session, reference.owner, part.ordinal, { prefix: INLINE_TEXT_BYTES })).toString("utf8");
 				}
-				if (page.more) {
-					pinnedEnd = options.follow ? null : page.end;
-					since = null;
-					wait = FIRST_POLL_MS;
-					continue;
-				}
-				if (!options.follow) return;
-				pinnedEnd = null;
-				position = page.end;
-				ordinal = null;
-				since = page.since;
-				idle = page.queued.count === "0" && dormant(page.work.state.kind);
-				receivedItems = page.items.length > 0;
-			}
-			if (receivedItems) wait = FIRST_POLL_MS;
-			else if (idle) {
-				await (watcher ? watcher.wait(revision, signal) : pause(undefined, signal));
-				wait = FIRST_POLL_MS;
+			} else if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
+				entry.truncated = true;
 			} else {
-				await pause(wait, signal);
-				wait = Math.min(wait * 2, MAX_POLL_MS);
+				const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
+				entry.text = prefix.toString("utf8");
 			}
 		}
-	} finally {
-		watcher?.close();
+		if (signal?.aborted) return;
+		yield entry;
 	}
 }
 
-function dormant(kind: Schemas["WorkStateJson"]["kind"]): boolean {
-	return kind === "idle" || kind === "finished" || kind === "failed" || kind === "stopped";
+/**
+ * Follows a Session's feed on the client's one line: yields each new row once, in order. Each nudge for the Session reads
+ * from this iterator's cursor (`Follows`); an idle Session makes no reads until the Host nudges it.
+ */
+export async function* watchActivity(link: Link, session: string, options: WatchOptions = {}, observe?: (target: InterruptTarget | null) => void): AsyncGenerator<FeedEntry, void, undefined> {
+	const follows = link.follows;
+	if (!follows) throw new RuiUnavailableError("this client has no line to follow a Session on");
+	const watcher = follows.join(session, { ...startOf(options.after), since: null }, kindsOf(options.kinds));
+	try {
+		for (;;) {
+			const page = await watcher.take(options.signal);
+			if (page === undefined) return;
+			observe?.(servedWork(page.work).interruptTarget);
+			yield* entriesOf(link, session, page.items, options.signal);
+		}
+	} finally {
+		follows.leave(watcher);
+	}
+}
+
+/** The Session's feed from `after` to its current end, or with `follow`, `watchActivity`. */
+export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}, observe?: (target: InterruptTarget | null) => void): AsyncGenerator<FeedEntry, void, undefined> {
+	if (options.follow) {
+		yield* watchActivity(link, session, options, observe);
+		return;
+	}
+	const kinds = kindsOf(options.kinds);
+	let { position, ordinal } = startOf(options.after);
+	let end: string | null = null;
+	while (!options.signal?.aborted) {
+		const page = await readPage(link, session, { end, position, ordinal, since: null, kinds });
+		if (page.delta !== "full") throw new Error("the Host answered not_modified to a request with no token");
+		observe?.(servedWork(page.work).interruptTarget);
+		yield* entriesOf(link, session, page.items, options.signal);
+		if (!page.more) return;
+		end = page.end;
+		const last = page.items.at(-1);
+		if (last) {
+			position = last.position;
+			ordinal = last.ordinal;
+		}
+	}
 }
 
 export interface SearchActivityOptions {

@@ -10,6 +10,8 @@ pub const Error = headers.Error;
 pub const Server = struct {
     target: http1.Target,
     bearer_token: []const u8,
+    /// The configured server name, named in the Host's log line for a tool the listing leaves out.
+    label: []const u8 = "",
 };
 
 pub const Client = struct {

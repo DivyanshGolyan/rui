@@ -480,10 +480,25 @@ Under `openai-responses/1` the top-level `tools` holds the Operation's whole set
 
 The Host lists every configured MCP server at startup and re-lists a server when asked (D110).
 One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
-A list that fails or collides keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
-A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation and tool count.
+A list that fails keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
+A `tools/list` whose pages carry a positive `ttlMs` is re-listed once its smallest page ttl, at least one minute, plus up to a tenth of it (at most 30 seconds) of jitter, has passed since it landed on the Host's monotonic awake clock, so time the machine spends suspended does not count; an absent, zero, negative, non-integer or out-of-range `ttlMs` sets no timer (integer-valued JSON written as `1e3` counts as non-integer), a failed list leaves the retry to backoff, and nothing is kept across restarts.
+The Host holds one credential per server per run, so nothing is shared across authorization contexts, and a saved list is offered only until the server lists.
+A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation, tool count and `left_out` count.
+The model can trigger the same reload with `find_tools` and `reload` true, with or without `words`.
+Its Action asks every configured server through the same owner that `tools_reload` uses, and settles in the pass that asks: its one Tool Result names the servers asked, or says that none is configured. Its search, if it has words, uses the tools offered now.
+With `words`, the usual matches follow, read from the set now in force.
+The Action keeps no record and waits on no list; the asked lists land later on the execution loop, and a server's new tools are found with a later `find_tools` call.
 A server that is unreachable at startup keeps its saved tools until a retry lists it.
-Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge; a result that collides or exceeds the Host tool limit during startup refuses the start (`tool_name_collision`, `settings_invalid`), because the configuration is wrong now, while the same refusal later keeps the running Host's previous tools.
+Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge.
+The Host never refuses to start or to publish a list because of MCP tool names or tool counts.
+Instead the merge decides names deterministically, independent of list order.
+Each server keeps its last complete list, and every publish merges all servers' kept lists, so a server's offered names always follow the lists now in force; a server that has never listed in this run keeps its saved tools.
+A name a server lists twice leaves both entries out.
+The offer is decided among the tools the record limit keeps: the built-ins, then each server's tools in configured server order, each server's in listed-name order, up to 1024 records; the rest are left out, and they never force a kept tool to take a prefix.
+Among the kept tools a built-in keeps its name, and an MCP tool whose listed name is offered more than once (by a built-in or by another server) is offered as `<server>__<name>`; a tool whose listed name is offered only once keeps it.
+A prefixed name that is longer than 64 bytes, or that still clashes with a name another kept tool keeps, leaves its tool out.
+Each tool left out is logged with its server, its name and its reason (a bad definition or more than the listing's tool capacity while listing; a name listed twice, a prefixed name too long or still clashing, or the record limit when merging), and `tools_status` counts the tools each server has left out in `left_out`.
+A call sends the name the server listed (`remote_name` in the Store, empty when that is the offered name), and the model and every Session see only the offered name.
 Operations keep their frozen offer, and the next Operation is projected from the new set (D110).
 The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
 Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.

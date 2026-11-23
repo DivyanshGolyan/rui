@@ -7,63 +7,77 @@ const tools = @import("tools.zig");
 const stderr = @import("stderr.zig");
 const store_module = @import("store.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
-const tool_name = @import("tool_name.zig");
-
-/// The one owner of MCP tool lists. Startup and the execution loop both ask it;
-/// nothing else lists a server. Each server has at most one list in flight, and a
-/// complete list is published in one Store step.
-pub const Refusal = union(enum) {
-    collision: struct { name: [tool_name.max_bytes]u8 = undefined, name_len: usize = 0, first: []const u8, second: []const u8 },
-    too_many,
-
-    fn named(listed_name: []const u8, first: []const u8, second: []const u8) Refusal {
-        var refusal: Refusal = .{ .collision = .{ .first = first, .second = second } };
-        const length = @min(listed_name.len, tool_name.max_bytes);
-        @memcpy(refusal.collision.name[0..length], listed_name[0..length]);
-        refusal.collision.name_len = length;
-        return refusal;
-    }
-
-    pub fn tool(self: *const Refusal) []const u8 {
-        return self.collision.name[0..self.collision.name_len];
-    }
-};
 
 comptime {
     std.debug.assert(hs.max_mcp_servers <= tools.HostToolSet.max_servers);
 }
 
+/// The one owner of MCP tool lists. Startup and the execution loop both ask it;
+/// nothing else lists a server. Each server has at most one list in flight, and a
+/// complete list is published in one Store step. A list is never refused over its
+/// tools' names or count: tools the merge cannot offer are left out and logged.
 pub const Relist = struct {
     /// `status` packed into one atomic word: state (2 bits), last (2 bits), tools (28 bits).
-    const Packed = packed struct(u32) { state: u2, last: u2, tools: u28 };
+    const Packed = packed struct(u64) { state: u2, last: u2, tools: u28, left_out: u32 };
 
     /// What `publishView` writes for one server. Intake threads read it lock-free.
     const View = struct {
         finished: std.atomic.Value(u64) = .init(0),
-        status: std.atomic.Value(u32) = .init(0),
+        status: std.atomic.Value(u64) = .init(0),
     };
 
     allocator: std.mem.Allocator,
     servers: []const server_mcp_settings.Server,
+    /// Mixed into each list's jitter seed, so Hosts do not time their re-lists in step.
+    seed: u64,
     slots: [hs.max_mcp_servers]relist.Slot = @splat(.{}),
     asks: [hs.max_mcp_servers]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
     pending: [hs.max_mcp_servers]?*offered.Pending = @splat(null),
     views: [hs.max_mcp_servers]View = @splat(.{}),
     /// Tool records per server in the set last published. Only the execution thread writes it.
     tools: [hs.max_mcp_servers]u28 = @splat(0),
+    /// Tools left out of the set last published, per server. Only the execution thread writes it.
+    left_out: [hs.max_mcp_servers]u32 = @splat(0),
     /// While startup runs, landed lists wait here so all first attempts publish in one merge.
     held: ?*[hs.max_mcp_servers]bool = null,
-    /// Why the latest list was refused, kept for startup's report.
-    refusal: ?Refusal = null,
     /// Configured server names with the settings' lifetime; every published set's
     /// `configured_servers` is this slice, so a missing-tool refusal can outlive the set.
     names: [hs.max_mcp_servers][]const u8 = undefined,
     /// The arena holding the tool set this owner published. Null while the current set is startup's.
     current: ?std.heap.ArenaAllocator = null,
+    /// Each server's last complete list, which every publish merges, so a server's offered names follow the
+    /// lists now in force rather than the set saved before. Only the execution thread touches it.
+    kept: [hs.max_mcp_servers]Kept = @splat(.{}),
+
+    /// One server's kept list: its entries and listing-level left-out count, copied into `arena`.
+    const Kept = struct {
+        arena: ?std.heap.ArenaAllocator = null,
+        entries: []const Listing.Entry = &.{},
+        left_out: u32 = 0,
+
+        /// Copies a listed server's entries, which the listing frees when it finishes.
+        fn copy(allocator: std.mem.Allocator, listed: []const Listing.Entry, left_out: u32) !Kept {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer arena.deinit();
+            const memory = arena.allocator();
+            const entries = try memory.alloc(Listing.Entry, listed.len);
+            for (listed, entries) |entry, *each| each.* = .{
+                .name = try memory.dupe(u8, entry.name),
+                .description = if (entry.description) |text| try memory.dupe(u8, text) else null,
+                .input_schema = try memory.dupe(u8, entry.input_schema),
+            };
+            return .{ .arena = arena, .entries = entries, .left_out = left_out };
+        }
+
+        fn deinit(self: *Kept) void {
+            if (self.arena) |*arena| arena.deinit();
+            self.* = .{};
+        }
+    };
 
     /// `servers` must outlive the owner.
-    pub fn init(allocator: std.mem.Allocator, servers: []const server_mcp_settings.Server) Relist {
-        return .{ .allocator = allocator, .servers = servers };
+    pub fn init(allocator: std.mem.Allocator, servers: []const server_mcp_settings.Server, seed: u64) Relist {
+        return .{ .allocator = allocator, .servers = servers, .seed = seed };
     }
 
     pub fn deinit(self: *Relist) void {
@@ -71,6 +85,7 @@ pub const Relist = struct {
             if (slot_pending.*) |pending| pending.finish();
             slot_pending.* = null;
         }
+        for (&self.kept) |*each| each.deinit();
         if (self.current) |*arena| arena.deinit();
         self.current = null;
     }
@@ -80,13 +95,28 @@ pub const Relist = struct {
         return self.asks[index].fetchAdd(1, .acq_rel) + 1;
     }
 
+    /// One server's ask: its name and the generation it was given.
+    pub const Asked = struct { server: []const u8, generation: u64 };
+
+    /// Asks every configured server, or only the one named `only`, to list again. Writes each ask to `out` in
+    /// configured order and returns how many were asked. Any thread may call it.
+    pub fn askAll(self: *Relist, only: ?[]const u8, out: *[hs.max_mcp_servers]Asked) usize {
+        var count: usize = 0;
+        for (self.servers, 0..) |*server, index| {
+            if (only) |name| if (!std.mem.eql(u8, name, server.name.slice())) continue;
+            out[count] = .{ .server = server.name.slice(), .generation = self.ask(index) };
+            count += 1;
+        }
+        return count;
+    }
+
     /// Reads server `index`'s published status from any thread. `finished` is loaded first, so a
     /// reader that sees generation g also sees a status at least as new as the list that finished g.
     pub fn status(self: *const Relist, index: usize) relist.Status {
         const view = &self.views[index];
         const finished = view.finished.load(.acquire);
         const packed_status: Packed = @bitCast(view.status.load(.acquire));
-        return .{ .state = @fromBackingInt(@intCast(packed_status.state)), .last = @fromBackingInt(@intCast(packed_status.last)), .finished = finished, .tools = packed_status.tools };
+        return .{ .state = @fromBackingInt(@intCast(packed_status.state)), .last = @fromBackingInt(@intCast(packed_status.last)), .finished = finished, .tools = packed_status.tools, .left_out = packed_status.left_out };
     }
 
     /// Publishes server `index`'s slot and tool count for intake reads. The execution thread calls it
@@ -94,7 +124,7 @@ pub const Relist = struct {
     fn publishView(self: *Relist, index: usize) void {
         const slot = &self.slots[index];
         const view = &self.views[index];
-        const packed_status: Packed = .{ .state = @backingInt(slot.state), .last = @backingInt(slot.last), .tools = self.tools[index] };
+        const packed_status: Packed = .{ .state = @backingInt(slot.state), .last = @backingInt(slot.last), .tools = self.tools[index], .left_out = self.left_out[index] };
         view.status.store(@bitCast(packed_status), .release);
         view.finished.store(slot.finished, .release);
     }
@@ -119,8 +149,8 @@ pub const Relist = struct {
     /// attempt has ended, holding the lists that land, then publishes them with the saved
     /// tools of every other configured server in one merge (dropping servers no longer
     /// configured). A server that did not list keeps its saved tools and is retried by
-    /// backoff once the Host serves. A refused merge refuses the start: the configuration
-    /// is wrong now.
+    /// backoff once the Host serves. Startup never refuses over tools: the merge leaves out what
+    /// it cannot offer and logs it.
     pub fn startup(self: *Relist, io: std.Io, store: *store_module.Store, saved: ?*const tools.HostToolSet, stop: ?std.posix.fd_t) !void {
         var held: [hs.max_mcp_servers]bool = @splat(false);
         self.held = &held;
@@ -141,20 +171,10 @@ pub const Relist = struct {
             _ = std.posix.poll(fds[0 .. polled + 1], 100) catch {};
             if (fds[polled].revents != 0) return error.Stopped;
         }
-        var fresh: [hs.max_mcp_servers]?[]const Listing.Entry = @splat(null);
-        for (0..self.servers.len) |index| if (held[index]) {
-            fresh[index] = self.pending[index].?.listed();
-        };
-        const outcome = try self.publish(store, saved, fresh[0..self.servers.len]);
+        try self.publish(store, saved, held[0..self.servers.len]);
         const now_ms = offered.nowMs(io);
-        for (0..self.servers.len) |index| if (held[index]) self.settle(index, outcome, now_ms);
+        for (0..self.servers.len) |index| if (held[index]) self.settleListed(index, now_ms);
         for (0..self.servers.len) |index| self.publishView(index);
-        var refused = outcome == .collision;
-        for (self.slots[0..self.servers.len]) |slot| refused = refused or slot.last == .collision;
-        if (refused) return switch (self.refusal.?) {
-            .collision => error.ToolNameCollision,
-            .too_many => error.TooManyTools,
-        };
     }
 
     fn firstAttemptsEnded(self: *const Relist) bool {
@@ -211,25 +231,18 @@ pub const Relist = struct {
                         held[index] = true;
                         continue;
                     }
-                    var fresh: [hs.max_mcp_servers]?[]const Listing.Entry = @splat(null);
-                    fresh[index] = pending.listed();
-                    const outcome = self.publish(store, store.hostTools().host_tool_set, fresh[0..self.servers.len]) catch |err| {
+                    var landed: [hs.max_mcp_servers]bool = @splat(false);
+                    landed[index] = true;
+                    self.publish(store, store.hostTools().host_tool_set, landed[0..self.servers.len]) catch |err| {
                         failure.* = err;
                         self.settle(index, .failed, now_ms);
                         return progress;
                     };
-                    self.settle(index, outcome, now_ms);
+                    self.settleListed(index, now_ms);
                 },
                 .failed => {
                     self.diagnoseFailure(index);
                     self.settle(index, .failed, now_ms);
-                    progress = true;
-                },
-                .collision => |name| {
-                    const server = self.servers[index].name.slice();
-                    stderr.diagnostic("rui: MCP server {s} lists tool {s} twice; keeping its saved tools\n", .{ server, name });
-                    self.refusal = .named(name, server, server);
-                    self.settle(index, .collision, now_ms);
                     progress = true;
                 },
             };
@@ -246,6 +259,17 @@ pub const Relist = struct {
             }
         }
         return progress;
+    }
+
+    /// Settles a list that landed at `now_ms`: its ttl and this list's jitter seed set when it goes stale. Reads the
+    /// ttl before `settle` frees the pending list.
+    fn settleListed(self: *Relist, index: usize, now_ms: u64) void {
+        const pending = self.pending[index].?;
+        const outcome: relist.Outcome = .{ .listed = .{
+            .ttl_ms = pending.ttlMs(),
+            .seed = relist.mix(self.seed, index, self.slots[index].started, now_ms),
+        } };
+        self.settle(index, outcome, now_ms);
     }
 
     fn settle(self: *Relist, index: usize, outcome: relist.Outcome, now_ms: u64) void {
@@ -268,48 +292,137 @@ pub const Relist = struct {
         stderr.diagnostic("rui: MCP server {s} did not list its tools; keeping its saved tools\n", .{self.servers[index].name.slice()});
     }
 
-    /// Merges one complete list into the current set and swaps it into the Store.
-    /// The previous set's arena is freed only after the Store has taken the new one.
-    /// `fresh` holds, per configured server, its complete new list or null; `base`
-    /// supplies the tools of every server whose entry is null.
-    fn publish(self: *Relist, store: *store_module.Store, base: ?*const tools.HostToolSet, fresh: []const ?[]const Listing.Entry) !relist.Outcome {
+    /// Merges the kept lists into a new set and swaps it into the Store. `landed` marks the servers whose
+    /// pending list has just completed: each takes a copy of it as its kept list once the Store has the set.
+    /// A server with no kept list keeps its tools from `base`. Every server's tool count and left-out count
+    /// are recomputed from this merge, and each tool the merge leaves out is logged. The previous set's arena
+    /// is freed only after the Store has taken the new one.
+    fn publish(self: *Relist, store: *store_module.Store, base: ?*const tools.HostToolSet, landed: []const bool) !void {
+        var next: [hs.max_mcp_servers]Kept = @splat(.{});
+        errdefer for (&next) |*each| each.deinit();
+        for (landed, 0..) |listed, index| if (listed) {
+            const pending = self.pending[index].?;
+            next[index] = try Kept.copy(self.allocator, pending.listed(), pending.leftOut());
+        };
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const memory = arena.allocator();
         const sources = try memory.alloc(offered.Source, self.servers.len);
-        for (self.servers, sources, 0..) |*server, *source, at| source.* = .{
-            .server = server.name.slice(),
-            .listed = fresh[at],
-        };
-        var collision: offered.Collision = .{};
-        const set = offered.merge(memory, base, sources, &collision) catch |err| switch (err) {
-            error.ToolNameCollision => {
-                stderr.diagnostic("rui: MCP tool {s} is offered by {s} and by {s}; keeping the previous tools\n", .{ collision.name, collision.first, collision.second });
-                self.refusal = .named(collision.name, collision.first, collision.second);
-                arena.deinit();
-                return .collision;
-            },
-            error.TooManyTools => {
-                stderr.diagnostic("rui: MCP servers list more tools than a Host offers; keeping the previous tools\n", .{});
-                self.refusal = .too_many;
-                arena.deinit();
-                return .collision;
-            },
-            else => |other| return other,
-        };
+        for (self.servers, sources, 0..) |*server, *source, index| {
+            const kept = if (next[index].arena != null) &next[index] else &self.kept[index];
+            source.* = .{
+                .server = server.name.slice(),
+                .listed = if (kept.arena != null) kept.entries else null,
+                .listed_left_out = kept.left_out,
+            };
+        }
+        var report: offered.Report = .{};
+        const set = try offered.merge(memory, base, sources, &report);
+        for (report.drops) |drop| stderr.diagnostic("rui: MCP server {s}: tool {s} left out: {s}\n", .{ self.servers[drop.source].name.slice(), drop.name, drop.reason.text() });
         const owned = try memory.create(tools.HostToolSet);
         owned.* = set;
         for (self.servers, self.names[0..self.servers.len]) |*server, *name| name.* = server.name.slice();
         owned.configured_servers = self.names[0..self.servers.len];
         try store.saveHostToolSet(owned);
-        for (self.servers, fresh, self.tools[0..self.servers.len]) |*server, listed, *count| {
-            if (listed != null) count.* = countOwned(owned, server.name.slice());
+
+        for (&next, &self.kept) |*copy, *kept| if (copy.arena != null) {
+            kept.deinit();
+            kept.* = copy.*;
+            copy.* = .{};
+        };
+        for (self.servers, 0..) |*server, index| {
+            self.tools[index] = countOwned(owned, server.name.slice());
+            self.left_out[index] = sources[index].listed_left_out + report.droppedFrom(index);
+            self.publishView(index);
         }
         if (self.current) |*previous| previous.deinit();
         self.current = arena;
-        return .listed;
     }
 };
+
+/// A listing reply for `names`, each with the object schema the merge needs.
+fn listReply(comptime names: []const []const u8) []const u8 {
+    const Script = @import("mcp/test_server.zig");
+    const body = comptime blk: {
+        var text: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[";
+        for (names, 0..) |name, index| {
+            if (index != 0) text = text ++ ",";
+            text = text ++ "{\"name\":\"" ++ name ++ "\",\"inputSchema\":{\"type\":\"object\"}}";
+        }
+        break :blk text ++ "]}}";
+    };
+    return Script.jsonReply(body);
+}
+
+test "a re-list of one server decides every server's names from the lists now in force" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    var docs_script: Script = .{ .reply = listReply(&.{"search"}) };
+    try docs_script.start();
+    defer docs_script.stop();
+    var notes_script: Script = .{ .reply = listReply(&.{"keep"}), .more = &.{
+        listReply(&.{ "search", "keep" }),
+        listReply(&.{ "search", "keep", "docs__search" }),
+        listReply(&.{"keep"}),
+    } };
+    try notes_script.start();
+    defer notes_script.stop();
+    var docs_url: [128]u8 = undefined;
+    var notes_url: [128]u8 = undefined;
+    var docs: server_mcp_settings.Server = .{};
+    try docs.name.set("docs");
+    @memcpy(docs.bearer_token.bytes[0..6], "secret");
+    docs.bearer_token.len = 6;
+    try docs.url.set(try std.fmt.bufPrint(&docs_url, "http://127.0.0.1:{d}/mcp", .{docs_script.port}));
+    var notes: server_mcp_settings.Server = .{};
+    try notes.name.set("notes");
+    @memcpy(notes.bearer_token.bytes[0..6], "secret");
+    notes.bearer_token.len = 6;
+    try notes.url.set(try std.fmt.bufPrint(&notes_url, "http://127.0.0.1:{d}/mcp", .{notes_script.port}));
+    const servers = [_]server_mcp_settings.Server{ docs, notes };
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    // Startup: both lists land, so docs offers `search` plainly.
+    _ = owner.ask(0);
+    _ = owner.ask(1);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqualStrings("docs", storage.hostTools().host_tool_set.records[storage.hostTools().host_tool_set.find("search").?].server);
+
+    // Notes lists `search` too: both are prefixed, and docs's status counts its offered tool.
+    _ = owner.ask(1);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    var set = storage.hostTools().host_tool_set;
+    try std.testing.expectEqual(@as(?usize, null), set.find("search"));
+    try std.testing.expectEqualStrings("docs", set.records[set.find("docs__search").?].server);
+    try std.testing.expectEqualStrings("notes", set.records[set.find("notes__search").?].server);
+    try std.testing.expectEqual(1, owner.status(0).tools);
+    try std.testing.expectEqual(0, owner.status(0).left_out);
+
+    // Notes lists `docs__search` plainly as well: docs's `search` now clashes and is left out, which docs's status shows.
+    _ = owner.ask(1);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    set = storage.hostTools().host_tool_set;
+    try std.testing.expectEqual(0, owner.status(0).tools);
+    try std.testing.expectEqual(1, owner.status(0).left_out);
+    try std.testing.expectEqualStrings("notes", set.records[set.find("docs__search").?].server);
+
+    // Notes stops listing `search`: docs's `search` comes back without docs listing again.
+    _ = owner.ask(1);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    set = storage.hostTools().host_tool_set;
+    try std.testing.expectEqualStrings("docs", set.records[set.find("search").?].server);
+    try std.testing.expectEqual(@as(?usize, null), set.find("docs__search"));
+    try std.testing.expectEqual(1, owner.status(0).tools);
+    try std.testing.expectEqual(0, owner.status(0).left_out);
+    try std.testing.expectEqual(@as(usize, 1), docs_script.requests.load(.acquire));
+}
 
 test "re-list folds asks made during a list into one more list" {
     const Script = @import("mcp/test_server.zig");
@@ -326,7 +439,7 @@ test "re-list folds asks made during a list into one more list" {
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -365,7 +478,7 @@ test "a list in flight keeps its generation: an ask made mid-list waits for the 
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -424,7 +537,7 @@ test "published status follows each list and keeps its tool count through a fail
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -432,22 +545,22 @@ test "published status follows each list and keeps its tool count through a fail
     try store_module_testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
 
-    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .never, .finished = 0, .tools = 0 }, owner.status(0));
+    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .never, .finished = 0, .tools = 0, .left_out = 0 }, owner.status(0));
 
     // A list that lands: one tool, generation 1 finished, last listed.
     const first = owner.ask(0);
     try serviceUntilFinished(&owner, &storage, first);
-    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .listed, .finished = 1, .tools = 1 }, owner.status(0));
+    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .listed, .finished = 1, .tools = 1, .left_out = 0 }, owner.status(0));
 
     // A list that fails keeps the tool count it had and waits out its backoff.
     const second = owner.ask(0);
     try serviceUntilFinishedQuietly(&owner, &storage, second);
-    try std.testing.expectEqual(relist.Status{ .state = .waiting, .last = .failed, .finished = 2, .tools = 1 }, owner.status(0));
+    try std.testing.expectEqual(relist.Status{ .state = .waiting, .last = .failed, .finished = 2, .tools = 1, .left_out = 0 }, owner.status(0));
 
     // The next list that lands sets the count to what it listed.
     const third = owner.ask(0);
     try serviceUntilFinished(&owner, &storage, third);
-    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .listed, .finished = 3, .tools = 2 }, owner.status(0));
+    try std.testing.expectEqual(relist.Status{ .state = .idle, .last = .listed, .finished = 3, .tools = 2, .left_out = 0 }, owner.status(0));
     try std.testing.expect(storage.hostTools().host_tool_set.find("beta") != null);
 }
 
@@ -481,4 +594,167 @@ fn serviceUntilFinished(owner: *Relist, storage: *store_module.Store, generation
         _ = owner.service(storage, 0, &failure);
     }
     try std.testing.expectEqual(@as(?anyerror, null), failure);
+}
+
+fn oneServer(name: []const u8, port: u16) !server_mcp_settings.Server {
+    var server: server_mcp_settings.Server = .{};
+    try server.name.set(name);
+    @memcpy(server.bearer_token.bytes[0..6], "secret");
+    server.bearer_token.len = 6;
+    var url: [128]u8 = undefined;
+    try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{port}));
+    return server;
+}
+
+test "EXR-70 a list with a ttlMs re-lists once the clock passes its deadline, not before" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{timed} };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+
+    // The list is kept until its ttl plus at most a tenth of it (and at most 30 s) has passed.
+    const deadline = owner.wakeAt().?;
+    try std.testing.expect(deadline >= 120_000 and deadline <= 132_000);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, deadline - 1));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, deadline));
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+    try std.testing.expect(storage.hostTools().host_tool_set.find("search") != null);
+}
+
+test "EXR-70 a list without a ttlMs never re-lists by time" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const untimed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"keep\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = untimed };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("notes", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(?u64, null), owner.wakeAt());
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+}
+
+test "EXR-70 startup sets the deadline of a list that lands before the Host serves" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    try owner.startup(io, &storage, null, null);
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+    try std.testing.expect(owner.wakeAt() != null);
+    try std.testing.expect(storage.hostTools().host_tool_set.find("search") != null);
+}
+
+test "EXR-70 each ttl cycle of one list draws its own jitter" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{ timed, timed } };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    // No ask folds into the re-lists, so every cycle shares one generation; only the landing time differs.
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    const first_deadline = owner.wakeAt().?;
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, first_deadline));
+    const second_deadline = owner.wakeAt().?;
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+    try std.testing.expect(second_deadline - first_deadline >= 120_000);
+    try std.testing.expect(second_deadline - first_deadline - 120_000 != first_deadline - 120_000);
+}
+
+test "EXR-70 a publish that fails leaves the retry to backoff" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{timed} };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expect(owner.slots[0].stale_at_ms != null);
+
+    // The deadline's re-list begins with the real allocator; the publish that follows its landing is made to fail.
+    const deadline = owner.wakeAt().?;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failure: ?anyerror = null;
+    _ = owner.service(&storage, deadline, &failure);
+    try std.testing.expect(owner.listing());
+    owner.allocator = failing.allocator();
+    var attempts: usize = 0;
+    while (failure == null) : (attempts += 1) {
+        if (attempts == 1000) return error.ListDidNotFinish;
+        if (owner.pending[0]) |pending| {
+            var poll_fd = [_]std.c.pollfd{.{ .fd = pending.fd(), .events = pending.events(), .revents = 0 }};
+            _ = std.c.poll(&poll_fd, 1, 100);
+        }
+        _ = owner.service(&storage, deadline, &failure);
+    }
+    owner.allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), failure);
+
+    // The failed publish clears the deadline; backoff owns the retry.
+    try std.testing.expectEqual(@as(?u64, null), owner.slots[0].stale_at_ms);
+    try std.testing.expectEqual(relist.State.waiting, owner.slots[0].state);
+    try std.testing.expectEqual(owner.slots[0].retry_at_ms, owner.wakeAt().?);
 }

@@ -8,7 +8,9 @@ import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { prepareSettings, type HostSettings, type PreparedSettings } from "./settings.ts";
-import { SessionNotifications } from "./notifications.ts";
+import { Follows } from "./follow.ts";
+import { readPage } from "./feed.ts";
+import { Line, LineProtocolError, type LineFrame, type LineHandler } from "./line.ts";
 import { resolveBinary } from "./binary.ts";
 import { TRANSPORT_ENVIRONMENT } from "./host-environment.ts";
 import { RuiRequestError, RuiStartError, RuiStoreFailedError, RuiUnavailableError } from "./errors.ts";
@@ -102,7 +104,16 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
 	#storeFailed: RuiStoreFailedError | undefined;
-	readonly activity = new SessionNotifications();
+	/** The one line this client holds for every watcher, and the registry of the Sessions they follow. */
+	readonly follows: Follows = new Follows((session, request) => readPage(this, session, request), { watch: (sessions) => this.#watchLine(sessions) });
+	#line: Line | undefined;
+	#lineSessions: readonly string[] = [];
+	#silentCloses = 0;
+	#opening = false;
+	readonly #lineHandler: LineHandler = {
+		frame: (frame) => this.#lineFrame(frame),
+		closed: (line, error) => this.#lineClosed(line, error),
+	};
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
 
@@ -208,20 +219,31 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					...(limits ? { limits } : {}),
 				});
 			} catch (error) {
-				if (this.#storeFailed) throw this.#storeFailed;
-				if (error instanceof RuiRequestError && isCanonicalFailure(error)) throw this.#latchStoreFailed(error);
-				// dispatch_fenced also comes from stop and cleanup phases, so it is classified only once the Host has exited.
-				if (error instanceof RuiRequestError && isDispatchFenced(error)) {
-					await settle(host);
-					throw this.#storeFailed ?? error;
-				}
-				if (!(error instanceof ConnectionError)) throw error;
-				const gone = await settle(host);
-				if (this.#storeFailed) throw this.#storeFailed;
-				if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
+				await this.#retryAfter(host, error, retried);
 				retried = true;
 			}
 		}
+	}
+
+	/**
+	 * The one classification of a failed attempt against `host`, shared by `call` and the line. A canonical Store failure
+	 * latches. A dispatch_fenced reply is classified only once the Host has exited, since stop and cleanup phases also send it.
+	 * A lost connection or a host_stopping reply settles the Host, then allows one retry; only the line (GET /v1/line) receives a
+	 * host_stopping reply. Returns when the attempt may be
+	 * retried; otherwise throws the error the caller reports.
+	 */
+	async #retryAfter(host: Host, error: unknown, retried: boolean): Promise<void> {
+		if (this.#storeFailed) throw this.#storeFailed;
+		if (error instanceof RuiRequestError && isCanonicalFailure(error)) throw this.#latchStoreFailed(error);
+		if (error instanceof RuiRequestError && isDispatchFenced(error)) {
+			await settle(host);
+			throw this.#storeFailed ?? error;
+		}
+		const stopping = error instanceof RuiRequestError && error.code === "host_stopping";
+		if (!(error instanceof ConnectionError || stopping)) throw error;
+		const gone = await settle(host);
+		if (this.#storeFailed) throw this.#storeFailed;
+		if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
 	}
 
 	async exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
@@ -275,8 +297,94 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#fail(error: Error): void {
-		this.activity.fail(error);
+		this.follows.fail(error);
 		for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+	}
+
+	/** The line's watched set. Empty closes the line; otherwise an open line is sent the set, and a closed one reopens. */
+	#watchLine(sessions: readonly string[]): void {
+		this.#lineSessions = sessions;
+		if (sessions.length === 0) {
+			const line = this.#line;
+			this.#line = undefined;
+			line?.close();
+			return;
+		}
+		if (this.#line) this.#line.watch(sessions);
+		else this.#openLine();
+	}
+
+	#openLine(): void {
+		if (this.#opening) return;
+		this.#opening = true;
+		this.#connectLine()
+			.catch((error: unknown) => this.follows.fail(error instanceof Error ? error : new RuiUnavailableError(String(error))))
+			.finally(() => {
+				this.#opening = false;
+				// A watch that arrived while this attempt was ending saw it as running, so it is opened here.
+				if (this.#lineSessions.length > 0 && !this.#line && !this.#closing && !this.#storeFailed) this.#openLine();
+			});
+	}
+
+	/**
+	 * Opens the line on the current Host and sends it the watched set; the Host nudges each listed Session, so every watcher
+	 * re-reads from its cursor. A refused or lost attempt follows the restart path, as `call` does: wait for the child to exit,
+	 * then reconnect to the Host that replaces it, once.
+	 */
+	async #connectLine(): Promise<void> {
+		for (let attempt = 1; ; attempt++) {
+			const host = await this.#ready();
+			try {
+				const line = await Line.open({ socketPath: this.#launch.socketPath, instance: host.instance, handler: this.#lineHandler });
+				if (!line.isOpen) throw new ConnectionError("the line closed while it opened");
+				if (this.#lineSessions.length === 0 || this.#closing) {
+					line.close();
+					return;
+				}
+				this.#line = line;
+				line.watch(this.#lineSessions);
+				return;
+			} catch (error) {
+				if (this.#storeFailed) return;
+				await this.#retryAfter(host, error, attempt > 1);
+			}
+		}
+	}
+
+	#lineFrame(frame: LineFrame): void {
+		// Only an answer to a watch set resets the count of closes: `hello` and `ping` arrive whether or not the Host read it.
+		if (frame.type === "changed" || frame.type === "resync" || frame.type === "failed") this.#silentCloses = 0;
+		switch (frame.type) {
+			case "changed":
+				this.follows.nudge(frame.session);
+				return;
+			case "resync":
+				this.follows.nudgeAll();
+				return;
+			case "failed":
+				// `host_stopping` needs no action: the Host closes the line, and the close reconnects once the child restarts.
+				if (frame.code === "store_failed") this.#latchStoreFailed(new RuiUnavailableError("the Rui Host's line reported store_failed"));
+				return;
+			default:
+				return;
+		}
+	}
+
+	#lineClosed(line: Line, error: Error | undefined): void {
+		if (this.#line !== line) return;
+		this.#line = undefined;
+		if (this.#closing || this.#storeFailed || this.#lineSessions.length === 0) return;
+		if (error instanceof LineProtocolError) {
+			this.follows.fail(new RuiUnavailableError("the Rui Host sent a malformed line frame", { cause: error }));
+			return;
+		}
+		// A Host restart closes a line once and then answers its successor. A line that closes twice without answering a watch
+		// set is not a restart: the Host refuses that set, so reconnecting would repeat it.
+		if (++this.#silentCloses > 1) {
+			this.follows.fail(new RuiUnavailableError("the Rui Host closed its line twice without a frame"));
+			return;
+		}
+		this.#openLine();
 	}
 
 	#scheduleRestart(): void {

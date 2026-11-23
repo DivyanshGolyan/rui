@@ -21,6 +21,7 @@ const failed_responses = @import("failed_responses.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
+const host_endpoint = @import("host_endpoint.zig");
 const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
@@ -45,6 +46,7 @@ const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
+const line_intake = @import("line_intake.zig");
 const signal_stack = @import("signal_stack.zig");
 const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
@@ -151,6 +153,25 @@ const Intake = struct {
     stdin: ?std.posix.fd_t = null,
     lifetime: host_settings.Interface.Lifetime = .detached,
     deadline_armed: bool = false,
+    /// Held lines, outside `intake_capacity`; served on this thread only.
+    lines: line_intake.Pool = .{},
+
+    /// Upgrades an exchange whose headers named `GET /v1/line`. Lines are refused while
+    /// the Store is fenced or the Host stops. The ring's lock is held only to read its
+    /// newest generation and open the waker, not to allocate the line.
+    fn upgradeLine(self: *Intake, exchange: *Exchange, leftover: []const u8) !void {
+        if (exchange.header.instance) |identity| {
+            if (!std.mem.eql(u8, &identity, &self.host.instance)) return error.HostInstanceChanged;
+        }
+        if (self.host.store.isFenced()) return error.CanonicalStoreFailure;
+        if (self.host.stopping()) return error.HostStopping;
+        const index = try self.lines.open(self.host.allocator, self.host.instance, exchange.fd, leftover, nowNs(self.host) / std.time.ns_per_ms);
+        self.host.store.lockChanges();
+        self.lines.admit(index, self.host.store.changes.newest);
+        self.host.store.unlockChanges();
+        exchange.fd = -1;
+        exchange.state = .closed;
+    }
 
     const Worker = struct {
         owner: *Intake,
@@ -313,7 +334,9 @@ const Intake = struct {
             };
             reply.deinit();
             const status: u16 = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => 503,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.HostStopping => 503,
+                error.HostInstanceChanged => 409,
+                error.CanonicalStoreFailure => 500,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
@@ -322,6 +345,10 @@ const Intake = struct {
             };
             const code = switch (err) {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
+                error.LinesFull => "line_capacity_exhausted",
+                error.CanonicalStoreFailure => "canonical_store_failure",
+                error.HostStopping => "host_stopping",
+                error.HostInstanceChanged => "host_instance_changed",
                 error.ControlCapacity => "control_capacity_exhausted",
                 error.DiscoveryCapacity => "discovery_capacity_exhausted",
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else if (self.route == .action_publish) "too_large" else "control_request_too_large",
@@ -335,7 +362,8 @@ const Intake = struct {
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => .busy,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.HostStopping => .busy,
+                error.CanonicalStoreFailure => .invocation_error,
                 error.UnsupportedControl => .unsupported,
                 else => .invocation_error,
             };
@@ -379,10 +407,10 @@ const Intake = struct {
                                         control += 1;
                                     } else if (route == .host_info) {
                                         discovery += 1;
-                                    } else ordinary += 1;
+                                    } else if (route != .line) ordinary += 1;
                                 }
                             }
-                            if (self.route.?.isControl()) {
+                            if (self.route == .line) {} else if (self.route.?.isControl()) {
                                 if (control > 2) return error.ControlCapacity;
                             } else if (self.route == .host_info) {
                                 if (discovery > 1) return error.DiscoveryCapacity;
@@ -394,6 +422,7 @@ const Intake = struct {
                     if (!std.mem.endsWith(u8, header, "\r\n\r\n")) continue;
                     self.header = try HeaderReader.parseFields(header, self.route.?);
                     if (self.route == .unsupported_control) return error.UnsupportedControl;
+                    if (self.route == .line) return self.owner.upgradeLine(self, bytes[consumed..]);
                     self.number = try nextRequestNumber(self.host);
                     switch (self.route.?) {
                         inline else => |route| traceRequest(self.host, "connection_request_" ++ @tagName(route), self.number.?, null),
@@ -566,6 +595,7 @@ const Intake = struct {
 
     fn deinit(self: *Intake) void {
         self.stopWorkers();
+        self.lines.deinit();
         for (self.exchanges.items) |exchange| {
             exchange.state = .retired;
             while (!exchange.destroy())
@@ -656,13 +686,33 @@ const Intake = struct {
         _ = std.c.alarm(product_defaults.host_shutdown_seconds);
     }
 
-    fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
+    /// The lines' share of an intake pass before polling: drains the wake pipe, re-arms
+    /// the commit waker, walks the ring's copy into each line, and fails every line once
+    /// the Store is fenced or the Host stops.
+    fn serveLineWake(self: *Intake) void {
+        var bytes: [256]u8 = undefined;
+        var woke = false;
+        while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) woke = true;
+        self.lines.rearm();
+        if (self.lines.count == 0) return;
+        // A pass with no wake byte has no commit to walk: a commit that is not yet
+        // drained writes its byte after its record, so it is seen on a later pass.
+        if (woke) {
+            self.host.store.lockChanges();
+            self.lines.capture(self.host.store.changes);
+            self.host.store.unlockChanges();
+            self.lines.onWake();
+        }
+        const line_ms: u64 = nowNs(self.host) / std.time.ns_per_ms;
+        if (self.host.store.isFenced()) self.lines.failAll(.store_failed, line_ms) else if (self.host.stopping()) self.lines.failAll(.host_stopping, line_ms);
+    }
+
+    fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, endpoint: *host_endpoint.Endpoint) !void {
         try setNonblocking(listener.socket.handle);
         var failure: ?anyerror = null;
         var accept_retry_at: i128 = 0;
         while (true) {
-            var bytes: [256]u8 = undefined;
-            while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            self.serveLineWake();
             StopSignals.apply(self.host);
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
@@ -672,9 +722,7 @@ const Intake = struct {
             if (self.host.stopping() and listener_open.*) {
                 listener.deinit(self.host.io);
                 listener_open.* = false;
-                self.host.lease.retireSocket() catch |err|
-                    stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
-                socket_owned.* = false;
+                unbind(endpoint);
             }
             const now: i128 = nowNs(self.host);
             self.polls.clearRetainingCapacity();
@@ -726,6 +774,9 @@ const Intake = struct {
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
+            const lines_base = self.polls.items.len;
+            try self.lines.appendPolls(self.host.allocator, &self.polls, nowNs(self.host) / std.time.ns_per_ms);
+            const lines_end = self.polls.items.len;
             try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
             for (self.exchanges.items) |exchange| {
@@ -734,9 +785,11 @@ const Intake = struct {
                     wake_at = @min(wake_at, exchange.cleanup_retry_at);
                 } else if (exchange.state == .closed) wake_at = now;
             }
+            if (self.lines.deadline()) |at| wake_at = @min(wake_at, @as(i128, @intCast(at)) * std.time.ns_per_ms);
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
+            self.lines.service(self.polls.items[lines_base..lines_end], nowNs(self.host) / std.time.ns_per_ms);
             if (self.polls.items[self.polls.items.len - 1].revents != 0) self.readStdin();
             for (self.exchanges.items, self.polls.items[2..][0..self.exchanges.items.len]) |exchange, poll| {
                 if (poll.revents == 0) continue;
@@ -758,7 +811,8 @@ const Intake = struct {
                 }
             }
             self.retireExchanges();
-            if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
+            self.lines.reap(nowNs(self.host) / std.time.ns_per_ms);
+            if (!listener_open.* and self.exchanges.items.len == 0 and self.lines.count == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             for (0..16) |_| {
                 if (self.host.intake_capacity < product_defaults.intake_capacity and
@@ -866,23 +920,13 @@ fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     requirement.total = try std.math.add(usize, requirement.total, sockets);
 }
 
-noinline fn offerMcpTools(io: std.Io, scratch: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
+noinline fn offerMcpTools(io: std.Io, scratch: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t) !void {
     var arena: std.heap.ArenaAllocator = .init(scratch);
     defer arena.deinit();
     var saved = try storage.readHostToolSet(arena.allocator());
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     relist_owner.startup(io, storage, if (kept) |*value| value else null, stop) catch |err| switch (err) {
         error.Stopped => return error.EffectAwareShutdown,
-        error.ToolNameCollision => {
-            const refusal = &relist_owner.refusal.?;
-            var message: [start_report.max_refusal_message_bytes]u8 = undefined;
-            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ refusal.tool(), refusal.collision.first, refusal.collision.second }) catch "a tool name is offered twice");
-            return err;
-        },
-        error.TooManyTools => {
-            failure.* = .init(.settings_invalid, "tools.mcp: servers list more tools than a Host offers");
-            return err;
-        },
         else => |other| return other,
     };
 }
@@ -932,7 +976,7 @@ pub noinline fn serve(
                 .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - descriptor_capacity.ordinary_exchange_descriptors * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} lines={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -943,6 +987,7 @@ pub noinline fn serve(
                     descriptor_requirement.execution,
                     descriptor_requirement.authentication,
                     descriptor_requirement.self_wake,
+                    descriptor_requirement.lines,
                 },
             );
         }
@@ -967,15 +1012,12 @@ pub noinline fn serve(
     defer if (mysql_url) |url| url.destroy();
     var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
     const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
-    const serving = try createUnfilled(allocator, struct { lease: platform.StoreLease, storage: store_module.Store });
+    const serving = try createUnfilled(allocator, struct { lease: platform.StoreLease, endpoint: host_endpoint.Endpoint, storage: store_module.Store });
     defer allocator.destroy(serving);
     const lease = &serving.lease;
-    if (mysql_url != null)
-        try lease.acquireMysql(io, settings.interface.dir.slice(), socket_path)
-    else
-        lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
+    const endpoint = &serving.endpoint;
+    try acquireLease(io, lease, endpoint, settings, mysql_url != null, socket_path);
     defer lease.release();
-    if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
     if (tuning.admitted_directory) |directory|
         try lease.paths.host_directory.set(directory)
     else
@@ -997,19 +1039,25 @@ pub noinline fn serve(
     // chain the main-thread stack ceiling bounds.
     const mcp_relist = try allocator.create(server_mcp_relist.Relist);
     defer allocator.destroy(mcp_relist);
-    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers);
+    // The Host's instance id is drawn once, here, and seeds the ttl re-list jitter, so Hosts' re-lists do not fall in step.
+    var instance: protocol.InstanceId = undefined;
+    try std.Io.randomSecure(io, &instance);
+    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers, std.mem.readInt(u64, instance[0..8], .little));
     defer mcp_relist.deinit();
     const storage = &serving.storage;
-    openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    openStore(io, storage, lease, endpoint, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
+    // Registered after the Store's close, so it runs first: the endpoint retires before the Store closes and the lease releases.
+    defer endpoint.retire() catch |err| stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
     return finishServing(storage, failure, serveOpened(
         io,
         allocator,
         storage,
         lease,
+        endpoint,
         active_capacity,
         limits,
         tuning.hooks,
@@ -1020,6 +1068,7 @@ pub noinline fn serve(
         settings,
         if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
+        instance,
         intake_capacity,
         descriptor_requirement.total,
         descriptor_observation.soft_limit,
@@ -1028,8 +1077,63 @@ pub noinline fn serve(
         &diagnostics,
         diagnostic_open_error,
         &readiness_owned,
-        failure,
     ));
+}
+
+/// Takes what each Store kind needs before the Store opens. A SQLite Host
+/// holds its Store's lease; the endpoint waits for `openStore`, so a Store it
+/// refuses leaves the socket and interface directory untouched. A MySQL Host
+/// has no Store lock before its open, so it claims the endpoint first, then
+/// takes its lease, which keeps any census from removing the directory beside it.
+noinline fn acquireLease(
+    io: std.Io,
+    lease: *platform.StoreLease,
+    endpoint: *host_endpoint.Endpoint,
+    settings: *const host_settings.Settings,
+    mysql: bool,
+    socket_path: []const u8,
+) !void {
+    if (mysql) {
+        endpoint.* = try claimEndpoint(io, settings.interface.dir.slice());
+        errdefer endpoint.retire() catch {};
+        return lease.acquireMysql(io, settings.interface.dir.slice(), socket_path);
+    }
+    lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
+    errdefer lease.release();
+    if (!settings.interface.dir.anchored) try lease.paths.socket.set(socket_path);
+}
+
+/// Opens the Store, then, for SQLite, claims the endpoint. Each engine's claim
+/// happens in exactly one place, and a failed open or claim gives back what
+/// this call took. The caller owns the endpoint's retire and the Store's close
+/// once this returns.
+noinline fn openStore(
+    io: std.Io,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    endpoint: *host_endpoint.Endpoint,
+    served: *const providers.Providers,
+    limits: *const Limits,
+    has_mcp: bool,
+    mysql_url: ?*MysqlUrl,
+    diagnostics: ?*HostDiagnostics,
+) !void {
+    // A MySQL endpoint was claimed by `acquireLease`; a refused open gives it back here.
+    errdefer if (mysql_url != null) endpoint.retire() catch {};
+    try openStoreForHost(io, storage, lease, served, limits, has_mcp, mysql_url, diagnostics);
+    if (mysql_url != null) return;
+    errdefer storage.close() catch {};
+    endpoint.* = try claimEndpoint(io, std.fs.path.dirname(lease.paths.socket.slice()).?);
+}
+
+fn claimEndpoint(io: std.Io, directory: []const u8) !host_endpoint.Endpoint {
+    return host_endpoint.claim(io, try .init(directory));
+}
+
+/// A stopping Host's socket goes as soon as its listener closes; the endpoint
+/// stays reserved until the Host exits.
+fn unbind(endpoint: *host_endpoint.Endpoint) void {
+    endpoint.unbind() catch |err| stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
 }
 
 fn serveOpened(
@@ -1037,6 +1141,7 @@ fn serveOpened(
     allocator: std.mem.Allocator,
     storage: *store_module.Store,
     lease: *platform.StoreLease,
+    endpoint: *host_endpoint.Endpoint,
     active_capacity: usize,
     limits: Limits,
     hooks: Hooks,
@@ -1047,6 +1152,7 @@ fn serveOpened(
     settings: *const host_settings.Settings,
     mcp_relist: ?*server_mcp_relist.Relist,
     mcp_servers: []const server_mcp_settings.Server,
+    instance: protocol.InstanceId,
     intake_capacity: usize,
     descriptor_requirement: usize,
     descriptor_soft_limit: ?usize,
@@ -1055,24 +1161,15 @@ fn serveOpened(
     diagnostics: *?HostDiagnostics,
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
-    failure: *?start_report.Failure,
 ) !void {
-    if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null, failure);
+    if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
+    host_endpoint.sweepNeighbors(allocator, endpoint);
 
-    var listener = try lease.listen(.{ .kernel_backlog = 128 });
+    var listener = try endpoint.listen(.{ .kernel_backlog = 128 });
     var listener_open = true;
-    var socket_owned = true;
-    errdefer {
-        if (listener_open) listener.deinit(io);
-        if (socket_owned) lease.retireSocket() catch |err| {
-            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
-        };
-    }
-    var socket_path: [257:0]u8 = undefined;
-    const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
-    if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
+    errdefer if (listener_open) listener.deinit(io);
 
     const bash_facts = try bash.readHostFacts(io, allocator, home);
     defer bash.freeHostFacts(allocator, bash_facts);
@@ -1152,7 +1249,7 @@ fn serveOpened(
         };
         try provider.checkLibraries();
     }
-    try std.Io.randomSecure(io, &host.instance);
+    host.instance = instance;
     storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
@@ -1162,6 +1259,9 @@ fn serveOpened(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
+    intake.lines.attach(intake.wake[1]);
+    storage.commitSubscriber().store(&intake.lines.subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
     intake.lifetime = settings.interface.lifetime.value;
     if (intake.lifetime == .stdin) intake.stdin = 0;
     host.intake_wake = intake.wake[1];
@@ -1170,12 +1270,11 @@ fn serveOpened(
     if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
-        if (listener_open) listener.deinit(io);
-        listener_open = false;
-        if (socket_owned) lease.retireSocket() catch |err| {
-            stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
-        };
-        socket_owned = false;
+        if (listener_open) {
+            listener.deinit(io);
+            listener_open = false;
+            unbind(endpoint);
+        }
         _ = host.advance(.ending);
         execution_thread.join();
         if (comptime test_pause.enabled) pause_owner.close();
@@ -1191,7 +1290,7 @@ fn serveOpened(
         host.attachDiagnostics(writer);
     }
 
-    return intake.run(&listener, &listener_open, &socket_owned);
+    return intake.run(&listener, &listener_open, endpoint);
 }
 
 fn finishServing(storage: *const store_module.Store, failure: *?start_report.Failure, result: anyerror!void) !void {
@@ -1528,6 +1627,7 @@ const Route = enum {
     model_list,
     tools_reload,
     tools_status,
+    line,
     unsupported_control,
 
     fn commandKind(comptime self: Route) ?protocol.CommandKind {
@@ -1555,7 +1655,7 @@ const Route = enum {
         return switch (self) {
             .observe => .observe_command,
             .inspect => .inspect_session,
-            .unsupported_control => unreachable,
+            .unsupported_control, .line => unreachable,
             inline else => |route| @field(protocol.Kind, @tagName(route)),
         };
     }
@@ -2082,17 +2182,11 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
 /// request, so the reply needs no wait: the caller polls tools_status for each asked generation.
 noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType(wire_request.Request, "tools_reload")) !void {
     if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-    const owner = host.mcp_relist;
-    const servers: []const server_mcp_settings.Server = if (owner) |relist_owner| relist_owner.servers else &.{};
-    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
-    var count: usize = 0;
-    for (servers, 0..) |*server, index| {
-        if (request.server) |name| if (!std.mem.eql(u8, name.slice(), server.name.slice())) continue;
-        asked[count] = .{ .server = server.name.slice(), .generation = owner.?.ask(index) };
-        count += 1;
-    }
+    var asked_by_owner: [host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
+    const count = server_host.askMcpLists(host, if (request.server) |name| name.slice() else null, &asked_by_owner);
     if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
-    if (count != 0) host.dispatch_wake.set(host.io);
+    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
+    for (asked_by_owner[0..count], asked[0..count]) |ask, *each| each.* = .{ .server = ask.server, .generation = ask.generation };
     try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{ host.instance, asked[0..count] });
 }
 
@@ -2273,6 +2367,7 @@ fn nextRequestNumber(host: *Host) !u64 {
 
 const HeaderReader = struct {
     fn parseRoute(request_line: []const u8) !Route {
+        if (std.mem.eql(u8, request_line, "GET /v1/line HTTP/1.1")) return .line;
         var request_parts = std.mem.splitScalar(u8, request_line, ' ');
         if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
             return error.InvalidMethod;
@@ -2336,7 +2431,44 @@ const HeaderReader = struct {
             error.UnknownRoute;
     }
 
+    /// The upgrade request: `Upgrade: rui-line/1`, a `Connection` token `Upgrade`, the wire
+    /// version, and an optional Host instance. A body or a framing header is refused.
+    fn parseLineFields(bytes: []const u8) !Header {
+        var fields = std.mem.splitSequence(u8, bytes, "\r\n");
+        _ = fields.next() orelse return error.InvalidRequestLine;
+        var upgrade_ok = false;
+        var connection_ok = false;
+        var wire_ok = false;
+        var instance: ?protocol.InstanceId = null;
+        while (fields.next()) |field| {
+            if (field.len == 0) break;
+            const colon = std.mem.indexOfScalar(u8, field, ':') orelse return error.InvalidHeader;
+            const name = std.mem.trim(u8, field[0..colon], " \t");
+            const value = std.mem.trim(u8, field[colon + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "Upgrade")) {
+                if (upgrade_ok or !std.mem.eql(u8, value, "rui-line/1")) return error.InvalidUpgrade;
+                upgrade_ok = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "Connection")) {
+                var tokens = std.mem.splitScalar(u8, value, ',');
+                while (tokens.next()) |token| {
+                    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, token, " \t"), "Upgrade")) connection_ok = true;
+                }
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
+                wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Host-Instance")) {
+                if (instance != null) return error.DuplicateHostInstance;
+                instance = try protocol.parseInstanceId(value);
+            } else if (std.ascii.eqlIgnoreCase(name, "Content-Length") or std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+                return error.InvalidUpgrade;
+            }
+        }
+        if (!upgrade_ok or !connection_ok) return error.InvalidUpgrade;
+        if (!wire_ok) return error.WrongWireVersion;
+        return .{ .route = .line, .content_length = 0, .instance = instance };
+    }
+
     fn parseFields(bytes: []const u8, route: Route) !Header {
+        if (route == .line) return parseLineFields(bytes);
         var lines = std.mem.splitSequence(u8, bytes, "\r\n");
         _ = lines.next() orelse return error.InvalidRequestLine;
         var content_length: ?u64 = null;
@@ -2387,6 +2519,182 @@ const HeaderReader = struct {
         };
     }
 };
+
+test "a line upgrade takes its one route and refuses malformed upgrade headers" {
+    try std.testing.expectEqual(Route.line, try HeaderReader.parseRoute("GET /v1/line HTTP/1.1"));
+    try std.testing.expectError(error.InvalidMethod, HeaderReader.parseRoute("GET /v1/host-info HTTP/1.1"));
+    const wire = "X-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n";
+    const request = "GET /v1/line HTTP/1.1\r\n";
+    const good = request ++ "Upgrade: rui-line/1\r\nConnection: keep-alive, Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: " ++ "abababababababababababababababab" ++ "\r\n\r\n";
+    const header = try HeaderReader.parseFields(good, .line);
+    try std.testing.expectEqual(Route.line, header.route);
+    try std.testing.expectEqual(@as(?protocol.InstanceId, @splat(0xab)), header.instance);
+    const refused = [_]struct { text: []const u8, err: anyerror }{
+        .{ .text = request ++ "Connection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/2\r\nConnection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: close\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\nContent-Length: 0\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n\r\n", .err = error.WrongWireVersion },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: ABC\r\n\r\n", .err = error.InvalidInstanceId },
+    };
+    for (refused) |case| try std.testing.expectError(case.err, HeaderReader.parseFields(case.text, .line));
+}
+
+const line_test_instance = "abababababababababababababababab";
+
+fn linePair() ![2]c_int {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    for (sockets) |fd| try setNonblocking(fd);
+    return sockets;
+}
+
+/// Upgrade headers, then `frame` as one length-prefixed app frame in the same write.
+fn lineRequest(buffer: []u8, instance: []const u8, frame: []const u8) ![]const u8 {
+    var length = (try std.fmt.bufPrint(buffer, "GET /v1/line HTTP/1.1\r\nUpgrade: rui-line/1\r\nConnection: Upgrade\r\nX-Rui-Wire-Version: {s}\r\nX-Rui-Host-Instance: {s}\r\n\r\n", .{ protocol.wire_version, instance })).len;
+    if (frame.len != 0) {
+        std.mem.writeInt(u32, buffer[length..][0..4], @intCast(frame.len), .big);
+        @memcpy(buffer[length + 4 ..][0..frame.len], frame);
+        length += 4 + frame.len;
+    }
+    return buffer[0..length];
+}
+
+/// Reads what the peer has queued on a nonblocking socket. Empty means nothing yet.
+fn drainPeer(fd: c_int, out: []u8) []u8 {
+    var used: usize = 0;
+    while (used < out.len) {
+        const count = std.c.read(fd, out[used..].ptr, out.len - used);
+        if (count <= 0) break;
+        used += @intCast(count);
+    }
+    return out[0..used];
+}
+
+/// Writes out a refused exchange's reply the way the loop does on POLLOUT.
+fn finishReply(exchange: *Intake.Exchange) !void {
+    const reply = exchange.reply.?;
+    var rounds: usize = 0;
+    while (!(try reply.advance(exchange.fd))) : (rounds += 1) std.debug.assert(rounds < 8);
+}
+
+/// One intake pass over the lines, as the loop runs it: the wake work, then poll and service.
+fn passLines(intake: *Intake, now_ms: u64) !void {
+    intake.serveLineWake();
+    intake.polls.clearRetainingCapacity();
+    try intake.lines.appendPolls(intake.host.allocator, &intake.polls, now_ms);
+    _ = std.c.poll(intake.polls.items.ptr, @intCast(intake.polls.items.len), 0);
+    intake.lines.service(intake.polls.items, now_ms);
+    intake.lines.reap(now_ms);
+}
+
+/// Writes one upgrade request, with `frame` as leftover app bytes, to a client peer.
+fn sendRequest(fd: c_int, buffer: []u8, instance: []const u8, frame: []const u8) !void {
+    const bytes = try lineRequest(buffer, instance, frame);
+    try std.testing.expectEqual(bytes.len, @as(usize, @intCast(std.c.write(fd, bytes.ptr, bytes.len))));
+}
+
+test "a line upgrades on the Host, takes its leftover watch, hears each commit through the Store, and fails with the Host or the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    storage.instance = @splat(0xab);
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .instance = @splat(0xab), .intake_capacity = descriptor_capacity.minimum_intake };
+    const wake = try linePair();
+    defer for (wake) |fd| {
+        _ = std.c.close(fd);
+    };
+    var intake: Intake = .{ .host = &host, .wake = wake };
+    defer intake.polls.deinit(host.allocator);
+    defer intake.exchanges.deinit(host.allocator);
+    defer for (intake.exchanges.items) |exchange| {
+        std.debug.assert(exchange.destroy());
+    };
+    intake.lines.attach(wake[1]);
+    defer intake.lines.deinit();
+    storage.commitSubscriber().store(&intake.lines.subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
+
+    // Four connections: the open line, a wrong Host instance, a stopping Host, a fenced Store.
+    const pairs = [_][2]c_int{ try linePair(), try linePair(), try linePair(), try linePair() };
+    defer for (pairs) |pair| {
+        _ = std.c.close(pair[1]);
+    };
+    var request: [512]u8 = undefined;
+    var sink: [1024]u8 = undefined;
+    var wake_bytes: [16]u8 = undefined;
+
+    var configure = try store_module.testingCompleteConfiguration("line-host-first", "", root, "model-a");
+    _ = try storage.configure(&configure, .{});
+
+    // The upgrade answers 101 and hello. The watch of every Session rides in the same write.
+    const watch_all = "{\"type\":\"watch\",\"sessions\":\"all\"}";
+    try sendRequest(pairs[0][1], &request, line_test_instance, watch_all);
+    try intake.accept(pairs[0][0]);
+    intake.exchanges.items[0].read() catch |err| intake.exchanges.items[0].fail(err);
+    try std.testing.expectEqual(@as(usize, 1), intake.lines.count);
+    try passLines(&intake, 0);
+    const opened = drainPeer(pairs[0][1], &sink);
+    try std.testing.expect(std.mem.startsWith(u8, opened, "HTTP/1.1 101 Switching Protocols"));
+    try std.testing.expect(std.mem.indexOf(u8, opened, "{\"type\":\"hello\"") != null);
+
+    // A commit writes one wake byte, and the line answers with a changed frame naming the new Session.
+    configure.key.set("line-host-second") catch unreachable;
+    const second = (try storage.configure(&configure, .{})).accepted.session;
+    try std.testing.expectEqual(@as(usize, 1), drainPeer(wake[0], &wake_bytes).len);
+    // The byte was counted above; put it back so the pass sees the wake it announces.
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(wake[1], "x", 1));
+    const walks_before_commit = intake.lines.captures;
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(walks_before_commit + 1, intake.lines.captures);
+    const changed = drainPeer(pairs[0][1], &sink);
+    try std.testing.expect(std.mem.indexOf(u8, changed, "{\"type\":\"changed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, second.slice()) != null);
+
+    // With nothing committed, a pass sends nothing and writes no wake byte.
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(@as(usize, 0), drainPeer(pairs[0][1], &sink).len);
+    try std.testing.expectEqual(@as(usize, 0), drainPeer(wake[0], &wake_bytes).len);
+    const walks = intake.lines.captures;
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(walks, intake.lines.captures);
+
+    // A different Host instance is refused with 409 and leaves the open line alone.
+    try sendRequest(pairs[1][1], &request, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "");
+    try intake.accept(pairs[1][0]);
+    intake.exchanges.items[1].read() catch |err| intake.exchanges.items[1].fail(err);
+    try finishReply(intake.exchanges.items[1]);
+    try std.testing.expect(std.mem.startsWith(u8, drainPeer(pairs[1][1], &sink), "HTTP/1.1 409"));
+    try std.testing.expectEqual(@as(usize, 1), intake.lines.count);
+
+    // A stopping Host refuses a new line with 503, then fails the open line with its own frame and closes it.
+    host.phase.store(.stopping, .release);
+    try sendRequest(pairs[2][1], &request, line_test_instance, "");
+    try intake.accept(pairs[2][0]);
+    intake.exchanges.items[2].read() catch |err| intake.exchanges.items[2].fail(err);
+    try finishReply(intake.exchanges.items[2]);
+    try std.testing.expect(std.mem.startsWith(u8, drainPeer(pairs[2][1], &sink), "HTTP/1.1 503"));
+    try passLines(&intake, 0);
+    try std.testing.expect(std.mem.indexOf(u8, drainPeer(pairs[0][1], &sink), "{\"type\":\"failed\",\"code\":\"host_stopping\"}") != null);
+    try std.testing.expectEqual(@as(usize, 0), intake.lines.count);
+
+    // A fenced Store refuses an upgrade with the canonical store failure, not a busy reply.
+    host.phase.store(.open, .release);
+    storage.fenced.store(true, .release);
+    try sendRequest(pairs[3][1], &request, line_test_instance, "");
+    try intake.accept(pairs[3][0]);
+    intake.exchanges.items[3].read() catch |err| intake.exchanges.items[3].fail(err);
+    try finishReply(intake.exchanges.items[3]);
+    const refused = drainPeer(pairs[3][1], &sink);
+    try std.testing.expect(std.mem.startsWith(u8, refused, "HTTP/1.1 500"));
+    try std.testing.expect(std.mem.indexOf(u8, refused, "canonical_store_failure") != null);
+}
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
@@ -3872,7 +4180,7 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/host.sock", .{root[0..root_len]});
+    const interface = try std.fmt.bufPrint(&path_buffer, "{s}/interface", .{root[0..root_len]});
     var vtable = std.testing.io.vtable.*;
     vtable.dirDeleteFile = Probe.delete;
     vtable.operate = Probe.operate;
@@ -3893,7 +4201,8 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                         .store_dir = .cwd(),
                         .lock_file = undefined,
                     };
-                    try lease.paths.socket.set(path);
+                    var endpoint = try host_endpoint.claim(io, try .init(interface));
+                    defer endpoint.retire() catch unreachable;
                     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
                     var intake: Intake = .{ .host = &host, .lifetime = lifetime, .deadline_armed = true };
                     for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
@@ -3905,13 +4214,11 @@ test "Host settings fields decide fenced MySQL shutdown once at the return bound
                     defer _ = std.c.close(stdin[0]);
                     _ = std.c.close(stdin[1]);
                     intake.stdin = stdin[0];
-                    const address = try std.Io.net.UnixAddress.init(path);
-                    var listener = try address.listen(io, .{ .kernel_backlog = 8 });
+                    var listener = try endpoint.listen(.{ .kernel_backlog = 8 });
                     var open = true;
-                    var owned = true;
                     defer if (open) listener.deinit(io);
                     var failure: ?start_report.Failure = null;
-                    const outcome = finishServing(&storage, &failure, intake.run(&listener, &open, &owned));
+                    const outcome = finishServing(&storage, &failure, intake.run(&listener, &open, &endpoint));
                     const fenced = mysql and (early or late);
                     try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
                     try std.testing.expectEqual(@as(usize, 0), Probe.used);
@@ -3951,10 +4258,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
         }
 
-        fn run(intake: *Intake, listener: *std.Io.net.Server) void {
+        fn run(intake: *Intake, listener: *std.Io.net.Server, endpoint: *host_endpoint.Endpoint) void {
             var open = true;
-            var owned = true;
-            intake.run(listener, &open, &owned) catch {};
+            intake.run(listener, &open, endpoint) catch {};
             if (open) listener.deinit(std.testing.io);
         }
 
@@ -3997,10 +4303,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var socket_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
-    const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
-    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
-    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var interface_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const interface = try std.fmt.bufPrint(&interface_buffer, "/tmp/rui-{s}", .{std.fs.path.basename(root)});
+    defer std.Io.Dir.deleteDirAbsolute(std.testing.io, interface) catch {};
     const message_template = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
@@ -4019,8 +4324,11 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         };
         try lease.paths.store_identity.set("s");
         try lease.paths.scratch.set(root);
-        try lease.paths.socket.set(socket_path);
         defer lease.store_dir.close(std.testing.io);
+        var endpoint = try host_endpoint.claim(std.testing.io, try .init(interface));
+        defer endpoint.retire() catch unreachable;
+        var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+        const address = try std.Io.net.UnixAddress.init(try endpoint.socketPath(&socket_buffer));
         var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/{s}.sqlite", .{ root, @tagName(phase) });
         var storage: store_module.Store = undefined;
@@ -4052,7 +4360,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try intake.init(&host);
         defer intake.deinit();
         host.intake_wake = intake.wake[1];
-        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 8 });
+        var listener = try endpoint.listen(.{ .kernel_backlog = 8 });
         const partial_header = try address.connect(std.testing.io);
         defer partial_header.socket.close(std.testing.io);
         const partial_body = try address.connect(std.testing.io);
@@ -4073,7 +4381,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             try std.testing.expectEqual(.host_stop, exchange.route.?);
         }
         const before_uploads = host.request_counter.load(.acquire);
-        const thread = try std.Thread.spawn(.{}, Probe.run, .{ &intake, &listener });
+        const thread = try std.Thread.spawn(.{}, Probe.run, .{ &intake, &listener, &endpoint });
         var joined = false;
         defer if (!joined) {
             Probe.released.store(true, .release);
@@ -5172,8 +5480,9 @@ test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
     try std.testing.expectEqual(null, lines.next());
 }
 
-test "Host startup reports MCP tool collision and excess tools as owned failures" {
+test "Host startup offers a clashing MCP tool under its prefix and leaves excess tools out" {
     const Script = @import("mcp/test_server.zig");
+    const built_ins = tools.built_in_tool_set.records.len;
     for ([_]bool{ false, true }) |too_many| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -5201,19 +5510,20 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        var failure: ?start_report.Failure = null;
-        {
-            const servers = [_]server_mcp_settings.Server{server};
-            var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
-            defer owner.deinit();
-            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure));
+        const servers = [_]server_mcp_settings.Server{server};
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
+        defer owner.deinit();
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
+        const offered = storage.hostTools().host_tool_set;
+        if (too_many) {
+            try std.testing.expectEqual(tools.max_host_tool_records, offered.records.len);
+            try std.testing.expectEqual(@as(u32, built_ins), owner.status(0).left_out);
+            try std.testing.expectEqual(@as(u32, tools.max_host_tool_records - built_ins), owner.status(0).tools);
+        } else {
+            try std.testing.expectEqual(tools.Owner.rui, offered.records[offered.find("bash").?].owner);
+            try std.testing.expectEqualStrings("bash", offered.records[offered.find("docs__bash").?].remote_name);
+            try std.testing.expectEqual(@as(u32, 0), owner.status(0).left_out);
         }
-        try std.testing.expect(failure != null);
-        var buffer: [start_report.max_line_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(if (too_many)
-            "{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"tools.mcp: servers list more tools than a Host offers\"}}\n"
-        else
-            "{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", start_report.line(&failure.?, &buffer));
     }
 }
 
@@ -5240,12 +5550,10 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        var failure: ?start_report.Failure = null;
         const servers = [_]server_mcp_settings.Server{server};
-        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
         defer owner.deinit();
-        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-        try std.testing.expect(failure == null);
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
             var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -5294,11 +5602,9 @@ test "startup publishes every first list in one merge, so a tool moving between 
             server.bearer_token.len = 6;
             try server.url.set(try std.fmt.bufPrint(url, "http://127.0.0.1:{d}/mcp", .{port}));
         }
-        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
         defer owner.deinit();
-        var failure: ?start_report.Failure = null;
-        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-        try std.testing.expect(failure == null);
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         const set = storage.hostTools().host_tool_set;
         try std.testing.expectEqualStrings(search_owner, set.records[set.find("search").?].server);
     }
@@ -5323,11 +5629,9 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     servers[0].bearer_token.len = 6;
     var url: [128]u8 = undefined;
     try servers[0].url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{down.port}));
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
-    var failure: ?start_report.Failure = null;
-    try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-    try std.testing.expect(failure == null);
+    try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("remote_lookup") == null);
     try std.testing.expectEqual(relist.Last.failed, owner.slots[0].last);
 
@@ -5368,7 +5672,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     var notes: server_mcp_settings.Server = .{};
     try notes.name.set("notes");
     const servers = [_]server_mcp_settings.Server{ docs, notes };
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .mcp_relist = &owner, .instance = @splat(0x7e) };
 
@@ -5429,7 +5733,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
         defer reply.deinit();
         try replyToolsStatus(&host, &reply);
-        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"}]}", reply.body.json);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"}]}", reply.body.json);
     }
 
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
