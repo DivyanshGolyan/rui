@@ -1,5 +1,7 @@
 name: Promote
-# Runs every three hours at :45 UTC (15 past the hour IST) and by hand. Publish a qualified main commit and
+# Runs every three hours at :45 UTC (15 past the hour IST) and by hand. GitHub's
+# scheduler drops most slots, so a watcher dispatches `slot: true` for a missed one,
+# which acts exactly as the schedule (docs/verification/release.md). Publish a qualified main commit and
 # advance stable to it. On schedule the commit is main HEAD (inputs are empty,
 # so `inputs.sha` is ''); when stable already holds it, the run does nothing.
 # A HEAD with a red main-qualified record is skipped when scheduled, since the
@@ -39,6 +41,11 @@ on:
         type: string
         required: false
         default: ''
+      slot:
+        description: Run as a scheduled slot (fills a slot GitHub's scheduler dropped); takes no sha
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: '45 */3 * * *'
 
@@ -70,19 +77,38 @@ jobs:
       version: ${{ steps.batch.outputs.version }}
       weekly: ${{ steps.weekly.outputs.weekly }}
       daily: ${{ steps.weekly.outputs.daily }}
+      scheduled: ${{ steps.slot.outputs.scheduled }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Name whether this run is a scheduled slot
+        # A slot is GitHub's schedule event or a `slot` dispatch, which fills a slot the
+        # scheduler dropped; every scheduled-only rule below reads this one output.
+        id: slot
+        env:
+          EVENT: ${{ github.event_name }}
+          SLOT: ${{ inputs.slot }}
+          CHOSEN: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          scheduled=false
+          if [ "$EVENT" = schedule ] || [ "$SLOT" = true ]; then scheduled=true; fi
+          if [ "$SLOT" = true ] && [ -n "$CHOSEN" ]; then
+            echo "::error title=slot takes no sha::a slot promotes main HEAD, as the schedule does; dispatch without slot to name a sha"
+            exit 1
+          fi
+          echo "scheduled=$scheduled" >> "$GITHUB_OUTPUT"
+          echo "scheduled slot: $scheduled"
       - name: Choose the commit and name the batch since stable
         id: batch
         env:
           GH_TOKEN: ${{ github.token }}
           MAIN_SHA: ${{ github.sha }}
           CHOSEN: ${{ inputs.sha }}
-          SCHEDULED: ${{ github.event_name == 'schedule' }}
+          SCHEDULED: ${{ steps.slot.outputs.scheduled }}
         run: |
           set -euo pipefail
           outputs=$(python3 -B tests/ci/main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN" $( [ "$SCHEDULED" = true ] && echo --scheduled ))
@@ -91,7 +117,7 @@ jobs:
       - name: Choose whether this run checks pins (weekly) or sweeps for races (daily)
         id: weekly
         env:
-          SCHEDULED: ${{ github.event_name == 'schedule' }}
+          SCHEDULED: ${{ steps.slot.outputs.scheduled }}
         run: |
           set -euo pipefail
           # Promote runs at :45 UTC every three hours; the 03:45 Monday run (09:15 IST) checks pins, allowing two hours of schedule delay.
@@ -135,7 +161,7 @@ jobs:
       base: ${{ needs.batch.outputs.base }}
       head: ${{ needs.batch.outputs.head }}
       # Scheduled runs file main-red, which the main-is-red timeline reads; manual promotions file promotion-red.
-      red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}
+      red-label: ${{ needs.batch.outputs.scheduled == 'true' && 'main-red' || 'promotion-red' }}
     # Only the runner-status token, so promotion's Mac routing can see rui-mac.
     secrets:
       MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
@@ -147,7 +173,7 @@ jobs:
     needs: [batch, qualify]
     # The repository variable SCHEDULED_RELEASES=paused holds scheduled publication;
     # scheduled runs still qualify and record, and a manual promotion publishes.
-    if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && (needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && !(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}
+    if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && (needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && !(needs.batch.outputs.scheduled == 'true' && vars.SCHEDULED_RELEASES == 'paused') }}
     permissions:
       contents: write
       actions: write
