@@ -3954,6 +3954,41 @@ comptime {
     }
 }
 
+test "schema 90 migration gives every saved tool record the zero app policy and checks app policy on SQLite" {
+    const step = migrations[90 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 90), step.from);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 90) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    const before = try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='replay'"));
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(before, try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name IN ('replay','restart_limit','wait_ms')"));
+    try std.testing.expectEqual(before, try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE replay='' AND restart_limit=0 AND wait_ms=0"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    // The app owner and its policy CHECKs: an app record needs a replay policy, a restart limit of at most 16 and a wait of 1 s to 1 h.
+    const app_row = "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) VALUES(";
+    try sqlite.exec(database, app_row ++ "999,'ask','','app','','safe',3,900000,1,1)");
+    try sqlite.exec(database, app_row ++ "1000,'ask','','app','','safe',3,900001,1,1)");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1001,'ask','','app','','',3,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1002,'ask','','app','','safe',17,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1003,'ask','','app','','safe',3,999,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1004,'ask','','app','','safe',3,3600001,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1005,'ask','','app','','safe',3,900000,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1006,'ask','','rui','safe',0,0,1,1)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, app_row ++ "1007,'ask','','mcp','',0,900000,1,1)"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
+}
+
 test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {
     const step = migrations[89 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 89), step.from);
