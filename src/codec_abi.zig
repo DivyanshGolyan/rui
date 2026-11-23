@@ -302,6 +302,12 @@ pub const Normalized = struct {
     /// The bytes appended since the last whole event, these included, now form one whole
     /// event for interpretEvent. False: keep accumulating (or nothing was appended).
     whole: bool = false,
+    /// Drop the bytes appended since the last whole event before appending these fragments, so
+    /// they replace the open event: a whole event that arrives inside an open block. Dropping
+    /// bytes only shrinks event data, so the invariant above still holds. The data is dropped
+    /// too, so with `discard` a copy must be the whole normalized data verbatim (the shell moves
+    /// it to the event's start), and any other copy is refused.
+    discard: bool = false,
 
     pub fn literal(self: *Normalized, bytes: []const u8) void {
         self.push(.{ .literal = bytes });

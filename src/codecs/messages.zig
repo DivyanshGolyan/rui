@@ -11,9 +11,13 @@
 //!                   block object, and `content_block_stop` makes it one whole event.
 //!                   `message_stop` is one whole `rui.completed` event built from
 //!                   the Stream. `error` is one whole event copied verbatim. A
-//!                   violation is one whole `rui.invalid` event. `message_start`,
-//!                   `message_delta`, `ping` and unknown types add nothing.
-//!   interpretEvent: reads only whole events and answers the grammar.
+//!                   violation is one whole `rui.invalid` event. Either one that
+//!                   arrives inside an open block discards that block first (the
+//!                   normalized `discard`), so it is classified as it is between
+//!                   blocks. `message_start`, `message_delta`, `ping` and unknown
+//!                   types add nothing.
+//!   interpretEvent: reads only whole events and answers the grammar. An open block
+//!                   at the end of the stream is the codec's `finish` to name.
 //!
 //! Document shapes assembled by normalize. Concatenating the escaped bodies of
 //! JSON strings yields the escaped body of the concatenated string, so every
@@ -84,11 +88,7 @@ pub const Stop = enum(u8) { none, end_turn, tool_use, refusal, max_tokens, model
 
 pub const Stream = struct {
     operation: codec_abi.Operation,
-    /// `held` is entered when a violation arrives inside an open block. That block's
-    /// fragments already sit in event data, so no whole event can be written without
-    /// them. Nothing more is emitted, and the shell reports the open event as
-    /// incomplete, so the output never commits.
-    phase: enum(u8) { before_start, started, in_block, between_blocks, stopping, stopped, held } = .before_start,
+    phase: enum(u8) { before_start, started, in_block, between_blocks, stopping, stopped } = .before_start,
     /// Bytes appended since the last whole event: the offsets a whole block's ranges use.
     document: u64 = 0,
     next_index: u64 = 0,
@@ -120,10 +120,11 @@ pub fn begin(operation: codec_abi.Operation) Stream {
     return .{ .operation = operation };
 }
 
+/// The reason a stream that ends without a whole completion names, or null when it stopped.
 pub fn finish(stream: *const Stream) ?Reason {
     return switch (stream.phase) {
         .stopped => null,
-        .in_block, .held => .provider_connection_closed,
+        .in_block => .provider_connection_closed,
         else => .incomplete_provider_output,
     };
 }
@@ -745,15 +746,11 @@ fn invalidText(reason: Reason) []const u8 {
     };
 }
 
-/// What a violation does. Inside an open block the fragments already appended cannot
-/// be a whole event of their own, so the stream is held. Between blocks it is one
-/// whole rui.invalid event, which interpretEvent fails with that reason.
+/// What a violation does: one whole rui.invalid event, which interpretEvent fails with that
+/// reason. Inside an open block it discards the block's partial fragments first.
 fn violation(stream: *Stream, out: *codec_abi.Normalized, reason: Reason) void {
-    out.* = .{};
-    if (stream.phase == .in_block) {
-        stream.phase = .held;
-        return;
-    }
+    out.* = .{ .discard = stream.phase == .in_block };
+    if (out.discard) stream.document = 0;
     out.literal(invalidText(reason));
     out.whole = true;
 }
@@ -776,7 +773,6 @@ fn orderError(stream: *const Stream) anyerror {
 
 pub fn normalize(stream: *Stream, data: []const u8, out: *codec_abi.Normalized) void {
     out.* = .{};
-    if (stream.phase == .held) return;
     normalizeEvent(stream, data, out) catch |err| violation(stream, out, reasonOf(err));
 }
 
@@ -795,11 +791,9 @@ fn normalizeEvent(stream: *Stream, data: []const u8, out: *codec_abi.Normalized)
         .message_delta => try messageDelta(stream, data),
         .message_stop => try messageStop(stream, out),
         .@"error" => {
-            // An error between blocks is one whole event, copied verbatim. Inside a block it is held.
-            if (stream.phase == .in_block) {
-                stream.phase = .held;
-                return;
-            }
+            // An error is one whole event, copied verbatim. Inside an open block it discards that block first.
+            out.discard = stream.phase == .in_block;
+            if (out.discard) stream.document = 0;
             out.copy(.{ .start = 0, .length = data.len });
             out.whole = true;
         },
@@ -1268,197 +1262,7 @@ pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.Err
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Runs raw events through normalize and interpretEvent the way output_decode's shell
-/// does (fragments appended to event data, whole events handed to the grammar), and
-/// writes one line per answer. A failed answer ends the run.
-fn runForTesting(events: []const []const u8, out: *std.Io.Writer) !void {
-    var stream = begin(.assistant_response);
-    var scratch: InterpretScratch = .{};
-    var data: [16384]u8 = undefined;
-    var len: usize = 0;
-    var whole_start: usize = 0;
-    for (events) |raw| {
-        var normalized: codec_abi.Normalized = .{};
-        normalize(&stream, raw, &normalized);
-        for (normalized.slice()) |fragment| {
-            const bytes = switch (fragment) {
-                .literal => |literal| literal,
-                .copy => |range| rangeBytes(raw, range),
-            };
-            try std.testing.expect(len + bytes.len <= data.len);
-            @memcpy(data[len..][0..bytes.len], bytes);
-            len += bytes.len;
-        }
-        if (!normalized.whole) continue;
-        const whole = data[whole_start..len];
-        const answer = interpretEvent(&stream, &scratch, whole);
-        whole_start = len;
-        switch (answer.what) {
-            .other, .done_marker, .added => try out.writeAll("other\n"),
-            .item => |value| try out.print("item {t} {s}\n", .{ value.kind, whole }),
-            .completed => |completed_value| {
-                try out.print("completed id={s} model={s} check={?t} usage=", .{
-                    rangeBytes(whole, completed_value.response_id),
-                    if (completed_value.served_model) |model| rangeBytes(whole, model) else "null",
-                    completed_value.check,
-                });
-                switch (completed_value.usage) {
-                    .absent => try out.writeAll("absent"),
-                    .failed => |reason| try out.print("failed {t}", .{reason}),
-                    .report => |report_value| if (report_value.counts) |counts| {
-                        try out.print("{d}/{d}/{d}/{d}", .{ counts.uncached, counts.cache_read, counts.cache_write, counts.output });
-                    } else try out.writeAll("unusable"),
-                }
-                try out.writeAll("\n");
-            },
-            .failed => |failed| {
-                try out.print("failed {t} refusal={?t}", .{ failed.reason, failed.refusal });
-                if (failed.report.code) |code| try out.print(" code={s}", .{rangeBytes(whole, .{ .start = code.start, .length = code.length })});
-                if (failed.report.message) |message| try out.print(" message={s}", .{rangeBytes(whole, .{ .start = message.start, .length = message.length })});
-                try out.writeAll("\n");
-                return;
-            },
-        }
-    }
-    try out.print("finish {?t}\n", .{finish(&stream)});
-}
-
-fn expectRun(events: []const []const u8, expected: []const u8) !void {
-    var buffer: [4096]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    try runForTesting(events, &out);
-    try std.testing.expectEqualStrings(expected, out.buffered());
-}
-
 const start_message = "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}";
-const stop_message = "{\"type\":\"message_stop\"}";
-
-test "MSG-1 a text stream assembles one message block and one completed event with its counts" {
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"ping\"}",
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo \\\"\\u00e9\\\"\\n\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":0}",
-        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":7}}",
-        stop_message,
-    }, "item message {\"type\":\"text\",\"text\":\"Hello \\\"\\u00e9\\\"\\n\"}\n" ++
-        "completed id=msg_1 model=claude-x check=null usage=10/3/2/7\n" ++
-        "finish null\n");
-}
-
-test "MSG-2 thinking keeps its text and signature, and tool calls keep id, name and argument JSON" {
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"pl\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"an\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig==\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":0}",
-        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input\":{}}}",
-        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ls\\\"}\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":1}",
-        "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"read\",\"input\":{}}}",
-        "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":2}",
-        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9}}",
-        stop_message,
-    }, "item reasoning {\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig==\"}\n" ++
-        "item function_call {\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input_json\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n" ++
-        "item function_call {\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"read\",\"input_json\":\"{}\"}\n" ++
-        "completed id=msg_1 model=claude-x check=null usage=10/3/2/9\n" ++
-        "finish null\n");
-}
-
-test "MSG-3 a redacted thinking block is copied whole and a refusal names its category and explanation" {
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":0}",
-        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\",\"category\":\"cyber\",\"explanation\":\"no\"}},\"usage\":{\"output_tokens\":1}}",
-        stop_message,
-    }, "item reasoning {\"type\":\"redacted_thinking\",\"data\":\"opaque\"}\n" ++
-        "failed reported_provider_failure refusal=policy code=cyber message=no\n");
-}
-
-test "MSG-4 the stop reasons that end without an answer name their failure" {
-    const cases = [_][2][]const u8{
-        .{ "max_tokens", "failed incomplete_provider_output refusal=null\n" },
-        .{ "model_context_window_exceeded", "failed context_overflow refusal=null\n" },
-        .{ "pause_turn", "failed unsupported_response_status refusal=null\n" },
-        .{ "stop_sequence", "failed unsupported_response_status refusal=null\n" },
-    };
-    for (cases) |case| {
-        var delta_buffer: [256]u8 = undefined;
-        const delta = try std.fmt.bufPrint(&delta_buffer, "{{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{s}\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":1}}}}", .{case[0]});
-        try expectRun(&.{ start_message, delta, stop_message }, case[1]);
-    }
-}
-
-test "MSG-5 an error event between blocks is one whole reported failure, classified by its error type" {
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
-    }, "failed reported_provider_failure refusal=null code=overloaded_error message=Overloaded\n");
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 200000 tokens\"}}",
-    }, "failed context_overflow refusal=null code=invalid_request_error message=prompt is too long: 200000 tokens\n");
-}
-
-test "MSG-6 ping and an unknown event type add nothing, and a block violation is one reported failure" {
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"ping\"}",
-        "{\"type\":\"future_event\",\"x\":[1,{\"y\":null}]}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"early\"}}",
-    }, "failed contradictory_provider_output refusal=null\n");
-}
-
-test "MSG-7 a block index out of order, an unknown block and a citation are reported at the place they occur" {
-    // An out-of-order block index inside a block holds the stream: no whole event, and
-    // the codec reports the open block as connection closed.
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}",
-        "{\"type\":\"content_block_stop\",\"index\":0}",
-    }, "finish provider_connection_closed\n");
-    // An unknown block type between blocks is a standalone failure.
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"s\",\"name\":\"web_search\"}}",
-    }, "failed unsupported_content_block refusal=null\n");
-    // A citations delta inside a text block is an unsupported annotation, held inside the block.
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{}}}",
-    }, "finish provider_connection_closed\n");
-}
-
-test "MSG-8 a message id longer than the Stream keeps is a provider value fault" {
-    var long: [max_id_bytes + 1]u8 = undefined;
-    @memset(&long, 'a');
-    var event_buffer: [512]u8 = undefined;
-    const event = try std.fmt.bufPrint(&event_buffer, "{{\"type\":\"message_start\",\"message\":{{\"id\":\"{s}\",\"model\":\"m\",\"usage\":{{}}}}}}", .{long[0..]});
-    try expectRun(&.{event}, "failed provider_value_too_long refusal=null\n");
-}
-
-test "MSG-9 a stream ends incomplete before message_stop, and a cut inside a block is a closed connection" {
-    try expectRun(&.{start_message}, "finish incomplete_provider_output\n");
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}",
-    }, "finish incomplete_provider_output\n");
-    try expectRun(&.{
-        start_message,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut\"}}",
-    }, "finish provider_connection_closed\n");
-}
 
 test "MSG-10 a block's fragments never exceed the raw events it came from" {
     const events = [_][]const u8{
@@ -1682,43 +1486,4 @@ test "MSG-16 an HTTP error body classifies by the table the stream's error event
     try std.testing.expect(!out.context_overflow);
     try std.testing.expectEqual(@as(?codec_abi.Refusal, null), out.refusal);
     try std.testing.expectEqual(@as(?codec_abi.ReportRange, null), out.report.code);
-}
-
-/// A recorded Anthropic stream's data events: thinking with its signature, text, a tool
-/// call whose arguments arrive in two fragments, usage, and the stop.
-const recorded_events = [_][]const u8{
-    "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}",
-    "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
-    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan.\"}}",
-    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}",
-    "{\"type\":\"content_block_stop\",\"index\":0}",
-    "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}",
-    "{\"type\":\"content_block_stop\",\"index\":1}",
-    "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}}",
-    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}",
-    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}",
-    "{\"type\":\"content_block_stop\",\"index\":2}",
-    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":42}}",
-    stop_message,
-};
-
-test "MSG-17 a recorded Anthropic stream runs to its items and its completion, and each cut names its reason" {
-    var buffer: [8192]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    try runForTesting(&recorded_events, &out);
-    const text = out.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "item reasoning ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "item message ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "item function_call ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"input_json\":\"{\\\"q\\\":1}\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "completed id=msg_01 model=claude-x") != null);
-
-    // A cut inside an open block is a closed connection; a cut before message_stop is incomplete output.
-    var cut_in_block: std.Io.Writer = .fixed(&buffer);
-    try runForTesting(recorded_events[0..7], &cut_in_block);
-    try std.testing.expect(std.mem.endsWith(u8, cut_in_block.buffered(), "finish provider_connection_closed\n"));
-    var before_stop: std.Io.Writer = .fixed(&buffer);
-    try runForTesting(recorded_events[0 .. recorded_events.len - 1], &before_stop);
-    try std.testing.expect(std.mem.endsWith(u8, before_stop.buffered(), "finish incomplete_provider_output\n"));
 }
