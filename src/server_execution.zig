@@ -31,6 +31,7 @@ const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
 const host_drain = @import("host_drain.zig");
 const signal_stack = @import("signal_stack.zig");
+const child_exit_wake = @import("child_exit_wake.zig");
 const tools = @import("tools.zig");
 const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
@@ -606,6 +607,11 @@ pub fn executionMain(host: *Host) void {
     if (reactor) |active| active.wake = &host.dispatch_wake;
     host.store.commitWake().store(&host.dispatch_wake, .release);
     defer host.store.commitWake().store(null, .release);
+    // One process-wide SIGCHLD owner: with two Hosts in one process the later
+    // attach wins and the other falls back to its Bash wait timeout.
+    const child_wake: child_exit_wake.Wake = .{ .event = &host.dispatch_wake, .io = host.io };
+    child_exit_wake.attach(&child_wake);
+    defer child_exit_wake.detach(&child_wake);
     const transport: ?std.Thread = if (reactor) |active|
         signal_stack.spawn(.{}, provider.Reactor.serve, .{active}) catch |err| {
             fenceDispatch(host, "transport thread start", err);

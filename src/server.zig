@@ -44,6 +44,7 @@ const relist = @import("mcp/relist.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
+const child_exit_wake = @import("child_exit_wake.zig");
 const signal_stack = @import("signal_stack.zig");
 const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
@@ -902,12 +903,8 @@ pub noinline fn serve(
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
     const mcp_servers = connections.servers;
-    const child_action: std.posix.Sigaction = .{
-        .handler = .{ .handler = std.posix.SIG.DFL },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(.CHLD, &child_action, null);
+    child_exit_wake.install();
+    defer child_exit_wake.restore();
     StopSignals.install();
     defer StopSignals.restore();
     var descriptor_observation = try descriptor_limit.observe(io);

@@ -79,6 +79,7 @@ extern fn rui_bash_observe(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_reap(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_pipe_queued_bytes(fd: c_int, bytes: *u64) c_int;
 extern fn rui_bash_group_absent(pgid: c_int) c_int;
+extern fn rui_bash_group_holds_only(pgid: c_int, leader: c_int) c_int;
 extern fn rui_bash_spawn(
     path: [*:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
@@ -699,6 +700,11 @@ pub const Execution = struct {
             },
         };
         self.sendSignal(self.lifecycle.observeLeader(term, now));
+        // Only a live observation has a real group behind it. A probe that
+        // cannot list the group keeps the grace.
+        if (source == .live and self.lifecycle.awaitsGroup() and rui_bash_group_holds_only(self.pgid, self.leader.?) == 1) {
+            self.sendSignal(self.lifecycle.groupHoldsOnlyLeader());
+        }
         return true;
     }
 
@@ -996,6 +1002,55 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
         .timeout_ms = timeout_ms,
         .faults = .{ .lifecycle = .signal },
     };
+}
+
+test "the group probe sees a lone exited leader and any member it left behind" {
+    const Probe = struct {
+        extern "c" fn pause() c_int;
+
+        leader: c_int,
+        observation: BashObservation = undefined,
+
+        fn exited(self: *@This()) !bool {
+            const result = rui_bash_observe(self.leader, &self.observation);
+            try std.testing.expect(result >= 0);
+            return result == 1;
+        }
+
+        fn alone(self: *@This()) !bool {
+            const result = rui_bash_group_holds_only(self.leader, self.leader);
+            try std.testing.expect(result >= 0);
+            return result == 1;
+        }
+    };
+    const Shape = enum { lone, member };
+    for (std.enums.values(Shape)) |shape| {
+        const leader = std.c.fork();
+        if (leader < 0) return error.TestForkFailed;
+        if (leader == 0) {
+            _ = std.c.setpgid(0, 0);
+            if (shape == .member and std.c.fork() == 0) while (true) {
+                _ = Probe.pause();
+            };
+            std.c._exit(0);
+        }
+        _ = std.c.setpgid(leader, leader);
+        var reaped = false;
+        defer if (!reaped) {
+            _ = @import("os/process.zig").signalGroup(leader, .KILL);
+            _ = std.c.waitpid(leader, null, 0);
+        };
+        var probe: Probe = .{ .leader = leader };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromMilliseconds(1500)), &probe, Probe.exited);
+        if (shape == .member) {
+            try std.testing.expectEqual(@as(c_int, 0), rui_bash_group_holds_only(leader, leader));
+            _ = @import("os/process.zig").signalGroup(leader, .KILL);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromMilliseconds(5000)), &probe, Probe.alone);
+        }
+        try std.testing.expectEqual(@as(c_int, 1), rui_bash_group_holds_only(leader, leader));
+        try std.testing.expectEqual(@as(c_int, 1), rui_bash_reap(leader, &probe.observation));
+        reaped = true;
+    }
 }
 
 test "service acts on its service-time observation rather than an earlier one" {

@@ -346,7 +346,7 @@ The Store also advances an in-memory control generation after each accepted cont
 The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; each turn skips its Bash, message and tool-continuation admission scans while the generation, the free-slot count and which shared preparation owners are open are unchanged since the last read found nothing.
 An Action Attempt loses custody without a saved outcome only after dispatch is fenced or the Host is shutting down, and neither admits work again, so uncertain Actions come only from an earlier Host; the lifecycle owner stops scanning for them once a scan after startup finds none.
 Retry admission depends on time and keeps its one-second poll.
-A Store commit from any thread and a finished stream wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
+A Store commit from any thread, a finished stream and a child exit wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
 A control always commits before its hint, so a lost hint still moves the control generation.
 Before transport handoff it rechecks superseding controls; stop or shutdown cancels preparation, closes readers and prevents launch.
 Canonical read faults fence dispatch.
