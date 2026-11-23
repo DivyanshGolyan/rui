@@ -161,9 +161,9 @@ class AdmissionTest(unittest.TestCase):
         release = RELEASE_BUILD.read_text()
         self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
+        # The qualification compile already builds every part in one job, so its budget is unchanged.
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
-        self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || %d }}"
-                      % budget(job(text, 'macos_build')), qualify)
+        self.assertIn("    timeout-minutes: ${{ needs.plan.outputs.platform == 'linux' && 15 || 60 }}", qualify)
         self.assertIn('    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}', job(text, 'linux_suites'))
         self.assertEqual(step_budget(job(text, 'linux_suites'), 'Run selected targets'), 35)
         # One macOS job runs every native suite back to back (about 22 min measured).

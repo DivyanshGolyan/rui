@@ -293,7 +293,9 @@ test('compiled restores its v4 snapshot, then seeds from the v2 baseline', () =>
     for (const part of ['all', 'compiled', 'compiled-unit', 'compiled-other', 'codegen', 'baseline']) {
       if (platform === 'Linux-X64' && part === 'compiled') continue;
       const ordinary = keys(part, deps, sources, platform);
-      const prefix = `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-`;
+      // macOS compiled publishes under v3 so its combined build never exact-hits the rest-only v2 snapshot.
+      const version = platform === 'macOS-ARM64' && part === 'compiled' ? 'v3' : 'v2';
+      const prefix = `rui-build-${version}-${platform}-0.17.1-${'a'.repeat(64)}-`;
       assert.equal(ordinary.key, `${prefix}${part}.${deps}-${sources}`);
       const restoreKeys = order.map(field => ordinary[field]).filter(Boolean);
       assert.equal(new Set(restoreKeys).size, restoreKeys.length, `${platform}/${part} duplicates fallbacks`);
@@ -810,8 +812,13 @@ test('prune retains newest partial per build or CPU prefix independently of comp
   assert.deepEqual(result.ids, [4, 5, 6, 7, 9, 10, 12, 13, 14]);
 });
 
-test('existing job timeout budgets are not increased to make space for saves', () => {
+test('existing job timeout budgets rise only in a job that absorbs the budgets it replaces', () => {
   const directory = `${__dirname}/../../.github/workflows`;
+  // A job that absorbs others may take the sum of the budgets it replaces (CI-33); nothing else may rise.
+  const absorbed = {
+    // macos_build replaces macos_build (60) and macos_build_unit (60).
+    'check.yml': {macos_build: 120, macos_suites: 105 /* the three former suite rows at 35 each */},
+  };
   for (const [file, expected] of [
     ['cache-maintenance.yml', {baseline: '30', runner: '15', previous_release: '45'}],
     ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '90', macos_typecheck: '15', cache_execution: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 60 }}'}],
@@ -820,6 +827,11 @@ test('existing job timeout budgets are not increased to make space for saves', (
     const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
     for (const [name, budget] of Object.entries(expected)) {
       assert.equal(jobs[name].match(/^    timeout-minutes: (.*)$/m)[1], budget, `${file}/${name}`);
+      const replaced = absorbed[file]?.[name];
+      if (replaced !== undefined) {
+        const minutes = Number(budget.match(/\|\| (\d+) \}\}$/)?.[1] ?? budget);
+        assert.ok(minutes <= replaced, `${file}/${name} may not exceed the sum it absorbs (${replaced})`);
+      }
     }
   }
 });
@@ -837,6 +849,7 @@ test('new work deadlines derive a save window and cover recorded green durations
       linux_build: [851, '43732653500'],
       linux_build_unit: [480, '43819213128'],
       macos_typecheck: [449, '43819213128'],
+      // PROVISIONAL: the sum of the separate rest (1117 s) and unit (760 s) green runs, until a combined run is recorded.
       macos_build: [1877, '43720387127'],
       cache_execution: [351, '42755585733'],
     },

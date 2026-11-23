@@ -1857,6 +1857,7 @@ fi
         self.assertIn(actionlint, check)
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
+        self.assertIn('rui-build-v2-macOS-ARM64-*) PREFIX="rui-build-v3-${PREFIX#rui-build-v2-}" ;;', caches)
         deps = re.search(r"(?m)^\s+PREFIX: rui-build-v2-", caches)[0]
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace(deps, deps.replace("v2", "v3"))))
         default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)

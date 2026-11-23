@@ -560,8 +560,8 @@ jobs:
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
         id: compile
-        # Serialized sum of the former rest (1117 s) and unit (760 s) green compiles, run
-        # 43720387127; no single combined run is recorded yet.
+        # PROVISIONAL: 1877 s is the sum of the separate rest (1117 s) and unit (760 s)
+        # green runs, run 43720387127, until a combined macos_build run is recorded.
         # Cache timing: green 1877 s, run 43720387127; minimum margin 120 s.
         # Limit = job budget - cold setup allowance - save reserve (the former 60 - 28).
         timeout-minutes: 62
@@ -793,8 +793,8 @@ jobs:
     needs: [plan, mac_runner, macos_build]
     if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
-    # One job runs every native suite back to back (about 22 min measured), so its
-    # budget covers that sum plus setup and restore.
+    # One job runs every native suite back to back (about 22 min, the sum of the three
+    # separate suites' times), so its budget covers that sum plus setup and restore.
     timeout-minutes: ${{ inputs.promotion && 300 || 60 }}
     strategy:
       # The plan emits one native row; the matrix stays so the row set is plan-driven.
