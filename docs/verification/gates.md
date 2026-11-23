@@ -180,9 +180,9 @@ Their disjoint fixtures cover the full gate once; callers run Host-process, allo
 A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.
 Only non-promotion manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
-Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
+Qualification keeps one job per target, except macOS: all native work runs in one hosted or Mac job (`check-full` whole, with the remaining targets and `test-logic`), so a macOS run pays one queue, setup and artifact restore.
 Composed gates, long witnesses, launch, Debug admission, reply delivery, H2 and UID-wide Upgrade stay isolated from other target batches.
-Within a macOS worker using verified CI artifacts, independent acceptance commands overlap through Zig's existing DAG scheduler.
+Within the macOS job, independent acceptance commands overlap through Zig's existing DAG scheduler, and its isolated batches run one after another.
 The shared build CI owner checks their exit status and keeps execution fresh while buffering combined output on stderr; inherited terminal I/O would hold Zig's global stderr lock.
 Compilation, generated outputs, explicit I/O checks and Zig test protocols keep their existing owners.
 The compiler-backed acceptance regression runs explicitly in the existing compiler-equipped `cache_execution` job alongside the warm-cache execution proof; its explicit `ACCEPTANCE_INPUTS` also select that job and focused local feedback, while it stays outside the five-minute Python policy suite.
@@ -268,7 +268,7 @@ Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 A ready PR's single `linux pr` job instead compiles its closure in place with `build_artifact.py compile` and transfers no artifact. It restores, read-only, the Linux `compiled` snapshot that main's `linux_build` producer publishes (setup's `cache-part`), keeping the package sources setup restored.
 Linux x86_64 producers use eight Zig async job slots so subprocess waits do not serialize independent compiles; this also applies to promotion's LLVM builds, while `-Dpr-ci` remains exclusive to pull requests.
 Changes to the shared artifact producer select the full Linux build gate and Debug admission, which promotion runs with native macOS; a PR runs `test-logic` through the changed producer ([Two tiers](#two-tiers)).
-On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
+On Linux, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile. macOS never splits: one producer builds every part (`-Dci-part=all`).
 [build_artifact.py](../../tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.
 Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run, source and tree, an attempt no later than their own (a rerun of failed jobs keeps its passed producer's artifact), platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.
 Extraction rejects traversal, special files, hardlinks and symlinks.
@@ -291,9 +291,9 @@ Uploads expire after three days.
 Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
-[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation (`baseline`) and both split producer partitions (`compiled` and `compiled-unit`) on Linux and macOS after trusted main pushes that change build, dependency or maintenance inputs.
+[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation (`baseline`), the Linux split producer partitions (`compiled` and `compiled-unit`) and macOS's single producer (`compiled`, all parts) after trusted main pushes that change build, dependency or maintenance inputs.
 The producer warmers run the same `build_artifact.py build` command as Selected checks and Promote, using `rest` and `unit` respectively with the full promotion core (`check-full`, `test-logic`, `admission-debug-integration`, plus Linux `stack-frames`).
-The new split warmers retain their 120-minute job budget and have a derived 92-minute compile step. No existing job budget increases: baseline stays at 30 minutes, runner maintenance at 15, previous release at 45, Linux unit/typecheck at 15, cache proof/codegen at 20, ordinary shards at 35 and Renderer contracts at 45. The existing 60-minute Linux and Mac producer safety nets remain. Only the measured, sufficiently long jobs receive derived work-step deadlines; no job budget changes to make space for saving.
+The warmers retain their 120-minute job budget and have a derived 92-minute compile step. Baseline stays at 30 minutes, runner maintenance at 15, previous release at 45, Linux unit/typecheck at 15, cache proof/codegen at 20, ordinary Linux shards at 35 and Renderer contracts at 45. The macOS producer's budget rises from 60 to 90 minutes, its compile step from 32 to 62 minutes (the same 28-minute setup and save allowance), because one producer now compiles what two Macs compiled; macOS suites rise from 35 to 60 minutes (step 45), because one job runs their sum of about 22 minutes. Only the measured, sufficiently long jobs receive derived work-step deadlines.
 A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
 Cleanup keeps main's newest complete snapshot per platform, partition and native-tool identity, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota. It separately keeps at most the newest partial compilation snapshot per platform/partition/identity or runner CPU prefix, so a partial cannot evict the retained complete snapshot.
@@ -310,7 +310,7 @@ A promotion's rerun also reruns the tier's `qualify / qualified` verdict and Rel
 
 ## Self-hosted Mac runner
 
-Selected checks decides once per run, promotion included, whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
+Selected checks decides once per run, promotion included, whether to send `macos_build` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
 Pull requests never run `mac_runner` (they select no native macOS work); manual dispatches by allowlisted actors are eligible.
 The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.

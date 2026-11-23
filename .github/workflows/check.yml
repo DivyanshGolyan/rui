@@ -191,7 +191,6 @@ jobs:
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       linux_split: ${{ steps.select.outputs.linux_split }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
-      macos_split: ${{ steps.select.outputs.macos_split }}
       policy_skips: ${{ steps.select.outputs.policy_skips }}
       pr_job: ${{ steps.select.outputs.pr_job }}
       pr_setup_targets: ${{ steps.select.outputs.pr_setup_targets }}
@@ -544,8 +543,9 @@ jobs:
     needs: [plan, mac_runner]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native == 'true' }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
-    # Match the cold Release producer budget without extending acceptance deadlines.
-    timeout-minutes: 60
+    # One producer compiles every native gate, unit roots included, so its budget covers
+    # both former producers (rest, then unit) run back to back.
+    timeout-minutes: 90
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
@@ -560,15 +560,16 @@ jobs:
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
         id: compile
-        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
-        # Limit = job budget - cold setup allowance - save reserve.
-        timeout-minutes: 32
+        # Serialized sum of the former rest (1117 s) and unit (760 s) green compiles, run
+        # 43720387127; no single combined run is recorded yet.
+        # Cache timing: green 1877 s, run 43720387127; minimum margin 120 s.
+        # Limit = job budget - cold setup allowance - save reserve (the former 60 - 28).
+        timeout-minutes: 62
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
-          PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}
         run: |
           sysctl hw.ncpu hw.memsize vm.swapusage
-          /usr/bin/time -l python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+          /usr/bin/time -l python3 -B tests/ci/build_artifact.py build "$TARGETS" --part all
           sysctl vm.swapusage
       - name: Save reusable caches even after failure
         if: ${{ always() }}
@@ -581,48 +582,6 @@ jobs:
         id: publish
         with:
           name: compiled-macos-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rui-compiled
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 1
-  macos_build_unit:
-    # Keep the parallel unit roots off the cores building the other gates.
-    # One extra Mac briefly; suites still use at most three of the five Macs.
-    needs: [plan, mac_runner]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}
-    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
-    # A cold cache compiles the unit roots from scratch; match the cold producer budget.
-    timeout-minutes: 60
-    outputs:
-      artifact: ${{ steps.publish.outputs.artifact-id }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.candidate_ref }}
-      - uses: ./.github/actions/setup
-        id: setup
-        with:
-          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
-          check-part: compiled-unit
-      - name: Compile the unit test roots once, never test acceptance
-        id: compile
-        # Cache timing: green 760 s, run 43720387127; minimum margin 120 s.
-        # Limit = job budget - cold setup allowance - save reserve.
-        timeout-minutes: 32
-        env:
-          TARGETS: ${{ needs.plan.outputs.native_targets }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
-      - name: Save reusable caches even after failure
-        if: ${{ always() }}
-        uses: ./.github/actions/setup/caches
-        with:
-          save-only: 'true'
-          setup-outcome: ${{ steps.setup.outcome }}
-          work-outcome: ${{ steps.compile.outcome }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        id: publish
-        with:
-          name: compiled-macos-unit-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-compiled
           compression-level: 0
           if-no-files-found: error
@@ -831,15 +790,16 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   macos_suites:
     name: macos suites (${{ matrix.name }})
-    needs: [plan, mac_runner, macos_build, macos_build_unit]
-    # A skipped unit producer is expected only for an unsplit selection.
-    if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
+    needs: [plan, mac_runner, macos_build]
+    if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
-    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
+    # One job runs every native suite back to back (about 22 min measured), so its
+    # budget covers that sum plus setup and restore.
+    timeout-minutes: ${{ inputs.promotion && 300 || 60 }}
     strategy:
-      # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
+      # The plan emits one native row; the matrix stays so the row set is plan-driven.
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -857,9 +817,8 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
-          UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Configure the build runner before acceptance
         id: compile
         # Restore/rebuild can consume the job budget; do not cap this follow-up either.
@@ -872,7 +831,7 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome == 'success' && steps.restore.outcome == 'success' && 'success' || 'failure' }}
           work-outcome: ${{ steps.compile.outcome }}
       - name: Run required native targets
-        timeout-minutes: 35
+        timeout-minutes: 45
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
@@ -902,7 +861,7 @@ jobs:
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.
-    needs: [plan, macos_build, macos_build_unit, macos_suites]
+    needs: [plan, macos_build, macos_suites]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -911,12 +870,9 @@ jobs:
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           BUILD_RESULT: ${{ needs.macos_build.result }}
-          UNIT_RESULT: ${{ needs.macos_build_unit.result }}
-          SPLIT: ${{ needs.plan.outputs.macos_split }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
-          if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -959,7 +915,6 @@ jobs:
           LINUX_MATRIX: ${{ needs.plan.outputs.linux_matrix }}
           MACOS_MATRIX: ${{ needs.plan.outputs.macos_matrix }}
           LINUX_SPLIT: ${{ needs.plan.outputs.linux_split }}
-          MACOS_SPLIT: ${{ needs.plan.outputs.macos_split }}
           LINUX_MEMORY: ${{ needs.plan.outputs.linux_memory }}
           DRAFT: ${{ github.event.pull_request.draft }}
           PLAN_RESULT: ${{ needs.plan.result }}
@@ -984,7 +939,6 @@ jobs:
               test "$LINUX_MATRIX" = '{"include": []}'
               test "$MACOS_MATRIX" = '{"include": []}'
               test "$LINUX_SPLIT" = false
-              test "$MACOS_SPLIT" = false
               test "$LINUX_MEMORY" = false ;;
             normal)
               # The single PR job runs policy itself; admission requires that job.
