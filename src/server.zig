@@ -45,6 +45,7 @@ const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
+const line_intake = @import("line_intake.zig");
 const signal_stack = @import("signal_stack.zig");
 const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
@@ -151,6 +152,24 @@ const Intake = struct {
     stdin: ?std.posix.fd_t = null,
     lifetime: host_settings.Interface.Lifetime = .detached,
     deadline_armed: bool = false,
+    /// Held lines, outside `intake_capacity`; served on this thread only.
+    lines: line_intake.Pool = .{},
+
+    /// Upgrades an exchange whose headers named `GET /v1/line`. Lines are refused while
+    /// the Store is fenced or the Host stops; the caller holds the change ring's lock while
+    /// the pool reads its newest generation.
+    fn upgradeLine(self: *Intake, exchange: *Exchange, leftover: []const u8) !void {
+        if (exchange.header.instance) |identity| {
+            if (!std.mem.eql(u8, &identity, &self.host.instance)) return error.HostInstanceChanged;
+        }
+        if (self.host.store.isFenced()) return error.StoreFailed;
+        if (self.host.stopping()) return error.HostStopping;
+        self.host.store.lockChanges();
+        defer self.host.store.unlockChanges();
+        try self.lines.open(self.host.allocator, self.host.instance, exchange.fd, leftover, nowNs(self.host) / std.time.ns_per_ms, self.host.store.changes);
+        exchange.fd = -1;
+        exchange.state = .closed;
+    }
 
     const Worker = struct {
         owner: *Intake,
@@ -313,7 +332,8 @@ const Intake = struct {
             };
             reply.deinit();
             const status: u16 = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => 503,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.StoreFailed, error.HostStopping => 503,
+                error.HostInstanceChanged => 409,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
@@ -322,6 +342,10 @@ const Intake = struct {
             };
             const code = switch (err) {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
+                error.LinesFull => "line_capacity_exhausted",
+                error.StoreFailed => "store_failed",
+                error.HostStopping => "host_stopping",
+                error.HostInstanceChanged => "host_instance_changed",
                 error.ControlCapacity => "control_capacity_exhausted",
                 error.DiscoveryCapacity => "discovery_capacity_exhausted",
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else if (self.route == .action_publish) "too_large" else "control_request_too_large",
@@ -335,7 +359,7 @@ const Intake = struct {
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => .busy,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.StoreFailed, error.HostStopping => .busy,
                 error.UnsupportedControl => .unsupported,
                 else => .invocation_error,
             };
@@ -379,10 +403,10 @@ const Intake = struct {
                                         control += 1;
                                     } else if (route == .host_info) {
                                         discovery += 1;
-                                    } else ordinary += 1;
+                                    } else if (route != .line) ordinary += 1;
                                 }
                             }
-                            if (self.route.?.isControl()) {
+                            if (self.route == .line) {} else if (self.route.?.isControl()) {
                                 if (control > 2) return error.ControlCapacity;
                             } else if (self.route == .host_info) {
                                 if (discovery > 1) return error.DiscoveryCapacity;
@@ -394,6 +418,7 @@ const Intake = struct {
                     if (!std.mem.endsWith(u8, header, "\r\n\r\n")) continue;
                     self.header = try HeaderReader.parseFields(header, self.route.?);
                     if (self.route == .unsupported_control) return error.UnsupportedControl;
+                    if (self.route == .line) return self.owner.upgradeLine(self, bytes[consumed..]);
                     self.number = try nextRequestNumber(self.host);
                     switch (self.route.?) {
                         inline else => |route| traceRequest(self.host, "connection_request_" ++ @tagName(route), self.number.?, null),
@@ -566,6 +591,7 @@ const Intake = struct {
 
     fn deinit(self: *Intake) void {
         self.stopWorkers();
+        self.lines.closeAll();
         for (self.exchanges.items) |exchange| {
             exchange.state = .retired;
             while (!exchange.destroy())
@@ -663,6 +689,16 @@ const Intake = struct {
         while (true) {
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            self.lines.rearm();
+            if (self.lines.count != 0) {
+                self.host.store.lockChanges();
+                self.lines.onWake(self.host.store.changes);
+                self.host.store.unlockChanges();
+            }
+            const line_ms: u64 = nowNs(self.host) / std.time.ns_per_ms;
+            if (self.lines.count != 0) {
+                if (self.host.store.isFenced()) self.lines.failAll(.store_failed, line_ms) else if (self.host.stopping()) self.lines.failAll(.host_stopping, line_ms);
+            }
             StopSignals.apply(self.host);
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
@@ -726,6 +762,9 @@ const Intake = struct {
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
+            const lines_base = self.polls.items.len;
+            try self.lines.appendPolls(self.host.allocator, &self.polls, line_ms);
+            const lines_end = self.polls.items.len;
             try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
             for (self.exchanges.items) |exchange| {
@@ -734,9 +773,11 @@ const Intake = struct {
                     wake_at = @min(wake_at, exchange.cleanup_retry_at);
                 } else if (exchange.state == .closed) wake_at = now;
             }
+            if (self.lines.deadline()) |at| wake_at = @min(wake_at, @as(i128, @intCast(at)) * std.time.ns_per_ms);
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
+            self.lines.service(self.polls.items[lines_base..lines_end], nowNs(self.host) / std.time.ns_per_ms);
             if (self.polls.items[self.polls.items.len - 1].revents != 0) self.readStdin();
             for (self.exchanges.items, self.polls.items[2..][0..self.exchanges.items.len]) |exchange, poll| {
                 if (poll.revents == 0) continue;
@@ -758,7 +799,8 @@ const Intake = struct {
                 }
             }
             self.retireExchanges();
-            if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
+            self.lines.reap(nowNs(self.host) / std.time.ns_per_ms);
+            if (!listener_open.* and self.exchanges.items.len == 0 and self.lines.count == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             for (0..16) |_| {
                 if (self.host.intake_capacity < product_defaults.intake_capacity and
@@ -860,6 +902,13 @@ extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) 
 /// MCP calls and one re-list per configured server can hold sockets at once.
 const mcp_socket_capacity = @import("server_mcp.zig").capacity + host_settings.max_mcp_servers;
 
+/// Each open line holds one socket, outside intake's exchange population.
+fn reserveLineDescriptors(requirement: *descriptor_capacity.Requirement) !void {
+    const sockets = @import("line.zig").capacity;
+    requirement.clients = try std.math.add(usize, requirement.clients, sockets);
+    requirement.total = try std.math.add(usize, requirement.total, sockets);
+}
+
 fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     const sockets = mcp_socket_capacity;
     requirement.execution = try std.math.add(usize, requirement.execution, sockets);
@@ -919,6 +968,7 @@ pub noinline fn serve(
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
+    try reserveLineDescriptors(&descriptor_requirement);
     if (descriptor_observation.soft_limit) |limit| {
         if (limit < descriptor_requirement.total) {
             descriptor_limit.raise(descriptor_requirement.total);
@@ -958,6 +1008,7 @@ pub noinline fn serve(
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
+    try reserveLineDescriptors(&descriptor_requirement);
     var descriptor_limit_buffer: [32]u8 = undefined;
     const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
         try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
@@ -1162,6 +1213,9 @@ fn serveOpened(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
+    intake.lines.attach(intake.wake[1]);
+    storage.commitSubscriber().store(&intake.lines.subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
     intake.lifetime = settings.interface.lifetime.value;
     if (intake.lifetime == .stdin) intake.stdin = 0;
     host.intake_wake = intake.wake[1];
@@ -1528,6 +1582,7 @@ const Route = enum {
     model_list,
     tools_reload,
     tools_status,
+    line,
     unsupported_control,
 
     fn commandKind(comptime self: Route) ?protocol.CommandKind {
@@ -1555,7 +1610,7 @@ const Route = enum {
         return switch (self) {
             .observe => .observe_command,
             .inspect => .inspect_session,
-            .unsupported_control => unreachable,
+            .unsupported_control, .line => unreachable,
             inline else => |route| @field(protocol.Kind, @tagName(route)),
         };
     }
@@ -2273,6 +2328,7 @@ fn nextRequestNumber(host: *Host) !u64 {
 
 const HeaderReader = struct {
     fn parseRoute(request_line: []const u8) !Route {
+        if (std.mem.eql(u8, request_line, "GET /v1/line HTTP/1.1")) return .line;
         var request_parts = std.mem.splitScalar(u8, request_line, ' ');
         if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
             return error.InvalidMethod;
@@ -2336,7 +2392,44 @@ const HeaderReader = struct {
             error.UnknownRoute;
     }
 
+    /// The upgrade request: `Upgrade: rui-line/1`, a `Connection` token `Upgrade`, the wire
+    /// version, and an optional Host instance. A body or a framing header is refused.
+    fn parseLineFields(bytes: []const u8) !Header {
+        var fields = std.mem.splitSequence(u8, bytes, "\r\n");
+        _ = fields.next() orelse return error.InvalidRequestLine;
+        var upgrade_ok = false;
+        var connection_ok = false;
+        var wire_ok = false;
+        var instance: ?protocol.InstanceId = null;
+        while (fields.next()) |field| {
+            if (field.len == 0) break;
+            const colon = std.mem.indexOfScalar(u8, field, ':') orelse return error.InvalidHeader;
+            const name = std.mem.trim(u8, field[0..colon], " \t");
+            const value = std.mem.trim(u8, field[colon + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "Upgrade")) {
+                if (upgrade_ok or !std.mem.eql(u8, value, "rui-line/1")) return error.InvalidUpgrade;
+                upgrade_ok = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "Connection")) {
+                var tokens = std.mem.splitScalar(u8, value, ',');
+                while (tokens.next()) |token| {
+                    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, token, " \t"), "Upgrade")) connection_ok = true;
+                }
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
+                wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Host-Instance")) {
+                if (instance != null) return error.DuplicateHostInstance;
+                instance = try protocol.parseInstanceId(value);
+            } else if (std.ascii.eqlIgnoreCase(name, "Content-Length") or std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+                return error.InvalidUpgrade;
+            }
+        }
+        if (!upgrade_ok or !connection_ok) return error.InvalidUpgrade;
+        if (!wire_ok) return error.WrongWireVersion;
+        return .{ .route = .line, .content_length = 0, .instance = instance };
+    }
+
     fn parseFields(bytes: []const u8, route: Route) !Header {
+        if (route == .line) return parseLineFields(bytes);
         var lines = std.mem.splitSequence(u8, bytes, "\r\n");
         _ = lines.next() orelse return error.InvalidRequestLine;
         var content_length: ?u64 = null;
@@ -2387,6 +2480,26 @@ const HeaderReader = struct {
         };
     }
 };
+
+test "a line upgrade takes its one route and refuses malformed upgrade headers" {
+    try std.testing.expectEqual(Route.line, try HeaderReader.parseRoute("GET /v1/line HTTP/1.1"));
+    try std.testing.expectError(error.InvalidMethod, HeaderReader.parseRoute("GET /v1/host-info HTTP/1.1"));
+    const wire = "X-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n";
+    const request = "GET /v1/line HTTP/1.1\r\n";
+    const good = request ++ "Upgrade: rui-line/1\r\nConnection: keep-alive, Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: " ++ "abababababababababababababababab" ++ "\r\n\r\n";
+    const header = try HeaderReader.parseFields(good, .line);
+    try std.testing.expectEqual(Route.line, header.route);
+    try std.testing.expectEqual(@as(?protocol.InstanceId, @splat(0xab)), header.instance);
+    const refused = [_]struct { text: []const u8, err: anyerror }{
+        .{ .text = request ++ "Connection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/2\r\nConnection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: close\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\nContent-Length: 0\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n\r\n", .err = error.WrongWireVersion },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: ABC\r\n\r\n", .err = error.InvalidInstanceId },
+    };
+    for (refused) |case| try std.testing.expectError(case.err, HeaderReader.parseFields(case.text, .line));
+}
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");

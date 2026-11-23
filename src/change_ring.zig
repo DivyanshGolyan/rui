@@ -41,10 +41,40 @@ pub const Ring = struct {
     next: usize = 0,
     len: usize = 0,
     forgotten_through: u64 = 0,
+    /// The newest generation recorded or forgotten: a line opened now starts from it.
+    newest: u64 = 0,
 
     pub fn record(self: *Ring, generation: u64, touched: *const Touched) void {
+        self.newest = @max(self.newest, generation);
         if (touched.everything) return self.forget(generation);
         for (touched.entries[0..touched.count]) |entry| self.push(generation, entry);
+    }
+
+    /// Entries recorded after `after`, newest first. Callers check `covers(after)` first:
+    /// an older generation was forgotten and this walk would miss it.
+    pub const Newer = struct {
+        ring: *const Ring,
+        after: u64,
+        left: usize,
+        index: usize,
+
+        pub const Visit = struct { session: Id, generation: u64 };
+
+        pub fn next(self: *Newer) ?Visit {
+            if (self.left == 0) return null;
+            self.left -= 1;
+            self.index = (self.index + capacity - 1) % capacity;
+            const generation = self.ring.generations[self.index];
+            if (generation <= self.after) {
+                self.left = 0;
+                return null;
+            }
+            return .{ .session = self.ring.sessions[self.index], .generation = generation };
+        }
+    };
+
+    pub fn newer(self: *const Ring, after: u64) Newer {
+        return .{ .ring = self, .after = after, .left = self.len, .index = self.next };
     }
 
     fn push(self: *Ring, generation: u64, entry: Entry) void {
@@ -58,6 +88,7 @@ pub const Ring = struct {
     }
 
     pub fn forget(self: *Ring, generation: u64) void {
+        self.newest = @max(self.newest, generation);
         self.forgotten_through = @max(self.forgotten_through, generation);
     }
 
@@ -303,4 +334,26 @@ test "Session change hints walk wrapped entries and conservatively report uncove
     try std.testing.expect(ring.mayHaveChanged(&session, capacity, capacity + 2));
     try std.testing.expect(!ring.mayHaveChanged(&session, capacity, capacity + 1));
     try std.testing.expect(!ring.mayHaveChanged(&session, capacity + 2, capacity + 2));
+}
+
+test "a newer walk names every entry after a generation and the newest generation" {
+    var ring: Ring = .{};
+    const first: Id = "k7m2qx".*;
+    recordAll(&ring, 1, 1, &.{&first});
+    recordAll(&ring, 2, 1, &.{"a00000"});
+    recordAll(&ring, 3, 1, &.{ "a00000", &first });
+    try std.testing.expectEqual(@as(u64, 3), ring.newest);
+    var walk = ring.newer(1);
+    var seen: usize = 0;
+    var generations: [3]u64 = undefined;
+    while (walk.next()) |entry| : (seen += 1) {
+        try std.testing.expect(seen < generations.len);
+        generations[seen] = entry.generation;
+    }
+    try std.testing.expectEqualSlices(u64, &.{ 3, 3, 2 }, &generations);
+    var none = ring.newer(3);
+    try std.testing.expect(none.next() == null);
+    ring.forget(9);
+    try std.testing.expectEqual(@as(u64, 9), ring.newest);
+    try std.testing.expect(!ring.covers(8) and ring.covers(9));
 }

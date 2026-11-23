@@ -431,7 +431,7 @@ Handle resolution is the same as `request inspect`, without keeping the capture 
 `client.waitCommand` owns the single poll loop, starting at 250 ms and rising to 2 s like the TypeScript feed follower.
 It passes the last full reply's `since` token to `observeCommand`; `not_modified` retains that full observation and updates the token.
 Busy or transient read replies matching the shared Host-unavailable classifier are retried within the timeout; transport disappearance and other read failures retain their existing failure path.
-There is no new Host thread, resident waiter or held connection, and the client adds no thread.
+There is no new Host thread or resident waiter, and the client adds no thread. A line holds no waiter and carries no saved fact: it is the one held connection, [documented here](#live-line).
 Only this command installs SIGINT/SIGTERM handlers; the loop checks their flag between polls and sleeps interruptibly.
 It prints the same JSON as `request inspect`, including CLI `as_of`, never the opaque `since` token.
 Timeout or interruption leaves work unchanged and prints the latest full observation before returning exit 5 while still `queued` or `processing`.
@@ -540,7 +540,7 @@ These are presentation choices over existing Host facts, not new conversation or
 
 ### Connection capacity and control headroom
 
-Connections serve one exchange then close, without pipelining or idle keepalive.
+Connections serve one exchange then close, without pipelining or idle keepalive, except the line: one held, notification-only connection per client, from a fixed pool of 64 outside intake's exchange capacity.
 Intake uses lightweight transient exchange ownership that scales with simultaneous live exchanges, not dormant Sessions, retained history or already-admitted pending work.
 Stream large values through bounded windows and charged scratch.
 SQLite retains pending work; intake adds no application or durable queue.
@@ -578,6 +578,23 @@ Observe completion through subsequent one-shot reads.
 If admission is unavailable or the reply is lost, the caller cannot infer whether a control committed.
 Recover core controls with the original core idempotency key and inputs, preserving their committed selection.
 Reconnection obtains a fresh complete observation, not a continuation of a partially delivered report.
+
+### Live line
+
+`GET /v1/line` with `Upgrade: rui-line/1`, `Connection: Upgrade`, `X-Rui-Wire-Version` and an optional `X-Rui-Host-Instance` (refused with `host_instance_changed` when it names another instance) upgrades to a held line. The request has no body. The Host answers `101 Switching Protocols`, then `hello`. Refusals are ordinary JSON errors: a malformed upgrade is `InvalidUpgrade`, a full pool is `line_capacity_exhausted`, and a fenced Store or a stopping Host refuses with `store_failed` or `host_stopping`.
+
+Each frame is a 4-byte big-endian length and a JSON object of at most 16 KiB. The line is notification-only: it carries no saved fact and no mutation. The app reads its feed from its own cursor when it hears `changed` or `resync`.
+
+| Direction | Frame | Meaning |
+| --- | --- | --- |
+| App to Host | `{"type":"watch","sessions":"all"}` or `{"type":"watch","sessions":["k7m2qx"]}` | Replaces the watched set. A new watch nudges each listed Session once, and `all` owes `resync`. Sessions are at most 256. |
+| Host to app | `{"type":"hello","line":N,"instance":"<hex>"}` | The line is open. |
+| Host to app | `{"type":"changed","session":"k7m2qx"}` | A watched Session committed since the line last saw it. Repeated commits coalesce into one frame. |
+| Host to app | `{"type":"resync"}` | The change ring no longer covers the line, or too many Sessions changed under `all`. Re-read everything watched. |
+| Host to app | `{"type":"failed","code":"store_failed"}` or `"host_stopping"` | The Store fenced or the Host is draining. The Host then closes the line. |
+| Host to app | `{"type":"ping"}` | Sent after 20 seconds with nothing else owed. |
+
+A commit reaches intake through the Store's second commit subscriber: it writes one byte to the intake wake pipe, at most once until intake re-arms it, and only while a line is open. Intake then walks the change ring from each line's generation under the ring's lock and sets dirty state. It reads no Store row and starts no worker. A malformed frame, an unknown `type` or a watch set past 256 closes the line without a frame. The line's sockets count in the descriptor requirement. The frames `serve`, `progress`, `calls` and `cancel` belong to the client-tool slices and are not part of this one.
 
 ### Live-control notification
 

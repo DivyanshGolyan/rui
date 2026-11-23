@@ -117,6 +117,8 @@ test {
     _ = @import("activity_golden_tests.zig");
     _ = @import("activity_reply.zig");
     _ = @import("server.zig");
+    _ = @import("line_intake.zig");
+    _ = @import("line.zig");
     _ = @import("server_execution.zig");
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");

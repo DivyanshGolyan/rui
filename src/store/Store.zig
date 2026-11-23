@@ -460,6 +460,34 @@ pub const Store = struct {
         return &owned.commit_wake;
     }
 
+    /// The Host's intake subscribes here (see `commitSubscriber`).
+    pub fn commitSubscriber(self: *Store) *std.atomic.Value(?*const CommitSubscriber) {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        return &owned.commit_subscriber;
+    }
+
+    /// Readers outside the Store queue (intake) take the change ring's lock around
+    /// each walk. Every record takes it too, so a walk sees whole entries.
+    pub fn lockChanges(self: *Store) void {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        while (owned.changes_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlockChanges(self: *Store) void {
+        const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+        owned.changes_lock.store(false, .release);
+    }
+
+    /// Records a commit into the change ring, then wakes the execution waiter and
+    /// the commit subscriber, in that order.
+    fn recordCommit(self: *Store, generation: u64, touched: *const change_ring.Touched) void {
+        self.lockChanges();
+        self.changes.record(generation, touched);
+        self.unlockChanges();
+        if (self.commitWake().load(.acquire)) |wake| wake.set(self.io);
+        if (self.commitSubscriber().load(.acquire)) |subscriber| subscriber.notify(subscriber.context);
+    }
+
     /// Makes every commit so far durable. Commits on the execution loop leave the
     /// SQLite WAL unsynced; the Store settles before a launch handoff and before
     /// any other thread hears an answer, so nothing outside the loop observes a
@@ -1106,8 +1134,7 @@ pub const Store = struct {
         const next = try entry.finish(Ordinary.none, session_list_read.retryCrossings(&access, from, now, &crossings));
         if (crossings.touched.count != 0 or crossings.touched.everything) {
             const generation = self.commit_generation.fetchAdd(1, .release) + 1;
-            self.changes.record(generation, &crossings.touched);
-            if (self.commitWake().load(.acquire)) |wake| wake.set(self.io);
+            self.recordCommit(generation, &crossings.touched);
         }
         return .{ .generation = self.commitGeneration(), .next = next };
     }
@@ -1941,6 +1968,14 @@ comptime {
     if (@sizeOf(Store) > 712) @compileError(std.fmt.comptimePrint("Store is {d} bytes; keep large state out of line", .{@sizeOf(Store)}));
 }
 
+/// A second commit subscriber, fixed at one slot: the Host's intake, which
+/// reads the change ring off the Store queue. `notify` runs on the committing
+/// thread after the ring has recorded the commit, so it must not block.
+pub const CommitSubscriber = struct {
+    context: *anyopaque,
+    notify: *const fn (context: *anyopaque) void,
+};
+
 const OutOfLine = struct {
     model_timings: @import("../model_timing.zig").Source,
     ring: change_ring.Ring,
@@ -1949,6 +1984,8 @@ const OutOfLine = struct {
     tools: HostTools,
     control_generation: std.atomic.Value(u64),
     commit_wake: std.atomic.Value(?*std.Io.Event),
+    commit_subscriber: std.atomic.Value(?*const CommitSubscriber),
+    changes_lock: std.atomic.Value(bool),
     /// The SQLite data version the WAL was last synced at (Store.settle).
     synced_version: u32,
     /// The Access passes this Store ran, on every engine, in test builds (RoundMeter's pass budgets).
@@ -1984,6 +2021,8 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     owned.model_timings = .{};
     owned.control_generation = .init(0);
     owned.commit_wake = .init(null);
+    owned.commit_subscriber = .init(null);
+    owned.changes_lock = .init(false);
     owned.synced_version = 0;
     if (@import("builtin").is_test) owned.testing_access_passes = 0;
     const ring: *change_ring.Ring = &owned.ring;
@@ -2112,8 +2151,7 @@ pub const Entry = struct {
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
             store.identities().survey.kept = if (store.identities().survey.kept == .fresh) .ready else .none;
-            store.changes.record(generation, &store.touched);
-            if (store.commitWake().load(.acquire)) |wake| wake.set(store.io);
+            store.recordCommit(generation, &store.touched);
         }
         self.trace.mark(.complete);
         if (@import("builtin").is_test) if (self.borrowed) store.queue().giveBack();
