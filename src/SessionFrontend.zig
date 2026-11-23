@@ -2265,7 +2265,7 @@ fn update(self: *Self) !Updated {
         .quiescing => self.quiesceUpgrade() catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            try writer.print("! Upgrade could not settle Client work: {s}. Select Version in app settings to retry.", .{@errorName(err)});
+            try writer.print("! Update stopped: {s}. Select Version in Settings to retry.", .{@errorName(err)});
             self.notice = writer.buffered();
             self.dirty = true;
             _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
@@ -2279,7 +2279,7 @@ fn update(self: *Self) !Updated {
                 self.settleReader() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Couldn't reopen this chat after the update: {s}. Select Version in Settings to retry, or open rui in a new terminal.", .{@errorName(err)});
                     self.notice = writer.buffered();
                     _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };

@@ -2660,7 +2660,7 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
-pub const upgrade_recovery = "! Host requests paused after Upgrade. Upgrade or reopen with the selected Rui.";
+pub const upgrade_recovery = session_upgrade.recovery;
 
 fn admitHostRequest(state: *State) bool {
     if (!state.holdsHost()) return true;

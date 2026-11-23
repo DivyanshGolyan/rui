@@ -3175,7 +3175,7 @@ class UpgradeFramesTest(unittest.TestCase):
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
             chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › What shall we work on?\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
-            screens = [marker + "\nReading this Session…\n" + chat,
+            screens = [marker + "\nReading this chat…\n" + chat,
                        marker + "\nHost paused\n" + chat,
                        marker + "\nSettings\n gpt-6.1-sol · low",
                        marker + "\n" + chat.replace("What shall we work on?", "wrong chat draft"),
@@ -3194,7 +3194,7 @@ class UpgradeFramesTest(unittest.TestCase):
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") == "failure"):
             self.assertNotIn("expect_last", state)
             self.assertIn("Host paused", state["absent"])
-            self.assertIn("Reading this Session", state["absent"])
+            self.assertIn("Reading this chat", state["absent"])
             self.assertIn("enter open", state["absent"])
             self.assertIn("enter open", state["comparison"]["before"]["absent"])
             self.assertIn(reason, state["expect"])
@@ -3204,7 +3204,7 @@ class UpgradeFramesTest(unittest.TestCase):
                 layout = "chat" if size[0] == 140 else "overview"
                 suffix = "│ actual chat" if size[0] == 140 else ""
                 rows = sidebar_rows(reason, layout) + "\n"
-                screens = [rows + "Reading this Session…", rows + "Host paused", rows]
+                screens = [rows + "Reading this chat…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
                     for index, plain in enumerate(screens):
@@ -3239,7 +3239,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         self.assertTrue(ready(chat.replace("retained draft", "What shall we work on?"), empty=True))
                         self.assertTrue(ready(chat, "Upgrade witness"))
                         self.assertFalse(ready(chat, "Different witness"))
-                        for stale in ("Opening…", "Reading this Session…", "Host paused", "Notifications"):
+                        for stale in ("Opening…", "Reading this chat…", "Host paused", "Notifications"):
                             self.assertFalse(ready(chat + "\n" + stale))
                         self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " low"])))
                         self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " Update failed"])))
@@ -3330,7 +3330,7 @@ class UpgradeFramesTest(unittest.TestCase):
         for before in (False, True):
             version = "0.78.10000"
             notice = f"\nUpgraded to {version}" if before else ""
-            screens = [chat("Another chat") + notice, chat(stale="\nReading this Session…") + notice,
+            screens = [chat("Another chat") + notice, chat(stale="\nReading this chat…") + notice,
                        chat() + ("" if before else "\nNotifications"), chat() + notice]
             observed = []
             with tempfile.TemporaryDirectory() as directory:

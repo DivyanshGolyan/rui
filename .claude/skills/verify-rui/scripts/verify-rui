@@ -3530,7 +3530,7 @@ def frame_upgrade_viewport(run, terminal, state):
 
 
 def frame_chat_ready(plain, witness=None, empty=False):
-    if any(marker in plain for marker in ("Opening…", "Reading this Session", "Host paused", "Notifications")):
+    if any(marker in plain for marker in ("Opening…", "Reading this chat", "Reading this Session", "Host paused", "Notifications")):
         return False
     lines = plain.splitlines()
 
