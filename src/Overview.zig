@@ -2856,7 +2856,9 @@ test "SUI-110 quiet overview schedules tree hold release without a worker" {
     try std.testing.expect(overview.worker.thread == null);
     const revision = overview.state.presentation_revision;
     _ = try overview.event(.{ .tick = start + 3000 });
-    try std.testing.expect(overview.state.presentation_revision != revision);
+    // The release ends the hold without a repaint: nothing on screen says the order was held.
+    try std.testing.expectEqual(revision, overview.state.presentation_revision);
+    try std.testing.expect((overview.state.wakeAt() orelse std.math.maxInt(u64)) > start + 3000);
 }
 
 test "the overview asks for frames only while a spinning mark is on screen" {
