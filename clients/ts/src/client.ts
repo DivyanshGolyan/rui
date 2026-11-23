@@ -4,13 +4,14 @@ import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { prepareSettings, type HostSettings, type PreparedSettings } from "./settings.ts";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { TRANSPORT_ENVIRONMENT } from "./host-environment.ts";
-import { RuiStartError, RuiUnavailableError } from "./errors.ts";
+import { RuiRequestError, RuiStartError, RuiStoreFailedError, RuiUnavailableError } from "./errors.ts";
 import { models, reloadTools, Session, Sessions, setPaused, type AgentSpec, type ModelSummary, type ToolReloadOutcome } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
@@ -45,6 +46,8 @@ const CLOSE_GRACE_MS = 15_000;
 const READY_POLL_MS = 25;
 const READINESS_RECEIPT_BYTES = Buffer.byteLength("ready instance=") + 32 + 1;
 const EXIT_NOTICE_MS = 2_000;
+const OUTPUT_GRACE_MS = 1_000;
+const MAX_LINE_CHARS = 64 * 1024;
 const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked", "mysql_unreachable"]);
 
 interface Exit {
@@ -57,6 +60,10 @@ interface Host {
 	instance: string;
 	info: HostInfo;
 	exited: Promise<Exit>;
+	/** Settles once the child's stdout has closed, so every line it wrote has been read. */
+	output: Promise<void>;
+	/** Settles with the `store_fenced` refusal the child writes on stdout before it exits. */
+	fenced: Promise<RuiStartError>;
 }
 
 interface Waiter {
@@ -95,6 +102,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
+	#storeFailed: RuiStoreFailedError | undefined;
 	readonly activity = new SessionNotifications();
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
@@ -201,8 +209,11 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					...(limits ? { limits } : {}),
 				});
 			} catch (error) {
+				if (error instanceof RuiRequestError && isStoreFence(error)) throw this.#latchStoreFailed(error);
 				if (!(error instanceof ConnectionError)) throw error;
 				const gone = await Promise.race([host.exited.then(() => true), sleep(EXIT_NOTICE_MS, false)]);
+				if (gone) await drained(host);
+				if (this.#storeFailed) throw this.#storeFailed;
 				if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
 				retried = true;
 			}
@@ -223,6 +234,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#ready(): Promise<Host> {
+		if (this.#storeFailed) return Promise.reject(this.#storeFailed);
 		if (this.#host) return Promise.resolve(this.#host);
 		const failed = this.#dead ?? (this.#closing ? new RuiUnavailableError("the Rui client is closed") : undefined);
 		if (failed) return Promise.reject(failed);
@@ -235,12 +247,26 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		this.#child = host.child;
 		this.#backoff = FIRST_RESTART_MS;
 		for (const waiter of this.#waiters.splice(0)) waiter.resolve(host);
-		void host.exited.then((exit) => {
+		void host.fenced.then((cause) => this.#latchStoreFailed(cause));
+		void host.exited.then(async (exit) => {
+			await drained(host);
 			if (this.#closing || this.#host !== host) return;
 			this.#host = undefined;
-			this.emit("exit", { ...exit, restarting: true });
+			this.emit("exit", { ...exit, restarting: this.#storeFailed === undefined });
 			this.#scheduleRestart();
 		});
+	}
+
+	/**
+	 * The one owner of the Store-failed latch. Every fence signal reaches it: a reply that `isStoreFence`, and the
+	 * `store_fenced` line. The first latch wins, rejects the pending calls with the same error and stops restarts.
+	 */
+	#latchStoreFailed(cause: unknown): RuiStoreFailedError {
+		if (this.#storeFailed) return this.#storeFailed;
+		this.#storeFailed = new RuiStoreFailedError({ cause });
+		clearTimeout(this.#restart);
+		this.#fail(this.#storeFailed);
+		return this.#storeFailed;
 	}
 
 	#fail(error: Error): void {
@@ -249,7 +275,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#scheduleRestart(): void {
-		if (this.#closing) return;
+		if (this.#closing || this.#storeFailed) return;
 		const delay = this.#backoff;
 		this.#backoff = Math.min(this.#backoff * 2, MAX_RESTART_MS);
 		this.#restart = setTimeout(() => void this.#restartNow(), delay);
@@ -257,12 +283,18 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	async #restartNow(): Promise<void> {
+		if (this.#storeFailed) return;
 		try {
 			const host = await start(this.#launch, (child) => {
 				this.#child = child;
 			});
 			if (this.#closing) {
 				host.child.stdin?.end();
+				return;
+			}
+			if (this.#storeFailed) {
+				host.child.stdin?.end();
+				if (this.#launch.detached) host.child.kill("SIGTERM");
 				return;
 			}
 			this.#adopt(host);
@@ -333,8 +365,24 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 		} else chunk.fill(0);
 	};
 	child.stdout?.on("data", capture);
+	const decoder = new StringDecoder("utf8");
+	let pending = "";
+	const fenceIn = (line: string) => {
+		const refusal = line.includes("store_fenced") ? startError(line) : undefined;
+		if (refusal?.code === "store_fenced") fence(refusal);
+	};
+	const watch = (chunk: Buffer) => {
+		const lines = (pending + decoder.write(chunk)).split("\n");
+		chunk.fill(0);
+		pending = lines.pop() ?? "";
+		if (pending.length > MAX_LINE_CHARS) pending = "";
+		for (const line of lines) fenceIn(line);
+	};
 	const outputEnded = new Promise<void>((done) => child.stdout?.once("close", done));
 	const launchError = new Promise<Error>((done) => child.once("error", done));
+	let fence!: (cause: RuiStartError) => void;
+	const fenced = new Promise<RuiStartError>((done) => (fence = done));
+	let ready = false;
 	const exited = exitOf(child);
 	child.unref();
 	(child.stdout as Socket | null)?.unref();
@@ -358,7 +406,13 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 				child.kill("SIGKILL");
 				throw new AttemptFailed(error as Error, await exited);
 			});
-			if (info) return { child, instance: info.instance, info, exited };
+			if (info) {
+				child.stdout?.off("data", capture);
+				child.stdout?.on("data", watch);
+				void outputEnded.then(() => fenceIn(pending));
+				ready = true;
+				return { child, instance: info.instance, info, exited, output: outputEnded, fenced };
+			}
 			await sleep(READY_POLL_MS);
 		}
 		if (ended instanceof Error) {
@@ -377,12 +431,25 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 			ended,
 		);
 	} finally {
-		child.stdout?.off("data", capture);
-		child.stdout?.on("data", (chunk: Buffer) => chunk.fill(0));
+		if (!ready) {
+			child.stdout?.off("data", capture);
+			child.stdout?.on("data", (chunk: Buffer) => chunk.fill(0));
+		}
 		receipt.fill(0);
 		for (const chunk of stdout) chunk.fill(0);
 		stdout.length = 0;
 	}
+}
+
+/** The Host's two replies for a fenced Store: `canonical_store_failure` (500) and `dispatch_fenced` (503). */
+function isStoreFence(error: RuiRequestError): boolean {
+	return (error.type === "invocation_error" && error.code === "canonical_store_failure")
+		|| (error.type === "host_unavailable" && error.code === "dispatch_fenced");
+}
+
+/** Lets a stopped child's stdout deliver its final lines, bounded so a grandchild holding the pipe cannot stall us. */
+async function drained(host: Host): Promise<void> {
+	await Promise.race([host.output, sleep(OUTPUT_GRACE_MS)]);
 }
 
 async function createInterfaceAlias(launch: Launch): Promise<void> {

@@ -1,5 +1,5 @@
 export { Rui, type HostSettings, type ClientOptions, type ExitEvent } from "./client.ts";
-export { ContentIsPartsError, RuiRequestError, RuiStartError, RuiUnavailableError, RuiWaitTimeoutError, type MissingSetting } from "./errors.ts";
+export { ContentIsPartsError, RuiRequestError, RuiStartError, RuiStoreFailedError, RuiUnavailableError, RuiWaitTimeoutError, type MissingSetting } from "./errors.ts";
 export {
 	Session,
 	Sessions,

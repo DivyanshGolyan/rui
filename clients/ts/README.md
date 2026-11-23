@@ -102,7 +102,7 @@ Shell commands the agent runs execute as your user; Rui is not a sandbox.
 With the default `interface.lifetime: "stdin"`, the Host stops when your process ends.
 An explicit `"detached"` lifetime does not stop on stdin closure; `rui.close()` still explicitly disposes its child and removes only the client-owned temporary directory, not a caller-supplied interface directory.
 If it exits on its own, the client restarts it, waiting 0.5 s and doubling up to 30 s, and sends calls in flight again once the new Host is ready.
-Automatic restarts retry `store_locked` and `mysql_unreachable`; calls waiting on a failed attempt receive `RuiUnavailableError`.
+Automatic restarts retry `store_locked` and `mysql_unreachable`; calls waiting on a failed attempt receive `RuiUnavailableError`. A fenced Store is different: see `RuiStoreFailedError` below.
 Initial connect still rejects `mysql_unreachable` immediately.
 
 Errors:
@@ -110,6 +110,7 @@ Errors:
 - `RuiStartError { code, message }`: Rui refused to open, for example `store_locked` once `lockWaitMs` (default 120 s) has passed.
 - `RuiRequestError { code, missing }`: Rui rejected one request. Its `message` is the Host's detail when it sent one, else the plain sentence the `rui` CLI prints for that `code`.
 - `RuiUnavailableError`: the child is gone.
+- `RuiStoreFailedError`: the Store failed under this client, from a `canonical_store_failure` or `dispatch_fenced` reply or the Host's `store_fenced` line. The client latches it once: every pending and later call rejects with this same error and no restart follows. Close the client and connect again.
 
 For `sessions.create` and `session.update`, `mcp_server_unavailable` means a requested tool is unknown and at least one configured MCP server has no tools, including no saved copies.
 The error's `message` names the unavailable server(s) that may provide the name; it does not assert ownership.

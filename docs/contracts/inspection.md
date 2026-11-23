@@ -478,6 +478,7 @@ Existing read/inspection raw output remains outside this mutation unit.
 Interactive catches propagate canonical failure rather than resume with an apparent successful detachment.
 Ordinary observation/transport failures keep their existing handling; this adds no retry or terminal owner.
 Fatal diagnosis never replaces the original captured identity or demotes an earlier confirmed admission to unconfirmed.
+The TypeScript client latches the fenced Store once as `store_failed` (`RuiStoreFailedError`) on any of three signals: a `canonical_store_failure` reply, a `dispatch_fenced` reply, or the Host's `store_fenced` line before it exits. Every pending and later call on that client then rejects with that one error; a Host restart does not clear it, and other 500 or 503 replies do not latch it.
 
 `request inspect` presents the saved command's original rejection, queued/processing state, exclusion, failure, cancellation or completion as data.
 `request read-result` explicitly streams its original public answer, or captured skill-refusal/reload outcome, when available.
