@@ -110,7 +110,7 @@ pub const Command = enum {
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_list_parts => .{ .resource = .action, .name = "list-parts", .description = "List the certified parts of an Action Resolution's parts value as JSON.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_part => .{ .resource = .action, .name = "read-part", .description = "Stream the exact bytes of one Text or Image part of an Action Resolution.", .options = destination ++ session ++ action ++ &[_]Option{part}, .requires = need_action ++ &[_][]const []const u8{&.{"part"}} },
-            .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
+            .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options },
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
             .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
@@ -877,41 +877,6 @@ test "Host settings modes and generic overrides share the start grammar" {
     try expectValidation(.host_settings, &.{"--paths"}, false);
     try expectValidation(.host_settings, &.{ "--check", "--set", "example.path=value" }, false);
     _ = try expectRefusal(.host_settings, &.{ "--paths", "--check" }, .host_settings_modes_conflict, "paths");
-}
-
-test "every retired Host flag rejects and renders its generated replacement" {
-    inline for (.{ Command.host_start, Command.host_serve }) |command| {
-        const definition = command.definition();
-        for (serve_grammar.retired_options) |old| {
-            try std.testing.expect(definition.optionNamed(old.name) == null);
-            var spelling: [128]u8 = undefined;
-            const token = try std.fmt.bufPrint(&spelling, "--{s}", .{old.name});
-            for ([_]?[]const u8{ null, "1000", "bad\nvalue" }) |value_text| {
-                var storage: [1024]u8 = undefined;
-                var fixed = std.heap.FixedBufferAllocator.init(&storage);
-                var refusal: Refusal = undefined;
-                const args: []const []const u8 = if (value_text) |text| &.{ token, text } else &.{token};
-                try std.testing.expectError(error.UnknownArgument, definition.parse(args, fixed.allocator(), &refusal));
-                try std.testing.expectEqual(.host_option_retired, refusal.code);
-                try std.testing.expectEqualStrings(old.replacement, refusal.accepted.?.grammar);
-                var bytes: [4096]u8 = undefined;
-                var writer = std.Io.Writer.fixed(&bytes);
-                try caller_error.writeLine(&writer, refusal.code, refusal.held("host", definition.name));
-                const text = writer.buffered();
-                try std.testing.expect(std.mem.indexOf(u8, text, "Accepted: --set ") != null);
-                try std.testing.expect(std.mem.indexOf(u8, text, "[host_option_retired]") != null);
-                try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\n"));
-                if (value_text) |value_bytes| {
-                    if (std.mem.indexOf(u8, value_bytes, "\n") == null) {
-                        var substituted: [256]u8 = undefined;
-                        const at = std.mem.indexOf(u8, old.replacement, "VALUE").?;
-                        const expected = try std.fmt.bufPrint(&substituted, "{s}1000{s}", .{ old.replacement[0..at], old.replacement[at + "VALUE".len ..] });
-                        try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
-                    }
-                } else try std.testing.expect(std.mem.indexOf(u8, text, old.replacement) != null);
-            }
-        }
-    }
 }
 
 test "parent relation reaches only creating command grammars without hiding canonical refusals" {

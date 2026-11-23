@@ -574,15 +574,6 @@ fn readDocumentAt(init: std.process.Init, source: []const u8, settings: *hs.Sett
     return json.object.contains("providers");
 }
 
-pub fn documentNamesProviders(init: std.process.Init, source: []const u8) !bool {
-    const settings = try init.gpa.create(hs.Settings);
-    defer init.gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    return readDocumentAt(init, source, settings, &failure);
-}
-
 fn readPipe(init: std.process.Init, file: std.Io.File, settings: *hs.Settings, failure: *start_report.Failure) !void {
     _ = try readPipeAt(init, file, settings, failure);
 }
@@ -1387,56 +1378,6 @@ test "Host start saved openai edit carries a usable key into the saved automatic
     try std.testing.expect(providers_object.object.contains("codex") and providers_object.object.contains("openai"));
 }
 
-test "Host start reads a previous release's retired flags as the settings those flags filled" {
-    const serve_grammar = @import("serve_grammar.zig");
-    const gpa = std.testing.allocator;
-    var environment: std.process.Environ.Map = .init(gpa);
-    defer environment.deinit();
-    try environment.put("HOME", "/nonexistent-host-start-test-home");
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const init = initForTest(&arena, &environment);
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir = try testHostDir(&tmp, &root);
-    var failure: start_report.Failure = undefined;
-    const Case = struct { args: []const []const u8, expected: []const u8 };
-    for ([_]Case{
-        .{ .args = &.{ "--active-capacity", "7" }, .expected = "{\"providers\":{},\"execution\":{\"activeCapacity\":7}}" },
-        .{ .args = &.{ "--provider", "codex" }, .expected = "{\"providers\":{\"codex\":{}}}" },
-        .{ .args = &.{ "--provider", "codex", "--provider", "chatgpt", "--provider", "openai" }, .expected = "{\"providers\":{\"codex\":{},\"chatgpt\":{},\"openai\":{}}}" },
-        .{ .args = &.{ "--provider-endpoint", "http://127.0.0.1:9/responses" }, .expected = "{\"providers\":{\"codex\":{\"endpoint\":\"http://127.0.0.1:9/responses\",\"unauthenticated\":true}}}" },
-        .{ .args = &.{ "--provider-ca-file", "/private/ca.pem" }, .expected = "{\"providers\":{},\"network\":{\"caFile\":\"/private/ca.pem\"}}" },
-        .{ .args = &.{ "--bash-path", "/bin/bash" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}" },
-        .{ .args = &.{ "--bash-timeout-ms", "1500" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":1500}}}" },
-        .{ .args = &.{ "--store", dir, "--provider", "codex", "--provider", "openai", "--active-capacity", "4" }, .expected = "{\"providers\":{\"codex\":{},\"openai\":{}},\"execution\":{\"activeCapacity\":4}}" },
-        .{
-            .args = &.{ "--store", dir, "--active-capacity", "3", "--provider-endpoint", "http://127.0.0.1:9/responses", "--provider-ca-file", "/private/ca.pem", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1500" },
-            .expected = "{\"providers\":{\"codex\":{\"endpoint\":\"http://127.0.0.1:9/responses\",\"unauthenticated\":true}},\"execution\":{\"activeCapacity\":3},\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\",\"timeoutMs\":1500}}}",
-        },
-    }) |case| {
-        const replayed = try gpa.create(hs.Settings);
-        defer gpa.destroy(replayed);
-        replayed.* = .{};
-        defer replayed.deinit();
-        // Restart source finishing prefixes the previous release's provider set.
-        const translated = try serve_grammar.currentArguments(arena.allocator(), case.args);
-        const replayed_args = try std.mem.concat(arena.allocator(), []const u8, &.{ &.{ "--set", serve_grammar.previousProviders(false, false).? }, translated });
-        const parsed = try parseForTest(arena.allocator(), replayed_args);
-        try fillAt(init, &parsed, dir, replayed, &failure);
-        const expected = try gpa.create(hs.Settings);
-        defer gpa.destroy(expected);
-        expected.* = .{};
-        defer expected.deinit();
-        try hs.apply(expected, gpa, case.expected, .file, checkPreset, &failure);
-        try expectJsonEqual(try complete(arena.allocator(), expected, &failure), try complete(arena.allocator(), replayed, &failure));
-    }
-    const current: []const []const u8 = &.{ "--store", dir, "--set", "providers.codex={}" };
-    try std.testing.expectEqual(current.ptr, (try serve_grammar.currentArguments(arena.allocator(), current)).ptr);
-    try std.testing.expectError(error.InvalidArguments, serve_grammar.currentArguments(arena.allocator(), &.{ "--store", dir, "--provider" }));
-}
-
 test "Host start refused JSON input allocations erase secret bytes before release" {
     const Observer = struct {
         child: std.mem.Allocator,
@@ -1545,27 +1486,12 @@ extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:n
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
 pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{}, frozen: ?[]const u8 = null };
 
-/// Finish a running Host's semantic sources, not a child launch plan. Older
-/// releases had flag-fill provider policy; prefix that baseline BEFORE explicit
-/// providers, and keep observed runtime capacity authoritative LAST. The caller
-/// owns a wiping arena and has authenticated the running release identity.
-pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sources: Spawn, previous_release: bool, active_capacity: usize) !Spawn {
-    const baseline = if (previous_release) base: {
-        const names = if (sources.settings_file) |file| names: {
-            // Never consume stdin or open a cwd-dependent source during upgrade.
-            // The target's check supplies its typed detached refusal instead.
-            if (!std.fs.path.isAbsolute(file)) break :names false;
-            break :names try documentNamesProviders(init, file);
-        } else false;
-        break :base @import("serve_grammar.zig").previousProviders(sources.settings_file != null, names);
-    } else null;
-    const assignments = try allocator.alloc([]const u8, sources.assignments.len + 1 + @intFromBool(baseline != null));
-    var offset: usize = 0;
-    if (baseline) |value| {
-        assignments[0] = value;
-        offset = 1;
-    }
-    @memcpy(assignments[offset..][0..sources.assignments.len], sources.assignments);
+/// Finish a running Host's semantic sources, not a child launch plan: observed
+/// runtime capacity stays authoritative LAST. The caller owns a wiping arena
+/// and has authenticated the running release identity.
+pub fn restartSources(allocator: std.mem.Allocator, sources: Spawn, active_capacity: usize) !Spawn {
+    const assignments = try allocator.alloc([]const u8, sources.assignments.len + 1);
+    @memcpy(assignments[0..sources.assignments.len], sources.assignments);
     var buffer: [128]u8 = undefined;
     assignments[assignments.len - 1] = try allocator.dupe(u8, try capacityAssignment(active_capacity, &buffer));
     return .{ .dir = sources.dir, .settings_file = sources.settings_file, .assignments = assignments };
@@ -1628,7 +1554,6 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
 pub const ProviderIntent = settings_handoff.ProviderIntent;
 
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
-    try refuseRetiredEnvironment(init.environ_map, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
@@ -1646,21 +1571,6 @@ pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Setting
         if (selects_providers) intent = .explicit;
     }
     return intent;
-}
-
-const RetiredVariable = struct { name: []const u8, replacement: []const u8 };
-const retired_environment = [_]RetiredVariable{
-    .{ .name = "RUI_OPENAI_BASE_URL", .replacement = "providers.openai.endpoint" },
-    .{ .name = "RUI_TEST_MODELS_DEV_URL", .replacement = "models.catalogUrl" },
-};
-
-fn refuseRetiredEnvironment(environ: *const std.process.Environ.Map, failure: *start_report.Failure) error{SettingsInvalid}!void {
-    inline for (retired_environment) |retired| {
-        if (environ.get(retired.name) != null) {
-            failure.* = .init(.settings_invalid, retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)");
-            return error.SettingsInvalid;
-        }
-    }
 }
 
 pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
@@ -1842,7 +1752,6 @@ pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const 
 }
 
 pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
-    try refuseRetiredEnvironment(init.environ_map, failure);
     const intent = try decodeStart(init, bytes, selected, settings, failure);
     try finishDetached(init, settings, intent, failure);
 }
@@ -3006,7 +2915,7 @@ test "Host detached check shares source admission then resolves and seals withou
     try std.testing.expectEqual(.mysql, std.meta.activeTag(settings.store));
 }
 
-test "Host restart sources preserve previous and current release provider semantics" {
+test "Host restart sources preserve current release provider semantics" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -3022,31 +2931,20 @@ test "Host restart sources preserve previous and current release provider semant
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir = root[0..try host.realPath(init.io, &root)];
     const without = try std.fmt.allocPrint(arena.allocator(), "{s}/without.json", .{dir});
-    const with = try std.fmt.allocPrint(arena.allocator(), "{s}/with.json", .{dir});
     try host.writeFile(init.io, .{ .sub_path = "without.json", .data = "{\"execution\":{\"activeCapacity\":2}}" });
-    try host.writeFile(init.io, .{ .sub_path = "with.json", .data = "{\"providers\":{\"openai\":{}}}" });
-    for ([_][]const u8{ "without.json", "with.json" }) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
+    for ([_][]const u8{"without.json"}) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
     const Served = struct { codex: bool = false, openai: bool = false, chatgpt: bool = false };
-    // Each `served` is what the old Host served: a flag-only fill started
-    // from no providers, and a document without `providers` served every
-    // built-in entry; named providers added to either.
-    const Case = struct { argv: []const []const u8, previous: bool, served: Served };
+    // Each `served` is what the Host serves: a document without `providers`
+    // or a launch without providers serves the current automatic set.
+    const Case = struct { argv: []const []const u8, served: Served };
     for ([_]Case{
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider-endpoint", "http://127.0.0.1:9/responses" }, .previous = true, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
         // This release's Host with unset providers keeps the current default.
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .served = .{ .chatgpt = true } },
     }) |case| {
         const running = try @import("serve_grammar.zig").runningSources(arena.allocator(), case.argv);
-        const request = try restartSources(init, arena.allocator(), .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments }, case.previous, 7);
+        const request = try restartSources(arena.allocator(), .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments }, 7);
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "--store", request.dir });
@@ -3063,44 +2961,5 @@ test "Host restart sources preserve previous and current release provider semant
         try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
-    }
-}
-
-test "retired endpoint environment is refused by each admission before effects" {
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir = try testHostDir(&tmp, &root);
-    const Door = enum { serve, start, check };
-    inline for (retired_environment) |retired| {
-        for ([_]bool{ false, true }) |present| for (std.enums.values(Door)) |door| {
-            var environment: std.process.Environ.Map = .init(gpa);
-            defer environment.deinit();
-            if (present) try environment.put(retired.name, "");
-            var arena: std.heap.ArenaAllocator = .init(gpa);
-            defer arena.deinit();
-            const init = initForTest(&arena, &environment);
-            const settings = try gpa.create(hs.Settings);
-            defer gpa.destroy(settings);
-            settings.* = .{};
-            defer settings.deinit();
-            var failure: start_report.Failure = undefined;
-            const parsed = try parseForTest(arena.allocator(), &.{ "--set", "providers={}" });
-            const outcome = switch (door) {
-                .serve => intake(init, &parsed, dir, settings, &failure, .foreground),
-                .start => checkStart(init, .{ .dir = dir, .assignments = &.{"providers={}"} }, &failure),
-                .check => intake(init, &parsed, dir, settings, &failure, .detached),
-            };
-            if (present) {
-                try std.testing.expectError(error.SettingsInvalid, outcome);
-                try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-                try std.testing.expectEqualStrings(retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)", failure.message.slice());
-            } else try outcome;
-            var host = try tmp.dir.openDir(init.io, "host-dir", .{ .iterate = true });
-            defer host.close(init.io);
-            var entries = host.iterate();
-            try std.testing.expectEqual(null, try entries.next(init.io));
-        };
     }
 }

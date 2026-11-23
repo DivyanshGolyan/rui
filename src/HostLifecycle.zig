@@ -389,10 +389,6 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     var environment: std.process.Environ.Map = .init(private);
     defer environment.deinit();
     const context: process.Context = .{ .environ_map = &environment, .cwd = .{ .path = "/" } };
-    var captured = init;
-    captured.gpa = private;
-    captured.arena = &arena;
-    captured.environ_map = &environment;
     var executable: []const u8 = undefined;
     var request: host_start.Spawn = undefined;
     var checked: ?process.Result = null;
@@ -437,7 +433,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                 defer build.deinit(private);
                 facts.known_bad = knownBadTarget(build);
             },
-            .reconstruct_sources => facts.sources = if (host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt, plan.observed.facts.active_capacity)) |value| sources: {
+            .reconstruct_sources => facts.sources = if (host_start.restartSources(arena.allocator(), plan.sources.request, plan.observed.facts.active_capacity)) |value| sources: {
                 request = value;
                 break :sources true;
             } else |err| if (err == error.OutOfMemory) return err else false,
@@ -616,7 +612,7 @@ test "upgrade running sources wipe on success and every allocation failure" {
         fn exercise(gpa: std.mem.Allocator) !void {
             var probe: @This() = .{ .backing = gpa };
             defer std.debug.assert(!probe.stale);
-            const source = try Sources.init(probe.allocator(), &.{ "rui", "host", "serve", "--store", "/host", "--provider-endpoint", "https://private-restart-key.test/responses" });
+            const source = try Sources.init(probe.allocator(), &.{ "rui", "host", "serve", "--store", "/host", "--set", "providers.codex.endpoint=https://private-restart-key.test/responses" });
             defer source.deinit(probe.allocator());
             try std.testing.expect(source.request.assignments.len > 0);
         }

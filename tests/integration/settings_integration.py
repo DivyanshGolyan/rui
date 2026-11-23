@@ -185,7 +185,7 @@ def flag_start_failures(root):
         (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
          {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
-    retired = [
+    removed = [
         ["--active-capacity", "2"],
         ["--provider", "codex"],
         ["--provider", "bogus"],
@@ -195,8 +195,8 @@ def flag_start_failures(root):
         ["--bash-path", "/bin/bash"],
         ["--bash-timeout-ms", "0"],
     ]
-    for flags in retired:
-        unchanged.append((flags, {}, 2, "host_option_retired", ""))
+    for flags in removed:
+        unchanged.append((flags, {}, 2, "option_unknown", ""))
     leaf = [
         (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),

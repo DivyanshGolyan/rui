@@ -61,7 +61,6 @@ The selected build must report a verified release version; an unversioned source
 
 The Upgrade restart may interrupt work in all Sessions across every affected Store, not only the client's selected Store.
 A running Host keeps its configured capacity through the restart.
-A Host that an earlier release started with its retired flags (`--provider`, `--active-capacity` and the others) restarts with the `--set` assignments that replace them, serving the same providers.
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
@@ -169,7 +168,7 @@ Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 
 Credential-location defaults for client and Host share `src/credential_location.zig`: `RUI_OPENAI_KEY_FILE`, `RUI_CODEX_CREDENTIAL_FILE` and `RUI_CHATGPT_CREDENTIAL_FILE` select absolute paths; a provider credential leaf overrides its default. Without a variable, the default is under `~/.config/rui/`.
 
-Retired environment inputs are refused by name: replace `RUI_OPENAI_BASE_URL` with `providers.openai.endpoint`, and `RUI_TEST_MODELS_DEV_URL` with `models.catalogUrl`. Hidden Host `--test-*-fixture-endpoint` flags are gone; fixture identity derives from the loopback endpoint and transport trust. The `providers.chatgpt.tokenEndpoint` leaf supplies the loopback token URL required for an authenticated ChatGPT fixture.
+Fixture identity derives from the loopback endpoint and transport trust. The `providers.chatgpt.tokenEndpoint` leaf supplies the loopback token URL required for an authenticated ChatGPT fixture.
 
 On stderr, typed start, save and check refusal sentences respectively begin `rui: the Host did not start`, `rui: the setting was not saved`, and `rui: these settings would not start a Host`. For their `rui_start_error` stdout receipt and detached refusal presentation, see [CLI-26 and CLI-18](invariants/cli-inspection.md).
 `settings --check` checks a detached start without opening or locking a Store: it reads and applies every source, refuses stdin lifetime and unrooted paths, checks saved placement, resolves credentials, anchors and seals. Pass absolute `--settings FILE`, `@FILE` and path/secret sources; unlike a newly typed `host start`, this check does not rebase argv. It does not prove database availability or lock acquisition.

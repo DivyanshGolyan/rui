@@ -7,7 +7,6 @@ const utf8_validation = @import("utf8_validation.zig");
 
 pub const Code = enum {
     option_unknown,
-    host_option_retired,
     host_settings_modes_conflict,
     option_repeated,
     option_repeat_limit,
@@ -431,7 +430,6 @@ pub fn facts(code: Code) Facts {
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
         .session_id_needs_to => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--to ID, with Message text on stdin" }, .says = "A positional Session ID is not a destination selector.", .next = "Move the Session ID to --to ID and pipe or redirect the Message into stdin." },
         .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
-        .host_option_retired => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That Host flag was removed; use the replacement shown below.", .next = "Use --set with the replacement path and value instead." },
         .host_settings_modes_conflict => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--paths or --check, not both" }, .says = "Listing paths and checking settings are different operations.", .next = "Keep one mode." },
         .option_unknown => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That option is not supported by this command.", .next = "Use an option listed by this command's help." },
         .option_repeated => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "one occurrence of this option" }, .says = "That option was given more than once.", .next = "Keep one occurrence." },
@@ -625,12 +623,7 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
         .none => {},
         .grammar => |grammar| {
             try out.writeAll(" Accepted: ");
-            if (code == .host_option_retired and held.value != null and std.mem.indexOf(u8, grammar, "VALUE") != null) {
-                const at = std.mem.indexOf(u8, grammar, "VALUE").?;
-                try out.writeAll(grammar[0..at]);
-                try writeHeld(out, held.value.?);
-                try out.writeAll(grammar[at + "VALUE".len ..]);
-            } else try out.writeAll(grammar);
+            try out.writeAll(grammar);
             try out.writeByte('.');
         },
         .closed => |set| {
