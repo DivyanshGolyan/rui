@@ -619,11 +619,11 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_r
         try anchorPlacement(init, settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], failure);
     hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
     try resolveProviders(init, settings, failure);
-    if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
+    if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", settings.store.mysql.url.source, err);
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.values[0..settings.tools.mcp.len]) |*name, *server| {
         resolve(init, &server.bearer_token) catch |err| {
             var path_buffer: [128]u8 = undefined;
-            return resolutionFailure(failure, try std.fmt.bufPrint(&path_buffer, "tools.mcp.{s}.bearerToken", .{name.slice()}), err);
+            return resolutionFailure(failure, try std.fmt.bufPrint(&path_buffer, "tools.mcp.{s}.bearerToken", .{name.slice()}), server.bearer_token.source, err);
         };
     }
     return hs.seal(settings, failure);
@@ -640,7 +640,7 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure:
                             if (err == error.ApiKeyMissing) stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
                             return err;
                         };
-                    } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
+                    } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", entry.key.source, err);
                 },
                 .sign_in => if (!entry.unauthenticated.value) {
                     if (entry.credential_file == null) {
@@ -655,12 +655,55 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure:
     }
 }
 
-fn resolutionFailure(failure: *start_report.Failure, path: []const u8, err: anyerror) anyerror {
+fn resolutionFailure(failure: *start_report.Failure, path: []const u8, source: anytype, err: anyerror) anyerror {
     if (err == error.OutOfMemory) return err;
     failure.code = .settings_invalid;
-    const message = std.fmt.bufPrint(&failure.message.bytes, "{s}: credential source is missing, unreadable, insecure or invalid", .{path}) catch unreachable;
-    failure.message.len = message.len;
+    failure.message.len = sourceRefusal(&failure.message.bytes, path, source, err).len;
     return error.SettingsInvalid;
+}
+
+/// Why a named secret source gave no usable value, naming the variable or file a caller must fix.
+/// `resolve` reports an unset variable or an absent file as ApiKeyMissing and a malformed key as
+/// InvalidApiKey; every other error is the private file reader's, named as it is.
+fn sourceRefusal(buffer: *[start_report.max_refusal_message_bytes]u8, path: []const u8, source: anytype, err: anyerror) []const u8 {
+    const named = switch (source) {
+        .env => |*name| switch (err) {
+            error.ApiKeyMissing => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is not set", .{ path, name.slice() }),
+            error.InvalidApiKey => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is empty or not a valid key (printable ASCII, no spaces)", .{ path, name.slice() }),
+            else => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is unusable ({s})", .{ path, name.slice(), @errorName(err) }),
+        },
+        .file => |*file| switch (err) {
+            error.ApiKeyMissing => std.fmt.bufPrint(buffer, "{s}: file {s} does not exist", .{ path, file.slice() }),
+            error.InvalidApiKey => std.fmt.bufPrint(buffer, "{s}: file {s} is empty or not a valid key (printable ASCII, no spaces)", .{ path, file.slice() }),
+            else => std.fmt.bufPrint(buffer, "{s}: file {s} is unreadable or not private ({s})", .{ path, file.slice(), @errorName(err) }),
+        },
+        .default, .literal => std.fmt.bufPrint(buffer, "{s}: credential source is unusable ({s})", .{ path, @errorName(err) }),
+    } catch null;
+    // A long file path or name may not fit the refusal bound; the setting path and cause always do.
+    return named orelse std.fmt.bufPrint(buffer, "{s}: credential source is unusable ({s})", .{ path, @errorName(err) }) catch unreachable;
+}
+
+test "a secret source refusal names the variable or file and why it gave no usable value" {
+    const Source = hs.Secret(.provider_saved).Source;
+    var env: Source = .{ .env = .{} };
+    try env.env.set("OPENAI_API_KEY");
+    var file: Source = .{ .file = .{} };
+    try file.file.text.set("/home/me/.config/rui/openai.key");
+    var long: Source = .{ .file = .{} };
+    try long.file.text.set("/" ++ &@as([300]u8, @splat('d')));
+    const cases = [_]struct { source: Source, err: anyerror, text: []const u8 }{
+        .{ .source = env, .err = error.ApiKeyMissing, .text = "providers.openai.key: environment variable OPENAI_API_KEY is not set" },
+        .{ .source = env, .err = error.InvalidApiKey, .text = "providers.openai.key: environment variable OPENAI_API_KEY is empty or not a valid key (printable ASCII, no spaces)" },
+        .{ .source = file, .err = error.ApiKeyMissing, .text = "providers.openai.key: file /home/me/.config/rui/openai.key does not exist" },
+        .{ .source = file, .err = error.InvalidApiKey, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is empty or not a valid key (printable ASCII, no spaces)" },
+        .{ .source = file, .err = error.InsecureCredentialFile, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is unreadable or not private (InsecureCredentialFile)" },
+        .{ .source = long, .err = error.ApiKeyMissing, .text = "providers.openai.key: credential source is unusable (ApiKeyMissing)" },
+        .{ .source = .default, .err = error.HomeUnavailable, .text = "providers.openai.key: credential source is unusable (HomeUnavailable)" },
+    };
+    for (cases) |case| {
+        var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(case.text, sourceRefusal(&buffer, "providers.openai.key", case.source, case.err));
+    }
 }
 
 fn resolve(init: std.process.Init, secret: anytype) !void {

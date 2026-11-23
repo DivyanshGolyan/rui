@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import { Rui, RuiStartError, RuiUnavailableError, type HostSettings, type ClientOptions, type ExitEvent } from "../src/index.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
+import { INHERITED_ENVIRONMENT } from "../src/client.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
@@ -62,7 +63,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	if (process.platform === "linux") {
 		const pid = rui.pid;
 		const environment = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
-		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), ["HOME", "PATH", "TMPDIR"].filter((name) => process.env[name] !== undefined).sort());
+		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), INHERITED_ENVIRONMENT.filter((name) => process.env[name] !== undefined).sort());
 		for (const file of ["environ", "cmdline"]) assert.ok(!readFileSync(`/proc/${pid}/${file}`, "utf8").includes(key), file);
 	}
 	const created = [...runtimeDirs()].filter((name) => !before.has(name));

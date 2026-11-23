@@ -272,9 +272,16 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 }
 
+/**
+ * The application's environment a child Host inherits: process basics, and the proxy and trust variables the Host's
+ * transport reads (src/h2/h2.zig, src/tls_client/tls_client.zig). Without them a Host behind a proxy or a private CA
+ * reaches neither its provider nor models.dev. Secrets reach it only through `{ env }` sources in the settings.
+ */
+export const INHERITED_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR"] as const;
+
 export function launchFor(settings: HostSettings, runtimeDir: string, options: ClientOptions = {}): Launch {
 	const env: NodeJS.ProcessEnv = Object.create(null);
-	for (const name of ["PATH", "HOME", "TMPDIR"]) {
+	for (const name of INHERITED_ENVIRONMENT) {
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}
