@@ -758,11 +758,15 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Undoes format 93 on MySQL: the session declaration and lane columns, added in place with their foreign keys
-/// and checks. A column that a key or check names cannot be dropped, so those go first, in one statement.
-/// SQLite's step adds the columns at the end of the table, so it replays unchanged.
+/// Undoes format 93: the session declaration and lane columns. On SQLite they drop directly, as the
+/// earlier columns do. On MySQL they were added in place with their foreign keys and checks, and a column
+/// that a key or check names cannot be dropped, so those go first, in one statement.
 fn dropFormat93SessionLanes(storage: *Store) !void {
-    if (storage.engine != .mysql) return;
+    if (storage.engine != .mysql) {
+        try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session DROP COLUMN app_lane");
+        try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session DROP COLUMN app_tool_set_id");
+        return;
+    }
     try mysql_testing.rawExec(storage, "SET @rui_lane_ddl=(SELECT CONCAT('ALTER TABLE session ',GROUP_CONCAT(ddl SEPARATOR ', ')) FROM (" ++
         "SELECT CONCAT('DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') AS ddl FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME IN ('app_tool_set_id','app_lane') AND REFERENCED_TABLE_NAME IS NOT NULL " ++
         "UNION ALL SELECT CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME " ++

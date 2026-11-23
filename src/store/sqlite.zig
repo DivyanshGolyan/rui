@@ -147,10 +147,7 @@ pub fn resetUnstepped(statement: *c.sqlite3_stmt) void {
 }
 
 pub fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
-    if (c.sqlite3_exec(database, sql, null, null, null) != c.SQLITE_OK) {
-        std.debug.print("DBGSQL {s} :: {s}\n", .{ c.sqlite3_errmsg(database), sql });
-        return error.SqliteExecFailed;
-    }
+    if (c.sqlite3_exec(database, sql, null, null, null) != c.SQLITE_OK) return error.SqliteExecFailed;
 }
 
 pub fn rollback(database: *c.sqlite3) void {

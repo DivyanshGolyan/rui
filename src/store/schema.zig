@@ -2856,7 +2856,6 @@ pub const MigrationNotice = struct {
 pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
-    std.debug.print("DBGFOUND {d}\n", .{found});
     if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
     if (notice) |told| told.notify(told.context, .{ .begin = found });
@@ -3733,8 +3732,9 @@ test "schema 80 creator migration retains all prior session facts and backfills 
         for (tables) |table| {
             if (!std.mem.eql(u8, table.name, "session")) continue;
             for (table.columns) |column| {
-                // creator_ref (80) and archive_seq (85) are added after format 79.
-                if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq")) continue;
+                // creator_ref (80), archive_seq (85), app_tool_set_id and app_lane (93) are added after format 79.
+                if (std.mem.eql(u8, column.name, "creator_ref") or std.mem.eql(u8, column.name, "archive_seq") or
+                    std.mem.eql(u8, column.name, "app_tool_set_id") or std.mem.eql(u8, column.name, "app_lane")) continue;
                 if (names.len != 0) names = names ++ ",";
                 names = names ++ column.name;
             }
