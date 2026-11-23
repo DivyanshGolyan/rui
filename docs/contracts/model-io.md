@@ -485,6 +485,7 @@ One owner on the execution loop keeps at most one list per server in flight, fol
 A list that fails or collides keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
 A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation and tool count.
 A server that is unreachable at startup keeps its saved tools until a retry lists it.
+Startup drives the same lists and publishes every first list with the other servers' saved tools in one merge; a result that collides or exceeds the Host tool limit during startup refuses the start (`tool_name_collision`, `settings_invalid`), because the configuration is wrong now, while the same refusal later keeps the running Host's previous tools.
 Operations keep their frozen offer, and the next Operation is projected from the new set (D110).
 The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
 Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.

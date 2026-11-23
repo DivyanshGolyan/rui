@@ -865,15 +865,17 @@ fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     requirement.total = try std.math.add(usize, requirement.total, sockets);
 }
 
-noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
-    var saved = try storage.readHostToolSet(arena);
+noinline fn offerMcpTools(io: std.Io, scratch: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
+    var arena: std.heap.ArenaAllocator = .init(scratch);
+    defer arena.deinit();
+    var saved = try storage.readHostToolSet(arena.allocator());
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
-    var collision: mcp_offered.Collision = .{};
-    const host_tool_set = relist_owner.listAtStartup(io, arena, if (kept) |*value| value else null, stop, &collision) catch |err| switch (err) {
+    relist_owner.startup(io, storage, if (kept) |*value| value else null, stop) catch |err| switch (err) {
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
+            const refusal = &relist_owner.refusal.?;
             var message: [start_report.max_refusal_message_bytes]u8 = undefined;
-            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice");
+            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ refusal.tool(), refusal.collision.first, refusal.collision.second }) catch "a tool name is offered twice");
             return err;
         },
         error.TooManyTools => {
@@ -882,9 +884,6 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, storage: *store_
         },
         else => |other| return other,
     };
-    const owned = try arena.create(tools.HostToolSet);
-    owned.* = host_tool_set;
-    try storage.saveHostToolSet(owned);
 }
 
 pub noinline fn serve(
@@ -997,8 +996,6 @@ pub noinline fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
-    defer tool_set_memory.deinit();
     var mcp_relist = server_mcp_relist.Relist.init(allocator, mcp_servers);
     defer mcp_relist.deinit();
     const storage = &serving.storage;
@@ -1020,7 +1017,6 @@ pub noinline fn serve(
         settings.tools.bash.timeout_ms.value,
         tuning.home,
         settings,
-        &tool_set_memory,
         if (mcp_servers.len != 0) &mcp_relist else null,
         mcp_servers,
         intake_capacity,
@@ -1048,7 +1044,6 @@ fn serveOpened(
     bash_timeout_ms: u64,
     home: ?[]const u8,
     settings: *const host_settings.Settings,
-    tool_set_memory: *std.heap.ArenaAllocator,
     mcp_relist: ?*server_mcp_relist.Relist,
     mcp_servers: []const server_mcp_settings.Server,
     intake_capacity: usize,
@@ -1061,7 +1056,7 @@ fn serveOpened(
     readiness_owned: *bool,
     failure: *?start_report.Failure,
 ) !void {
-    if (mcp_relist) |owner| try offerMcpTools(io, tool_set_memory.allocator(), storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null, failure);
+    if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null, failure);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -5207,12 +5202,10 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
         var failure: ?start_report.Failure = null;
         {
-            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer memory.deinit();
             const servers = [_]server_mcp_settings.Server{server};
             var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
             defer owner.deinit();
-            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, memory.allocator(), &storage, &owner, null, &failure));
+            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure));
         }
         try std.testing.expect(failure != null);
         var buffer: [start_report.max_line_bytes]u8 = undefined;
@@ -5237,8 +5230,6 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         var script: Script = .{ .reply = reply };
         try script.start();
         defer script.stop();
-        var tool_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer tool_memory.deinit();
         var storage: store_module.Store = undefined;
         try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
         defer storage.close() catch unreachable;
@@ -5252,7 +5243,7 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         const servers = [_]server_mcp_settings.Server{server};
         var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
         defer owner.deinit();
-        try offerMcpTools(std.testing.io, tool_memory.allocator(), &storage, &owner, null, &failure);
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
         try std.testing.expect(failure == null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
@@ -5270,6 +5261,45 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         try std.testing.expect(script.request_received.load(.acquire));
         try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
         try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "startup publishes every first list in one merge, so a tool moving between servers does not collide with its saved copy" {
+    const Script = @import("mcp/test_server.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const reply = struct {
+        fn of(comptime name: []const u8) []const u8 {
+            return Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"" ++ name ++ "\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+        }
+    }.of;
+    // First run: a lists search, b lists other. Second run: search moved to b and a lists find.
+    const rounds = [_][2][]const u8{ .{ reply("search"), reply("other") }, .{ reply("find"), reply("search") } };
+    for (rounds, [_][]const u8{ "a", "b" }) |round, search_owner| {
+        var a: Script = .{ .reply = round[0] };
+        try a.start();
+        defer a.stop();
+        var b: Script = .{ .reply = round[1] };
+        try b.start();
+        defer b.stop();
+        var storage: store_module.Store = undefined;
+        try store_module.testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var servers = [_]server_mcp_settings.Server{ .{}, .{} };
+        var urls: [2][128]u8 = undefined;
+        for (&servers, &urls, [_][]const u8{ "a", "b" }, [_]u16{ a.port, b.port }) |*server, *url, name, port| {
+            try server.name.set(name);
+            @memcpy(server.bearer_token.bytes[0..6], "secret");
+            server.bearer_token.len = 6;
+            try server.url.set(try std.fmt.bufPrint(url, "http://127.0.0.1:{d}/mcp", .{port}));
+        }
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        defer owner.deinit();
+        var failure: ?start_report.Failure = null;
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
+        try std.testing.expect(failure == null);
+        const set = storage.hostTools().host_tool_set;
+        try std.testing.expectEqualStrings(search_owner, set.records[set.find("search").?].server);
     }
 }
 
@@ -5294,10 +5324,8 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     try servers[0].url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{down.port}));
     var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
     defer owner.deinit();
-    var startup_memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer startup_memory.deinit();
     var failure: ?start_report.Failure = null;
-    try offerMcpTools(std.testing.io, startup_memory.allocator(), &storage, &owner, null, &failure);
+    try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
     try std.testing.expect(failure == null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("remote_lookup") == null);
     try std.testing.expectEqual(relist.Last.failed, owner.slots[0].last);
@@ -5313,17 +5341,9 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     const retry_at = owner.slots[0].retry_at_ms;
     var publish_failure: ?anyerror = null;
     try std.testing.expect(!owner.service(&storage, retry_at - 1, &publish_failure));
-    _ = owner.service(&storage, retry_at, &publish_failure);
-    var attempts: usize = 0;
-    while (owner.slots[0].state != .idle or owner.slots[0].last != .listed) : (attempts += 1) {
-        if (attempts == 1000) return error.RetryNeverListed;
-        if (owner.pending[0]) |pending| {
-            var poll_fd = [_]std.c.pollfd{.{ .fd = pending.fd(), .events = pending.events(), .revents = 0 }};
-            _ = std.c.poll(&poll_fd, 1, 100);
-        }
-        _ = owner.service(&storage, retry_at, &publish_failure);
-    }
     try std.testing.expectEqual(@as(?anyerror, null), publish_failure);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(std.testing.io, &storage, retry_at));
+    try std.testing.expectEqual(relist.Last.listed, owner.slots[0].last);
     try std.testing.expect(storage.hostTools().host_tool_set.find("remote_lookup") != null);
 
     // An Operation admitted afterwards is offered the retried tool.
