@@ -229,7 +229,7 @@ class VerifyRuiTest(unittest.TestCase):
                     "answer": {"status": "accepted", "replayed": False, "session": "fybw8c", "admission": "1"},
                     "input": {"type": "text", "bytes": "22"}, "queue": {"status": "queued", "admission": "1"},
                 }), stderr="request: fixture-request\n")
-            sent_to.append(args[args.index("--to") + 1])
+            sent_to.append(args[args.index("--session") + 1])
             return types.SimpleNamespace(returncode=0, stderr="request: fixture-request\n")
 
         def fixture(_args, **kwargs):

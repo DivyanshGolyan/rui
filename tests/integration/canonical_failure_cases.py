@@ -80,7 +80,7 @@ def producer_cases(state):
             key = f"{kind}-{mode}"
             host = fixture.start_host(store, None, "--fault", "before-commit")
             try:
-                address = (["--store", store, "--to", "k7m2qx"] if name == "message" else
+                address = (["--store", store, "--session", "k7m2qx"] if name == "message" else
                     ["--store", store] if name == "configure" else ["--store", store, "--session", "k7m2qx"])
                 args = [*command, *address]
                 if mode == "raw":
@@ -151,7 +151,7 @@ def binding_cases(state):
         session = fixture.configure(home, store, "binding-session", None, "gpt-6-sol")
         proxy = ReplyProxy(host, route, rewrite)
         try:
-            result = invoke(home, "session", "send", "--store", store, "--to", session, input="a\nµ")
+            result = invoke(home, "session", "send", "--store", store, "--session", session, input="a\nµ")
             assert result.returncode == 4 and "[reply_unconfirmed]" in result.stderr, result
             assert "(internal_unexpected)" in result.stderr, result
             assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
@@ -200,7 +200,7 @@ def committed_cases(state):
         session = json.loads(configured.stdout)["answer"]["session"]
         proxy = ReplyProxy(host, "/v1/message")
         try:
-            result = invoke(home, "session", "send", "--store", store, "--to", session,
+            result = invoke(home, "session", "send", "--store", store, "--session", session,
                 input="original committed bytes")
             expect_fatal(result, status=4)
         finally:
@@ -517,7 +517,7 @@ def permission_read_cases(state):
             "--permission-mode", "ask")
         assert configured.returncode == 0, configured
         session = json.loads(configured.stdout)["answer"]["session"]
-        assert invoke(home, "session", "send", "--store", store, "--to", session,
+        assert invoke(home, "session", "send", "--store", store, "--session", session,
             input="inspect exact permission").returncode == 0
         records = home / ".config/rui/requests"
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
@@ -585,7 +585,7 @@ def permission_read_cases(state):
                     '{"cmd":"printf saved-output","timeout_ms":null,"description":"Read saved fold output"}')]),
                 fixture.sse_answer("fold-answer", "fold-reason", "fold-message", "saved fold ready")[0],
             ])
-        sent = invoke(home, "session", "send", "--store", store, "--to", fold_session,
+        sent = invoke(home, "session", "send", "--store", store, "--session", fold_session,
             input="produce saved output")
         assert sent.returncode == 0, sent
         settled = invoke(home, "request", "wait", announced(sent))
@@ -700,7 +700,7 @@ def keyed_observation_cases(state, only="keyed"):
         keys = {}
         session = None
         for kind, command in zip(kinds, commands):
-            address = (["--store", store, "--to", session] if kind == "message" else ["--store", store] if kind == "configure"
+            address = (["--store", store, "--session", session] if kind == "message" else ["--store", store] if kind == "configure"
                 else ["--store", store, "--session", session])
             args = [*command, *address]
             args += [] if kind == "message" else ["--record", home / f"{kind}.json", "--key", kind]

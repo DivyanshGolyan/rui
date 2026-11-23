@@ -563,7 +563,7 @@ def fixture_main(args):
                 kind = "relay"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
                     "printf %s " + shlex.quote(user_text.partition(": ")[2] or "show environment") +
-                    f" | rui session send --to {relay.group(1)}", "Relay to a peer")])
+                    f" | rui session send --session {relay.group(1)}", "Relay to a peer")])
             elif user_text and "start a child" in user_text:
                 kind = "start-child"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
@@ -1053,7 +1053,7 @@ def cmd_new(args):
     run.meta = meta
     for index in range(args.seed):
         text = f"Seed history message {index + 1}: " + "lorem ipsum dolor sit amet " * 12
-        result = run.rui_cmd("session", "send", "--store", run.store, "--to", run.sid("demo"), input=text)
+        result = run.rui_cmd("session", "send", "--store", run.store, "--session", run.sid("demo"), input=text)
         if result.returncode != 0:
             die(f"seed send failed: {result.stderr}")
         handle = re.search(r"request: (\S+)", result.stderr)
@@ -2619,7 +2619,7 @@ def creator_birth(run, entry):
             "permissionMode": entry["mode"], "tools": (entry.get("tools") or "start_agent").split(",")}
     attached = entry.get("attached", True)
     payload = {"task": entry["messages"][0], "attached": attached, "spec": spec}
-    result = run.rui_cmd("session", "send", "--store", run.store, "--to", parent,
+    result = run.rui_cmd("session", "send", "--store", run.store, "--session", parent,
                          input="verify-rui creator birth " + json.dumps(payload))
     frame_request(run, result, "answered", parent)
     def born():
@@ -2697,10 +2697,10 @@ def seed_cast(run, entries, *, ordered=False):
                 run.meta["sessions"][entry["label"]] = sid
                 atomic_write(run.root / "run.json", json.dumps(run.meta, indent=1) + "\n")
             elif not entry.get("sender"):
-                result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=text)
+                result = run.rui_cmd("session", "send", "--store", run.store, "--session", sid, input=text)
             settle = entry.get("settle", "answered") if i == len(entry["messages"]) - 1 else "answered"
             if entry.get("sender"):
-                relay = run.rui_cmd("session", "send", "--store", run.store, "--to", run.sid(entry["sender"]),
+                relay = run.rui_cmd("session", "send", "--store", run.store, "--session", run.sid(entry["sender"]),
                                     input=f"relay to {sid}: {text}")
                 frame_request(run, relay, "answered", run.sid(entry["sender"]))
                 # Read canonical Session work, not the sender's completed relay.
@@ -3135,7 +3135,7 @@ def frame_steps(run, terminal, steps, exiting=False, processes=PROCESSES):
         elif "send" in step:
             message = step["send"]
             sid = run.sid(message["to"])
-            result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=message["text"])
+            result = run.rui_cmd("session", "send", "--store", run.store, "--session", sid, input=message["text"])
             frame_request(run, result, "answered" if message.get("wait", True) else "pending", sid)
         elif step["host"] in ("suspend", "resume"):
             if step["host"] == "resume":

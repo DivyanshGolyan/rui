@@ -177,7 +177,7 @@ def message(state, store, key, session, text):
         "session", "send",
         "--store",
         store,
-        "--to",
+        "--session",
         session,
         "--record",
         state / f"{key}.json",

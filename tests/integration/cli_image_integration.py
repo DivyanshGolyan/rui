@@ -62,7 +62,7 @@ def rejected_image(store, record, part_args, accepted):
     # CLI-19: a rejected multipart receipt identifies the request, but has no admitted owner.
     target = "zzzzzz" if accepted["context"]["session"] != "zzzzzz" else "zzzzzy"
     key = "rejected-image"
-    result = fixture.command("session", "send", "--store", store, "--to", target,
+    result = fixture.command("session", "send", "--store", store, "--session", target,
                              "--record", record, "--key", key, *part_args, input="", expect=3)
     assert result["answer"] == {
         "status": "rejected", "replayed": False, "session": target, "code": "unknown_session",
@@ -115,7 +115,7 @@ def run_case(root, provider, operation):
             configured = fixture.command("session", "configure", "--store", store,
                 "--record", state / "configure.json", "--key", "configure",
                 "--workspace", workspace, "--provider", provider, "--model", "gpt-6-sol", "--tools", "none")
-            args = ["session", "send", *common, "--to", configured["context"]["session"]]
+            args = ["session", "send", *common, "--session", configured["context"]["session"]]
         part_args = ["--text", "before", "--image", first, "--text-file", text_file,
                      "--image", second, "--text", "after"]
         args += part_args
@@ -186,7 +186,7 @@ def cli_rules(root):
         session = config["context"]["session"]
         legacy = state / "legacy.json"
         explicit = state / "explicit.json"
-        common = ["session", "send", "--store", store, "--to", session, "--key", "scalar"]
+        common = ["session", "send", "--store", store, "--session", session, "--key", "scalar"]
         first = fixture.command(*common, "--record", legacy, input="α\n\n")
         replay = fixture.command(*common, "--record", explicit, "--text", "α\n\n", input="")
         assert first["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True
@@ -198,14 +198,14 @@ def cli_rules(root):
             ("duplicate-stdin", ["--text-file", "-", "--text-file", "-"], "text"),
         ):
             record = state / (label + ".json")
-            cmd = [str(fixture.RUI), "session", "send", "--store", str(store), "--to", session,
+            cmd = [str(fixture.RUI), "session", "send", "--store", str(store), "--session", session,
                    "--record", str(record), "--key", label, *args]
             failed = subprocess.run(cmd, input=stdin, text=True, capture_output=True, timeout=15)
             assert failed.returncode != 0 and not record.exists(), (label, failed)
         image = state / "image.png"
         png = (fixture.ROOT / "src/codecs/fixtures/image-input/pixel.png").read_bytes()
         image.write_bytes(png)
-        result = fixture.command("session", "send", "--store", store, "--to", session,
+        result = fixture.command("session", "send", "--store", store, "--session", session,
             "--record", state / "implicit.json", "--key", "implicit", "--image", image, input="piped first")
         assert result["answer"]["status"] == "accepted", result
         observation, _ = wait_message(store, "implicit")
@@ -215,7 +215,7 @@ def cli_rules(root):
         assert base64.b64decode(parts[1]["image_url"].split(",", 1)[1], validate=True) == png, parts
         master, slave = terminal_process.open_pty()
         try:
-            cmd = [str(fixture.RUI), "session", "send", "--store", str(store), "--to", session,
+            cmd = [str(fixture.RUI), "session", "send", "--store", str(store), "--session", session,
                    "--record", str(state / "terminal.json"), "--key", "terminal", "--image", str(image)]
             completed = subprocess.run(cmd, stdin=slave, text=True, capture_output=True, timeout=15)
             assert completed.returncode == 0, completed

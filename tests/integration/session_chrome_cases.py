@@ -109,7 +109,7 @@ class Chrome:
 
     def answered(self, session, *inputs):
         for text in inputs:
-            message = admit(self.home, "session", "send", "--to", session, input=text)
+            message = admit(self.home, "session", "send", "--session", session, input=text)
             fixture.wait_for(lambda key=message["request"]: fixture.completed_observation(self.store, key), "saved answer")
 
     def open(self, session, ready, *, columns=80, height=ROWS):
@@ -479,7 +479,7 @@ def approval_glyph_domain():
         chrome.endpoint.responses.append(fixture.sse_tool_calls("glyph", [
             ("bash", "glyph-call", json.dumps({
                 "cmd": "printf done", "description": "Review approval glyph", "timeout_ms": None}))]))
-        request = admit(chrome.home, "session", "send", "--to", session, input="Review this")["request"]
+        request = admit(chrome.home, "session", "send", "--session", session, input="Review this")["request"]
         fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
         for locale, glyph in (("C", "?"), ("C.UTF-8", "●")):
             for width, height in ((140, 40), (46, 30)):
@@ -508,10 +508,10 @@ def opening_case():
         ]
         chrome.answered(session, long_text)
         try:
-            admit(chrome.home, "session", "send", "--to", session, input="HOLD-QUESTION")
+            admit(chrome.home, "session", "send", "--session", session, input="HOLD-QUESTION")
             fixture.wait_for(lambda: len(chrome.endpoint.requests) >= 2, "held request", timeout=20)
             for index in range(2):
-                admit(chrome.home, "session", "send", "--to", session, input=f"WAITING-{index}")
+                admit(chrome.home, "session", "send", "--session", session, input=f"WAITING-{index}")
             release.set()
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "◝ Held call · " in screen)
             tail = tail_rows(opened)

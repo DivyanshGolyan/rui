@@ -56,7 +56,7 @@ The child inherits the parent's provider, Workspace and saved Bash environment. 
 ## Send Messages and read results
 
 ```sh
-printf '%s' 'Also check the error path' | rui session send --store "$STORE" --to "$SESSION"
+printf '%s' 'Also check the error path' | rui session send --store "$STORE" --session "$SESSION"
 rui request inspect SAVED_HANDLE
 rui request read-result SAVED_HANDLE
 ```
@@ -79,7 +79,7 @@ For responses whose messages have no phase, it returns the last assistant messag
 
 ### Addressing
 
-`--to` takes the bare ID, without JSON or a prefix.
+`--session` takes the bare ID, without JSON or a prefix.
 A person or script can pass `--store`, or omit it to use the saved default Store.
 A peer Session always sends within its own Store, even when `HOME` points elsewhere, and rejects a different `--store`.
 An unknown ID fails with `no session k7m2qx in this Store` and creates no work.
@@ -147,7 +147,7 @@ Bash never gets the Host's own environment, such as credentials.
 Each model request tells the agent its own bare ID.
 Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority.
 To get an answer from another Session, an agent puts its own ID in the Message.
-The other Session replies with an ordinary `session send --to ID`.
+The other Session replies with an ordinary `session send --session ID`.
 
 An agent can label its own Session: `rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label "Fix the flaky resize test"`.
 `--label ""` clears it.
@@ -193,7 +193,7 @@ Exact Session reads remain available in every archive state.
 ## Invoke and reload skills
 
 ```sh
-printf 'Use /NAME on the failing test\n' | rui session send --store "$STORE" --to "$SESSION"
+printf 'Use /NAME on the failing test\n' | rui session send --store "$STORE" --session "$SESSION"
 rui session configure --store "$STORE" --session "$SESSION" --reload-skills
 ```
 

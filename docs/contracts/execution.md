@@ -461,7 +461,7 @@ A string supplies its exact decoded UTF-8 bytes, including NUL and trailing newl
 Invalid UTF-8 and non-string/non-null values reject without coercion.
 The Host never inserts input into `cmd`, argv or an environment value.
 The tool description says: "Put text payloads in stdin, never inside cmd."
-This composes with `rui session send --to ID`, `rui session start`, `git commit -F -` and `cat >file`.
+This composes with `rui session send --session ID`, `rui session start`, `git commit -F -` and `cat >file`.
 The schema leaves `stdin` out of `required`; Rui also accepts an explicit null.
 
 Decoded stdin is bounded to 122,880 bytes, reusing the existing command preparation ceiling rather than adding an unbounded per-execution payload.

@@ -83,7 +83,6 @@ pub const names = [_][]const u8{
     "text-file",
     "text-output",
     "timeout-seconds",
-    "to",
     "tools",
     "turn",
     "workspace",

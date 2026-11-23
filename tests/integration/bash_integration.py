@@ -166,7 +166,7 @@ def prove_stdin(state):
         host = fixture.start_host(store, url, active_capacity=2)
         recipient = configure(state, store, "stdin-recipient-config", workspace=workspace)
         for name, input_text in (("empty-send", ""), ("null-send", None)):
-            command = shlex.join([str(fixture.RUI), "session", "send", "--to", recipient,
+            command = shlex.join([str(fixture.RUI), "session", "send", "--session", recipient,
                                   "--record", str(state / f"{name}.json"), "--key", name])
             cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
         descriptors = {}
@@ -726,7 +726,7 @@ def walkthrough():
             "session", "send",
             "--store",
             store,
-            "--to",
+            "--session",
             session,
             "--record",
             message_record,

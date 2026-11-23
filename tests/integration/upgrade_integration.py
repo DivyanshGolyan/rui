@@ -1344,7 +1344,7 @@ def tool_custody_cases(root, binary, releases, operation):
                 session = origin.json("session", "configure", "--store", origin.store,
                     "--workspace", origin.root, "--provider", "codex", "--model", "gpt-6-luna",
                     "--tools", "bash", "--permission-mode", "bypass")["answer"]["session"]
-                origin.json("session", "send", "--store", origin.store, "--to", session, input="upgrade now")
+                origin.json("session", "send", "--store", origin.store, "--session", session, input="upgrade now")
 
                 if operation == "restart":
                     wait_for(lambda: (old_first.poll(), old_second.poll(), first.status(), second.status()),

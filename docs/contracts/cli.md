@@ -94,7 +94,7 @@ Failure after upload begins leaves admission unconfirmed; inspection or recovery
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
 Invalid fresh invocation exits 2 with a catalog stderr diagnostic naming the relevant flag or field, accepted inputs and repair.
-A positional Session ID on a command whose selector is a flag names `--to ID` or `--session ID` rather than mistaking the ID for Message text.
+A positional Session ID on a command whose selector is a flag names `--session ID` rather than mistaking the ID for Message text.
 
 The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
 
