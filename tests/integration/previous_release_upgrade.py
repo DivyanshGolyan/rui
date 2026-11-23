@@ -157,7 +157,9 @@ class Dialect(HostServeDialect):
                      else help_text(binary))
         assert send_help, f"No command help from {binary}"
         self.address_send = "--to ADDRESS" in send_help
-        self.short_ids = "--to ID" in send_help
+        # Short Session IDs arrived with send's --to ID; #2022 renamed that flag to --session ID.
+        self.send_flag = "--to" if "--to ID" in send_help else "--session"
+        self.short_ids = "--to ID" in send_help or "Requires: --session ID" in send_help
         self.stdin_message = bool(help_text(binary, "session", "start"))
         self.pause = ("host", "pause") if help_text(binary, "host", "pause") else ("host", "stop")
 
@@ -183,7 +185,7 @@ class Dialect(HostServeDialect):
     def message(self, state, store, key, session, text):
         text_path = state / f"{key}.txt"
         text_path.write_text(text)
-        destination = (("--store", store, "--to", session) if self.short_ids else
+        destination = (("--store", store, self.send_flag, session) if self.short_ids else
             ("--to", json.dumps({"store": str(store), "session": session})) if self.address_send else
             ("--store", store, "--session", session))
         reply = fixture.command(*(("session", "send") if self.resource_first else ("message",)),
