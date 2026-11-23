@@ -127,6 +127,9 @@ These derive accounting, not file quotas.
 Ownership transfer preserves charges.
 Protect current work/publication/delivery/I/O.
 Release files with no later consumer; optional **Spillover Output** becomes disposable after its excerpt/result is saved and execution releases it.
+Every scratch file (ingress content, provider request, response capture, response metadata, decoded event data, Session reports and Bash captures) is flushed from Rui's buffers and seals by checking that its length equals the bytes written to it; none is fsynced.
+Scratch never decides recovery and restart removes it, so a sync adds no crash durability, and on the execution loop it would stall every agent (a 200 MB Bash capture's fsync took about 250 ms, #2084); durability lives in the Store.
+A write error still fails at write time, and a later read error fails the call that reads it.
 Evict oldest eligible retained files to satisfy byte reservations or retained-file capacity, not LRU, a background expiry service or per-tool pool.
 
 Serialized provider validation keeps the immutable raw capture for failure evidence and assembles decoded SSE data into one additional private unlinked file through a 4 KiB window.

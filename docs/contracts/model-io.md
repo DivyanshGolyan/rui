@@ -360,9 +360,7 @@ Stream large strings, opaque objects and unknown open fields; do not decode comp
 Preserve exact historical order, and rebuild each item from its neutral form and bags so that it parses equal to the item the provider sent, minus only demonstrated non-replayable fields.
 Source integrity, output completion and scratch sealing must succeed before the existing atomic transport handoff.
 Partial read, write or capacity failure cannot expose an incomplete request.
-Unlinked scratch files (ingress request content, provider request, response capture, response metadata, decoded event data and Session reports) are flushed from Rui's buffers and length-checked at seal or before use, but not fsynced.
-They never outlive the Host process, so a sync adds no crash durability; durability lives in the Store.
-A write error still fails at write time, and a later read error fails the call that reads it.
+Request, response, metadata and event-data scratch follow the [scratch sealing rule](resources.md#shared-scratch-ownership): length-checked, never fsynced.
 
 Model transport is Rui's own HTTP/2 client in `src/h2/`, built on pinned nghttp2 and OpenSSL.
 It is a separate build module that imports nothing from Rui.

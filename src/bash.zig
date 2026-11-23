@@ -206,6 +206,14 @@ const OwnedFile = struct {
         self.file = null;
     }
 
+    /// A capture is sealed when the file holds every byte charged to it. Scratch
+    /// never outlives the Host, so sealing checks length and never syncs: a sync
+    /// adds no durability and stalls every agent on the execution loop.
+    fn sealed(self: *const OwnedFile, io: std.Io) bool {
+        const length = self.file.?.length(io) catch return false;
+        return length == self.charged;
+    }
+
     fn injectedCleanupFault(self: *const OwnedFile, scratch: Scratch) bool {
         return self.cleanup_fault == .persistent or
             (self.cleanup_fault == .gated and faultGateActive(scratch.io, scratch.path));
@@ -513,8 +521,8 @@ pub const Execution = struct {
     }
 
     pub fn resultCode(self: *Execution, scratch: Scratch) store.ActionResolutionCode {
-        self.stdout_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
-        self.stderr_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
+        if (!self.stdout_capture.sealed(scratch.io)) self.lifecycle.recordSealFailure();
+        if (!self.stderr_capture.sealed(scratch.io)) self.lifecycle.recordSealFailure();
         if (self.faults.seal) self.lifecycle.recordSealFailure();
         return switch (self.lifecycle.resolution()) {
             inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
@@ -1540,6 +1548,30 @@ test "an owned file closes its descriptor before reporting removal failure" {
     try file.cleanup(scratch);
     try std.testing.expect(file.published);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "a capture is sealed exactly when its file holds the bytes charged to it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 64 };
+    const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
+    const Case = struct { written: []const u8, charged: u64, sealed: bool };
+    for ([_]Case{
+        .{ .written = "", .charged = 0, .sealed = true },
+        .{ .written = "abc", .charged = 3, .sealed = true },
+        .{ .written = "ab", .charged = 3, .sealed = false },
+        .{ .written = "abcd", .charged = 3, .sealed = false },
+    }, 1..) |case, ordinal| {
+        var file = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
+        defer file.cleanup(scratch) catch {};
+        try file.file.?.writeStreamingAll(std.testing.io, case.written);
+        file.charged = case.charged;
+        try std.testing.expect(budget.charge(case.charged));
+        try std.testing.expectEqual(case.sealed, file.sealed(std.testing.io));
+    }
 }
 
 test "retired execution is independent of outstanding capture reclamation" {
