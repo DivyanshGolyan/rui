@@ -39,6 +39,9 @@ pub const Pool = struct {
     waker: Waker = .{},
     subscriber: store.CommitSubscriber = undefined,
     allocator: ?std.mem.Allocator = null,
+    /// The ring's walk fields, copied by `capture` under the ring's lock. About 56 KiB,
+    /// so it is allocated with the first line and freed by `deinit`, not on a stack.
+    view: ?*change_ring.Ring.View = null,
 
     /// Wires the waker to the commit subscriber. Call once, at the pool's final address.
     pub fn attach(self: *Pool, pipe: std.posix.fd_t) void {
@@ -52,9 +55,8 @@ pub const Pool = struct {
     }
 
     /// Upgrades `fd`: answers 101 and `hello`, and takes `leftover` (app bytes read
-    /// after the request). The caller holds the change ring's lock, so the line starts
-    /// from the ring's newest generation and every later commit reaches it.
-    /// On success the pool owns `fd`; on failure the caller still does.
+    /// after the request). Allocates and fills the line without the ring's lock; the
+    /// caller then `admit`s the returned slot under it. On failure the caller keeps `fd`.
     pub fn open(
         self: *Pool,
         allocator: std.mem.Allocator,
@@ -62,16 +64,15 @@ pub const Pool = struct {
         fd: std.posix.fd_t,
         leftover: []const u8,
         now_ms: u64,
-        ring: *const change_ring.Ring,
-    ) error{ LinesFull, OutOfMemory, ProtocolError }!void {
+    ) error{ LinesFull, OutOfMemory, ProtocolError }!usize {
         const index = for (self.slots, 0..) |slot, position| {
             if (slot == null) break position;
         } else return error.LinesFull;
-        self.waker.open.store(true, .seq_cst);
-        errdefer self.syncOpen();
+        if (self.view == null) self.view = try allocator.create(change_ring.Ring.View);
+        self.allocator = allocator;
         const created = try allocator.create(line.Line);
         errdefer allocator.destroy(created);
-        created.init(self.next_token, ring.newest, now_ms);
+        created.init(self.next_token, 0, now_ms);
         created.begin(instance, now_ms);
         if (leftover.len != 0) {
             const room = created.inputRoom();
@@ -80,24 +81,38 @@ pub const Pool = struct {
             try created.received(leftover.len);
         }
         self.next_token += 1;
-        self.allocator = allocator;
         self.slots[index] = .{ .line = created, .fd = fd };
         self.count += 1;
+        return index;
     }
 
-    /// The caller holds the change ring's lock. Each line walks the entries newer than
-    /// its own generation and notes the watched Sessions; a ring that no longer covers a
-    /// line's generation owes it a resync.
-    pub fn onWake(self: *Pool, ring: *const change_ring.Ring) void {
+    /// The caller holds the ring's lock and passes the ring's newest generation. The line
+    /// starts from it, and the commit waker is opened, so every later commit reaches it.
+    pub fn admit(self: *Pool, index: usize, newest: u64) void {
+        self.slots[index].?.line.seen = newest;
+        self.syncOpen();
+    }
+
+    /// The caller holds the ring's lock. Copies what the line walk reads, so the walk
+    /// (`onWake`) runs after the lock is released.
+    pub fn capture(self: *Pool, ring: *const change_ring.Ring) void {
+        self.view.?.capture(ring);
+    }
+
+    /// Each line walks the entries newer than its own generation in the captured view
+    /// and notes the watched Sessions; a view that no longer covers a line's generation
+    /// owes it a resync. Runs on intake, without the ring's lock.
+    pub fn onWake(self: *Pool) void {
+        const view = self.view orelse return;
         for (self.slots) |maybe| {
             const slot = maybe orelse continue;
-            if (!ring.covers(slot.line.seen)) {
-                slot.line.wrap(ring.newest);
+            if (!view.covers(slot.line.seen)) {
+                slot.line.wrap(view.newest);
                 continue;
             }
-            var walk = ring.newer(slot.line.seen);
+            var walk = view.newer(slot.line.seen);
             while (walk.next()) |entry| slot.line.absorb(entry.session);
-            slot.line.advance(ring.newest);
+            slot.line.advance(view.newest);
         }
     }
 
@@ -175,6 +190,13 @@ pub const Pool = struct {
         for (&self.slots) |*maybe| {
             if (maybe.* != null) self.close(maybe);
         }
+    }
+
+    /// Closes every line and frees the walk view.
+    pub fn deinit(self: *Pool) void {
+        self.closeAll();
+        if (self.view) |view| self.allocator.?.destroy(view);
+        self.view = null;
     }
 
     fn close(self: *Pool, maybe: *?Slot) void {
@@ -260,14 +282,6 @@ fn sendFrame(fd: std.posix.fd_t, body: []const u8) !void {
     try std.testing.expectEqual(@as(isize, @intCast(body.len)), std.c.write(fd, body.ptr, body.len));
 }
 
-/// Records a commit into the ring and notifies the waker, as the Store does.
-fn commit(ring: *change_ring.Ring, pool: *Pool, generation: u64, session: []const u8) void {
-    var touched: change_ring.Touched = .{};
-    touched.add(.{ .session = session[0..6].*, .workspace = 1 });
-    ring.record(generation, &touched);
-    pool.waker.notify();
-}
-
 fn wakeBytes(fd: std.posix.fd_t) usize {
     var bytes: [16]u8 = undefined;
     return readAvailable(fd, &bytes);
@@ -280,7 +294,27 @@ fn expectOneFrame(fd: std.posix.fd_t, payload: []const u8) !void {
     try std.testing.expectEqualStrings(payload, bytes[4..count]);
 }
 
-test "an upgrade answers 101 and hello, and a commit nudges only a watching line once" {
+/// Opens a line and admits it at the ring's newest generation, as intake does under the lock.
+fn openLine(pool: *Pool, ring: *const change_ring.Ring, fd: std.posix.fd_t, leftover: []const u8, now_ms: u64) !void {
+    const index = try pool.open(std.testing.allocator, @splat(0xab), fd, leftover, now_ms);
+    pool.admit(index, ring.newest);
+}
+
+/// Records a commit in the ring. The waker's nudge is the Host and Store tests' concern.
+fn record(ring: *change_ring.Ring, generation: u64, session: []const u8) void {
+    var touched: change_ring.Touched = .{};
+    touched.add(.{ .session = session[0..6].*, .workspace = 1 });
+    ring.record(generation, &touched);
+}
+
+/// What intake does after a wake: copy the ring under its lock, then walk the copy.
+fn wakeIntake(pool: *Pool, ring: *const change_ring.Ring) void {
+    pool.rearm();
+    pool.capture(ring);
+    pool.onWake();
+}
+
+test "an upgrade answers 101 and hello, and a watched change nudges only that line once" {
     const allocator = std.testing.allocator;
     const wake = try socketPair();
     defer for (wake) |fd| {
@@ -288,39 +322,40 @@ test "an upgrade answers 101 and hello, and a commit nudges only a watching line
     };
     var pool: Pool = .{};
     pool.attach(wake[1]);
-    defer pool.closeAll();
+    defer pool.deinit();
     var ring: change_ring.Ring = .{};
     var polls: std.ArrayList(std.c.pollfd) = .empty;
     defer polls.deinit(allocator);
 
     const pair = try socketPair();
     defer _ = std.c.close(pair[1]);
-    try pool.open(allocator, @splat(0xab), pair[0], "", 0, &ring);
+    try openLine(&pool, &ring, pair[0], "", 0);
     try step(&pool, &polls, 0);
     var reply: [512]u8 = undefined;
     const reply_length = readAvailable(pair[1], &reply);
     try std.testing.expect(std.mem.startsWith(u8, reply[0..reply_length], "HTTP/1.1 101 Switching Protocols"));
+
+    // The waker writes one byte per arming, and only until intake re-arms it.
+    pool.waker.notify();
+    pool.waker.notify();
+    try std.testing.expectEqual(@as(usize, 1), wakeBytes(wake[0]));
+    pool.rearm();
 
     // The watch catch-up nudges the watched Session once, before any commit.
     try sendFrame(pair[1], "{\"type\":\"watch\",\"sessions\":[\"k7m2qx\"]}");
     try step(&pool, &polls, 0);
     try expectOneFrame(pair[1], "{\"type\":\"changed\",\"session\":\"k7m2qx\"}");
 
-    // An unwatched commit writes the wake byte but nudges nothing.
-    commit(&ring, &pool, 1, "a00000");
-    try std.testing.expectEqual(@as(usize, 1), wakeBytes(wake[0]));
-    pool.rearm();
-    pool.onWake(&ring);
+    // An unwatched commit nudges nothing.
+    record(&ring, 1, "a00000");
+    wakeIntake(&pool, &ring);
     try step(&pool, &polls, 0);
     try std.testing.expectEqual(@as(usize, 0), readAvailable(pair[1], &reply));
 
-    // Two watched commits coalesce: one wake byte, one changed frame.
-    commit(&ring, &pool, 2, "k7m2qx");
-    try std.testing.expectEqual(@as(usize, 1), wakeBytes(wake[0]));
-    commit(&ring, &pool, 3, "k7m2qx");
-    try std.testing.expectEqual(@as(usize, 0), wakeBytes(wake[0]));
-    pool.rearm();
-    pool.onWake(&ring);
+    // Two watched commits coalesce into one changed frame.
+    record(&ring, 2, "k7m2qx");
+    record(&ring, 3, "k7m2qx");
+    wakeIntake(&pool, &ring);
     try step(&pool, &polls, 0);
     try expectOneFrame(pair[1], "{\"type\":\"changed\",\"session\":\"k7m2qx\"}");
     try std.testing.expectEqual(@as(usize, 1), pool.count);
@@ -330,7 +365,7 @@ test "the pool refuses a line past its capacity and leaves the open lines alone"
     const allocator = std.testing.allocator;
     var pool: Pool = .{};
     pool.attach(-1);
-    defer pool.closeAll();
+    defer pool.deinit();
     var ring: change_ring.Ring = .{};
     var pairs: [line.capacity + 1][2]std.posix.fd_t = undefined;
     for (&pairs) |*pair| pair.* = try socketPair();
@@ -338,10 +373,10 @@ test "the pool refuses a line past its capacity and leaves the open lines alone"
         _ = std.c.close(pair[1]);
     };
     for (pairs[0..line.capacity], 0..) |pair, index| {
-        try pool.open(allocator, @splat(0), pair[0], "", @intCast(index), &ring);
+        try openLine(&pool, &ring, pair[0], "", @intCast(index));
     }
     try std.testing.expectEqual(@as(usize, line.capacity), pool.count);
-    try std.testing.expectError(error.LinesFull, pool.open(allocator, @splat(0), pairs[line.capacity][0], "", 0, &ring));
+    try std.testing.expectError(error.LinesFull, pool.open(allocator, @splat(0), pairs[line.capacity][0], "", 0));
     try std.testing.expectEqual(@as(usize, line.capacity), pool.count);
     _ = std.c.close(pairs[line.capacity][0]);
 }
@@ -354,21 +389,20 @@ test "a ring that no longer covers a line owes it resync" {
     };
     var pool: Pool = .{};
     pool.attach(wake[1]);
-    defer pool.closeAll();
+    defer pool.deinit();
     var ring: change_ring.Ring = .{};
     var polls: std.ArrayList(std.c.pollfd) = .empty;
     defer polls.deinit(allocator);
     const pair = try socketPair();
     defer _ = std.c.close(pair[1]);
-    try pool.open(allocator, @splat(0), pair[0], "", 0, &ring);
+    try openLine(&pool, &ring, pair[0], "", 0);
     try sendFrame(pair[1], "{\"type\":\"watch\",\"sessions\":\"all\"}");
     try step(&pool, &polls, 0);
     var sink: [256]u8 = undefined;
     _ = readAvailable(pair[1], &sink);
     var generation: u64 = 1;
-    while (generation <= change_ring.capacity + 1) : (generation += 1) commit(&ring, &pool, generation, "k7m2qx");
-    pool.rearm();
-    pool.onWake(&ring);
+    while (generation <= change_ring.capacity + 1) : (generation += 1) record(&ring, generation, "k7m2qx");
+    wakeIntake(&pool, &ring);
     try step(&pool, &polls, 0);
     try expectOneFrame(pair[1], "{\"type\":\"resync\"}");
 }
@@ -377,14 +411,14 @@ test "a fence and a drain each send one failed frame, then close the line" {
     const allocator = std.testing.allocator;
     var pool: Pool = .{};
     pool.attach(-1);
-    defer pool.closeAll();
+    defer pool.deinit();
     var ring: change_ring.Ring = .{};
     var polls: std.ArrayList(std.c.pollfd) = .empty;
     defer polls.deinit(allocator);
     for ([_]line.Failure{ .store_failed, .host_stopping }) |why| {
         const pair = try socketPair();
         defer _ = std.c.close(pair[1]);
-        try pool.open(allocator, @splat(0), pair[0], "", 0, &ring);
+        try openLine(&pool, &ring, pair[0], "", 0);
         try step(&pool, &polls, 0);
         var sink: [256]u8 = undefined;
         _ = readAvailable(pair[1], &sink);
@@ -402,13 +436,13 @@ test "an idle line pings at twenty seconds of fake time, and a zero length frame
     const allocator = std.testing.allocator;
     var pool: Pool = .{};
     pool.attach(-1);
-    defer pool.closeAll();
+    defer pool.deinit();
     var ring: change_ring.Ring = .{};
     var polls: std.ArrayList(std.c.pollfd) = .empty;
     defer polls.deinit(allocator);
     const pair = try socketPair();
     defer _ = std.c.close(pair[1]);
-    try pool.open(allocator, @splat(0), pair[0], "", 1000, &ring);
+    try openLine(&pool, &ring, pair[0], "", 1000);
     try step(&pool, &polls, 1000);
     var sink: [256]u8 = undefined;
     _ = readAvailable(pair[1], &sink);

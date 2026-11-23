@@ -1,5 +1,6 @@
 const std = @import("std");
 const default_intake = @import("product_defaults.zig").intake_capacity;
+const line = @import("line.zig");
 
 pub const minimum_intake: usize = 10;
 pub const ordinary_exchange_descriptors: usize = @import("protocol.zig").max_request_contents + 2;
@@ -19,6 +20,8 @@ pub const Requirement = struct {
     execution: usize,
     authentication: usize,
     self_wake: usize,
+    /// Open lines are served on intake outside its exchange population.
+    lines: usize,
     total: usize,
 };
 
@@ -82,11 +85,13 @@ pub fn calculate(
     };
 
     const self_wake: usize = 2;
+    const lines: usize = line.capacity;
     var total = try add(inherited, fixed_host);
     total = try add(total, clients);
     total = try add(total, execution);
     total = try add(total, authentication);
     total = try add(total, self_wake);
+    total = try add(total, lines);
     return .{
         .inherited = inherited,
         .fixed_host = fixed_host,
@@ -94,6 +99,7 @@ pub fn calculate(
         .execution = execution,
         .authentication = authentication,
         .self_wake = self_wake,
+        .lines = lines,
         .total = total,
     };
 }
@@ -154,31 +160,32 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     try std.testing.expectEqual(@as(usize, 15), linux.execution);
     try std.testing.expectEqual(@as(usize, 0), linux.authentication);
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
-    try std.testing.expectEqual(@as(usize, 80), linux.total);
+    try std.testing.expectEqual(@as(usize, 16), linux.lines);
+    try std.testing.expectEqual(@as(usize, 96), linux.total);
 
     const managed = try calculate(3, 2, 10, 2, .requests, true, .linux);
     try std.testing.expectEqual(@as(usize, 6), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 86), managed.total);
+    try std.testing.expectEqual(@as(usize, 102), managed.total);
 
     const listing = try calculate(3, 2, 10, 2, .requests_and_model_list, false, .linux);
     try std.testing.expectEqual(@as(usize, 9), listing.fixed_host);
-    try std.testing.expectEqual(@as(usize, 81), listing.total);
+    try std.testing.expectEqual(@as(usize, 97), listing.total);
 
     const without_transport = try calculate(3, 2, 10, 2, .none, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
-    try std.testing.expectEqual(@as(usize, 79), without_transport.total);
+    try std.testing.expectEqual(@as(usize, 95), without_transport.total);
 
     const macos = try calculate(3, 2, 10, 2, .requests, true, .macos);
     try std.testing.expectEqual(@as(usize, 9), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 7), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 88), macos.total);
+    try std.testing.expectEqual(@as(usize, 104), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
     const requirement = try calculate(3, 0, 10, 2, .none, true, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
-    try std.testing.expectEqual(@as(usize, 64), requirement.total);
+    try std.testing.expectEqual(@as(usize, 80), requirement.total);
     const listing = try calculate(3, 0, 10, 2, .requests_and_model_list, true, .linux);
     try std.testing.expectEqual((try calculate(3, 0, 10, 2, .requests, true, .linux)).fixed_host, listing.fixed_host);
 }
@@ -233,6 +240,6 @@ test "catalog discovery reserves its sockets beyond model capacity including zer
 
 test "default managed Host budgets all creating-Message contents at a typical Linux limit" {
     const requirement = try calculate(3, 100, 100, 3, .{ .listings = 0 }, true, .linux);
-    try std.testing.expectEqual(@as(usize, 1028), requirement.total);
-    try std.testing.expectEqual(@as(usize, 99), try fitIntake(requirement.total, 1024));
+    try std.testing.expectEqual(@as(usize, 1044), requirement.total);
+    try std.testing.expectEqual(@as(usize, 96), try fitIntake(requirement.total, 1024));
 }

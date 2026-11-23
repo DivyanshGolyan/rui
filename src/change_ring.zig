@@ -53,7 +53,8 @@ pub const Ring = struct {
     /// Entries recorded after `after`, newest first. Callers check `covers(after)` first:
     /// an older generation was forgotten and this walk would miss it.
     pub const Newer = struct {
-        ring: *const Ring,
+        generations: *const [capacity]u64,
+        sessions: *const [capacity]Id,
         after: u64,
         left: usize,
         index: usize,
@@ -64,18 +65,47 @@ pub const Ring = struct {
             if (self.left == 0) return null;
             self.left -= 1;
             self.index = (self.index + capacity - 1) % capacity;
-            const generation = self.ring.generations[self.index];
+            const generation = self.generations[self.index];
             if (generation <= self.after) {
                 self.left = 0;
                 return null;
             }
-            return .{ .session = self.ring.sessions[self.index], .generation = generation };
+            return .{ .session = self.sessions[self.index], .generation = generation };
         }
     };
 
     pub fn newer(self: *const Ring, after: u64) Newer {
-        return .{ .ring = self, .after = after, .left = self.len, .index = self.next };
+        return .{ .generations = &self.generations, .sessions = &self.sessions, .after = after, .left = self.len, .index = self.next };
     }
+
+    /// The fields a line walk reads, copied under the ring's lock so the walk itself
+    /// runs without it. About 56 KiB, so it lives in its owner, never on a stack.
+    pub const View = struct {
+        generations: [capacity]u64 = undefined,
+        sessions: [capacity]Id = undefined,
+        next: usize = 0,
+        len: usize = 0,
+        forgotten_through: u64 = 0,
+        newest: u64 = 0,
+
+        /// The caller holds the ring's lock.
+        pub fn capture(self: *View, ring: *const Ring) void {
+            @memcpy(&self.generations, &ring.generations);
+            @memcpy(&self.sessions, &ring.sessions);
+            self.next = ring.next;
+            self.len = ring.len;
+            self.forgotten_through = ring.forgotten_through;
+            self.newest = ring.newest;
+        }
+
+        pub fn covers(self: *const View, since: u64) bool {
+            return since >= self.forgotten_through;
+        }
+
+        pub fn newer(self: *const View, after: u64) Newer {
+            return .{ .generations = &self.generations, .sessions = &self.sessions, .after = after, .left = self.len, .index = self.next };
+        }
+    };
 
     fn push(self: *Ring, generation: u64, entry: Entry) void {
         if (self.len == capacity) {

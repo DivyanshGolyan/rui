@@ -19,6 +19,8 @@ import os_semantics
 
 ORDINARY_EXCHANGE_DESCRIPTORS = 5
 DEFAULT_CLIENT_DESCRIPTORS = 100 * ORDINARY_EXCHANGE_DESCRIPTORS + 3
+# Open lines: src/line.zig capacity, outside intake's exchange population.
+LINE_DESCRIPTORS = 16
 
 
 def assert_managed_descriptor_rejection(rejected, limit):
@@ -29,10 +31,10 @@ def assert_managed_descriptor_rejection(rejected, limit):
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
-    required = inherited + fixed_host + DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2
+    required = inherited + fixed_host + DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2 + LINE_DESCRIPTORS
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
                     inherited=inherited, fixed_host=fixed_host, clients=DEFAULT_CLIENT_DESCRIPTORS,
-                    execution=10, authentication=authentication, self_wake=2)
+                    execution=10, authentication=authentication, self_wake=2, lines=LINE_DESCRIPTORS)
     assert fields == expected, (fields, expected)
     assert limit < required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
@@ -62,7 +64,7 @@ def run(*, observed=False, intake=100):
     complete = False
     store = root / "store"
     try:
-        default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
+        default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2 + LINE_DESCRIPTORS
         minimum_required = default_required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1',
                  "--set", f"providers.codex.endpoint=https://localhost:{endpoint.server_address[1]}/responses",

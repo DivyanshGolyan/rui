@@ -466,16 +466,17 @@ pub const Store = struct {
         return &owned.commit_subscriber;
     }
 
-    /// Readers outside the Store queue (intake) take the change ring's lock around
-    /// each walk. Every record takes it too, so a walk sees whole entries.
+    /// Readers outside the Store queue (intake) hold the change ring's lock only while
+    /// they copy or read the ring's counters. Every record holds it for its one write,
+    /// so a reader sees whole entries.
     pub fn lockChanges(self: *Store) void {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        while (owned.changes_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+        owned.changes_lock.lockUncancelable(self.io);
     }
 
     pub fn unlockChanges(self: *Store) void {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
-        owned.changes_lock.store(false, .release);
+        owned.changes_lock.unlock(self.io);
     }
 
     /// Records a commit into the change ring, then wakes the execution waiter and
@@ -1985,7 +1986,7 @@ const OutOfLine = struct {
     control_generation: std.atomic.Value(u64),
     commit_wake: std.atomic.Value(?*std.Io.Event),
     commit_subscriber: std.atomic.Value(?*const CommitSubscriber),
-    changes_lock: std.atomic.Value(bool),
+    changes_lock: std.Io.Mutex,
     /// The SQLite data version the WAL was last synced at (Store.settle).
     synced_version: u32,
     /// The Access passes this Store ran, on every engine, in test builds (RoundMeter's pass budgets).
@@ -2022,7 +2023,7 @@ fn createRing() error{OutOfMemory}!*change_ring.Ring {
     owned.control_generation = .init(0);
     owned.commit_wake = .init(null);
     owned.commit_subscriber = .init(null);
-    owned.changes_lock = .init(false);
+    owned.changes_lock = .init;
     owned.synced_version = 0;
     if (@import("builtin").is_test) owned.testing_access_passes = 0;
     const ring: *change_ring.Ring = &owned.ring;

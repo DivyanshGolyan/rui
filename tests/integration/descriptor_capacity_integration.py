@@ -24,6 +24,9 @@ from host_process import HeldReplies, HostDiagnostics, PauseGate, TestHTTPServer
 import os_semantics
 from product_defaults import DEFAULTS
 
+# Open lines: src/line.zig capacity, outside intake's exchange population.
+LINE_DESCRIPTORS = 16
+
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
@@ -728,7 +731,7 @@ def main():
         fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
         execution = 5 + 10
         clients = 100 * 5 + 3
-        fixed = fixed_host + clients + execution + 0 + 2
+        fixed = fixed_host + clients + execution + 0 + 2 + LINE_DESCRIPTORS
         minimum_required = fixed - clients + 10 * 5 + 3 + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
@@ -755,7 +758,7 @@ def main():
         required = fixed + fields["inherited"]
         expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
             inherited=fields["inherited"], fixed_host=fixed_host, clients=clients, execution=execution,
-            authentication=0, self_wake=2)
+            authentication=0, self_wake=2, lines=LINE_DESCRIPTORS)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if fields["inherited"] != 3:

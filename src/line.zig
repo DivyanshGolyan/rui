@@ -18,7 +18,7 @@ pub const Id = [session_id.bytes]u8;
 const DirtySet = std.bit_set.StaticBitSet(max_watched);
 
 /// Pool size. Lines are served on intake and are outside its exchange capacity.
-pub const capacity = 64;
+pub const capacity = 16;
 pub const max_watched = 256;
 pub const max_frame_bytes = 16 * 1024;
 pub const ping_interval_ms = 20_000;
