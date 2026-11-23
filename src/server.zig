@@ -996,7 +996,11 @@ pub noinline fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    var mcp_relist = server_mcp_relist.Relist.init(allocator, mcp_servers);
+    // On the heap: each server's published view would otherwise sit in the serve frame, whose
+    // chain the main-thread stack ceiling bounds.
+    const mcp_relist = try allocator.create(server_mcp_relist.Relist);
+    defer allocator.destroy(mcp_relist);
+    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers);
     defer mcp_relist.deinit();
     const storage = &serving.storage;
     openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
@@ -1017,7 +1021,7 @@ pub noinline fn serve(
         settings.tools.bash.timeout_ms.value,
         tuning.home,
         settings,
-        if (mcp_servers.len != 0) &mcp_relist else null,
+        if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
         intake_capacity,
         descriptor_requirement.total,
