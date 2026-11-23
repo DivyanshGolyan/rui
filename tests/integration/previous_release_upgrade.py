@@ -142,11 +142,9 @@ def supported_format(checkout):
 
 
 def supported_range(checkout):
-    path = checkout / "src/store/schema.zig"
-    source = (path if path.exists() else checkout / "src/store.zig").read_text()
-    current = supported_format(checkout)
+    source = (checkout / "src/store/schema.zig").read_text()
     baseline = re.search(r"pub const migration_baseline: u32 = (\d+);", source)
-    return (int(baseline[1]) if baseline else current), current
+    return int(baseline[1]), supported_format(checkout)
 
 
 

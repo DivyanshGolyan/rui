@@ -47,7 +47,7 @@ rui host restart --all
 
 `--all` is required; this command does not accept `--store` yet.
 It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
-Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved, inspected or checked fails before any stop, and the Host keeps running; a total follows.
+Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved or checked fails before any stop, and the Host keeps running; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
 A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
 For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.
@@ -70,7 +70,7 @@ This does not make a selected source installation eligible for `rui upgrade`; Up
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Check, start and status receive the same captured Host environment with cwd `/` and null stdin. Snapshots, normalized source buffers, environment copies and subprocess captures are kept only in memory and wiped after the operation.
 Saved moved SQLite storage, explicit interfaces and MySQL use the shared starter. DIR is retained separately from wire Store identity; unsaved nondefault placement remains subject to the ordinary detached starter's discoverability rule.
-After exact-instance stop, upgrade waits for the old process generation to retire (an unreaped zombie is retired) and its runtime/Store lease to retire before starting. A concurrent new owner is never stopped. Released v0.75.0 is refused as a target before stop because its check admits stdin lifetime while its detached starter refuses it; older targets without `settings --check` also leave the old Host running. Intentional source builds are not labelled from version text alone.
+After exact-instance stop, upgrade waits for the old process generation to retire (an unreaped zombie is retired) and its runtime/Store lease to retire before starting. A concurrent new owner is never stopped. Targets without `settings --check` also leave the old Host running.
 
 Updates keep saved work and sign-in.
 Retained earlier builds are not an unconditional rollback after a Store migration.

@@ -102,11 +102,6 @@ class SupportedRangeTest(unittest.TestCase):
             source.write_text("pub const schema_version: u32 = 56;\n"
                               "pub const migration_baseline: u32 = 51;\n")
             self.assertEqual(upgrade.supported_range(checkout), (51, 56))
-            source.write_text("pub const schema_version: u32 = 40;\n")
-            self.assertEqual(upgrade.supported_range(checkout), (40, 40))
-            source.unlink()
-            (checkout / "src/store.zig").write_text("pub const schema_version: u32 = 37;\n")
-            self.assertEqual(upgrade.supported_range(checkout), (37, 37))
 
     def test_historical_source_build_uses_current_native_publisher_not_old_installer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,8 +124,8 @@ class SupportedRangeTest(unittest.TestCase):
 
 class RunningUpgradeTest(unittest.TestCase):
     def check_activation(self, *, status="ready", instance="candidate-instance", store="/store",
-                         pid=12, executable=Path("/candidate/bin/rui"), version="0.69.10000",
-                         output="/store: restarted on 0.69.10000\n", retired=True,
+                         pid=12, executable=Path("/candidate/bin/rui"), version="0.88.0",
+                         output="/store: restarted on 0.88.0\n", retired=True,
                          capacity="1", paused=False, bash=True, providers=None):
         binary = Path("/candidate/bin/rui")
         previous = {"store": "/store", "instance": "previous-instance", "active_capacity": "1", "paused": False,
@@ -156,7 +151,7 @@ class RunningUpgradeTest(unittest.TestCase):
             stack.enter_context(patch.object(upgrade, "wait_for", side_effect=wait))
             stack.enter_context(patch.object(upgrade.subprocess, "run", side_effect=AssertionError("no explicit restart")))
             upgrade.assert_running_upgrade(dialect, binary, Path("/store"), seed,
-                {"socket": "/host.sock"}, previous, "0.69.10000", output)
+                {"socket": "/host.sock"}, previous, "0.88.0", output)
         dialect.host_status.assert_called_once_with(binary, Path("/store"), 5)
 
     def test_candidate_instance_image_version_and_restart_report(self):
@@ -169,7 +164,7 @@ class RunningUpgradeTest(unittest.TestCase):
     def test_rejects_incomplete_or_misdirected_activation(self):
         for changes in (
             {"status": "unavailable"}, {"store": "/another-store"}, {"pid": 11},
-            {"executable": Path("/previous/bin/rui")}, {"version": "0.69.1"},
+            {"executable": Path("/previous/bin/rui")}, {"version": "0.87.0"},
             {"output": "Installed Rui; no restart performed"}, {"retired": False},
         ):
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
@@ -228,7 +223,7 @@ class RunningUpgradeTest(unittest.TestCase):
             root = Path(directory).resolve()
             binary = root / "native-actor"
             binary.write_bytes(b"archive construction fixture, never executed")
-            with patch.object(upgrade, "release_version", return_value="0.69.10000"), \
+            with patch.object(upgrade, "release_version", return_value="0.88.0"), \
                  patch.object(upgrade.subprocess, "run", return_value=subprocess.CompletedProcess(
                      [], 0, "installer transcript", "")) as run:
                 _, output = upgrade.install_candidate_release(ROOT, binary, root)
@@ -250,9 +245,9 @@ class RunningUpgradeTest(unittest.TestCase):
             root = Path(directory).resolve()
             binary = root / "native-actor"
             binary.write_bytes(b"not executed")
-            with patch.object(upgrade, "release_version", return_value="0.69.10000"), \
+            with patch.object(upgrade, "release_version", return_value="0.88.0"), \
                  patch.object(upgrade.subprocess, "run", return_value=subprocess.CompletedProcess(
-                     [], 1, "/store: restarted on 0.69.10000", "")), \
+                     [], 1, "/store: restarted on 0.88.0", "")), \
                  self.assertRaises(AssertionError):
                 upgrade.install_candidate_release(ROOT, binary, root)
 

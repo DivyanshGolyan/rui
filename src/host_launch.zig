@@ -135,7 +135,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
                 if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);
                 try writer.writeAll("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n");
             },
-            .incompatible => try writer.writeAll("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n"),
+            .incompatible => try writer.writeAll("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause, then run this rui again; saved work is unchanged.\n"),
             .provider_unserved => try writer.writeAll("rui: the Host serving this Store does not serve the selected provider. Pause it with rui host pause, then start a Host serving that provider, or select a provider it serves; saved work is unchanged.\n"),
             .setup, .worker, .store_access, .mysql_unavailable, .interrupted => {},
         },

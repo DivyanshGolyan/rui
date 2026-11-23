@@ -1062,7 +1062,7 @@ def adopted_replacement_case(root, binary, releases):
         print("upgrade native: deterministic adopted same-target-version owner verified (different managed executable)", flush=True)
 
 
-def known_target_case(root, binary, releases, baseline, known_bad):
+def unchecked_target_case(root, binary, releases, baseline):
     """Downloaded real releases, verified by the caller, never stand-in Hosts."""
     with case(root, binary, releases, "old-target-precondition") as c:
         retained = c.build("running-baseline")
@@ -1078,15 +1078,13 @@ def known_target_case(root, binary, releases, baseline, known_bad):
 
         previous = old_status()
         try:
-            for name, target, reason in (("no-settings-check", baseline, "target build cannot safely check"),
-                                         ("known-bad-check", known_bad, "target build cannot safely check")):
-                build = c.build(name)
-                shutil.copy2(target, build / "bin/rui")
-                c.select(build)
-                output = c.run("host", "restart", "--all", timeout=60)
-                assert "left running" in output and reason in output, output
-                assert old.poll() is None and old_status()["instance"] == previous["instance"], output
-            print("upgrade native: actual known-bad check and pre-check release targets refused before stop; old PID/instance unchanged", flush=True)
+            build = c.build("no-settings-check")
+            shutil.copy2(baseline, build / "bin/rui")
+            c.select(build)
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert "left running" in output and "target build cannot safely check" in output, output
+            assert old.poll() is None and old_status()["instance"] == previous["instance"], output
+            print("upgrade native: a pre-check release target is refused before stop; old PID/instance unchanged", flush=True)
         finally:
             # Its owning historical client retains cleanup authority.
             c.binary = old_binary
@@ -1788,11 +1786,11 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
 
 
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target", "frozen-settings", "pre-freeze-target", "retired-environment")
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "unchecked-target", "frozen-settings", "pre-freeze-target", "retired-environment")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI|retired-environment PREVIOUS_REAL_RUI]")
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|unchecked-target BASELINE_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI|retired-environment PREVIOUS_REAL_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
-    assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target", "retired-environment") else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
+    assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target", "retired-environment") else 4 if selection == "unchecked-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -1820,8 +1818,8 @@ def main():
             pre_freeze_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection == "future-target":
             future_target_case(root, binary, releases)
-        if selection == "known-target":
-            known_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True), pathlib.Path(sys.argv[4]).resolve(strict=True))
+        if selection == "unchecked-target":
+            unchecked_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection in ("restart-all", "lifecycle"):
             suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[selection]
             suite(root, binary, releases)

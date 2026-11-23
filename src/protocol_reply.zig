@@ -388,14 +388,7 @@ test "a model list reply reads as what the Host writes" {
 
 pub const HostInfoProfile = enum {
     current,
-    released_20,
-    released_18,
-    released_17,
-    released_16,
-    released_15,
-    released_14,
-    released_13,
-    released_9,
+    released_22,
 
     pub fn historical(self: HostInfoProfile) bool {
         return self != .current;
@@ -404,14 +397,7 @@ pub const HostInfoProfile = enum {
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
-            .released_20 => "20",
-            .released_18 => "18",
-            .released_17 => "17",
-            .released_16 => "16",
-            .released_15 => "15",
-            .released_14 => "14",
-            .released_13 => "13",
-            .released_9 => "9",
+            .released_22 => "22",
         };
     }
 
@@ -422,19 +408,7 @@ pub const HostInfoProfile = enum {
 
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
-            .current => protocol.Routes,
-            .released_20 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_18 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_17 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_15 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_14 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
-            .released_13 => struct {
-                codex: protocol.Route,
-                openai: protocol.Route,
-                chatgpt: protocol.Route = .unserved,
-            },
-            .released_9 => struct { codex: protocol.Route, openai: protocol.Route },
+            .current, .released_22 => protocol.Routes,
         };
     }
 };
@@ -654,24 +628,20 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
 }
 
-test "Host information accepts both wire-13 shapes and requires complete current facts" {
-    const historical_wire = comptime HostInfoProfile.released_13.wire();
-    const previous = "{\"version\":\"" ++ historical_wire ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
-    const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, previous, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
-    defer std.testing.allocator.free(historical_full);
-    const historical_version = "\"version\":\"" ++ historical_wire ++ "\"";
-    const current = try std.mem.replaceOwned(u8, std.testing.allocator, historical_full, historical_version, "\"version\":\"" ++ protocol.wire_version ++ "\"");
-    defer std.testing.allocator.free(current);
-    const facts = try parseHostInfoForProfile(previous, "/one", .released_13);
+const host_info_fields_after_version = ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}";
+const released_22_host_info = "{\"version\":\"" ++ HostInfoProfile.released_22.wire() ++ "\"" ++ host_info_fields_after_version;
+const current_host_info = "{\"version\":\"" ++ protocol.wire_version ++ "\"" ++ host_info_fields_after_version;
+
+test "Host information accepts the released wire-22 shape and requires complete facts" {
+    const facts = try parseHostInfoForProfile(released_22_host_info, "/one", .released_22);
     try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
     try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
     try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
-    try std.testing.expectEqualDeep(facts, (try parseHostInfo(current, "/one")).ready);
-    try std.testing.expectEqualDeep(facts, try parseHostInfoForProfile(historical_full, "/one", .released_13));
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(historical_full, "/one"));
-    const missing = try std.mem.replaceOwned(u8, std.testing.allocator, previous, historical_version, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    try std.testing.expectEqualDeep(facts, (try parseHostInfo(current_host_info, "/one")).ready);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_22_host_info, "/one"));
+    const missing = try std.mem.replaceOwned(u8, std.testing.allocator, released_22_host_info, ",\"chatgpt\":\"unserved\"", "");
     defer std.testing.allocator.free(missing);
-    try std.testing.expectError(error.MissingField, parseHostInfo(missing, "/one"));
+    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing, "/one", .released_22));
 
     inline for (@typeInfo(protocol.Routes).@"struct".field_names) |provider| {
         for (std.meta.tags(protocol.Route)) |route| {
@@ -679,20 +649,16 @@ test "Host information accepts both wire-13 shapes and requires complete current
             defer std.testing.allocator.free(before);
             const after = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(route) });
             defer std.testing.allocator.free(after);
-            const body = try std.mem.replaceOwned(u8, std.testing.allocator, current, before, after);
+            const body = try std.mem.replaceOwned(u8, std.testing.allocator, released_22_host_info, before, after);
             defer std.testing.allocator.free(body);
             var expected = facts;
             @field(expected.capabilities.providers, provider) = route;
-            try std.testing.expectEqualDeep(expected, (try parseHostInfo(body, "/one")).ready);
-            const historical = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_version);
-            defer std.testing.allocator.free(historical);
-            try std.testing.expectEqualDeep(expected, try parseHostInfoForProfile(historical, "/one", .released_13));
+            try std.testing.expectEqualDeep(expected, try parseHostInfoForProfile(body, "/one", .released_22));
         }
     }
     const samples = [_]struct { body: []const u8, profile: HostInfoProfile }{
-        .{ .body = previous, .profile = .released_13 },
-        .{ .body = historical_full, .profile = .released_13 },
-        .{ .body = current, .profile = .current },
+        .{ .body = released_22_host_info, .profile = .released_22 },
+        .{ .body = current_host_info, .profile = .current },
     };
     for (samples) |sample| {
         const body = sample.body;
@@ -720,7 +686,7 @@ test "Host information accepts both wire-13 shapes and requires complete current
     }) |case| {
         const field = try std.fmt.allocPrint(std.testing.allocator, "\"chatgpt\":{s}", .{case.value});
         defer std.testing.allocator.free(field);
-        for (samples[1..]) |sample| {
+        for (samples) |sample| {
             const bad = try std.mem.replaceOwned(u8, std.testing.allocator, sample.body, "\"chatgpt\":\"unserved\"", field);
             defer std.testing.allocator.free(bad);
             try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", sample.profile));
@@ -734,127 +700,46 @@ test "upgrade Host information profiles map every wire back to their profile" {
     try std.testing.expectEqual(@as(?HostInfoProfile, null), HostInfoProfile.fromWire(""));
 }
 
-test "upgrade Host information profiles retain the entire strict shape" {
-    const legacy_wire = comptime HostInfoProfile.released_9.wire();
-    const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
-    const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
+test "WIR-5 released_host_info_profiles" {
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
-    try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
-    try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
-    try std.testing.expectEqualStrings("14", HostInfoProfile.released_14.wire());
-    try std.testing.expectEqualStrings("20", HostInfoProfile.released_20.wire());
-    try std.testing.expectEqualStrings("18", HostInfoProfile.released_18.wire());
-    try std.testing.expectEqualStrings("17", HostInfoProfile.released_17.wire());
-    try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
-    try std.testing.expectEqualStrings("15", HostInfoProfile.released_15.wire());
-    try std.testing.expectError(error.MissingField, parseHostInfo(old, "/one"));
-    const versioned = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
-    defer std.testing.allocator.free(versioned);
-    const current = try std.mem.replaceOwned(u8, std.testing.allocator, versioned, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
-    defer std.testing.allocator.free(current);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(versioned, "/one", .released_9));
-    try std.testing.expectError(error.UnknownField, parseHostInfoForProfile(current, "/one", .released_9));
-    const historical_field = "\"version\":\"" ++ comptime HostInfoProfile.released_13.wire() ++ "\"";
-    const historical = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, historical_field);
-    defer std.testing.allocator.free(historical);
-    const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
-    defer std.testing.allocator.free(historical_full);
-    const released_20 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_20.wire() ++ "\"");
-    defer std.testing.allocator.free(released_20);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_20, "/one"));
-    const missing_20 = try std.mem.replaceOwned(u8, std.testing.allocator, released_20, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_20);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_20, "/one", .released_20));
-    const released_18 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_18.wire() ++ "\"");
-    defer std.testing.allocator.free(released_18);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_18, "/one"));
-    const missing_18 = try std.mem.replaceOwned(u8, std.testing.allocator, released_18, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_18);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_18, "/one", .released_18));
-    const released_17 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_17.wire() ++ "\"");
-    defer std.testing.allocator.free(released_17);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_17, "/one"));
-    const missing_17 = try std.mem.replaceOwned(u8, std.testing.allocator, released_17, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_17);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_17, "/one", .released_17));
-    const released_16 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_16.wire() ++ "\"");
-    defer std.testing.allocator.free(released_16);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_16, "/one"));
-    const missing_16 = try std.mem.replaceOwned(u8, std.testing.allocator, released_16, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_16);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_16, "/one", .released_16));
-    const released_15 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_15.wire() ++ "\"");
-    defer std.testing.allocator.free(released_15);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_15, "/one"));
-    const missing_15 = try std.mem.replaceOwned(u8, std.testing.allocator, released_15, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_15);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_15, "/one", .released_15));
-    const released_14 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_14.wire() ++ "\"");
-    defer std.testing.allocator.free(released_14);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_14, "/one"));
-    const missing_14 = try std.mem.replaceOwned(u8, std.testing.allocator, released_14, ",\"chatgpt\":\"unserved\"", "");
-    defer std.testing.allocator.free(missing_14);
-    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_14, "/one", .released_14));
-    const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
-        .{ .body = released_20, .profile = .released_20, .historical = true },
-        .{ .body = released_18, .profile = .released_18, .historical = true },
-        .{ .body = released_17, .profile = .released_17, .historical = true },
-        .{ .body = released_16, .profile = .released_16, .historical = true },
-        .{ .body = released_15, .profile = .released_15, .historical = true },
-        .{ .body = released_14, .profile = .released_14, .historical = true },
-        .{ .body = current, .profile = .current, .historical = false },
-        .{ .body = historical, .profile = .released_13, .historical = true },
-        .{ .body = historical_full, .profile = .released_13, .historical = true },
-        .{ .body = old, .profile = .released_9, .historical = true },
-    };
-    for (samples) |sample| {
-        const profile = sample.profile;
-        const body = sample.body;
-        try std.testing.expectEqual(sample.historical, profile.historical());
-        const facts = try parseHostInfoForProfile(body, "/one", profile);
-        try std.testing.expect(facts.store.eql("/one"));
-        try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
-        try std.testing.expectEqual(@as(usize, 10), facts.intake_capacity);
-        try std.testing.expectEqual(@as(?usize, 256), facts.descriptor_limit);
-        try std.testing.expectEqual(@as(usize, 3), facts.custody_occupied);
-        try std.testing.expectEqual(@as(u64, 1792918800), facts.started_at);
-        try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &facts.instance);
-        try std.testing.expect(facts.paused and facts.capabilities.bash);
-        try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
-        try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
-        try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
-        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
-        for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
-            .{ .from = "\"type\":\"host_info\"", .to = "\"type\":\"host_status\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"store\":\"/one\"", .to = "\"store\":\"/one\",\"store\":\"/one\"", .failure = error.DuplicateField },
-            .{ .from = "\"paused\":true", .to = "\"paused\":true,\"paused\":false", .failure = error.DuplicateField },
-            .{ .from = "\"paused\":true,", .to = "", .failure = error.MissingField },
-            .{ .from = "\"paused\":true", .to = "\"paused\":true,\"unknown\":false", .failure = error.UnknownField },
-            .{ .from = "000102030405060708090a0b0c0d0e0f", .to = "000102030405060708090a0b0c0d0e0F", .failure = error.InvalidHostInfo },
-            .{ .from = "\"active_capacity\":\"17\"", .to = "\"active_capacity\":\"017\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"intake_capacity\":\"10\"", .to = "\"intake_capacity\":\"9\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"descriptor_limit\":\"256\"", .to = "\"descriptor_limit\":\"+256\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"started_at\":\"1792918800\"", .to = "\"started_at\":\"0\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"custody_occupied\":\"3\"", .to = "\"custody_occupied\":\"18\"", .failure = error.InvalidHostInfo },
-            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"unknown\"", .failure = error.InvalidEnumTag },
-        }) |case| {
-            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, case.from, case.to);
-            defer std.testing.allocator.free(bad);
-            try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", profile));
-        }
+    try std.testing.expectEqualStrings("22", HostInfoProfile.released_22.wire());
+    try std.testing.expect(HostInfoProfile.released_22.historical());
+    try std.testing.expect(!HostInfoProfile.current.historical());
+    const facts = try parseHostInfoForProfile(released_22_host_info, "/one", .released_22);
+    try std.testing.expect(facts.store.eql("/one"));
+    try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
+    try std.testing.expectEqual(@as(usize, 10), facts.intake_capacity);
+    try std.testing.expectEqual(@as(?usize, 256), facts.descriptor_limit);
+    try std.testing.expectEqual(@as(usize, 3), facts.custody_occupied);
+    try std.testing.expectEqual(@as(u64, 1792918800), facts.started_at);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &facts.instance);
+    try std.testing.expect(facts.paused and facts.capabilities.bash);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(released_22_host_info, "/other", .released_22));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(current_host_info, "/one", .released_22));
+    for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
+        .{ .from = "\"type\":\"host_info\"", .to = "\"type\":\"host_status\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"store\":\"/one\"", .to = "\"store\":\"/one\",\"store\":\"/one\"", .failure = error.DuplicateField },
+        .{ .from = "\"paused\":true", .to = "\"paused\":true,\"paused\":false", .failure = error.DuplicateField },
+        .{ .from = "\"paused\":true,", .to = "", .failure = error.MissingField },
+        .{ .from = "\"paused\":true", .to = "\"paused\":true,\"unknown\":false", .failure = error.UnknownField },
+        .{ .from = "000102030405060708090a0b0c0d0e0f", .to = "000102030405060708090a0b0c0d0e0F", .failure = error.InvalidHostInfo },
+        .{ .from = "\"active_capacity\":\"17\"", .to = "\"active_capacity\":\"017\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"intake_capacity\":\"10\"", .to = "\"intake_capacity\":\"9\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"descriptor_limit\":\"256\"", .to = "\"descriptor_limit\":\"+256\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"started_at\":\"1792918800\"", .to = "\"started_at\":\"0\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"custody_occupied\":\"3\"", .to = "\"custody_occupied\":\"18\"", .failure = error.InvalidHostInfo },
+        .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"unknown\"", .failure = error.InvalidEnumTag },
+    }) |case| {
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, released_22_host_info, case.from, case.to);
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", .released_22));
     }
     for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
-        for (samples) |sample| {
-            const profile = sample.profile;
-            const body = sample.body;
-            const field = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{profile.wire()});
-            defer std.testing.allocator.free(field);
-            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, field, version);
-            defer std.testing.allocator.free(bad);
-            try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(bad, "/one", profile));
-        }
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, released_22_host_info, "\"version\":\"" ++ comptime HostInfoProfile.released_22.wire() ++ "\"", version);
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(bad, "/one", .released_22));
     }
 }
 
@@ -4626,36 +4511,6 @@ test "CLI-12 list_page_validation" {
     try listValidationCase0();
     try listValidationCase1();
     try listValidationCase2();
-}
-
-test "WIR-5 released_host_info_profiles" {
-    const Case = struct { wire: []const u8, chatgpt: bool };
-    for ([_]Case{
-        .{ .wire = "9", .chatgpt = false },
-        .{ .wire = "13", .chatgpt = false },
-        .{ .wire = "13", .chatgpt = true },
-        .{ .wire = "14", .chatgpt = true },
-        .{ .wire = "15", .chatgpt = true },
-        .{ .wire = "16", .chatgpt = true },
-        .{ .wire = "17", .chatgpt = true },
-        .{ .wire = "18", .chatgpt = true },
-        .{ .wire = "20", .chatgpt = true },
-    }) |case| {
-        var selected: ?HostInfoProfile = null;
-        for (std.enums.values(HostInfoProfile)) |profile| {
-            if (profile.historical() and std.mem.eql(u8, profile.wire(), case.wire)) selected = profile;
-        }
-        const profile = selected orelse return error.MissingReleasedProfile;
-        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ case.wire, if (case.chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
-        defer std.testing.allocator.free(body);
-        const facts = try parseHostInfoForProfile(body, "/one", profile);
-        try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
-        try std.testing.expect(facts.store.eql("/one"));
-        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
-        const incomplete = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"paused\":true,", "");
-        defer std.testing.allocator.free(incomplete);
-        try std.testing.expectError(error.MissingField, parseHostInfoForProfile(incomplete, "/one", profile));
-    }
 }
 
 test "WIR-4 a content value reads back only as text or as parts with one owner" {
