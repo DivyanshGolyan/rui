@@ -622,8 +622,9 @@ class CandidatePlanTest(unittest.TestCase):
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
-    # CI-1: written as literals, independent of select_tests' tier constants. stack-frames, measurement-check and
-    # mysql-wire-integration reach the PR tier only through their own files (the rows below name each case).
+    # CI-1: written as literals, independent of select_tests' tier constants. measurement-check and
+    # mysql-wire-integration reach the PR tier only through their own files; stack-frames runs whenever a Host
+    # source, build input or frame gate file selects it (the rows below name each case).
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full'}
     # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
@@ -631,18 +632,18 @@ class CandidatePlanTest(unittest.TestCase):
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         # A source file no owner reaches is unclassified, so it selects the full PR set.
         'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
-        'build hub': (['build.zig'], {'test-logic'}),
+        'build hub': (['build.zig'], {'stack-frames', 'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic', 'test-native', 'test-store'}),
-        'dependency fetch': (['src/fetch_dependencies.sh'], {'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'stack-frames', 'test-logic', 'test-native', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'stack-frames', 'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
         'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
-                                     {'test-logic', 'test-native'}),
-        'Store': (['src/store.zig'], {'test-native', 'test-store'}),
+                                     {'stack-frames', 'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'stack-frames', 'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         # A shared helper runs the fixtures that import it, directly (bash_fixture.py) or through another
         # helper (tool_profile_fixture.py is imported by fresh_tool_profile_cases.py, which human-cli imports).
@@ -662,16 +663,16 @@ class CandidatePlanTest(unittest.TestCase):
             'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
             'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
-        'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
-        # The frame gate's own inputs run stack-frames on the PR; its script and budget are the gate's own files.
+        'core owning no fixture': (['src/request_encoding.zig'], {'stack-frames', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
+        # The frame gate's budget and any Host source run stack-frames on the PR.
         'frame gate budget': (['tests/ci/stack_frames.json'], {'stack-frames'}),
-        'Host source under check': (['src/wire_version.zig'], {'test-logic', 'test-native'}),
+        'Host source under check': (['src/wire_version.zig'], {'stack-frames', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),
         'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
         'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
-                                    {'test-logic', 'test-native', 'test-store'}),
+                                    {'stack-frames', 'test-logic', 'test-native', 'test-store'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',

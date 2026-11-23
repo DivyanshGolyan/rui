@@ -211,7 +211,7 @@ Clean socket retirement removes its hint only after unlink succeeds; a crash lea
 For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
 A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
 The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
-The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance with the current or released-9 read-only observation profiles.
+The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance: a Host on the current wire answers a read-only Host-info request on that socket, and a Host on another wire is read through its own executable (see below).
 Unreadable identities are reported rather than guessed; relative or unavailable Store hints cannot grant activation authority.
 `host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.
 Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Host-directory-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
@@ -225,9 +225,10 @@ No running Hosts prints `No running Hosts.` and starts nothing.
 Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `22` profile, with matching HTTP and body versions and peer PID from that same connection.
-Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
-A historical managed Host is paused through its retained executable with the captured exact instance. Its process generation (gone or zombie) and runtime/Store lease must retire; a different authenticated owner holding the lease is eligible for adoption, never another stop. Historical control facts never grant Session access.
+Upgrade reads the complete bounded Host-info envelope on the current wire, with matching HTTP and body versions and peer PID from that same connection.
+An explicit wrong-wire response names another wire, and that Host is observed through its own executable: `<exe> host status --store DIR` supplies its instance, Store, active capacity and settings digest, whatever wire its envelope carries. The envelope's version is never checked against ours, and no per-wire decoder exists.
+Malformed, unavailable or unknown envelopes, an unreadable executable, and a failing or unparseable `host status` grant no authority and leave the Host running.
+A Host on another wire is paused through its own executable with `host pause --store DIR --instance HEX` for the captured exact instance. Its process generation (gone or zombie) and runtime/Store lease must retire; a different authenticated owner holding the lease is eligible for adoption, never another stop. Control facts from another wire never grant Session access.
 Target source admission precedes interruption and covers read/apply, detached rejection, placement/anchoring, provider finishing, resolution and sealing without database access. Targets with no check are refused before stop.
 MySQL follows ordered stop then start: the replacement's own Store lock acquisition/readiness, not runtime retirement or coordinator SQL polling, proves database ownership. A typed start failure does not abandon later batch entries.
 When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.

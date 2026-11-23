@@ -16,7 +16,6 @@ TS_OWNER = re.compile(r'^export const WIRE_VERSION = "(\d+)";$', re.MULTILINE)
 TS_OWNER_FILE = "clients/ts/src/transport.ts"
 OWNER_FILE = "src/wire_version.zig"
 EARLIER_OWNER_FILE = "src/protocol.zig"
-PROFILE_FILE = "src/protocol_reply.zig"
 NAME = "wire_version"
 HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
 LITERALS = (
@@ -104,15 +103,6 @@ def wire_contract_error(tag, released, candidate, released_document, candidate_d
     return None
 
 
-def profile_error(tag, released, current, profile_source):
-    if released == current or re.search(rf"^\s*released_{released},$", profile_source, re.MULTILINE):
-        return None
-    return (f"{PROFILE_FILE} has no released_{released} HostInfoProfile, but release {tag} speaks wire "
-            f"{released} and wire_version is {current}: add `released_{released}` to HostInfoProfile "
-            f"(wire \"{released}\", Providers as the released host_info shape) so upgrades from {tag} "
-            "can recognise its Host")
-
-
 def literal_findings(root):
     findings = []
     for directory, suffixes, pattern in LITERALS:
@@ -166,25 +156,6 @@ class WireVersionTest(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "tests/integration"))
         self.assertEqual(host_process.WIRE_VERSION, str(owner))
-
-    def test_newest_release_has_a_host_info_profile(self):
-        tag = released_tag(ROOT)
-        if tag is None:
-            self.skipTest("no v* release tags in this checkout; the policy job checks out with fetch-depth 0")
-        error = profile_error(tag, wire_version_at(tag), wire_version((ROOT / OWNER_FILE).read_text()),
-                              (ROOT / PROFILE_FILE).read_text())
-        if error:
-            self.fail(error)
-
-    def test_host_info_profile_guard_names_the_missing_profile(self):
-        source = "pub const HostInfoProfile = enum {\n    current,\n    released_22,\n};\n"
-        self.assertIsNone(profile_error("v0.88.0", 22, 23, source), "the newest release's profile is present")
-        self.assertIsNone(profile_error("v0.88.0", 23, 23, source), "a release on main's wire needs no profile")
-        error = profile_error("v0.89.0", 23, 24, source)
-        self.assertIsNotNone(error)
-        self.assertIn("released_23", error)
-        self.assertIn("add `released_23`", error)
-        self.assertIn("v0.89.0", error)
 
     def test_bump_rule(self):
         self.assertIsNone(bump_error(NAME, 4, 4, 4))

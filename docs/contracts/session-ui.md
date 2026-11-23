@@ -472,10 +472,10 @@ Wire version 18 adds the desired-state Session pin command, its keyed observatio
 Session list pagination remains creation-ordered; pinning changes only the shared presentation order.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
-Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
+Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump needs no Host-info decoder for the old wire: a Host on another wire is observed through its own executable, below.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
 `tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
-Upgrade and restart-all control recognize wire 22 (v0.88.0) and wire 23 (v0.88.1) as historical Host-info profiles. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
+Upgrade and restart-all control observe a Host on another wire, such as v0.88.0's wire 22, through its own executable's `host status --store DIR`, with no per-wire decoder. That observation never grants ordinary client readiness; exact-instance shutdown runs the same executable's `host pause --instance` before the new build starts it.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 

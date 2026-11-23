@@ -403,7 +403,7 @@ class EscapeClassTest(unittest.TestCase):
              'own-files:measurement-check'),
             (MEASUREMENT_BUNDLE, 'failure', [(selected, failed)], Cause('signature'), 'unknown'),
             ('qualify / selected / linux suites (stack-frames)', 'failure', [(selected, failed)], Cause('signature'),
-             'own-files:stack-frames'),
+             'pr-tier'),
             ('qualify / selected / linux suites (rsql-table)', 'failure', [(selected, failed)], Cause('signature'),
              'promotion-only:rsql-table'),
             ('qualify / selected / cache execution (ubuntu-24.04)', 'failure',
