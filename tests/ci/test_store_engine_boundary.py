@@ -118,6 +118,50 @@ def format_violations(root=ROOT, writers=None):
     return messages
 
 
+# Shrink-only ratchet for the fixtures a hand-built old-format Store is assembled from. Test code outside the
+# fixture owners (history.zig builds old formats forward; testing.zig defines the fixtures) names them to build a
+# format by hand. Counted per file as code tokens, so a struct field such as `.baseline_rows = true` is not a
+# reference. A new hand-built old-format Store fails here and must go through history.build.
+BASELINE_NAMES = {"baseline_sqlite_ddl", "baseline_mysql_ddl", "baseline_mysql_rows", "baseline_rows"}
+BASELINE_OWNERS = {"src/store/history.zig", "src/store/testing.zig"}
+BASELINE_REFERENCES = {
+    "src/store/mysql_dialect_check.zig": 32,
+    "src/store/sqlite_tests/archive_membership.zig": 8,
+    "src/store/sqlite_tests/context_window_migration.zig": 2,
+    "src/store/sqlite_tests/migration.zig": 26,
+    "src/store/sqlite_tests/skills_migration.zig": 4,
+    "src/store/sqlite_tests/tool_record_hint.zig": 2,
+    "src/store/sqlite_tests/tool_set_migration.zig": 2,
+}
+BASELINE_RULE = ("hand-built old-format Stores are built through history.build (src/store/history.zig), "
+                 "not from the baseline fixtures")
+
+
+def baseline_references(source):
+    texts = [match.group() for match in FORMAT_TOKEN.finditer(source) if not match.group().startswith("//")]
+    return sum(1 for i, text in enumerate(texts) if text in BASELINE_NAMES and texts[i + 1:i + 2] != ["="])
+
+
+def baseline_violations(root=ROOT, references=None):
+    references = BASELINE_REFERENCES if references is None else references
+    found = {}
+    for path in sorted((root / "src").rglob("*.zig")):
+        name = path.relative_to(root).as_posix()
+        if name in BASELINE_OWNERS:
+            continue
+        count = baseline_references(path.read_text())
+        if count:
+            found[name] = count
+    messages = []
+    for name in sorted(set(found) | set(references)):
+        count, listed = found.get(name, 0), references.get(name, 0)
+        if count > listed:
+            messages.append(f"{name} names the baseline fixtures {count} times, {listed} allowed; {BASELINE_RULE}")
+        elif count < listed:
+            messages.append(f"{name} names the baseline fixtures {count} times, {listed} allowed; lower its BASELINE_REFERENCES entry")
+    return messages
+
+
 def binding_sites(source):
     tokens = [token.text for token in lex(source)]
     sites = 0
@@ -280,6 +324,33 @@ class FormatWriteTest(unittest.TestCase):
                 path = root / owner
                 path.write_text(path.read_text() + '\nconst owner = "PRAGMA user_version=5; DROP COLUMN x";\n')
             self.assertEqual(format_violations(root), [])
+
+
+class BaselineReferenceTest(unittest.TestCase):
+    def test_baseline_references_match_the_shrink_only_ratchet(self):
+        self.assertEqual(baseline_violations(), [])
+
+    def test_scan_counts_fixture_uses_but_not_fields_comments_or_strings(self):
+        self.assertEqual(baseline_references("store_testing.baseline_rows; try sqlite.exec(db, baseline_sqlite_ddl);"), 2)
+        self.assertEqual(baseline_references("const start: Start = .{ .format = 74, .baseline_rows = false };"), 0)
+        self.assertEqual(baseline_references("// store_testing.baseline_rows\nconst s = \"baseline_rows\";"), 0)
+        self.assertEqual(baseline_references("const migration_baseline_rows = 1;"), 0)
+
+    def test_a_planted_hand_built_store_fails_and_an_increase_is_named(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / "src", root / "src")
+            planted = root / "src/store/tests/planted.zig"
+            planted.parent.mkdir(parents=True, exist_ok=True)
+            planted.write_text('test "planted" {\n    try sqlite.exec(db, store_testing.baseline_sqlite_ddl);\n}\n')
+            self.assertEqual(baseline_violations(root), [
+                f"src/store/tests/planted.zig names the baseline fixtures 1 times, 0 allowed; {BASELINE_RULE}"])
+            listed = BASELINE_REFERENCES | {"src/store/tests/planted.zig": 1}
+            self.assertEqual(baseline_violations(root, listed), [])
+            grown = root / "src/store/sqlite_tests/tool_set_migration.zig"
+            grown.write_text(grown.read_text() + "\nconst more = store_testing.baseline_rows;\n")
+            self.assertEqual(baseline_violations(root, listed), [
+                f"src/store/sqlite_tests/tool_set_migration.zig names the baseline fixtures 3 times, 2 allowed; {BASELINE_RULE}"])
 
 
 class DomainReachTest(unittest.TestCase):
