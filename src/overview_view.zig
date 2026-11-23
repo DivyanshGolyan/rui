@@ -1460,7 +1460,6 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             const was_held = holding(state);
             state.now_ms = @max(state.now_ms, presence.at_ms);
             state.pointer_over = presence.pointer_over;
-            if (was_held != holding(state)) state.presentation_revision +%= 1;
             if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
@@ -1785,7 +1784,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     const released = was_held and !holding(state);
     if (released) try releaseOrder(state);
     var changed = false;
-    var redraw = released;
+    var redraw = false;
     for (state.rows.items, 0..) |*row, index| {
         if (row.flash_until_ms != 0 and row.flash_until_ms <= now_ms) {
             if (index < state.nodes.items.len and state.nodes.items[index].line != null) redraw = true;
@@ -3718,11 +3717,11 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
             region_count += 1;
         }
     }
-    const held_at = text_column + "Chats".len + 2 + "Archived".len + 2;
+    const hint_at = text_column + "Chats".len + 2 + "Archived".len + 2;
     // The shaded tab names what the drop does; the words only say that it takes one, and fit a sidebar.
     if (drop != null) {
-        _ = try built.put(held_at, if (caps.unicode) "· drop here" else ". drop here", width -| held_at, .{ .colour = if (dropping) .strong else .quiet });
-    } else if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
+        _ = try built.put(hint_at, if (caps.unicode) "· drop here" else ". drop here", width -| hint_at, .{ .colour = if (dropping) .strong else .quiet });
+    }
     return .{
         .{ .segments = new_session, .target = .new_session },
         .{ .segments = try segmentsOf(arena, try built.finish(), width, .{}), .regions = try arena.dupe(Region, regions[0..region_count]) },
@@ -4432,8 +4431,11 @@ fn creatorKeyHoldCase() !void {
     _ = try refresh(&state, .changed, testToken(2), &.{b});
     _ = try step(&state, .{ .tick = start + 2999 });
     try expectOrder(&state, &.{ "A", "B" });
+    const held = state.presentation_revision;
     _ = try step(&state, .{ .tick = start + 3000 });
     try expectOrder(&state, &.{ "B", "A" });
+    // A release that moves rows repaints; one that moves nothing does not (creatorPresentationCase).
+    try std.testing.expect(state.presentation_revision != held);
 }
 
 fn creatorKeyOriginCase() !void {
@@ -6024,7 +6026,6 @@ test "the tab that takes a carried chat is shaded, strongly while the pointer ho
         const tabs = (try controls(arena.allocator(), &state, 38, caps))[1].segments;
         const text = try segmentText(arena.allocator(), tabs);
         try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_caps) "Archived  · drop here" else "Archived  . drop here") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "order held") == null);
         const shaded = try styleOf(tabs, if (archived_row) "Chats" else "Archived");
         try std.testing.expectEqual(if (over_target) Background.selection else Background.hover, shaded.background);
         try std.testing.expectEqual(Colour.strong, shaded.colour);
@@ -9422,7 +9423,7 @@ fn creatorPresentationCase() !void {
     const deadline = nextRedrawAt(&state, .{ .first = 0, .end = 1, .header = true }, .{ .depth = .none }, 1000).?;
     try std.testing.expectEqual(@as(u64, 1000) + state.key_until_ms - start, deadline);
     _ = try step(&state, .{ .tick = start + 3000 });
-    try std.testing.expect(state.presentation_revision != collapsed);
+    try std.testing.expectEqual(collapsed, state.presentation_revision);
 }
 
 fn creatorFlashDeadlineCase() !void {
@@ -9432,7 +9433,7 @@ fn creatorFlashDeadlineCase() !void {
     defer state.deinit();
     const initial = state.presentation_revision;
     _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = true } });
-    try std.testing.expect(state.presentation_revision != initial);
+    try std.testing.expectEqual(initial, state.presentation_revision);
     b.state_change_at = test_now_s - 1;
     b.subtree_state_change_at = test_now_s - 1;
     _ = try refresh(&state, .changed, testToken(2), &.{b});

@@ -330,8 +330,10 @@
       ],
       "expect": [
         "Tree root",
-        "Held arrival",
-        "order held"
+        "Held arrival"
+      ],
+      "expect_regex": [
+        "(?s)Attached worker.*Held arrival"
       ],
       "comparison": {
         "before": {
@@ -381,17 +383,14 @@
             "do": "move"
           },
           "repaint": false
-        },
-        {
-          "gone": "order held"
         }
       ],
       "expect": [
         "Tree root",
         "Release arrival"
       ],
-      "absent": [
-        "order held"
+      "expect_regex": [
+        "(?s)Release arrival.*Attached worker"
       ],
       "record": true,
       "note": "Pointer leaves; retained raw frames capture the release and any flash"
@@ -431,8 +430,10 @@
       ],
       "expect": [
         "Tree root",
-        "ASCII arrival",
-        ". order held"
+        "ASCII arrival"
+      ],
+      "expect_regex": [
+        "(?s)Attached worker.*ASCII arrival"
       ],
       "comparison": {
         "before": {
