@@ -119,10 +119,10 @@ jobs:
           esac
           baseline="$RUNNER_TEMP/previous-running-release"
           mkdir -p "$baseline/bin"
-          archive="rui-0.69.1-$platform.tar.gz"
+          archive="rui-0.88.0-$platform.tar.gz"
           for asset in "$archive" SHA256SUMS; do
             curl --fail --location --show-error --silent --connect-timeout 10 --max-time 150 \
-              "https://github.com/DivyanshGolyan/rui/releases/download/v0.69.1/$asset" -o "$baseline/$asset"
+              "https://github.com/DivyanshGolyan/rui/releases/download/v0.88.0/$asset" -o "$baseline/$asset"
           done
           expected=$(awk -v name="$archive" '$2 == name {print $1}' "$baseline/SHA256SUMS")
           test "${#expected}" = 64
