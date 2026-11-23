@@ -711,6 +711,8 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
+    // Format 92 moved the codec from the Session to each revision; undo it before anything older.
+    try dropFormat92Codec(storage);
     try dropFormat87Indexes(storage);
     try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
@@ -774,6 +776,27 @@ fn dropMysqlInPlaceColumns(storage: *Store) !void {
     try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_missing");
     try mysql_testing.rawExec(storage, "SET @rui_missing_ddl=NULL");
     try mysql_testing.rawExec(storage, "ALTER TABLE core_command DROP COLUMN missing_settings");
+}
+
+/// Undoes format 92's codec move: each Session takes its current revision's codec back, then the
+/// revisions lose theirs. SQLite adds the Session's columns with a placeholder default, which the
+/// backfill replaces before the first row is read; MySQL drops the revision's CHECK by lookup.
+fn dropFormat92Codec(storage: *Store) !void {
+    if (storage.engine != .mysql) {
+        try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session ADD COLUMN codec TEXT NOT NULL DEFAULT 'openai-responses/1' CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40)");
+        try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE session ADD COLUMN codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512)");
+        // The revision keeps its codec: the current configure SQL reads it after this rewind, and the
+        // refused upgrade that follows does not depend on dropping it.
+        return sqlite.exec(storage.sqliteDatabase(), "UPDATE session SET codec=(SELECT r.codec FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision)");
+    }
+    try mysql_testing.rawExec(storage, "ALTER TABLE session ADD COLUMN codec TEXT NOT NULL AFTER provider, ADD COLUMN codec_options BLOB, ADD CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512)");
+    try mysql_testing.rawExec(storage, "UPDATE session s JOIN session_revision r ON r.session_ref=s.session_ref AND r.revision=s.revision SET s.codec=r.codec");
+    try mysql_testing.rawExec(storage, "SET @rui_codec_ddl=(SELECT CONCAT('ALTER TABLE session_revision ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session_revision' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('codec',cc.CHECK_CLAUSE)>0)");
+    try mysql_testing.rawExec(storage, "PREPARE rui_codec FROM @rui_codec_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_codec");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_codec");
+    try mysql_testing.rawExec(storage, "SET @rui_codec_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE session_revision DROP COLUMN codec");
 }
 
 /// Undoes format 91's output limits. SQLite's step rebuilds model_fact from named columns, so only
@@ -980,6 +1003,19 @@ pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl
         try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
         try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
     }
+}
+
+/// Gives every Session that has no revision row its first revision, carrying the Session's
+/// provider and the codec the Session pins (the test fixtures use codex on openai-responses/1).
+/// The command key is a fixture text, so foreign keys are off for this insert only.
+pub fn fixtureRevisions(database: *sqlite.c.sqlite3) !void {
+    const foreign_keys = try sqlite.pragmaInt(database, "PRAGMA foreign_keys");
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF");
+    defer sqlite.exec(database, if (foreign_keys == 0) "PRAGMA foreign_keys=OFF" else "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
+    try sqlite.exec(database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id," ++
+        "instructions_updated,tool_set_id,permission_mode,effort_source_revision) " ++
+        "SELECT s.session_ref,s.revision,'fixture-'||s.session_ref||'-'||s.revision,s.workspace,s.provider,'openai-responses/1',s.model,s.instructions_content_id," ++
+        "0,s.tool_set_id,s.permission_mode,s.revision FROM session s WHERE NOT EXISTS(SELECT 1 FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision)");
 }
 
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
@@ -2052,7 +2088,8 @@ pub const operation_offer_migration_seed: [:0]const u8 =
     "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";
 
 pub const operation_effort_migration_seed: [:0]const u8 =
-    "UPDATE session SET codec='openai-responses/2',revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
+    "UPDATE session SET codec='openai-responses/2' WHERE session_ref='d8mv7p';" ++
+    "UPDATE session SET revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
     "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1;" ++
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-high',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
     "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-last',1,'d8mv7p',input_digest,1,'',3,0,101 FROM core_command WHERE command_key='fixture-answer-config';" ++

@@ -1169,6 +1169,7 @@ test "definite rejections retain decisions without retaining payloads for config
             const created_session_0_reply = try storage.configure(&initial, .{});
             try std.testing.expect(created_session_0_reply == .accepted);
             const created_session_0 = created_session_0_reply.accepted.session;
+            try store_testing.withoutForeignKeys(&storage, "UPDATE session_revision SET revision=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
             try store_testing.exec(&storage, "UPDATE session SET revision=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
 
             var unknown_message: wire_request.MessageCommand = .{};

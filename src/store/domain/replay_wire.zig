@@ -26,3 +26,9 @@ pub fn bindingOf(wire: replay_binding.Wire, model: []const u8) replay_binding.Bi
 pub fn producerOf(request: replay_binding.Binding, model: []const u8) replay_binding.Binding {
     return .{ .wire = request.wire, .model = model };
 }
+
+/// The SQL column list that reads one Operation's Binding (provider, codec and model) from a
+/// table alias. One owner of the spelling, so each reader names the same three columns.
+pub fn operationBindingSql(comptime alias: []const u8) []const u8 {
+    return alias ++ ".provider," ++ alias ++ ".codec," ++ alias ++ ".model";
+}

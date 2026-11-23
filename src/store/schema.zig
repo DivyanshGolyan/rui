@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 91;
+pub const schema_version: u32 = 92;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -71,6 +71,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
+    .{ .schema_version = 92, .digest = 0xd34fd39a555e1425 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -957,6 +958,33 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation ADD COLUMN output_limit BIGINT NOT NULL DEFAULT 32000 AFTER context_window, ADD CHECK(output_limit BETWEEN 0 AND 4294967295)",
         },
     },
+    // The codec that wrote a revision's bags moves from the Session to each revision, so an Operation's
+    // Binding reads its frozen revision (replay_binding.Binding). Every existing revision takes its
+    // Session's codec: a Session never changes codec, since a provider change is refused before a Turn.
+    .{
+        .from = 91,
+        .sqlite = &.{
+            "ALTER TABLE session_revision RENAME TO session_revision_before_92",
+            "CREATE TABLE session_revision(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n revision INTEGER NOT NULL CHECK(revision>0),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n workspace TEXT NOT NULL,\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n model TEXT NOT NULL,\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=revision),\n PRIMARY KEY(session_ref,revision),\n FOREIGN KEY(session_ref,effort_source_revision) REFERENCES session_revision(session_ref,revision)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,codec,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) SELECT r.session_ref,r.revision,r.command_key,r.workspace,r.provider,s.codec,r.model,r.instructions_content_id,r.instructions_updated,r.tool_set_id,r.loaded_tool_set_id,r.permission_mode,r.output_schema_content_id,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,r.effort_source_revision FROM session_revision_before_92 r JOIN session s ON s.session_ref=r.session_ref",
+            "DROP TABLE session_revision_before_92",
+            "CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id)",
+            "CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id)",
+            "ALTER TABLE session DROP COLUMN codec_options",
+            "ALTER TABLE session DROP COLUMN codec",
+        },
+        .mysql = &.{
+            "ALTER TABLE session_revision ADD COLUMN codec TEXT NOT NULL AFTER provider",
+            "UPDATE session_revision r JOIN session s ON s.session_ref=r.session_ref SET r.codec=s.codec",
+            "ALTER TABLE session_revision ADD CHECK(OCTET_LENGTH(codec) BETWEEN 3 AND 40)",
+            "SET @rui_codec_ddl=(SELECT CONCAT('ALTER TABLE session ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('codec',cc.CHECK_CLAUSE)>0)",
+            "PREPARE rui_codec FROM @rui_codec_ddl",
+            "EXECUTE rui_codec",
+            "DEALLOCATE PREPARE rui_codec",
+            "SET @rui_codec_ddl=NULL",
+            "ALTER TABLE session DROP COLUMN codec, DROP COLUMN codec_options",
+        },
+    },
 };
 
 comptime {
@@ -1159,6 +1187,8 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
 }
 
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
+/// The wire grammar a revision's bags were written by (codec_abi.Dialect's codecs); each revision freezes its own.
+const codec_column: Column = .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } };
 const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
@@ -1360,8 +1390,6 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
-            .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } },
-            .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true },
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
@@ -1429,6 +1457,7 @@ pub const tables = [_]Table{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "workspace", .type = .{ .text = null } },
             provider_column,
+            codec_column,
             .{ .name = "model", .type = .{ .text = null } },
             .{ .name = "instructions_content_id", .type = .int },
             .{ .name = "instructions_updated", .type = .flag },

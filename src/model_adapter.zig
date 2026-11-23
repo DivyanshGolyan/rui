@@ -6214,7 +6214,7 @@ test "canonical ordered Message lowers original PNG JPEG and Text parts on every
             try setup.init();
             defer setup.close();
             const session = try setup.configure("ordered-config");
-            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
             try submitOrderedForTesting(&setup, session.slice(), "ordered-message", parts, null, null);
             const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             // A later Message is outside this Operation's frozen view.
@@ -6577,7 +6577,7 @@ test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on e
             try setup.init();
             defer setup.close();
             const session = try setup.configure("ordered-actions");
-            try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+            try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
             try setup.submit("ordered-action-seed", "ordered-action-seed", session.slice(), "observe");
             const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             try proposeOrderedActionsForTesting(&setup, model, &.{ .{ .item_id = "shot-item", .call_id = "shot\\\"" }, .{ .item_id = "text-item", .call_id = "text-call" } });
@@ -6766,7 +6766,7 @@ test "canonical ordered Action Resolution background final prefixes the same par
         try setup.init();
         defer setup.close();
         const session = try setup.configure("ordered-action-background");
-        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
         try setup.submit("ordered-background-seed", "ordered-background-seed", session.slice(), "observe");
         const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "background-shot", .call_id = "background-shot" }});
@@ -6897,7 +6897,7 @@ test "old text request retries unchanged across later image message and final ac
         try setup.init();
         defer setup.close();
         const session = try setup.configure("replay-wire-config");
-        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try store.testing.exec(&setup.storage, "UPDATE session_revision SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
         try setup.submit("replay-wire-seed", "replay-wire-seed", session.slice(), "old text input");
         const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try proposeOrderedActionsForTesting(&setup, first, &.{ .{ .item_id = "legacy-item", .call_id = "legacy-call" }, .{ .item_id = "background-item", .call_id = "background-call" } });

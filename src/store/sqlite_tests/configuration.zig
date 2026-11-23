@@ -146,14 +146,14 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, testSettings(&view));
     view.close();
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET provider='codex' WHERE session_ref=?1", .{created_session_0.slice()});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' FROM session_revision WHERE session_ref=?1 AND revision=1", .{created_session_0.slice()}));
     for ([_][:0]const u8{
         "UPDATE session SET provider='Codex' WHERE session_ref=?1",
         "UPDATE session_revision SET provider='9codex' WHERE session_ref=?1",
         "UPDATE session SET provider='codex.v2' WHERE session_ref=?1",
         "UPDATE session SET provider='' WHERE session_ref=?1",
         "UPDATE session SET provider='abcdefghijklmnopq' WHERE session_ref=?1",
-        "UPDATE session SET codec_options=x'' WHERE session_ref=?1",
+        "UPDATE session_revision SET codec='' WHERE session_ref=?1",
     }) |fault| try std.testing.expectError(error.StatementFailed, store_testing.sqliteExec(storage.sqliteDatabase(), fault, .{created_session_0.slice()}));
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
@@ -165,8 +165,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 test "a Session pinned to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='unknown-codec/1' WHERE session_ref=?1",
-        "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
+        "UPDATE session_revision SET codec='unknown-codec/1' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -174,7 +173,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session = try configureTestSession(&storage, "config");
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()}));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (fault) |sql| try store_testing.sqliteExec(storage.sqliteDatabase(), sql, .{session.slice()});

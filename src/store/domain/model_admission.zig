@@ -383,7 +383,7 @@ const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON bas
 
 pub const context_changed = rsql.Read(.{
     .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
-        ",(SELECT s.provider FROM session s WHERE s.session_ref=?1) AS provider,(SELECT s.codec FROM session s WHERE s.session_ref=?1) AS codec" ++
+        ",(SELECT s.provider FROM session s WHERE s.session_ref=?1) AS provider,(SELECT r.codec FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision WHERE o.session_ref=?1 AND o.admission_position=?2) AS codec" ++
         ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
     .Args = struct { session: []const u8, boundary: u64 },
@@ -426,7 +426,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 }
 
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
-    return "s.revision,s.provider,s.codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
+    return "s.revision,s.provider,(SELECT r.codec FROM session_revision r WHERE r.session_ref=s.session_ref AND r.revision=s.revision) AS codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
@@ -890,7 +890,7 @@ const insert_operation = rsql.Write(.{
         "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
         model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++ model_facts_domain.outputLimitSql("?14", "?18", "?19") ++ "," ++
         configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
-        "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
+        "selected_revision.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
         "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
     .Args = struct {
         operation_id: u64,

@@ -92,7 +92,7 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 pub const CurrentConfiguration = struct {
     workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: provider_name.Provider = undefined,
-    /// The codec the Session pinned at creation; admission and inspection both read it, not the provider's current codec.
+    /// The codec of the current revision's bags; a Session never changes codec, so every revision carries the same one.
     codec: provider_name.Codec = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
@@ -298,6 +298,8 @@ pub const Applied = struct {
     session: Bounded(session_id.max_reference_bytes),
     head: rsql.SessionHead,
     revision: u64,
+    /// The codec a Session's first revision pins (its provider's); later revisions keep the prior one.
+    codec: provider_name.Codec = undefined,
     instructions_id: ?u64,
     output_schema_id: ?u64,
     instructions_updated: bool,
@@ -512,7 +514,7 @@ pub const ConfigurationReads = struct {
 };
 
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,(SELECT r.codec FROM session_revision r WHERE r.session_ref=session.session_ref AND r.revision=session.revision) AS codec,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -530,8 +532,8 @@ const creation_facts = rsql.Read(.{
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,@now,?14,?15,?16,?17,?18)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -545,7 +547,6 @@ const insert_session = rsql.Write(.{
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
         label: ?[]const u8,
-        codec: []const u8,
         digest: [32]u8,
         created_seq: u64,
         workspace_key: u64,
@@ -575,7 +576,6 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .output_reservation = next.output_reservation,
         .reasoning_effort = next.reasoning_effort,
         .label = if (next.label) |*label| label.slice() else null,
-        .codec = @tagName(next.provider.codec()),
         .digest = workspace_digest.*,
         .created_seq = created_seq,
         .workspace_key = head.workspace_key.get(),
@@ -610,10 +610,11 @@ pub const update_session_sql = update_session.sql;
 
 const insert_revision = rsql.Write(.{
     .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
-        "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
+        "permission_mode,output_schema_content_id,provider,codec,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
         "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
+        "?5," ++
         "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool },
+    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool, codec: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1106,6 +1107,9 @@ fn accept(reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8
     try applied.session.set(target);
     applied.head = head;
     applied.revision = reads.next.revision;
+    // Interim: a Session pins the codec of its first revision (its provider then). A later revision
+    // carries the codec its saved revision holds, so a switch of codec is a later unit.
+    applied.codec = if (created) reads.next.provider.codec() else reads.next.codec;
     applied.instructions_updated = created or reads.configuration.instructions.state == .value;
     applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
@@ -1129,7 +1133,7 @@ pub noinline fn queueConfiguredCommand(
     answer: *const StoredAnswer,
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
-    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort) });
+    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort), .codec = @tagName(applied.codec) });
     if (applied.changes.count() == 0) return;
     const position = try (try a.positions(applied.head)).take(1);
     var fields = applied.changes.iterator();

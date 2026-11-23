@@ -75,9 +75,8 @@ const floor_facts = rsql.Read(.{
     .sql = "SELECT current.session_ref,current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
-        "current.output_reservation,current.context_window,r.provider,s.codec,r.model,base_revision.model AS base_model FROM model_operation current " ++
+        "current.output_reservation,current.context_window," ++ replay_wire.operationBindingSql("r") ++ ",base_revision.model AS base_model FROM model_operation current " ++
         "JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
-        "JOIN session s ON s.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
         "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
         "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position " ++

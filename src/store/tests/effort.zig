@@ -205,7 +205,7 @@ test "effort refusal requires an emitted Operation update across configure cycle
                 const session = (try storage.configure(&create, .{})).accepted.session;
                 // Retain the historical null case after fresh null requests became default resets.
                 if (initial == null) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
-                if (legacy_codec) try store_testing.exec(&storage, "UPDATE session SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
+                if (legacy_codec) try store_testing.exec(&storage, "UPDATE session_revision SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
                 if (scenario != .first) try answerTestTurn(&storage, &tmp, session.slice(), "wire-effort-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
                 var change: wire_request.ConfigureCommand = .{};
                 change.session = session;
