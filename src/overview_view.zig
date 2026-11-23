@@ -1498,7 +1498,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} pin unsure; recover {s}. Nothing reordered locally.", .{ &ref, handle });
+                    state.say(.attention, "! {s} pin unsure; recover {s}.", .{ &ref, handle });
                 },
             }
             state.next_list_ms = 0;
@@ -1508,17 +1508,14 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
             const at = state.pendingAt(kind, result.request.reference).?;
             const ref = result.request.reference;
             switch (result.outcome) {
-                .requested => {
-                    state.answer(at, .done, "");
-                    if (!result.request.archived) state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
-                },
+                .requested => state.answer(at, .done, ""),
                 .failed => |code| {
                     state.answer(at, .failed, code);
                     state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.archived) "archived" else "restored", code });
                 },
                 .unconfirmed => |handle| {
                     state.answer(at, .unknown, handle);
-                    state.say(.attention, "! {s} {s} unsure; recover {s}. Nothing hidden locally.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
+                    state.say(.attention, "! {s} {s} unsure; recover {s}.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
                 },
             }
             state.next_list_ms = 0;
@@ -2621,7 +2618,7 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
-pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. Upgrade or reopen with the selected Rui.";
+pub const upgrade_recovery = "! Host requests paused after Upgrade. Upgrade or reopen with the selected Rui.";
 
 fn admitHostRequest(state: *State) bool {
     if (!state.holdsHost()) return true;
@@ -2824,7 +2821,6 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Int
     if (organizationHeld(state, request.reference)) return .refused;
     if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
         effects.add(.{ .archive = request });
-        if (!request.archived) state.say(.quiet, "Restore request pending for {s}; waiting for the Host.", .{&request.reference});
         return .admitted;
     }
     return .refused;

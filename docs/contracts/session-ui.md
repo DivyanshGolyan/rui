@@ -703,7 +703,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable.`, or `! This directory is not writable.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
