@@ -252,28 +252,24 @@ pub fn parseInstanceId(text: []const u8) !InstanceId {
     return id;
 }
 
-pub const HostInfo = HostInfoWith(Routes);
-
-pub fn HostInfoWith(comptime Providers: type) type {
-    return struct {
-        version: []const u8,
-        type: []const u8,
-        store: []const u8,
-        instance: []const u8,
-        active_capacity: []const u8,
-        intake_capacity: []const u8 = "100",
-        descriptor_limit: []const u8 = "unlimited",
-        started_at: []const u8,
-        custody_occupied: []const u8,
-        paused: bool,
-        innodb_doublewrite: ?[]const u8 = null,
-        settings_digest: ?[]const u8 = null,
-        capabilities: struct {
-            bash: bool,
-            providers: Providers,
-        },
-    };
-}
+pub const HostInfo = struct {
+    version: []const u8,
+    type: []const u8,
+    store: []const u8,
+    instance: []const u8,
+    active_capacity: []const u8,
+    intake_capacity: []const u8 = "100",
+    descriptor_limit: []const u8 = "unlimited",
+    started_at: []const u8,
+    custody_occupied: []const u8,
+    paused: bool,
+    innodb_doublewrite: ?[]const u8 = null,
+    settings_digest: ?[]const u8 = null,
+    capabilities: struct {
+        bash: bool,
+        providers: Routes,
+    },
+};
 
 pub const ListSessions = session_list.ListSessions;
 

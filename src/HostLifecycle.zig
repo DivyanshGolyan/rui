@@ -107,7 +107,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
                 .incompatible => .incompatible,
                 .ready => .ready,
             },
-            .observe => seen.observed = if (client.observeHostForUpgrade(io, directory, null)) |value| observed: {
+            .observe => seen.observed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |value| observed: {
                 observed = value;
                 break :observed true;
             } else |_| false,
@@ -141,7 +141,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
                 request.dir = try sources.?.arena.allocator().dupe(u8, canonical);
                 seen.directory = .same;
             },
-            .confirm => seen.confirmed = if (client.observeHostForUpgradeProfile(io, directory, observed.profile, null)) |confirmed|
+            .confirm => seen.confirmed = if (client.observeHostForUpgrade(allocator, io, directory, null)) |confirmed|
                 sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.?.started
             else |_|
                 false,
@@ -156,8 +156,10 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
     };
 }
 
+/// Identity is the process, its Host instance and its Store. The wire a Host
+/// speaks is how it was read, not which Host it is.
 fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
-    return a.profile == b.profile and a.pid == b.pid and std.mem.eql(u8, &a.facts.instance, &b.facts.instance) and std.mem.eql(u8, a.facts.store.slice(), b.facts.store.slice());
+    return a.pid == b.pid and std.mem.eql(u8, &a.facts.instance, &b.facts.instance) and std.mem.eql(u8, a.facts.store.slice(), b.facts.store.slice());
 }
 
 fn sameSnapshot(a: *const identity.Snapshot, b: *const identity.Snapshot) bool {
@@ -252,7 +254,7 @@ fn refusal(allocator: std.mem.Allocator, result: process.Result) !?start_report.
 
 fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, context: process.Context) !client.HostStopResult {
     const directory = plan.sources.request.dir;
-    if (plan.observed.profile.historical()) {
+    if (plan.observed.foreign) {
         const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
         const result = try process.runIn(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", directory, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5), context);
         defer process.dispose(allocator, result);
@@ -308,7 +310,7 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
     defer if (before) |*peer| peer.deinit(allocator);
     var after: ?identity.Snapshot = null;
     defer if (after) |*peer| peer.deinit(allocator);
-    var facts: client.ReplacementFacts = undefined;
+    var facts: client.StatusFacts = undefined;
     // The probe borrows Store bytes from both answers until the pass ends.
     var own: protocol_reply.HostStatus = undefined;
     while (true) switch (activation.verdict(probe)) {
@@ -403,7 +405,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                 };
                 facts.same_executable = std.mem.eql(u8, executable, plan.snapshot.executable);
             },
-            .confirm_current => facts.current = if (client.observeHostForUpgradeProfile(init.io, plan.sources.request.dir, plan.observed.profile, null)) |value|
+            .confirm_current => facts.current = if (client.observeHostForUpgrade(private, init.io, plan.sources.request.dir, null)) |value|
                 (if (!sameHost(value, plan.observed) or (identity.generation(value.pid) catch 0) != plan.snapshot.started)
                     .changed
                 else
@@ -431,7 +433,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                 else |_|
                     .bad_frame;
             },
-            .reobserve => facts.before_stop = if (client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null)) |value| reobserved: {
+            .reobserve => facts.before_stop = if (client.observeHostForUpgrade(private, init.io, request.dir, null)) |value| reobserved: {
                 current = value;
                 break :reobserved if (sameHost(current, plan.observed)) .same else .changed;
             } else |_| .unreadable,
@@ -481,30 +483,26 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     }
 }
 
-test "upgrade lifecycle control cannot equate different wire profiles or instances" {
-    for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
-        var original: client.HostControlObservation = .{
-            .profile = profile,
-            .pid = 123,
-            .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } },
-        };
-        try original.facts.store.set("/fixture/store");
-        try std.testing.expect(sameHost(original, original));
-        var replacement = original;
-        for (std.enums.values(protocol_reply.HostInfoProfile)) |other| {
-            replacement.profile = other;
-            try std.testing.expectEqual(profile == other, sameHost(original, replacement));
-        }
-        replacement = original;
-        replacement.facts.instance = @splat(2);
-        try std.testing.expect(!sameHost(original, replacement));
-        replacement = original;
-        replacement.pid += 1;
-        try std.testing.expect(!sameHost(original, replacement));
-        replacement = original;
-        try replacement.facts.store.set("/fixture/other");
-        try std.testing.expect(!sameHost(original, replacement));
-    }
+test "upgrade lifecycle control equates a Host by process, instance and store, not by wire" {
+    var original: client.HostControlObservation = .{
+        .foreign = false,
+        .pid = 123,
+        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2 },
+    };
+    try original.facts.store.set("/fixture/store");
+    try std.testing.expect(sameHost(original, original));
+    var replacement = original;
+    replacement.foreign = true;
+    try std.testing.expect(sameHost(original, replacement));
+    replacement = original;
+    replacement.facts.instance = @splat(2);
+    try std.testing.expect(!sameHost(original, replacement));
+    replacement = original;
+    replacement.pid += 1;
+    try std.testing.expect(!sameHost(original, replacement));
+    replacement = original;
+    try replacement.facts.store.set("/fixture/other");
+    try std.testing.expect(!sameHost(original, replacement));
 }
 
 test "upgrade public commands preserve semantic sources and Host directory routing" {
