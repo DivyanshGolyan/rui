@@ -7,6 +7,13 @@ const store = @import("store.zig");
 const Store = store.Store;
 const testing = store.testing;
 
+/// Reads a search call and settles it, the way the Host settles a search that asks nothing.
+fn settleSearch(storage: *Store, arena: std.mem.Allocator, input: *const store.CoreActionInput, faults: store.Faults) !void {
+    const found = try loader.read(storage, arena, input);
+    try std.testing.expect(!found.reloads());
+    try loader.settle(storage, input, &found, arena, faults);
+}
+
 fn call(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, arguments: []const u8, id: []const u8, arena: std.mem.Allocator) !store.CoreActionInput {
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const encoded = try std.json.Stringify.valueAlloc(arena, arguments, .{});
@@ -80,7 +87,7 @@ test "find_tools loads saved name and description matches once in one revision a
             try std.testing.expect(input.tool == .find_tools);
             const revisions = try count(&storage, session.slice(), "session_revision");
             const changes = try count(&storage, session.slice(), "session_change");
-            try loader.run(&storage, alloc, &input, .{});
+            try settleSearch(&storage, alloc, &input, .{});
             try std.testing.expect(try loaded(&storage, session.slice(), "bash"));
             try std.testing.expect(try loaded(&storage, session.slice(), "read_transcript"));
             try std.testing.expect(!try loaded(&storage, session.slice(), "message_agent"));
@@ -90,7 +97,7 @@ test "find_tools loads saved name and description matches once in one revision a
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ session.slice(), donor.slice() }));
             const names = try result(&storage, session, alloc);
             try std.testing.expect(std.mem.indexOf(u8, names, "bash") != null and std.mem.indexOf(u8, names, "read_transcript") != null);
-            try loader.run(&storage, alloc, &input, .{});
+            try settleSearch(&storage, alloc, &input, .{});
             try std.testing.expectEqual(revisions + 1, try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id})}));
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -127,7 +134,7 @@ test "find_tools no match and bad words resolve without revisions then equality 
             for (cases, 0..) |args, index| {
                 const id = try std.fmt.allocPrint(alloc, "find-empty-{d}", .{index});
                 const input = try call(&storage, &tmp, session.slice(), args, id, alloc);
-                try loader.run(&storage, alloc, &input, .{});
+                try settleSearch(&storage, alloc, &input, .{});
                 try std.testing.expectEqual(@as(u64, 1), try count(&storage, session.slice(), "session_revision"));
                 try std.testing.expectEqual(@as(u64, 0), try count(&storage, session.slice(), "session_change"));
                 const code = if (index == 0) "succeeded" else "failed";
@@ -143,11 +150,11 @@ test "find_tools no match and bad words resolve without revisions then equality 
             const huge_input = try call(&storage, &tmp, session.slice(), huge, "find-huge", alloc);
             var small_buffer: [16 * 1024]u8 = undefined;
             var small: std.heap.FixedBufferAllocator = .init(&small_buffer);
-            try loader.run(&storage, small.allocator(), &huge_input, .{});
+            try settleSearch(&storage, small.allocator(), &huge_input, .{});
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='failed'", .{huge_input.binding.action_id}));
             try std.testing.expect(std.mem.indexOf(u8, try result(&storage, session, alloc), "words") != null);
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"bash\"}", "find-equality", alloc);
-            try loader.run(&storage, alloc, &input, .{});
+            try settleSearch(&storage, alloc, &input, .{});
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=2", .{session.slice()}));
             try std.testing.expect(!storage.isFenced());
         }
@@ -184,7 +191,7 @@ test "find_tools lists a match's whole first line, however many windows it takes
             const session = try configure(&storage, "find-long-line", &.{ "find_tools", "probe" }, &.{"find_tools"});
             try testing.submitTestMessage(&storage, &tmp, "find-long-line-input", "find-long-line-input", session.slice(), "find tools");
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"probe\"}", "long-line-call", alloc);
-            try loader.run(&storage, alloc, &input, .{});
+            try settleSearch(&storage, alloc, &input, .{});
             try std.testing.expect(try loaded(&storage, session.slice(), "probe"));
             const expected = try std.fmt.allocPrint(alloc, "- probe: {s}\n", .{description[0..line_bytes]});
             const bytes = try result(&storage, session, alloc);
@@ -228,7 +235,7 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             const session = try configure(&storage, "find-cap", &names, &.{ "find_tools", "match_00" });
             try testing.submitTestMessage(&storage, &tmp, "find-cap-input", "find-cap-input", session.slice(), "find tools");
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"match\"}", "find-cap-call", alloc);
-            try std.testing.expectError(error.InjectedCommitFailure, loader.run(&storage, alloc, &input, .{ .before_commit = true }));
+            try std.testing.expectError(error.InjectedCommitFailure, settleSearch(&storage, alloc, &input, .{ .before_commit = true }));
             try storage.close();
             open = false;
             try testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
@@ -238,19 +245,34 @@ test "find_tools caps eight sorted matches skips loaded and out of set and rolls
             try std.testing.expect(!try loaded(&storage, session.slice(), "match_01"));
             const retry = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             try std.testing.expectEqual(input.binding.action_id, retry.binding.action_id);
-            try loader.run(&storage, alloc, &retry, .{});
+            try settleSearch(&storage, alloc, &retry, .{});
             for (1..9) |index| try std.testing.expect(try loaded(&storage, session.slice(), names[index + 1]));
             try std.testing.expect(!try loaded(&storage, session.slice(), "match_09"));
             try std.testing.expect(!try loaded(&storage, session.slice(), "match_11"));
             try std.testing.expectEqual(@as(u64, 2), try count(&storage, session.slice(), "session_revision"));
             try std.testing.expectEqual(@as(u64, 1), try count(&storage, session.slice(), "session_change"));
-            try loader.run(&storage, alloc, &retry, .{});
+            try settleSearch(&storage, alloc, &retry, .{});
             try std.testing.expectEqual(@as(u64, 2), try count(&storage, session.slice(), "session_revision"));
             const bytes = try result(&storage, session, alloc);
             try std.testing.expect(std.mem.indexOf(u8, bytes, "Not part of the preview") == null);
             try std.testing.expect(!storage.isFenced());
         }
     }.run);
+}
+
+test "find_tools reload report names one server singularly and several as a comma list" {
+    var buffer: [512]u8 = undefined;
+    var one = std.Io.Writer.fixed(&buffer);
+    try loader.writeReload(&one, &.{.{ .server = "docs", .generation = 2 }});
+    try std.testing.expectEqualStrings("Asked 1 MCP server to list its tools again: docs. New tools can be searched for with find_tools after a server answers.", one.buffered());
+
+    var several = std.Io.Writer.fixed(&buffer);
+    try loader.writeReload(&several, &.{ .{ .server = "docs", .generation = 2 }, .{ .server = "search", .generation = 5 } });
+    try std.testing.expectEqualStrings("Asked 2 MCP servers to list their tools again: docs, search. New tools can be searched for with find_tools after a server answers.", several.buffered());
+
+    var none = std.Io.Writer.fixed(&buffer);
+    try loader.writeReload(&none, &.{});
+    try std.testing.expectEqualStrings("No MCP servers are configured, so nothing was reloaded.", none.buffered());
 }
 
 test "find_tools searches saved descriptions across MySQL chunk boundaries with literal words" {
@@ -307,7 +329,7 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
                 try testing.submitTestMessage(&storage, &tmp, input_key, input_key, session.slice(), "find tools");
                 const args = try std.fmt.allocPrint(alloc, "{{\"words\":\"{s}\"}}", .{item.words});
                 const input = try call(&storage, &tmp, session.slice(), args, try std.fmt.allocPrint(alloc, "chunk-call-{d}", .{index}), alloc);
-                try loader.run(&storage, alloc, &input, .{});
+                try settleSearch(&storage, alloc, &input, .{});
                 try std.testing.expectEqual(item.match, try loaded(&storage, session.slice(), "probe"));
                 if (item.match) {
                     const bytes = try result(&storage, session, alloc);

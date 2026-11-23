@@ -87,10 +87,16 @@ const FirstLine = struct {
     pub fn write(self: *FirstLine, bytes: []const u8) !void {
         if (self.ended) return;
         const end = std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len;
-        try self.writer.writeAll(bytes[0..end]);
+        try grown(self.writer.writeAll(bytes[0..end]));
         self.ended = end != bytes.len;
     }
 };
+
+/// The result text's writer allocates from the Action's arena, and an allocation it cannot make reaches it as
+/// `WriteFailed`. Out of memory is this transition's ordinary retry, so the write reports it as `OutOfMemory`.
+fn grown(result: std.Io.Writer.Error!void) error{OutOfMemory}!void {
+    return result catch error.OutOfMemory;
+}
 
 pub const FindTools = struct {
     pub const rounds = transition.rounds(.{
@@ -114,7 +120,7 @@ pub const FindTools = struct {
         refusal: ?[]const u8,
     };
     pub const Result = bool;
-    pub const Ordinary = store_core.Ordinary.action_attempt;
+    pub const Ordinary = store_core.Ordinary.action_attempt || error{OutOfMemory};
     pub const Guards = store_core.Ordinary.action_attempt;
     pub const Declined = error{};
 
@@ -187,7 +193,7 @@ pub const FindTools = struct {
         const arena = t.input.arena;
         t.matches = try arena.create(Matches);
         t.matches.* = .{};
-        if (t.input.refusal != null) return t.writeResult(r);
+        if (t.input.refusal != null or t.input.words.count == 0) return t.writeResult(r);
         t.pending = try arena.create(Candidates);
         t.pending.* = .{};
         tool_offer.project(r, t.configured(), t.loadedIntent(), t.pending);
@@ -282,11 +288,18 @@ pub const FindTools = struct {
         const out = &t.output.writer;
         const matches = t.matches;
         if (t.input.refusal) |reason| {
-            try out.print("Rui could not find tools: {s}. Nothing was loaded.", .{reason});
-        } else if (matches.count == 0) {
-            try out.print("No tools matched. {d} tools are still not loaded.", .{matches.remaining});
+            try grown(out.print("Rui could not find tools: {s}. Nothing was loaded.", .{reason}));
+            return t.lookupOutcome(r);
+        }
+        if (t.input.words.report) |report| {
+            try grown(out.writeAll(report));
+            if (t.input.words.count == 0) return t.lookupOutcome(r);
+            try grown(out.writeAll("\n"));
+        }
+        if (matches.count == 0) {
+            try grown(out.print("No tools matched. {d} tools are still not loaded.", .{matches.remaining}));
         } else {
-            try out.writeAll("Loaded these tools; they are available on your next request:\n");
+            try grown(out.writeAll("Loaded these tools; they are available on your next request:\n"));
             t.index = 0;
             return t.describe(r);
         }
@@ -297,13 +310,13 @@ pub const FindTools = struct {
         const out = &t.output.writer;
         while (t.index < t.matches.count) : (t.index += 1) {
             const row = &t.matches.rows[t.index];
-            try out.print("- {s}: ", .{row.name.slice()});
+            try grown(out.print("- {s}: ", .{row.name.slice()}));
             t.early = .{ .reading = .{
                 .windows = .{ .content_id = row.content_id.get(), .reference = .{ .length = row.byte_length, .digest = row.digest }, .buffer = t.scratch.window[0..content.verified_window_bytes] },
                 .first = .{ .writer = out },
             } };
             if (try t.early.reading.windows.next(r)) return .{ .round = .describe };
-            try out.writeAll("\n");
+            try grown(out.writeAll("\n"));
         }
         return t.lookupOutcome(r);
     }
@@ -312,7 +325,7 @@ pub const FindTools = struct {
         const reading = &t.early.reading;
         try reading.first.write(try reading.windows.window());
         if (try reading.windows.next(r)) return .{ .round = .describe };
-        try t.output.writer.writeAll("\n");
+        try grown(t.output.writer.writeAll("\n"));
         t.index += 1;
         return t.describe(r);
     }

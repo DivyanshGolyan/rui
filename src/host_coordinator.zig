@@ -15,8 +15,6 @@ const Event = union(enum) {
     progress: HostLifecycle.Stage,
     version: release.Version,
     entry: restart_all.Entry,
-    /// Leftover sockets with no running Host, counted only (#1855).
-    stale: usize,
     /// Only the live typed refusal line crosses the private pipe, never the
     /// unused backing bytes of Failure.message.
     refused: struct {
@@ -94,7 +92,6 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
         switch (parsed.value) {
             .progress => |stage| if (progress) |value| value.report(value.context, stage),
             .version => |version| result.version = version,
-            .stale => |count| result.stale = count,
             .failure => |failure| result.failure = switch (failure) {
                 .cancelled => error.Cancelled,
                 .unconfirmed => error.HostRestartFailed,
@@ -192,7 +189,6 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     defer batch.deinit(allocator);
     if (batch.version) |version| event(init, .{ .version = version });
     for (batch.entries) |entry| event(init, .{ .entry = entry });
-    if (batch.stale != 0) event(init, .{ .stale = batch.stale });
     if (batch.failure) |err| {
         stderr.diagnostic("Host restart could not finish ({s})\n", .{@errorName(err)});
         event(init, .{ .failure = if (err == error.Cancelled) .cancelled else .unconfirmed });
@@ -235,7 +231,6 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     inline for (std.enums.values(restart_all.Stage)) |stage| {
         try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .{ .stage = stage, .cause = "HostSocketStoreMismatch" } } } });
     }
-    try expectRoundTrip(Event{ .stale = 212 });
     try expectRoundTrip(Event{ .failure = .cancelled });
     try expectRoundTrip(Event{ .failure = .unconfirmed });
     try expectRoundTrip(Event.done);

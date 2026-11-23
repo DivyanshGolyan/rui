@@ -30,10 +30,10 @@ The canonical selector is at most **492 bytes**, so its 504-byte `/rui.sqlite3` 
 A longer raw CLI alias remains supported when the OS resolves it to a selector within that canonical bound; canonical overflow rejects before the Store lock, SQLite database or socket has an owner.
 Do not use Linux abstract sockets.
 Close-on-exec prevents descendants inheriting ownership.
-PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination.
+PID metadata, socket existence, timeout and absent results prove neither ownership nor effect termination; a free `rui.lock` held and verified as the inode its interface directory names proves no Host serves that directory.
 
 Protect socket/parent directory; validate Store identity/wire version before mutation.
-Reclaim only the expected stale socket after ownership.
+Remove a Host socket only while holding its interface directory's `rui.lock` (`host_endpoint`); discovery and startup both reclaim proven-dead endpoints.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
@@ -46,7 +46,7 @@ usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
 database components accept percent escapes.
 An explicit private `interface.dir` selects `interface.dir/rui.sock` (D211).
-Without it, MySQL uses a short private per-user interface directory derived from the canonical Host directory, so long Host directory names do not lengthen the socket path.
+Without it, Rui uses a short private per-user interface directory derived from the canonical Host directory, for SQLite and MySQL alike, so long Host directory names do not lengthen the socket path.
 Host admission, the starter and directory-based clients share that placement derivation; clients read saved sources without resolving the MySQL login.
 Unsaved Store/interface placement on a detached start is refused when it differs from the saved placement; save it with `rui host set` so subsequent clients can find it.
 The URL travels as a literal only in stdin; a document file names a secret source for it (an environment variable or a private file), and it never appears in argv or
@@ -61,9 +61,7 @@ On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and ever
 `GET_LOCK` only refuses early a second Host on the same database.
 One MySQL server is the one writer: multi-primary topologies, where `GET_LOCK` is local to one member, are not supported. Reclaim after a lost COMMIT reads `commit_seq` as final once it holds the lock, so on such a topology it may rerun a batch an old session still commits; the fence then stops the duplicate and the Host fences.
 Every message the Host sends starts with its session settings, so no message relies on settings an earlier one left on the server connection.
-There is no `host.lock`: the runtime's
-`rui.lock` reserves only its socket, preventing two different Stores from
-reclaiming each other's endpoint.
+There is no `host.lock`: every Host holds `rui.lock` in its interface directory for life, which reserves that directory's socket, so two Stores can neither share nor reclaim each other's live endpoint. OS temp cleaners (macOS periodic clean-tmps, systemd-tmpfiles) can delete an old, untouched `rui.lock` while its Host runs; this is not yet guarded against.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
@@ -153,7 +151,7 @@ Missing credentials do not change readiness.
 An owned Store without a usable listener/reply, or with a valid bounded 503 capacity/fencing error, is **owned but unavailable** (possibly starting, busy or shutting down; not a finer diagnosis); a complete malformed or unknown 503 reply is incompatible, distinct from an access failure.
 Lease and socket observations may race replacement, so they are not a durable ownership certificate and must not authorize effects.
 After listener closure, only the lease can still establish ownership; without it, completion remains unconfirmed.
-No status registry, separate listener, client SQLite, credential access or stale-owner reclamation is involved.
+No status registry, separate listener, client SQLite, credential access or Store-lease-based socket reclamation is involved.
 
 `rui host status [--store PATH]` displays these categories as observations.
 Explicit Store selection bypasses private preferences; otherwise it uses the same saved Store or HOME fallback as other destination-bearing commands.

@@ -2,6 +2,7 @@ const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
 const socket_os = @import("os").socket;
 const platform = @import("platform.zig");
+const host_endpoint = @import("host_endpoint.zig");
 const protocol = @import("protocol.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const content_value = @import("content_value.zig");
@@ -838,13 +839,13 @@ pub fn readForeignHostStatus(allocator: std.mem.Allocator, io: std.Io, executabl
 const foreign_status_limit = 64 * 1024;
 
 /// What one listed socket showed. `unanswered` is a refusal or missing socket
-/// at connect, after the retry: nothing accepted, so a complete process census
-/// can settle it. Every failure after a connection is an error instead.
-pub const SocketObservation = union(enum) { absent, unanswered: anyerror, observed: HostControlObservation };
+/// at connect, after the retry: nothing accepted, so the census looks at its
+/// endpoint once more. Every failure after a connection is an error instead.
+pub const SocketObservation = union(enum) { unanswered: anyerror, observed: HostControlObservation };
 
 /// A refused connect is retried until `refused_until` (default: 200 ms from
 /// now) for a Host that bound its socket but is not listening yet. A census
-/// passes one shared window for every socket, so leftover sockets cost one
+/// passes one shared window for every socket, so sockets that refuse cost one
 /// window in total, not one each.
 pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128, refused_until: ?i128) !SocketObservation {
     const until = hostObservationDeadline(io, deadline);
@@ -855,12 +856,6 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const fd = connection: {
         while (true) {
             const connected = connectRequest(.{ .io = io }, address, @min(until, refusedConnectWindow(io))) catch |err| {
-                switch (err) {
-                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
-                        if (platform.socketStoreIsUnowned(io, socket_path)) return .absent;
-                    },
-                    else => {},
-                }
                 if (err == error.ConnectionRefused) {
                     const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
                     if (remaining > 0) {
@@ -954,10 +949,8 @@ pub const UpgradeCandidate = struct {
     pid: ?c_int = null,
     generation: ?u64 = null,
     /// `unanswered` holds a socket that refused or vanished at connect until
-    /// the process census settles it: `stale` when a complete census found no
-    /// Host serving it (#1855), else `failed`. Callers never see `unanswered`.
-    /// A stale Host state is still unconfirmed, so nothing acts on it.
-    result: union(enum) { observed: HostControlObservation, failed: anyerror, unanswered: anyerror, stale },
+    /// `settleUnansweredSockets` decides it. Callers never see `unanswered`.
+    result: union(enum) { observed: HostControlObservation, failed: anyerror, unanswered: anyerror },
 
     pub fn deinit(self: UpgradeCandidate, allocator: std.mem.Allocator) void {
         if (self.socket) |path| allocator.free(path);
@@ -991,9 +984,10 @@ fn appendUpgradeCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayLi
     try candidates.append(allocator, candidate);
 }
 
-/// Union shallow private sockets with same-user process hints. A vanished or
-/// unreadable unrelated process is not a Host failure. Once argv identifies a
-/// Host, unreadable required sources are an explained per-Host failure instead.
+/// Union the endpoint census (which removes every endpoint it proves dead)
+/// with same-user process hints. A vanished or unreadable unrelated process is
+/// not a Host failure. Once argv identifies a Host, unreadable required
+/// sources are an explained per-Host failure instead.
 pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellation: ?*const Cancellation) ![]UpgradeCandidate {
     const requests: Requests = .{ .io = io, .cancellation = cancellation };
     try requests.check();
@@ -1002,20 +996,16 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         for (candidates.items) |candidate| candidate.deinit(allocator);
         candidates.deinit(allocator);
     }
-    const sockets = try platform.listHostSockets(allocator, io);
-    defer {
-        for (sockets) |socket| allocator.free(socket);
-        allocator.free(sockets);
-    }
-    // One window for the whole census: thousands of leftover sockets from
-    // test runs once cost 200 ms each, one after another, before any restart.
+    const sockets = try host_endpoint.census(allocator, io);
+    defer host_endpoint.freeSockets(allocator, sockets);
+    // One window for the whole census: sockets that refuse cost 200 ms in
+    // total, not 200 ms each, one after another, before any restart.
     const refused_until = refusedConnectWindow(io);
     for (sockets) |socket| {
         try requests.check();
         try candidates.ensureUnusedCapacity(allocator, 1);
         const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null, refused_until);
         const result: @FieldType(UpgradeCandidate, "result") = if (observed) |seen| switch (seen) {
-            .absent => continue,
             .unanswered => |err| .{ .unanswered = err },
             .observed => |facts| .{ .observed = facts },
         } else |err| .{ .failed = err };
@@ -1033,14 +1023,14 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }) },
     }) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        settleUnansweredSockets(candidates.items, .incomplete);
+        settleUnansweredSockets(allocator, io, &candidates);
         try candidates.append(allocator, .{ .result = .{ .failed = err } });
         return candidates.toOwnedSlice(allocator);
     };
     defer allocator.free(processes.stdout);
     defer allocator.free(processes.stderr);
     if (!processes.term.success()) {
-        settleUnansweredSockets(candidates.items, .incomplete);
+        settleUnansweredSockets(allocator, io, &candidates);
         try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessSnapshotUnavailable } });
         return candidates.toOwnedSlice(allocator);
     }
@@ -1075,7 +1065,13 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
             candidate.directory = canonical_directory;
             candidate.socket = try allocator.dupe(u8, paths.socket.slice());
             if (knownUpgradeSocket(candidates.items, paths.socket.slice())) break :result .{ .failed = error.HostPeerPidMismatch };
-            var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
+            var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| {
+                if (err != error.FileNotFound) break :result .{ .failed = err };
+                // No endpoint where this build derives it: a Host of a release
+                // that served elsewhere. Read it through its own executable,
+                // as a Host on another wire is, rather than through a path.
+                break :result if (readMovedHost(allocator, io, pid, paths.selector())) |observed| .{ .observed = observed } else |failure| .{ .failed = failure };
+            };
             defer peer.deinit(allocator);
             if (peer.pid != pid or peer.started != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
             const observed = observeHostForUpgrade(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
@@ -1084,24 +1080,51 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         };
         try appendUpgradeCandidate(allocator, &candidates, candidate);
     }
-    settleUnansweredSockets(candidates.items, .complete);
+    settleUnansweredSockets(allocator, io, &candidates);
     return candidates.toOwnedSlice(allocator);
 }
 
-/// The one place an unanswered socket is decided. After a complete process
-/// census that located every Host process's socket, a Host process resolving
-/// to a socket has replaced that socket's candidate, so one still unanswered
-/// has no live owner: a leftover, not a failed Host. Otherwise it stays a
-/// per-Host failure.
-fn settleUnansweredSockets(candidates: []UpgradeCandidate, census: enum { complete, incomplete }) void {
-    // A Host process whose socket stayed unknown might own any unanswered socket.
-    const located = census == .complete and for (candidates) |candidate| {
-        if (candidate.pid != null and candidate.socket == null) break false;
-    } else true;
-    for (candidates) |*candidate| switch (candidate.result) {
-        .unanswered => |err| candidate.result = if (located) .stale else .{ .failed = err },
-        else => {},
+fn readMovedHost(allocator: std.mem.Allocator, io: std.Io, pid: c_int, directory: []const u8) !HostControlObservation {
+    var observed: HostControlObservation = .{ .foreign = true, .pid = pid, .facts = try readForeignHost(allocator, io, pid, directory, hostObservationDeadline(io, null), .{}) };
+    try observed.host_directory.set(directory);
+    return observed;
+}
+
+/// Looks once more at the endpoint of each socket still unanswered after the
+/// process census, which a Host process resolving to it has replaced: one
+/// proven dead since goes, as the census would have removed it; any other
+/// stays a per-Host failure.
+fn settleUnansweredSockets(allocator: std.mem.Allocator, io: std.Io, candidates: *std.ArrayList(UpgradeCandidate)) void {
+    var index: usize = 0;
+    while (index < candidates.items.len) {
+        const candidate = &candidates.items[index];
+        const sighting: ?host_endpoint.Sighting = if (candidate.result == .unanswered) sighting: {
+            const interface = host_endpoint.Interface.init(std.fs.path.dirname(candidate.socket.?) orelse "") catch break :sighting .unprovable;
+            break :sighting host_endpoint.inspect(io, &interface);
+        } else null;
+        if (sighting != null and settleUnanswered(candidate, sighting.?) == .drop) {
+            candidate.deinit(allocator);
+            _ = candidates.orderedRemove(index);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+/// The one rule for an unanswered socket, given what a fresh look at its
+/// endpoint found.
+fn settleUnanswered(candidate: *UpgradeCandidate, sighting: host_endpoint.Sighting) enum { keep, drop } {
+    const err = switch (candidate.result) {
+        .unanswered => |err| err,
+        else => return .keep,
     };
+    switch (sighting) {
+        .reclaimed, .vanished => return .drop,
+        .busy, .unprovable => {
+            candidate.result = .{ .failed = err };
+            return .keep;
+        },
+    }
 }
 
 /// Process generation and retirement are independent of runtime/Store leases.
@@ -1456,11 +1479,10 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
             for (std.enums.values(Mode)) |mode| {
                 active_mode.* = mode;
                 phase.* = .listener;
-                var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-                defer {
-                    listener.deinit(io);
-                    std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-                }
+                var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+                defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+                var listener = try endpoint.listen(.{});
+                defer listener.deinit(io);
                 var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 phase.* = .peer_spawn;
                 const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
@@ -1611,6 +1633,9 @@ test "MySQL Host status bypasses filesystem locks and lock ownership stays unkno
     const runtime = try std.fmt.bufPrintSentinel(&runtime_buffer, "{s}/runtime", .{tmp.root[0..tmp.root_len]}, 0);
     var socket_buffer: [platform.max_launch_socket_path_bytes]u8 = undefined;
     const socket = try std.fmt.bufPrint(&socket_buffer, "{s}/rui.sock", .{runtime});
+    var endpoint = try host_endpoint.claim(io, try .init(runtime));
+    var claimed = true;
+    defer if (claimed) endpoint.retire() catch {};
     var lease: platform.StoreLease = undefined;
     try lease.acquireMysql(io, runtime, socket);
     var leased = true;
@@ -1619,6 +1644,8 @@ test "MySQL Host status bypasses filesystem locks and lock ownership stays unkno
     const store_id = "0123456789abcdef0123456789abcdef";
     try std.testing.expectEqual(HostLockState.failure, hostLockState(io, store_id));
     try std.testing.expectEqual(std.meta.Tag(protocol_reply.HostStatus).owned_unavailable, std.meta.activeTag(hostStatusUntil(io, store_id, null)));
+    try endpoint.retire();
+    claimed = false;
     lease.release();
     leased = false;
     try tmp.dir.deleteTree(io, "runtime");
@@ -5881,11 +5908,10 @@ test "transport cancellation returns before silent peer release and retains pinn
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     var token: Cancellation = .{};
     var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .captured = &captured };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -6031,11 +6057,10 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         defer lease.release();
         try lease.prepareForServing(false);
         const paths = lease.paths;
-        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-        }
+        var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+        defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+        var listener = try endpoint.listen(.{});
+        defer listener.deinit(io);
         var token: Cancellation = .{};
         var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .root = root, .kind = kind, .sink = .{ .fail = kind == .result } };
         const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -6550,44 +6575,47 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
     try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1, null));
 }
 
-test "socket upgrade discovery distinguishes stale free Store from refused held Store" {
+test "socket upgrade discovery shares one refusal window and settles an unanswered socket by its endpoint lock" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
-    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const parent = buffer[0..try tmp.dir.realPath(io, &buffer)];
-    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{parent});
-    var lease = try platform.StoreLease.acquire(io, root);
-    var held = true;
-    defer if (held) lease.release();
-    try lease.prepareForServing(false);
-    const socket = lease.paths.socket;
-    defer {
-        if (!held) {
-            lease = platform.StoreLease.acquire(io, root) catch unreachable;
-            held = true;
-        }
-        lease.retireSocket() catch {};
-    }
-    var listener = try lease.listen(.{});
-    try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null));
+    var interface_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const interface = try std.fmt.bufPrint(&interface_buffer, "{s}/interface", .{tmp.root[0..tmp.root_len]});
+    var endpoint = try host_endpoint.claim(io, try .init(interface));
+    defer endpoint.retire() catch {};
+    var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+    const socket = try endpoint.socketPath(&socket_buffer);
+    var listener = try endpoint.listen(.{});
+    try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket, null, null));
     listener.deinit(io);
     const refused_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null)).unanswered);
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket, null, null)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - refused_at >= refused_connect_retry_ns);
-    // A census's shared window that has already closed buys no retry: a held,
-    // refused socket answers at once, so leftover sockets cost one window.
+    // A census's shared window that has already closed buys no retry: a
+    // refused socket answers at once, so such sockets cost one window.
     const shared_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, shared_at)).unanswered);
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket, null, shared_at)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - shared_at < 25 * std.time.ns_per_ms);
-    lease.release();
-    held = false;
-    const stale_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expect(try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null) == .absent);
-    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
-    _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
+
+    var candidates: std.ArrayList(UpgradeCandidate) = .empty;
+    defer {
+        for (candidates.items) |candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    // While its holder lives, an unanswered socket is a failure and stays.
+    try candidates.append(allocator, .{ .socket = try allocator.dupe(u8, socket), .result = .{ .unanswered = error.ConnectionRefused } });
+    settleUnansweredSockets(allocator, io, &candidates);
+    try std.testing.expectEqual(error.ConnectionRefused, candidates.items[0].result.failed);
+    _ = try std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false });
+    // Once its holder is gone, the next look proves it dead and removes it.
+    candidates.items[0].result = .{ .unanswered = error.ConnectionRefused };
+    endpoint.held.?.lock.close(io);
+    endpoint.held.?.dir.close(io);
+    endpoint.held = null;
+    settleUnansweredSockets(allocator, io, &candidates);
+    try std.testing.expectEqual(@as(usize, 0), candidates.items.len);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false }));
 }
 
 test "pin captures preserve pin and unpin intent through generated and explicit recovery" {
@@ -6668,40 +6696,38 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expect(candidates.items[1].socket == null);
 }
 
-test "#1855 only a socket unanswered at connect, after a complete census, is a stale leftover" {
+test "an unanswered socket goes only when a fresh look proves its endpoint dead, and any other result stays" {
     var observation: HostControlObservation = .{ .foreign = false, .facts = std.mem.zeroes(StatusFacts), .pid = 42 };
     try observation.host_directory.set("/host");
-    const Settled = enum { stale, failed, observed };
-    const Row = struct { candidate: UpgradeCandidate, complete: Settled, incomplete: Settled };
+    const Settled = enum { dropped, failed, observed };
+    const Row = struct { candidate: UpgradeCandidate, dead: Settled, alive: Settled };
     const rows = [_]Row{
-        .{ .candidate = .{ .socket = "/refused.sock", .result = .{ .unanswered = error.ConnectionRefused } }, .complete = .stale, .incomplete = .failed },
-        .{ .candidate = .{ .socket = "/vanished.sock", .result = .{ .unanswered = error.FileNotFound } }, .complete = .stale, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/refused/rui.sock", .result = .{ .unanswered = error.ConnectionRefused } }, .dead = .dropped, .alive = .failed },
+        .{ .candidate = .{ .socket = "/vanished/rui.sock", .result = .{ .unanswered = error.FileNotFound } }, .dead = .dropped, .alive = .failed },
         // Same error names after a connection: a live Host whose Store vanished.
-        .{ .candidate = .{ .socket = "/accepted.sock", .result = .{ .failed = error.FileNotFound } }, .complete = .failed, .incomplete = .failed },
-        .{ .candidate = .{ .socket = "/old-wire.sock", .result = .{ .failed = error.WrongWireVersion } }, .complete = .failed, .incomplete = .failed },
-        .{ .candidate = .{ .socket = "/silent.sock", .result = .{ .failed = error.TransferInactive } }, .complete = .failed, .incomplete = .failed },
-        .{ .candidate = .{ .socket = "/live.sock", .directory = "/host", .pid = 42, .result = .{ .observed = observation } }, .complete = .observed, .incomplete = .observed },
-        .{ .candidate = .{ .socket = "/owned.sock", .pid = 43, .result = .{ .failed = error.HostPeerPidMismatch } }, .complete = .failed, .incomplete = .failed },
+        .{ .candidate = .{ .socket = "/accepted/rui.sock", .result = .{ .failed = error.FileNotFound } }, .dead = .failed, .alive = .failed },
+        .{ .candidate = .{ .socket = "/old-wire/rui.sock", .result = .{ .failed = error.WrongWireVersion } }, .dead = .failed, .alive = .failed },
+        .{ .candidate = .{ .socket = "/silent/rui.sock", .result = .{ .failed = error.TransferInactive } }, .dead = .failed, .alive = .failed },
+        .{ .candidate = .{ .socket = "/live/rui.sock", .directory = "/host", .pid = 42, .result = .{ .observed = observation } }, .dead = .observed, .alive = .observed },
+        .{ .candidate = .{ .socket = "/owned/rui.sock", .pid = 43, .result = .{ .failed = error.HostPeerPidMismatch } }, .dead = .failed, .alive = .failed },
+        .{ .candidate = .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } }, .dead = .failed, .alive = .failed },
     };
-    // A Host process whose socket stayed unknown might own any unanswered socket.
-    const unlocated: Row = .{ .candidate = .{ .pid = 44, .result = .{ .failed = error.HostServeStoreMissing } }, .complete = .failed, .incomplete = .failed };
-    inline for (.{ false, true }) |with_unlocated| {
-        inline for (.{ .complete, .incomplete }) |census| {
-            const all = if (with_unlocated) rows ++ [_]Row{unlocated} else rows;
-            var candidates: [all.len]UpgradeCandidate = undefined;
-            for (all, &candidates) |row, *candidate| candidate.* = row.candidate;
-            settleUnansweredSockets(&candidates, census);
-            for (all, candidates) |row, candidate| {
-                const expected = @field(row, @tagName(census));
-                try std.testing.expectEqual(if (with_unlocated and expected == .stale) Settled.failed else expected, switch (candidate.result) {
-                    .stale => Settled.stale,
-                    .failed => Settled.failed,
-                    .observed => Settled.observed,
-                    .unanswered => unreachable,
-                });
-            }
-        }
-    }
+    for (rows) |row| for (std.enums.values(host_endpoint.Sighting)) |sighting| {
+        var candidate = row.candidate;
+        const decision = settleUnanswered(&candidate, sighting);
+        const expected = switch (sighting) {
+            .reclaimed, .vanished => row.dead,
+            .busy, .unprovable => row.alive,
+        };
+        try std.testing.expectEqual(expected, if (decision == .drop) Settled.dropped else switch (candidate.result) {
+            .failed => |err| failed: {
+                if (row.candidate.result == .unanswered) try std.testing.expectEqual(row.candidate.result.unanswered, err);
+                break :failed Settled.failed;
+            },
+            .observed => Settled.observed,
+            .unanswered => unreachable,
+        });
+    };
 }
 
 test "upgrade process retirement covers macOS zombie generations and living cleanup tails" {
@@ -6849,15 +6875,16 @@ test "capture routing round trips six placements without conflating selector and
         try host.writeFile(io, .{ .sub_path = "host.json", .data = document.written(), .flags = .{ .permissions = .fromMode(0o600) } });
         var paths = try platform.resolveClientPaths(io, directory);
         if (kind == .mysql) try paths.store_identity.set("0123456789abcdef0123456789abcdef");
+        var endpoint: ?host_endpoint.Endpoint = null;
         var listener: ?std.Io.net.Server = null;
         var future: ?std.Io.Future(anyerror!void) = null;
         if (kind == .mysql) {
-            var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .permissions = .fromMode(0o700) });
-            runtime_dir.close(io);
-            listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+            listener = try endpoint.?.listen(.{});
             future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
         }
         defer if (kind == .mysql) std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("routing test runtime cleanup failed");
+        defer if (endpoint) |*held| held.retire() catch @panic("unable to retire fixture endpoint");
         defer if (listener) |*server| server.deinit(io);
         defer if (future) |*pending| {
             _ = pending.cancel(io) catch {};
