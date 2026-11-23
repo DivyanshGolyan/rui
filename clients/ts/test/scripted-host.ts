@@ -175,4 +175,3 @@ export async function failureOf(call: Promise<unknown>): Promise<unknown> {
 		return error;
 	}
 }
-
