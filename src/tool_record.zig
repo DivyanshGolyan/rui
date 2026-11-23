@@ -792,6 +792,12 @@ test "a remote name joins a digest only when it differs from the offered name" {
 fn expectAppPolicyDigests() !void {
     const base: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{} };
     const base_digest = recordDigest(&base);
+    // The default app record's digest is pinned: a change to canonical() or to the app policy tag fails here.
+    const default_app_pinned = [32]u8{
+        0x2B, 0xA9, 0x41, 0xA8, 0x68, 0x77, 0x99, 0xED, 0x64, 0xC2, 0xA8, 0x0B, 0xD4, 0x9D, 0x0E, 0x0A,
+        0x2F, 0xAD, 0x46, 0xC1, 0xAC, 0xAE, 0xED, 0x39, 0x3E, 0x09, 0x13, 0x6D, 0x3F, 0xAE, 0x2C, 0xCD,
+    };
+    try std.testing.expectEqualSlices(u8, &default_app_pinned, &base_digest);
     const variants = [_]AppPolicy{
         .{ .replay = .safe, .restart_limit = 3, .wait_ms = default_app_wait_ms },
         .{ .replay = .safe, .restart_limit = 4, .wait_ms = default_app_wait_ms },
