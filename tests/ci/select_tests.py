@@ -451,6 +451,8 @@ RULES = (
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "WIR-4 published request schemas and generated wire contract"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
+    (("README.md", "docs/integrating-rui.md"), ("ts-client",), ("ts-client",),
+     "The TypeScript examples a new user copies: clients/ts/test/doc-examples.test.ts runs them"),
     (("clients/ts/test/fixtures/empty-creation.ts", "clients/ts/test/fixtures/preferences-bridge.ts"),
      ("settings-integration",), ("settings-integration",),
      "Three-client creation parity uses the TypeScript helper against both Store engines"),

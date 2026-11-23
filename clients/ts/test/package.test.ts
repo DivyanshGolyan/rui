@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import { PLATFORM_PACKAGES, resolveBinary } from "../src/binary.ts";
+import { RuiUnavailableError } from "../src/errors.ts";
 
 const binary = process.env.RUI_BINARY;
 const platform = PLATFORM_PACKAGES[process.platform]?.[process.arch];
@@ -18,12 +19,17 @@ const skip = !binary
 			? "run npm ci first: packing compiles the client"
 			: false;
 
-test("an explicit binary wins, and without a platform package the answer is rui on PATH", () => {
+test("TS-10 binary resolution refuses without a platform package", () => {
 	assert.equal(resolveBinary("/opt/rui"), "/opt/rui");
-	assert.equal(resolveBinary(undefined, { platform: "plan9", arch: "mips" }), "rui");
+	assert.equal(resolveBinary("/opt/rui", { platform: "win32", arch: "x64" }), "/opt/rui");
+	for (const [platform, arch] of [["darwin", "x64"], ["win32", "x64"], ["linux", "ia32"]] as const) {
+		assert.throws(() => resolveBinary(undefined, { platform, arch }), (error: unknown) =>
+			error instanceof RuiUnavailableError && error.message.startsWith(`Rui has no build for ${platform} on ${arch}.`) && /macOS on Apple Silicon/.test(error.message));
+	}
 	const empty = mkdtempSync(join(tmpdir(), "rui-ts-nopkg-"));
 	try {
-		assert.equal(resolveBinary(undefined, { platform: "linux", arch: "x64", from: join(empty, "x.js") }), "rui");
+		assert.throws(() => resolveBinary(undefined, { platform: "linux", arch: "x64", from: join(empty, "x.js") }), (error: unknown) =>
+			error instanceof RuiUnavailableError && /ruicode-linux-x64 package.*not installed/.test(error.message));
 	} finally {
 		rmSync(empty, { recursive: true, force: true });
 	}
@@ -40,6 +46,7 @@ test("the packed tarballs install and start a Host from the platform package", {
 		execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", join(packs, "rui-0.0.1.tgz"), join(packs, `rui${(platform as string).slice("ruicode".length)}-0.0.1.tgz`)], { cwd: app, stdio: "inherit" });
 		const installed = JSON.parse(readFileSync(join(app, "node_modules", "ruicode", "package.json"), "utf8"));
 		assert.deepEqual(Object.keys(installed.optionalDependencies).sort(), ["ruicode-darwin-arm64", "ruicode-linux-arm64", "ruicode-linux-x64"]);
+		assert.deepEqual(installed.os, ["linux", "darwin"]);
 		writeFileSync(
 			join(app, "run.mjs"),
 			`import { readlinkSync } from "node:fs";
