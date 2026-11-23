@@ -182,10 +182,15 @@ pub const Stream = PerCodec("Stream");
 
 pub const InterpretScratch = EachCodec("InterpretScratch");
 
-pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
-    return switch (codec) {
-        inline else => |tag| @unionInit(Stream, @tagName(tag), module(tag).begin(operation)),
-    };
+/// Starts `codec`'s stream state at `stream`, its owner's address: a codec's state can be kilobytes,
+/// so it is never built in the caller's frame and copied.
+pub noinline fn begin(stream: *Stream, codec: protocol.Codec, operation: codec_abi.Operation) void {
+    switch (codec) {
+        inline else => |tag| {
+            stream.* = @unionInit(Stream, @tagName(tag), undefined);
+            @field(stream.*, @tagName(tag)) = module(tag).begin(operation);
+        },
+    }
 }
 
 pub noinline fn normalize(stream: *Stream, data: []const u8, out: *codec_abi.Normalized) void {

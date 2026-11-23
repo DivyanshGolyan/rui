@@ -288,6 +288,8 @@ pub const AnswerSelection = struct {
 pub const Interpret = struct {
     scratch: codecs.InterpretScratch,
     grammar: Grammar,
+    /// The pinned codec's stream state lives at its owner's address, not in `read`'s frame.
+    stream: codecs.Stream,
 };
 
 pub const Interpretation = union(enum) {
@@ -383,7 +385,8 @@ fn read(
     defer pages.unmapReadOnly(events);
     const grammar = &storage.grammar;
     grammar.begin(codec, metadata, operation, rejection, provider_failure, &validated.evidence);
-    var stream = codecs.begin(codec, switch (operation) {
+    const stream = &storage.stream;
+    codecs.begin(stream, codec, switch (operation) {
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
@@ -411,13 +414,13 @@ fn read(
             var normalized: codec_abi.Normalized = .{};
             if (lines == 1) {
                 if (first_line.len == 0) return error.EmptySseData;
-                codecs.normalize(&stream, first_line, &normalized);
+                codecs.normalize(stream, first_line, &normalized);
                 // The copies read the capture, which a discard leaves alone.
                 if (normalized.discard) try event_data.truncate(whole_start);
                 try appendFragments(event_data, limit, first_line, &normalized);
             } else {
                 const staged = events[@intCast(staged_start)..@intCast(event_data.length)];
-                codecs.normalize(&stream, staged, &normalized);
+                codecs.normalize(stream, staged, &normalized);
                 if (normalized.discard) {
                     // The open event's bytes go, and the staged data goes with them unless it is
                     // the whole event, which then moves to the event's start.
@@ -437,7 +440,7 @@ fn read(
                 }
             }
             if (normalized.whole) {
-                try grammar.event(&stream, &storage.scratch, events[@intCast(whole_start)..@intCast(event_data.length)], whole_start, raw_start);
+                try grammar.event(stream, &storage.scratch, events[@intCast(whole_start)..@intCast(event_data.length)], whole_start, raw_start);
                 whole_start = event_data.length;
             }
             lines = 0;
@@ -462,7 +465,7 @@ fn read(
     // An open raw event is an unterminated SSE line group. Otherwise the codec decides what an
     // open normalized event means at the end of the stream.
     if (lines != 0) return error.IncompleteSseEvent;
-    if (codecs.finish(&stream)) |reason| return reasonError(reason);
+    if (codecs.finish(stream)) |reason| return reasonError(reason);
     if (whole_start != event_data.length) return error.IncompleteSseEvent;
     try event_data.seal();
     validated.source_length = event_data.length;
@@ -984,7 +987,8 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     var evidence: Evidence = .{ .response_id = .{ .len = 0 }, .served_model = .{ .len = 0 } };
     grammar.begin(pinned, &records, operation, &rejection, testingProviderFailure(), &evidence);
     grammar.item_count = ordinal;
-    var stream = codecs.begin(pinned, switch (operation) {
+    var stream: codecs.Stream = undefined;
+    codecs.begin(&stream, pinned, switch (operation) {
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
@@ -1012,7 +1016,8 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
     defer pages.unmapReadOnly(bytes);
     const data = try std.mem.concat(std.testing.allocator, u8, &.{ "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":", bytes[@intCast(start)..], "}}" });
     defer std.testing.allocator.free(data);
-    var stream = codecs.begin(pinned, .assistant_response);
+    var stream: codecs.Stream = undefined;
+    codecs.begin(&stream, pinned, .assistant_response);
     const answer = codecs.interpretEvent(&stream, &testing_interpret.scratch, data);
     return switch (answer.what) {
         .completed => |completed| switch (completed.usage) {
