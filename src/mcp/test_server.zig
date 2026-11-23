@@ -11,7 +11,7 @@ hold_reply: bool = false,
 /// The 1-based ordinary request whose reply the test sends with `releaseGated`, or 0 for none.
 gate_request: usize = 0,
 gated_fd: std.atomic.Value(std.posix.fd_t) = .init(-1),
-/// Answers `subscriptions/listen` requests. Without it those requests take the ordinary replies.
+/// Answers `subscriptions/listen` requests. Without it a subscribe is refused with 404 and takes no scripted reply.
 listening: ?*Listening = null,
 request_received: std.atomic.Value(bool) = .init(false),
 /// Requests answered so far, counted before the reply is sent.
@@ -242,6 +242,9 @@ pub fn stop(self: *Script) void {
     address.setPort(self.port);
     if (address.connect(std.testing.io, .{ .mode = .stream })) |stream| stream.close(std.testing.io) else |_| {}
     if (self.thread) |thread| thread.join();
+    // The serve thread may have gated a request after the swap above; it has stopped now.
+    const late = self.gated_fd.swap(-1, .acq_rel);
+    if (late >= 0) _ = std.c.close(late);
     if (self.listening) |listening| listening.close();
     _ = std.c.close(self.listener);
 }
