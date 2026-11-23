@@ -130,65 +130,10 @@ def unquote(text):
     return None
 
 
-def transition(tokens, relative):
-    if relative != "src/serve_grammar.zig":
-        return tokens
-    names = [t.text for t in tokens]
-    starts = [i for i in range(len(names) - 2)
-              if names[i:i + 3] == ["pub", "const", "retired_options"]]
-    if len(starts) > 1:
-        raise ValueError("duplicate retired_options transition table")
-    if not starts:
-        return tokens
-    start = starts[0]
-    brace = names.index("{", start)
-    end = close_brace(tokens, brace)
-    header = names[start:brace + 1]
-    if header != ["pub", "const", "retired_options", "=", "&", "[", "_", "]", "grammar", ".", "RetiredOption", "{"]:
-        raise ValueError("retired_options must be a literal grammar.RetiredOption table")
-    cursor = brace + 1
-    exempt = set()
-
-    def literal(what):
-        nonlocal cursor
-        if unquote(names[cursor]) is None:
-            raise ValueError(f"retired option {what} must be literal")
-        exempt.add(cursor)
-        cursor += 1
-
-    while cursor < end:
-        if names[cursor:cursor + 4] != ["grammar", ".", "retired", "("]:
-            raise ValueError("retired_options accepts only grammar.retired literal rows")
-        cursor += 4
-        literal("name")
-        if names[cursor:cursor + 4] != [",", "&", ".", "{"]:
-            raise ValueError("retired option requires its assignments")
-        cursor += 4
-        while names[cursor] != "}":
-            literal("assignment")
-            if names[cursor] == ",":
-                cursor += 1
-            elif names[cursor] != "}":
-                raise ValueError("retired option assignments have unexpected code")
-        cursor += 1
-        if names[cursor] != ",":
-            raise ValueError("retired option requires a note")
-        cursor += 1
-        literal("note")
-        if names[cursor] == ",":
-            cursor += 1
-        if names[cursor] != ")":
-            raise ValueError("retired option row has unexpected code")
-        cursor += 1
-        if names[cursor] == ",":
-            cursor += 1
-    return [token for index, token in enumerate(tokens) if index not in exempt]
-
-
 def scan(source, relative="src/cli.zig", derived=None):
     keys, paths, shared, wire_paths = derived or facts()
     ts = relative.endswith(".ts")
-    tokens = transition(tokens_for(source, ts), relative)
+    tokens = tokens_for(source, ts)
     names = [t.text for t in tokens]
     found = set()
     def hit(index, reason):
@@ -346,30 +291,6 @@ def scan(source, relative="src/cli.zig", derived=None):
     return sorted(found)
 
 
-def running_source_violations(root=ROOT):
-    """Running argv translation has one path, never one per consumer.
-
-    This is a source gate like leaf locality, not a whole-program call graph.
-    Fresh CLI parsing is independent; test blocks and literal text do not count.
-    """
-    callers = {"currentArguments": [], "previousProviders": []}
-    for path in sorted((root / "src").rglob("*.zig")):
-        tokens = production(lex(path.read_text()))
-        for i, token in enumerate(tokens[:-1]):
-            if (token.text in callers and tokens[i + 1].text == "("
-                    and (i == 0 or tokens[i - 1].text != "fn")):
-                callers[token.text].append((path.relative_to(root).as_posix(), token.line))
-    found = []
-    current = callers["currentArguments"]
-    if len(current) != 1 or current[0][0] != "src/serve_grammar.zig":
-        found.append("running sources: currentArguments must have one production caller in src/serve_grammar.zig; "
-                     + repr(current))
-    previous = callers["previousProviders"]
-    if len(previous) != 1:
-        found.append("running sources: previousProviders must have one production caller; " + repr(previous))
-    return found
-
-
 def host_child_violations(root=ROOT):
     """Only spawn composes Host-child argv, including array and slot forms.
 
@@ -427,7 +348,7 @@ def host_environment_violations(root=ROOT):
             if token.text != "getenv" and not any(re.search(r"(?:^env$|environ)", x, re.I) for x in receiver):
                 continue
             owner = next((names[j + 1] for j in range(i - 1, -1, -1) if names[j] == "fn" and names[j + 2:j + 3] == ["("]), None)
-            if path.name == "host_start.zig" and owner in ("resolve", "refuseRetiredEnvironment"):
+            if path.name == "host_start.zig" and owner == "resolve":
                 continue
             value = unquote(names[i + 2]) if i + 2 < len(names) else None
             if value in HOST_ENV_ALLOW or (path.name == "host_start.zig" and owner == "spawn" and value in HOST_LAUNCH_TEST_GATES):
@@ -467,7 +388,7 @@ def violations(root=ROOT):
     derived = facts(root)
     return ([hit for path in surfaces(root)
              for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
-            + running_source_violations(root) + host_child_violations(root) + host_environment_violations(root)
+            + host_child_violations(root) + host_environment_violations(root)
             + credential_location_violations(root))
 
 

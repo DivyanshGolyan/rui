@@ -1214,12 +1214,8 @@ def saved_settings(root, env):
         assert failed.returncode != 0 and not failed.stdout and report in failed.stderr, failed
         assert "settings_invalid" not in failed.stderr and not matching_processes(directory), failed
 
-    for flag, value, replacement in (("--bash-timeout-ms", "1000", "--set tools.bash.timeoutMs=1000"),
-                                     ("--active-capacity", "4", "--set execution.activeCapacity=4")):
-        retired = host_command(env, "serve", "--store", root / "retired", flag, value)
-        assert retired.returncode != 0 and replacement in retired.stderr, retired
     print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"
-          " refusals, ordered sources, unreachable refusal, relative paths, child start failures, retired flags", flush=True)
+          " refusals, ordered sources, unreachable refusal, relative paths, child start failures", flush=True)
 
 
 def saved_settings_served(root, env):

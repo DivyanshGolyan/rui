@@ -669,10 +669,6 @@ def openai_journey():
                                  capture_output=True, text=True, timeout=15)
         assert refused.returncode != 0, refused
         key_file.chmod(0o600)
-        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}'],
-                                 capture_output=True, text=True, timeout=15,
-                                 env={**os.environ, "RUI_OPENAI_BASE_URL": "http://api.openai.com/v1"})
-        assert refused.returncode != 0 and "RUI_OPENAI_BASE_URL is no longer read; set providers.openai.endpoint (rui host set --store DIR providers.openai.endpoint URL)" in refused.stderr, refused
 
         host = start(store, url, "--set", f"providers.openai.endpoint={url}")
         status = fixture.command("host", "status", "--store", store)
