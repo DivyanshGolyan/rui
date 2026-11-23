@@ -120,6 +120,32 @@ test "an outside SQLite writer cannot take the open Store's lock" {
     try std.testing.expect((try reopened.inspectSessionForTesting(configured.accepted.session.slice())).found);
 }
 
+test "settle syncs the WAL once for every commit since the last sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const version = struct {
+        fn of(database: *c.sqlite3) !u32 {
+            var value: u32 = 0;
+            if (c.sqlite3_file_control(database, "main", c.SQLITE_FCNTL_DATA_VERSION, &value) != c.SQLITE_OK) return error.TestUnexpectedResult;
+            return value;
+        }
+    }.of;
+    var synced: u32 = 0;
+    try storage.engine.sqlite.settle(&synced);
+    try std.testing.expectEqual(try version(storage.sqliteDatabase()), synced);
+    const before = synced;
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE TABLE settle_probe(x)");
+    try sqlite.exec(storage.sqliteDatabase(), "INSERT INTO settle_probe VALUES (1)");
+    try std.testing.expect(try version(storage.sqliteDatabase()) != before);
+    try storage.engine.sqlite.settle(&synced);
+    try std.testing.expectEqual(try version(storage.sqliteDatabase()), synced);
+    try storage.settle();
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "production Store applies finite durable SQLite settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -130,7 +156,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA foreign_keys"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA mmap_size"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA temp_store"));
-    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA synchronous"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA synchronous"));
     try std.testing.expectEqual(@as(u32, 4194304), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA journal_size_limit"));
     try std.testing.expectEqualStrings("exclusive", (sqlite.diagnosticTextPragma(storage.sqliteDatabase(), "PRAGMA locking_mode") orelse return error.TestUnexpectedResult).slice());
     try std.testing.expectEqual(@as(u32, 4096), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA page_size"));
@@ -149,7 +175,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
     try std.testing.expect(diagnostic.cache_spill_threshold.? > 0);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.mmap_size_bytes);
-    try std.testing.expectEqual(@as(?i64, 2), diagnostic.synchronous);
+    try std.testing.expectEqual(@as(?i64, 1), diagnostic.synchronous);
     try std.testing.expectEqual(@as(?i64, 1), diagnostic.temp_store);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.busy_timeout_ms);
     try std.testing.expectEqualStrings("wal", diagnostic.journal_mode.?.slice());
@@ -266,7 +292,7 @@ test "measurement Store can disable cache spill without changing other limits" {
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
-    try std.testing.expectEqual(@as(?i64, 2), diagnostic.synchronous);
+    try std.testing.expectEqual(@as(?i64, 1), diagnostic.synchronous);
     try std.testing.expectEqualStrings("wal", diagnostic.journal_mode.?.slice());
 }
 

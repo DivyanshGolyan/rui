@@ -124,7 +124,10 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
     try sqlite.exec(database.?, cache_size);
     try sqlite.exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
-    try sqlite.exec(database.?, "PRAGMA synchronous=FULL");
+    // Commits leave the WAL unsynced; Store.settle syncs it before anyone
+    // outside the execution loop can observe them. NORMAL still syncs the
+    // WAL before every checkpoint, so the database file never runs ahead.
+    try sqlite.exec(database.?, "PRAGMA synchronous=NORMAL");
     if (@import("os").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
     const journal_mode = sqlite.diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
     if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
@@ -288,6 +291,22 @@ pub fn openSink(self: *Sqlite, content_id: u64, length: u64) Failure!ContentSink
     if (c.sqlite3_blob_open(self.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;
     if (std.debug.runtime_safety) std.debug.assert(c.sqlite3_blob_bytes(blob) == length);
     return .{ .blob = blob.? };
+}
+
+/// Syncs the WAL when a commit changed the database since `synced`, the
+/// pager's data version at the last sync. One sync covers every commit before
+/// it: the WAL is append-only.
+pub fn settle(self: *Sqlite, synced: *u32) Failure!void {
+    var version: u32 = 0;
+    if (c.sqlite3_file_control(self.database, "main", c.SQLITE_FCNTL_DATA_VERSION, &version) != c.SQLITE_OK) return error.StatementFailed;
+    if (version == synced.*) return;
+    var file: ?*c.sqlite3_file = null;
+    if (c.sqlite3_file_control(self.database, "main", c.SQLITE_FCNTL_JOURNAL_POINTER, @ptrCast(&file)) != c.SQLITE_OK) return error.StatementFailed;
+    if (file) |wal| if (wal.pMethods) |methods| {
+        const flags: c_int = if (@import("os").full_fsync) c.SQLITE_SYNC_FULL else c.SQLITE_SYNC_NORMAL;
+        if (methods.*.xSync.?(wal, flags) != c.SQLITE_OK) return error.StatementFailed;
+    };
+    synced.* = version;
 }
 
 pub fn control(self: *Sqlite, comptime which: Control) engine.ControlError!void {

@@ -8,6 +8,10 @@ pub const Queue = struct {
     head: ?*Job = null,
     tail: ?*Job = null,
     owner: std.atomic.Value(std.Thread.Id) = .init(0),
+    /// The thread whose commits may stay unsynced until someone else could
+    /// observe them: the execution loop. Every other thread's answer, and
+    /// every handoff to a launch, settles first.
+    deferring: std.atomic.Value(std.Thread.Id) = .init(0),
     batch: Batch,
 
     pub const Batch = struct {
@@ -17,6 +21,8 @@ pub const Queue = struct {
         closed: *const fn (*anyopaque) bool,
         arm: *const fn (*anyopaque, bool) void,
         recover: *const fn (*anyopaque) bool,
+        /// Makes every commit so far durable; false fences the Store.
+        settle: *const fn (*anyopaque) bool,
     };
 
     pub const Job = struct {
@@ -24,6 +30,7 @@ pub const Queue = struct {
         run: ?*const fn (*Job) void,
         done: std.Io.Event = .unset,
         own: bool,
+        defers: bool = false,
         handed: bool = false,
         lost: bool = false,
     };
@@ -42,11 +49,14 @@ pub const Queue = struct {
         var job: Job = .{ .run = null, .own = true };
         std.debug.assert(self.take(&job));
         defer self.release();
-        return @call(.auto, body, args);
+        const answer = @call(.auto, body, args);
+        // A failed sync fences the Store; the answer already read stands.
+        if (!self.defers()) _ = self.batch.settle(self.batch.context);
+        return answer;
     }
 
     pub noinline fn write(self: *Queue, comptime body: anytype, args: anytype) Answer(body) {
-        var request: Write(body, @TypeOf(args)) = .{ .args = args, .job = .{ .run = Write(body, @TypeOf(args)).run, .own = false } };
+        var request: Write(body, @TypeOf(args)) = .{ .args = args, .job = .{ .run = Write(body, @TypeOf(args)).run, .own = false, .defers = self.defers() } };
         if (self.take(&request.job)) {
             const committed = self.drain(&request.job);
             return if (committed) request.answer else lostAnswer(Answer(body), request.answer);
@@ -62,6 +72,10 @@ pub const Queue = struct {
         return answer;
     }
 
+    fn defers(self: *const Queue) bool {
+        return std.Thread.getCurrentId() == self.deferring.load(.monotonic);
+    }
+
     pub fn release(self: *Queue) void {
         _ = self.drain(null);
     }
@@ -73,7 +87,9 @@ pub const Queue = struct {
         var committed = true;
         var ran: u32 = 0;
         var batched: ?*Job = null;
+        var observed = false;
         if (own) |job| {
+            observed = !job.defers;
             self.batch.start(self.batch.context);
             self.batch.arm(self.batch.context, true);
             batching = true;
@@ -94,6 +110,7 @@ pub const Queue = struct {
                 }
                 batching = true;
                 job.run.?(job);
+                observed = observed or !job.defers;
                 ran += 1;
                 job.next = batched;
                 batched = job;
@@ -110,6 +127,8 @@ pub const Queue = struct {
                     while (at) |job| : (at = job.next) job.run.?(job);
                     ok = self.batch.finish(self.batch.context);
                 }
+                if (ok and observed) ok = self.batch.settle(self.batch.context);
+                observed = false;
                 if (first and own != null) committed = ok;
                 first = false;
                 batching = false;
@@ -328,12 +347,20 @@ const Batches = struct {
     armed: u32 = 0,
     rerun: u32 = 0,
     closes: bool = false,
+    settles: u32 = 0,
+    fail_settle: bool = false,
 
     var ignored: Batches = .{};
     const none: Queue.Batch = hooks(&ignored);
 
     fn hooks(self: *Batches) Queue.Batch {
-        return .{ .context = self, .start = start, .finish = finish, .closed = closed, .arm = arm, .recover = recover };
+        return .{ .context = self, .start = start, .finish = finish, .closed = closed, .arm = arm, .recover = recover, .settle = settle };
+    }
+
+    fn settle(context: *anyopaque) bool {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        self.settles += 1;
+        return !self.fail_settle;
     }
 
     fn closed(context: *anyopaque) bool {
@@ -429,4 +456,38 @@ test "a batch that lost its connection with nothing saved runs once more, whole 
     batches.rerun = 1;
     try queue.write(Probe.note, .{ &probe, 'w' });
     try std.testing.expectEqualStrings("rhbcdbcdww", probe.logged());
+}
+
+test "commits settle once someone outside the deferring thread hears them, and a failed settle loses the batch" {
+    const io = std.testing.io;
+    var batches: Batches = .{};
+    var queue: Queue = .init(io, batches.hooks());
+    queue.opened();
+    var probe: Probe = .{ .io = io };
+    queue.deferring.store(std.Thread.getCurrentId(), .monotonic);
+    try queue.write(Probe.note, .{ &probe, 'a' });
+    try queue.run(Probe.note, .{ &probe, 'r' });
+    try std.testing.expectEqual(@as(u32, 0), batches.settles);
+
+    const writer = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, 'o', .write });
+    writer.join();
+    try std.testing.expectEqual(@as(u32, 1), batches.settles);
+    const reader = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, 'o', .run });
+    reader.join();
+    try std.testing.expectEqual(@as(u32, 2), batches.settles);
+
+    try queue.callHeld(Probe.note, .{ &probe, 'h' });
+    const joined = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, 'j', .write });
+    waitQueued(&queue, 1);
+    queue.release();
+    joined.join();
+    try std.testing.expectEqual(@as(u32, 3), batches.settles);
+
+    batches.fail_settle = true;
+    try queue.write(Probe.note, .{ &probe, 'd' });
+    try std.testing.expectEqual(@as(u32, 3), batches.settles);
+    const lost = try std.Thread.spawn(.{}, Probe.lose, .{ &probe, &queue });
+    lost.join();
+    try std.testing.expect(probe.lost);
+    try std.testing.expectEqualStrings("aroohjde", probe.logged());
 }

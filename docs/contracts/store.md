@@ -276,13 +276,18 @@ Pre-provider captures are not accepted or defaulted to Codex.
 One thread at a time holds the Store: its connection, its scratch and its id allocator.
 A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
-Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
+Writes the holder runs back to back share one transaction: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
 A lone write costs BEGIN and COMMIT, as before; on MySQL its COMMIT shares the message of its last writes.
 A Message's commit callback runs once the batch's COMMIT succeeds, before any of its writers hears an answer.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
-The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=FULL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
-Each commit appends to `rui.sqlite3-wal` and syncs it before the transaction returns, so an acknowledged commit survives a process crash and, under SQLite's WAL `FULL` contract, an OS crash or power loss on storage that honors sync.
+The Host opens the Store database with `locking_mode=EXCLUSIVE`, `journal_mode=WAL`, `synchronous=NORMAL` (with `fullfsync` on macOS) and a 4-MiB `journal_size_limit`.
+Each commit appends to `rui.sqlite3-wal`, which survives a process crash at once.
+The WAL is synced before anything outside the execution loop can observe a commit: before another thread hears any answer, read or write, and before the loop hands the Store to a launch of a model call or Action.
+One sync covers every earlier commit, because the WAL is append-only, so the loop's settlements and admissions in one stretch share a sync ([#2086](https://github.com/DivyanshGolyan/rui/issues/2086)).
+An OS crash or power loss can therefore lose only commits no client, provider or Action has seen, which is the same as crashing before them; every acknowledged commit survives on storage that honors sync.
+`NORMAL` also syncs the WAL before each checkpoint, so the database file never holds a page the WAL could lose.
+A failed sync fences the Store, like a failed COMMIT.
 Automatic checkpoints copy committed pages into `rui.sqlite3` and truncate a grown WAL to the limit; a clean close checkpoints and deletes the WAL.
 A crash leaves committed frames only in the WAL until the next open replays them, so the database file alone is not a Store: copy or restore the whole Store directory, including any `-wal` file.
 
@@ -295,7 +300,7 @@ The WAL name needs four bytes beyond the database path, within the eight reserve
 Enforce a finite internal SQLite heap, deriving cache/window/statement capacities against whole-Host targets; no separate caller SQLite tuning or artificial database/page-count quota/emergency reserve.
 Large incremental imports must not retain payload-sized dirty-page memory.
 Verify effective spill/cache/heap enforcement, not merely setter success.
-Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration, the query planner stability guarantee (plans never depend on bound values, so a cached statement is never re-prepared) and disabled unused attachment/extension/trigger/worker features.
+Use the exclusive WAL and observed-commit sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration, the query planner stability guarantee (plans never depend on bound values, so a cached statement is never re-prepared) and disabled unused attachment/extension/trigger/worker features.
 Required features need concrete consumers.
 
 #### Compound Content values
