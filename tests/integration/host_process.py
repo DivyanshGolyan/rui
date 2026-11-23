@@ -54,6 +54,7 @@ import http.server
 import ctypes
 import errno
 import functools
+import hashlib
 import io
 import json
 import mmap
@@ -473,6 +474,16 @@ def retain_failure_state(label, state):
 
 def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
+
+
+def store_endpoint(store):
+    """The socket a SQLite Store's default Host serves: `rui.sock` in its interface directory.
+
+    Mirrors platform.zig `interfaceFor`: the directory is the first 32 hex digits of the SHA-256 of
+    the canonical Store path, under the uid's runtime directory. Its parent is the directory to lock.
+    """
+    digest = hashlib.sha256(str(pathlib.Path(store).resolve()).encode()).hexdigest()[:32]
+    return pathlib.Path(f"/tmp/rui-{os.geteuid()}") / digest / "rui.sock"
 
 
 @contextmanager

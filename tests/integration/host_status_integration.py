@@ -15,11 +15,11 @@ import time
 from urllib.parse import quote
 
 import host_process
-from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
+from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, store_endpoint, wait_for
 import os_semantics
 import live_engines
 import settings_fixture as frame_host
-from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
+from host_status_fixture import ACTOR, RUI, complete_response, status
 
 
 PUBLISH = pathlib.Path(__file__).resolve().parents[2] / "release/publish.sh"
@@ -120,7 +120,7 @@ def wait_for_descriptors(pid, expected=None, timeout=5):
 def held_request(store, route, length=512, *, complete_headers=True):
     stream = os_semantics.unix_stream()
     stream.settimeout(2)
-    stream.connect(str(socket_path(store)))
+    stream.connect(str(store_endpoint(store)))
     stream.sendall(f"POST /v1/{route} HTTP/1.1\r\n".encode())
     if complete_headers:
         stream.sendall((f"Host: local\r\nContent-Type: application/json\r\n"
@@ -170,7 +170,7 @@ def protected_saturation(root):
         assert initial.startswith("ready "), initial
         discovery_released(diagnostics, began_ns)
         began_ns = time.monotonic_ns()
-        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        assert b'"type":"host_info"' in raw_info(store_endpoint(store), store)
         discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         began = time.monotonic()
@@ -195,7 +195,7 @@ def protected_saturation(root):
         assert not diagnostics.matching("connection_resources_released", subject=pending["subject"])
         competing_started = time.monotonic()
         began_ns = time.monotonic_ns()
-        competing = raw_info(socket_path(store), store)
+        competing = raw_info(store_endpoint(store), store)
         assert competing.startswith(b"HTTP/1.1 200") and b'"type":"host_info"' in competing, competing
         assert time.monotonic() - competing_started < 2, "competing discovery exceeded bound"
         discovery_released(diagnostics, began_ns)
@@ -206,12 +206,12 @@ def protected_saturation(root):
         if baseline is not None:
             snapshot = wait_for_descriptors(host.pid)
             assert len(snapshot) <= len(baseline) + 11, (baseline, snapshot)
-        ack = raw_info(socket_path(store), store, identity,
+        ack = raw_info(store_endpoint(store), store, identity,
                        kind="host_stop", route="control/host-stop")
         assert ack.startswith(b"HTTP/1.1 200") and json.loads(ack.split(b"\r\n\r\n", 1)[1]) == {
             "version": host_process.WIRE_VERSION, "type": "host_stop_reply", "status": "acknowledged"}, ack
         deadline = time.monotonic() + 2
-        wait_for(lambda: not socket_path(store).exists(), "stop to close the listener", interval=.01, deadline=deadline)
+        wait_for(lambda: not store_endpoint(store).exists(), "stop to close the listener", interval=.01, deadline=deadline)
         for stream in held:
             remaining = deadline - time.monotonic()
             assert remaining > 0, "unhanded intake did not retire after stop"
@@ -244,19 +244,19 @@ def hostile_discovery(root):
     try:
         diagnostics.wait("lifecycle_boundary")
         began_ns = time.monotonic_ns()
-        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        assert b'"type":"host_info"' in raw_info(store_endpoint(store), store)
         discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 128}}),
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {"instructions": "x" * 128}})):
             for route in ("host-info", "control/host-stop"):
                 began_ns = time.monotonic_ns()
-                response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)
+                response = raw_info(store_endpoint(store), store, route=route, kind=kind, extra=extra)
                 assert b"RouteKindMismatch" in response and b"InjectedContentAcquireFailure" not in response, response
                 if route == "host-info":
                     discovery_released(diagnostics, began_ns)
             assert list((store / "scratch").iterdir()) == [], "hostile discovery created scratch"
-            observed = raw_info(socket_path(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
+            observed = raw_info(store_endpoint(store), store, kind="observe_command", route="observe-command", extra={"key": "hostile"})
             assert b'"status":"absent"' in observed, observed
             began_ns = time.monotonic_ns()
             assert status(store).startswith("ready ")
@@ -268,7 +268,7 @@ def hostile_discovery(root):
         discovery_released(diagnostics, began_ns)
         assert list((store / "scratch").iterdir()) == []
         began_ns = time.monotonic_ns()
-        assert b'"type":"host_info"' in raw_info(socket_path(store), store)
+        assert b'"type":"host_info"' in raw_info(store_endpoint(store), store)
         discovery_released(diagnostics, began_ns)
         if baseline is not None:
             wait_for_descriptors(host.pid, baseline)
@@ -500,7 +500,7 @@ def main():
             assert cli_status(home, "--store", store)["status"] == "access_failure"
         finally:
             fifo_lock.unlink()
-        stale = socket_path(store)
+        stale = store_endpoint(store)
         stale.parent.mkdir(mode=0o700, exist_ok=True)
         with os_semantics.unix_stream() as endpoint:
             endpoint.bind(str(stale))

@@ -24,7 +24,7 @@ import termios
 import time
 
 import host_process
-from host_process import (canonical_fixture_root, start_ready_process, stop_process,
+from host_process import (canonical_fixture_root, start_ready_process, stop_process, store_endpoint,
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
 import codex_fixture
@@ -330,7 +330,7 @@ def startup_limits(root, env):
             else:
                 assert capacity == INTAKE and int(reported["descriptor_limit"]) >= required, reported
             if hard == minimum:
-                socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
+                socket_path = str(store_endpoint(store))
                 borrowers = []
                 try:
                     for _ in range(capacity):
@@ -1271,7 +1271,7 @@ def saved_settings_served(root, env):
         save(store, "presets.review", f"@{preset_file}")
         started = run_start(store, env)
         assert started.returncode == 0, started.stderr
-        sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
+        sock = str(store_endpoint(store))
         create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
                   "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         created = post(sock, "configure", create)

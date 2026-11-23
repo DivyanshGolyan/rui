@@ -17,8 +17,8 @@ import time
 import bash_fixture
 import model_fixture as fixture
 import host_process
-from host_process import HostDiagnostics, PauseGate, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
-from host_status_fixture import socket_path, status
+from host_process import HostDiagnostics, PauseGate, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process, store_endpoint
+from host_status_fixture import status
 import os_semantics
 from host_status_fixture import finish
 
@@ -154,7 +154,7 @@ def mixed_effect_drain(provider_first):
             occupied = fixture.command("session", "inspect", "--store", store, "--session", bash_session)["execution"]
             assert int(occupied["custody_occupied"]) == 2, occupied
             assert actor("stop", store, instance(store)) == "acknowledged"
-            fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held provider")
+            fixture.wait_for(lambda: not store_endpoint(store).exists(), "listener closure with held provider")
 
             signalled.wait()
             fixture.wait_for(lambda: "TERM\n" in events.read_text(),
@@ -335,7 +335,7 @@ def main():
                                       "--test-phase-trace", observations="stop")
             diagnostics = HostDiagnostics(host)
             target = instance(store)
-            sock = socket_path(store)
+            sock = store_endpoint(store)
             wrong = actor("stop", store, "0" * 32)
             assert wrong == "instance_changed", wrong
             missing, body = request(sock, store)
