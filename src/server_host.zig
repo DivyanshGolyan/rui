@@ -1138,13 +1138,18 @@ pub inline fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
     if (host.hooks.phase_trace and host.hooks.sqlite_diagnostics) writeSqliteDiagnosticTrace(host, subject);
 }
 
+// Reads the Store before the trace buffer exists: the read can run queued Store
+// writes on this thread, so the buffer must not share a frame with it.
 noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
     defer if (publication) |*value| value.finish();
-    const value = switch (host.store.diagnostic()) {
-        .sqlite => |value| value,
-        .mysql => return,
-    };
+    switch (host.store.diagnostic()) {
+        .sqlite => |*value| renderSqliteDiagnosticTrace(host, subject, value, &publication),
+        .mysql => {},
+    }
+}
+
+noinline fn renderSqliteDiagnosticTrace(host: *Host, subject: []const u8, value: *const @FieldType(store_module.Diagnostic, "sqlite"), publication: *?TestObservation.Publication) void {
     var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;
@@ -1179,7 +1184,7 @@ noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
         trace.appendJsonString(mode.slice()) catch return;
     } else trace.append("null") catch return;
     trace.append("}") catch return;
-    writeTestTrace(host, &trace, &publication);
+    writeTestTrace(host, &trace, publication);
 }
 
 pub const SettlementTrace = struct {
