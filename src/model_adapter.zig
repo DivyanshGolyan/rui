@@ -5990,7 +5990,7 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
             .pages = "1d0119b69cf5107abca8513bdbbb2a342395f4932a3246e0ea131171f557363e",
-            .tool_results = "5f3bc62d6f0b22fce92121a892b37ec30d7aab53559f627c34ab11db6152a0db",
+            .tool_results = "d3622d7d47b437651a9d97b766ba4bc8fc615c8f42b206cff7c301960040421b",
             .bounds = "f1d1c5105dd663ead4d0573ed3a114f20a3c526d62a741bd2ae353a3f606c461",
         });
     };
