@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import unittest
 
-from caller_errors import TOKEN, lex, production
+from caller_errors import lex, production
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +42,7 @@ DOMAIN_REACH = {
 
 
 FORMAT_SOURCES = "src"
+FORMAT_SUFFIXES = (".zig", ".sql")
 FORMAT_OWNERS = {"src/store/history.zig", "src/store/schema.zig"}
 # A generated lookup of statements the owners and tests already build (tests/ci/rsql_table.py); its text is counted where
 # it is written, so the table itself is not a writer.
@@ -49,6 +50,7 @@ FORMAT_GENERATED = {"src/store/rsql_table.zig"}
 FORMAT_WRITE = {
     "user_version": re.compile(r"PRAGMA\s+user_version\s*="),
     "format update": re.compile(r"UPDATE\s+store_meta\s+SET\s+meta_value\s*=(?:(?!WHERE|;).)*?WHERE\s+meta_key\s*=\s*'format'"),
+    "format insert": re.compile(r"(?:INSERT|REPLACE)\s+INTO\s+store_meta\b(?:(?!;).)*?\(\s*'format'\s*,"),
     "drop column": re.compile(r"\bDROP\s+COLUMN\b"),
 }
 FORMAT_RULE = ("only src/store/history.zig and src/store/schema.zig write the Store format; build an old format with "
@@ -56,32 +58,54 @@ FORMAT_RULE = ("only src/store/history.zig and src/store/schema.zig write the St
 # Shrink-only ratchet: each existing test-code writer of the format, by file and kind. A new writer, or a count that
 # grows, fails; a count that drops must be lowered here. Each entry is a format built by hand that history.zig should own.
 FORMAT_WRITERS = {
+    ("src/store/mysql_dialect_check.zig", "format insert"): 12,
     ("src/store/mysql_testing.zig", "format update"): 6,
+    ("src/store/sqlite_tests/archive_membership.zig", "format insert"): 1,
     ("src/store/sqlite_tests/archive_membership.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/context_window_migration.zig", "format insert"): 1,
     ("src/store/sqlite_tests/context_window_migration.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/migration.zig", "format insert"): 13,
     ("src/store/sqlite_tests/migration.zig", "format update"): 3,
     ("src/store/sqlite_tests/migration.zig", "user_version"): 15,
+    ("src/store/sqlite_tests/schema.zig", "format insert"): 2,
     ("src/store/sqlite_tests/schema.zig", "format update"): 3,
     ("src/store/sqlite_tests/schema.zig", "user_version"): 2,
+    ("src/store/sqlite_tests/skills_migration.zig", "format insert"): 2,
     ("src/store/sqlite_tests/skills_migration.zig", "user_version"): 2,
+    ("src/store/sqlite_tests/tool_record_hint.zig", "format insert"): 1,
     ("src/store/sqlite_tests/tool_record_hint.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/tool_set_migration.zig", "format insert"): 1,
     ("src/store/sqlite_tests/tool_set_migration.zig", "user_version"): 1,
 }
 
 
-def format_writes(source):
-    code = " ".join(token.text for token in lex(source))
+# The format lint's own tokeniser. Unlike caller_errors.lex it keeps Zig multiline-string lines (`\\`), whose SQL is
+# written there, and drops only `//` comments. SQL files have no comment form the lint needs, except `--`.
+FORMAT_TOKEN = re.compile(
+    r'//[^\n]*|\\\\[^\n]*|@"(?:\\.|[^"\\])*"|"(?:\\.|[^"\\])*"|'
+    r"'(?:\\.|[^'\\])*'|@?[A-Za-z_][A-Za-z_0-9]*|=>|[^\s]"
+)
+
+
+def format_code(source, suffix):
+    if suffix == ".sql":
+        return re.sub(r"--[^\n]*", " ", source)
+    return " ".join(match.group() for match in FORMAT_TOKEN.finditer(source) if not match.group().startswith("//"))
+
+
+def format_writes(source, suffix=".zig"):
+    code = format_code(source, suffix)
     return {kind: len(pattern.findall(code)) for kind, pattern in FORMAT_WRITE.items()}
 
 
 def format_violations(root=ROOT, writers=None):
     writers = FORMAT_WRITERS if writers is None else writers
     found = {}
-    for path in sorted((root / FORMAT_SOURCES).rglob("*.zig")):
+    for path in sorted(p for p in (root / FORMAT_SOURCES).rglob("*") if p.suffix in FORMAT_SUFFIXES):
         name = path.relative_to(root).as_posix()
         if name in FORMAT_OWNERS | FORMAT_GENERATED:
             continue
-        for kind, count in format_writes(path.read_text()).items():
+        for kind, count in format_writes(path.read_text(), path.suffix).items():
             if count:
                 found[(name, kind)] = count
     messages = []
@@ -188,14 +212,24 @@ class FormatWriteTest(unittest.TestCase):
         self.assertEqual(format_violations(), [])
 
     def test_scan_reads_writes_in_strings_but_not_comments_or_reads(self):
-        self.assertEqual(format_writes('const s = "PRAGMA user_version={d}";'), {"user_version": 1, "format update": 0, "drop column": 0})
+        self.assertEqual(format_writes('const s = "PRAGMA user_version={d}";'), {"user_version": 1, "format update": 0, "drop column": 0, "format insert": 0})
         self.assertEqual(format_writes('x("UPDATE store_meta SET meta_value=\'" ++ f ++ "\' WHERE meta_key=\'format\'");'),
-                         {"user_version": 0, "format update": 1, "drop column": 0})
-        self.assertEqual(format_writes('const s = "ALTER TABLE t DROP COLUMN c";'), {"user_version": 0, "format update": 0, "drop column": 1})
-        for source in ('// PRAGMA user_version=5', '\\\\PRAGMA user_version=5',
+                         {"user_version": 0, "format update": 1, "drop column": 0, "format insert": 0})
+        self.assertEqual(format_writes('const s = "ALTER TABLE t DROP COLUMN c";'), {"user_version": 0, "format update": 0, "drop column": 1, "format insert": 0})
+        self.assertEqual(format_writes('const s = "PRAGMA user_version=5";'), {"user_version": 1, "format update": 0, "drop column": 0, "format insert": 0})
+        self.assertEqual(format_writes('\\\\PRAGMA user_version=5'), {"user_version": 1, "format update": 0, "drop column": 0, "format insert": 0})
+        self.assertEqual(format_writes('\\\\ALTER TABLE t DROP COLUMN c'), {"user_version": 0, "format update": 0, "drop column": 1, "format insert": 0})
+        self.assertEqual(format_writes('const s = "INSERT INTO store_meta(meta_key,meta_value) VALUES(\'format\',\'74\')";'),
+                         {"user_version": 0, "format update": 0, "drop column": 0, "format insert": 1})
+        self.assertEqual(format_writes('const s = "REPLACE INTO store_meta(meta_key,meta_value) VALUES(\'wire_version\',\'7\'),(\'format\',?1)";'),
+                         {"user_version": 0, "format update": 0, "drop column": 0, "format insert": 1})
+        self.assertEqual(format_writes("ALTER TABLE t DROP COLUMN c;", ".sql"), {"user_version": 0, "format update": 0, "drop column": 1, "format insert": 0})
+        for source in ('// PRAGMA user_version=5', '// \\\\ALTER TABLE t DROP COLUMN c',
                        'const s = "PRAGMA user_version";', 'try pragmaInt(db, "PRAGMA user_version");',
-                       'const s = "UPDATE store_meta SET meta_value=\'x\' WHERE meta_key=\'store_id\'";'):
+                       'const s = "UPDATE store_meta SET meta_value=\'x\' WHERE meta_key=\'store_id\'";',
+                       'const s = "INSERT INTO store_meta(meta_key,meta_value) VALUES(\'store_id\',\'x\')";'):
             self.assertEqual(sum(format_writes(source).values()), 0, source)
+        self.assertEqual(format_writes("-- PRAGMA user_version=5\n", ".sql")["user_version"], 0)
 
     def test_a_planted_format_write_outside_the_owners_fails(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -207,6 +241,25 @@ class FormatWriteTest(unittest.TestCase):
                 "src/store/sqlite_tests/tool_set_migration.zig writes the Store format (user_version) 2 times, 1 allowed; "
                 + FORMAT_RULE])
             self.assertEqual(format_violations(root, FORMAT_WRITERS | {("src/store/sqlite_tests/tool_set_migration.zig", "user_version"): 2}), [])
+
+    def test_a_planted_multiline_string_drop_column_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            (root / "src/store/tests/planted_multiline.zig").write_text(
+                'const sql =\n    \\\\ALTER TABLE session DROP COLUMN obligation_since;\n;\n')
+            self.assertEqual(format_violations(root), [
+                f"src/store/tests/planted_multiline.zig writes the Store format (drop column) 1 times, 0 allowed; {FORMAT_RULE}"])
+
+    def test_a_planted_sql_file_format_write_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            (root / "src/store/tests/planted.sql").write_text(
+                "ALTER TABLE session DROP COLUMN obligation_since;\nPRAGMA user_version=5;\n")
+            self.assertEqual(format_violations(root), [
+                f"src/store/tests/planted.sql writes the Store format (drop column) 1 times, 0 allowed; {FORMAT_RULE}",
+                f"src/store/tests/planted.sql writes the Store format (user_version) 1 times, 0 allowed; {FORMAT_RULE}"])
 
     def test_a_planted_drop_column_or_format_update_in_a_new_file_fails(self):
         with tempfile.TemporaryDirectory() as scratch:
