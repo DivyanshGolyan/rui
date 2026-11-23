@@ -35,6 +35,8 @@ pub const Relist = struct {
     slots: [hs.max_mcp_servers]relist.Slot = @splat(.{}),
     asks: [hs.max_mcp_servers]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
     pending: [hs.max_mcp_servers]?*offered.Pending = @splat(null),
+    /// While startup runs, landed lists wait here so all first attempts publish in one merge.
+    held: ?*[hs.max_mcp_servers]bool = null,
     /// Why the latest list was refused, kept for startup's report.
     refusal: ?Refusal = null,
     /// The arena holding the tool set this owner published. Null while the current set is startup's.
@@ -75,15 +77,16 @@ pub const Relist = struct {
         return earliest;
     }
 
-    /// Startup: publishes the saved tools of every configured server (dropping servers no
-    /// longer configured), asks every server, and drives the same `service` step until every
-    /// first attempt has ended. A server that did not list keeps its saved tools and is
-    /// retried by backoff once the Host serves.
+    /// Startup: asks every server and drives the same `service` step until every first
+    /// attempt has ended, holding the lists that land, then publishes them with the saved
+    /// tools of every other configured server in one merge (dropping servers no longer
+    /// configured). A server that did not list keeps its saved tools and is retried by
+    /// backoff once the Host serves. A refused merge refuses the start: the configuration
+    /// is wrong now.
     pub fn startup(self: *Relist, io: std.Io, store: *store_module.Store, saved: ?*const tools.HostToolSet, stop: ?std.posix.fd_t) !void {
-        if (try self.publish(store, saved, null) != .listed) {
-            // The saved tools collide with today's built-ins: start from the built-ins alone.
-            if (try self.publish(store, null, null) != .listed) unreachable;
-        }
+        var held: [hs.max_mcp_servers]bool = @splat(false);
+        self.held = &held;
+        defer self.held = null;
         for (0..self.servers.len) |index| _ = self.ask(index);
         while (true) {
             var failure: ?anyerror = null;
@@ -92,7 +95,7 @@ pub const Relist = struct {
             if (self.firstAttemptsEnded()) break;
             var fds: [hs.max_mcp_servers + 1]std.posix.pollfd = undefined;
             var polled: usize = 0;
-            for (self.pending[0..self.servers.len]) |slot_pending| if (slot_pending) |pending| {
+            for (self.pending[0..self.servers.len], held[0..self.servers.len]) |slot_pending, waiting| if (slot_pending) |pending| if (!waiting) {
                 fds[polled] = .{ .fd = pending.fd(), .events = pending.events(), .revents = 0 };
                 polled += 1;
             };
@@ -100,11 +103,24 @@ pub const Relist = struct {
             _ = std.posix.poll(fds[0 .. polled + 1], 100) catch {};
             if (fds[polled].revents != 0) return error.Stopped;
         }
-        // A list refused at startup refuses the start: the configuration is wrong now.
-        for (self.slots[0..self.servers.len]) |slot| if (slot.last == .collision) return switch (self.refusal.?) {
+        var fresh: [hs.max_mcp_servers]?[]const Listing.Entry = @splat(null);
+        for (0..self.servers.len) |index| if (held[index]) {
+            fresh[index] = self.pending[index].?.listed();
+        };
+        const outcome = try self.publish(store, saved, fresh[0..self.servers.len]);
+        const now_ms = offered.nowMs(io);
+        for (0..self.servers.len) |index| if (held[index]) self.settle(index, outcome, now_ms);
+        var refused = outcome == .collision;
+        for (self.slots[0..self.servers.len]) |slot| refused = refused or slot.last == .collision;
+        if (refused) return switch (self.refusal.?) {
             .collision => error.ToolNameCollision,
             .too_many => error.TooManyTools,
         };
+    }
+
+    fn firstAttemptsEnded(self: *const Relist) bool {
+        for (self.slots[0..self.servers.len], 0..) |slot, index| if (slot.finished == 0 and !self.held.?[index]) return false;
+        return true;
     }
 
     /// Test driver: services at a fixed `now_ms` until no list is in flight and every
@@ -130,11 +146,6 @@ pub const Relist = struct {
         return drive.failure;
     }
 
-    fn firstAttemptsEnded(self: *const Relist) bool {
-        for (self.slots[0..self.servers.len]) |slot| if (slot.finished == 0) return false;
-        return true;
-    }
-
     /// Drives every server's list once against `store` at `now_ms`. Returns true when
     /// anything progressed. A failed publish is written to `failure` and stops the pass.
     pub fn service(self: *Relist, store: *store_module.Store, now_ms: u64, failure: *?anyerror) bool {
@@ -147,6 +158,7 @@ pub const Relist = struct {
             }
         }
         for (0..self.servers.len) |index| {
+            if (self.held) |held| if (held[index]) continue;
             const slot = &self.slots[index];
             if (self.pending[index]) |pending| switch (pending.advance()) {
                 .waiting => if (pending.expired(now_ms)) {
@@ -156,7 +168,13 @@ pub const Relist = struct {
                 },
                 .listed => {
                     progress = true;
-                    const outcome = self.publish(store, store.hostTools().host_tool_set, .{ .index = index, .entries = pending.listed() }) catch |err| {
+                    if (self.held) |held| {
+                        held[index] = true;
+                        continue;
+                    }
+                    var fresh: [hs.max_mcp_servers]?[]const Listing.Entry = @splat(null);
+                    fresh[index] = pending.listed();
+                    const outcome = self.publish(store, store.hostTools().host_tool_set, fresh[0..self.servers.len]) catch |err| {
                         failure.* = err;
                         self.settle(index, .failed, now_ms);
                         return progress;
@@ -199,19 +217,18 @@ pub const Relist = struct {
         stderr.diagnostic("rui: MCP server {s} did not list its tools; keeping its saved tools\n", .{self.servers[index].name.slice()});
     }
 
-    const Fresh = struct { index: usize, entries: []const Listing.Entry };
-
     /// Merges one complete list into the current set and swaps it into the Store.
     /// The previous set's arena is freed only after the Store has taken the new one.
-    /// `base` supplies the tools of every server that is not `fresh`; `fresh` is one server's complete list.
-    fn publish(self: *Relist, store: *store_module.Store, base: ?*const tools.HostToolSet, fresh: ?Fresh) !relist.Outcome {
+    /// `fresh` holds, per configured server, its complete new list or null; `base`
+    /// supplies the tools of every server whose entry is null.
+    fn publish(self: *Relist, store: *store_module.Store, base: ?*const tools.HostToolSet, fresh: []const ?[]const Listing.Entry) !relist.Outcome {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const memory = arena.allocator();
         const sources = try memory.alloc(offered.Source, self.servers.len);
         for (self.servers, sources, 0..) |*server, *source, at| source.* = .{
             .server = server.name.slice(),
-            .listed = if (fresh != null and fresh.?.index == at) fresh.?.entries else null,
+            .listed = fresh[at],
         };
         var collision: offered.Collision = .{};
         const set = offered.merge(memory, base, sources, &collision) catch |err| switch (err) {

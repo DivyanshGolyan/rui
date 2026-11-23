@@ -5223,6 +5223,45 @@ test "Host startup projects MCP offers after a changed listing and restart" {
     }
 }
 
+test "startup publishes every first list in one merge, so a tool moving between servers does not collide with its saved copy" {
+    const Script = @import("mcp/test_server.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const reply = struct {
+        fn of(comptime name: []const u8) []const u8 {
+            return Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"" ++ name ++ "\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+        }
+    }.of;
+    // First run: a lists search, b lists other. Second run: search moved to b and a lists find.
+    const rounds = [_][2][]const u8{ .{ reply("search"), reply("other") }, .{ reply("find"), reply("search") } };
+    for (rounds, [_][]const u8{ "a", "b" }) |round, search_owner| {
+        var a: Script = .{ .reply = round[0] };
+        try a.start();
+        defer a.stop();
+        var b: Script = .{ .reply = round[1] };
+        try b.start();
+        defer b.stop();
+        var storage: store_module.Store = undefined;
+        try store_module.testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var servers = [_]server_mcp_settings.Server{ .{}, .{} };
+        var urls: [2][128]u8 = undefined;
+        for (&servers, &urls, [_][]const u8{ "a", "b" }, [_]u16{ a.port, b.port }) |*server, *url, name, port| {
+            try server.name.set(name);
+            @memcpy(server.bearer_token.bytes[0..6], "secret");
+            server.bearer_token.len = 6;
+            try server.url.set(try std.fmt.bufPrint(url, "http://127.0.0.1:{d}/mcp", .{port}));
+        }
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        defer owner.deinit();
+        var failure: ?start_report.Failure = null;
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
+        try std.testing.expect(failure == null);
+        const set = storage.hostTools().host_tool_set;
+        try std.testing.expectEqualStrings(search_owner, set.records[set.find("search").?].server);
+    }
+}
+
 test "a server that was down at startup is listed by a backoff retry and the next Operation is offered its tools" {
     const Script = @import("mcp/test_server.zig");
     const testing = store_module.testing;
