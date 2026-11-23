@@ -4431,8 +4431,11 @@ fn creatorKeyHoldCase() !void {
     _ = try refresh(&state, .changed, testToken(2), &.{b});
     _ = try step(&state, .{ .tick = start + 2999 });
     try expectOrder(&state, &.{ "A", "B" });
+    const held = state.presentation_revision;
     _ = try step(&state, .{ .tick = start + 3000 });
     try expectOrder(&state, &.{ "B", "A" });
+    // A release that moves rows repaints; one that moves nothing does not (creatorPresentationCase).
+    try std.testing.expect(state.presentation_revision != held);
 }
 
 fn creatorKeyOriginCase() !void {

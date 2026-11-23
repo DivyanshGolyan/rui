@@ -332,6 +332,9 @@
         "Tree root",
         "Held arrival"
       ],
+      "expect_regex": [
+        "(?s)Attached worker.*Held arrival"
+      ],
       "comparison": {
         "before": {
           "expect": [
@@ -386,6 +389,9 @@
         "Tree root",
         "Release arrival"
       ],
+      "expect_regex": [
+        "(?s)Release arrival.*Attached worker"
+      ],
       "record": true,
       "note": "Pointer leaves; retained raw frames capture the release and any flash"
     },
@@ -425,6 +431,9 @@
       "expect": [
         "Tree root",
         "ASCII arrival"
+      ],
+      "expect_regex": [
+        "(?s)Attached worker.*ASCII arrival"
       ],
       "comparison": {
         "before": {
