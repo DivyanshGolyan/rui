@@ -4,7 +4,6 @@ import sys
 
 import live_engines
 import network_variables
-import runtime_leftovers
 
 NON_ROOT_INSTRUCTION = (
     "Rui fixtures must run as a non-root user. This fixture is running as root "
@@ -543,22 +542,6 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
         else:
             clock.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
-
-
-def retire_settled(store, timeout=2):
-    """Retire a disposed Host's socket, waiting briefly for it to stop accepting.
-
-    A Host run under a wrapper such as strace --kill-on-exit dies only after the
-    reaped wrapper does, so its socket can still accept for a moment. A socket
-    that keeps accepting is a successor serving the same Store and stays.
-    """
-    def settled():
-        runtime_leftovers.retire(store)
-        return not runtime_leftovers.hinted(store)
-    try:
-        wait_for(settled, f"Host socket for {store} to retire", timeout=timeout, drain=False)
-    except WaitTimeout:
-        pass
 
 
 def wait_for_execution_release(inspect, deadline):
@@ -1230,9 +1213,9 @@ def close_stdin(process):
         process.stdin = None
 
 
-def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
-    """Reap a Host and dispose its fixture state. `retire=False` leaves its socket and .store hint
-    behind, as a real crash does; the caller's final disposal of the Store then retires them."""
+def stop_process(process, timeout=10, *, seal_observations=True):
+    """Reap a Host and dispose its fixture state. Its socket is left to the census, which removes
+    any endpoint whose lock is free (src/host_endpoint.zig)."""
     deadline = time.monotonic() + timeout
     errors = []
     incoming_error = sys.exc_info()[1]
@@ -1254,12 +1237,6 @@ def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException as error:
         errors.append(error)
-    if retire:
-        try:
-            if (store := disposed_store(process)) is not None:
-                retire_settled(store)
-        except BaseException as error:
-            errors.append(error)
     diagnostics = getattr(process, "rui_diagnostics", None)
     for close in (observations.close if observations else None, diagnostics.close if diagnostics else None,
                   process.stdout.close if process.stdout else None, process.stderr.close if process.stderr else None):
@@ -1285,18 +1262,6 @@ def stop_process(process, timeout=10, *, seal_observations=True, retire=True):
     finally:
         if (incoming_error is not None or errors) and observations is not None:
             observations.preserve_failure(snapshot)
-
-
-def disposed_store(process):
-    """The Store whose socket a reaped Host process owned: its ready field, else its argv, else None.
-
-    A client command (`rui request ... --store S`) shares the Store argument but owns no socket, so
-    only a Host's argv names a Store here; retiring for a client would probe the live Host serving S."""
-    store = getattr(process, "rui_ready_fields", {}).get("store")
-    if store is not None:
-        return store
-    argv = getattr(process, "args", None)
-    return host_store(argv) if isinstance(argv, (list, tuple)) else None
 
 
 def host_store(argv):
