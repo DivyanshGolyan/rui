@@ -18,11 +18,12 @@ DIAGNOSTICS = {
     "trust": b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n",
 }
 REQUIRED_FAILURE = catalog.REQUIRED_PROXY_FAILURE
+REQUIRED_RECEIPT = catalog.REQUIRED_PROXY_RECEIPT
 
 
 class CatalogDiagnosticsTest(unittest.TestCase):
     def run_fixture(self, case, *, early=b"", late=b"", providers=None, capacity=None,
-                    exited=False, required_code=1, required_stdout="", required_stderr=REQUIRED_FAILURE,
+                    exited=False, required_code=1, required_stdout=REQUIRED_RECEIPT, required_stderr=REQUIRED_FAILURE,
                     configured="accepted", completed="completed", answer=b"HTTP still works",
                     requests=1):
         hosts = []

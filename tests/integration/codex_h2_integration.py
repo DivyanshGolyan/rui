@@ -19,6 +19,7 @@ from codex_h2_cases import openai_base_url_run, saved_catalog_run, run
 
 REQUIRED_PROXY_MESSAGE = "https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy"
 REQUIRED_PROXY_FAILURE = f"rui: the Host did not start: {REQUIRED_PROXY_MESSAGE} [proxy_unusable]\n"
+REQUIRED_PROXY_RECEIPT = json.dumps({"rui_start_error": {"code": "proxy_unusable", "message": REQUIRED_PROXY_MESSAGE}}, separators=(",", ":")) + "\n"
 
 
 def catalog_unusable_proxy_run():
@@ -55,7 +56,7 @@ def catalog_unusable_proxy_run():
             "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
         ], env=env, capture_output=True, text=True, timeout=10)
         assert required.returncode != 0, required
-        assert json.loads(required.stdout) == {"rui_start_error": {"code": "proxy_unusable", "message": REQUIRED_PROXY_MESSAGE}}, required
+        assert required.stdout == REQUIRED_PROXY_RECEIPT, required
         assert REQUIRED_PROXY_FAILURE in required.stderr, required
         assert "models.dev catalog unavailable" not in required.stderr, required
         print("catalog proxy failure passed: provider-free Hosts stay responsive at capacity 0 and 1; a provider Host refuses the proxy before readiness")
