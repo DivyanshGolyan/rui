@@ -413,10 +413,10 @@ pub const Store = struct {
     /// Store entry so both see the same rows.
     pub fn readToolDigestsForTesting(self: *Store, set: u64, names: *const command_input.ToolsField, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
         selection.names = names;
-        return self.queue().run(readToolDigestsHeld, .{ self, set, offer, selection });
+        return self.queue().run(readToolDigestsForTestingHeld, .{ self, set, offer, selection });
     }
 
-    fn readToolDigestsHeld(self: *Store, set: u64, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
+    fn readToolDigestsForTestingHeld(self: *Store, set: u64, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.read, error{}) = .open(&entry);
