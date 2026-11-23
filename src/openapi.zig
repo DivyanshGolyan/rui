@@ -307,11 +307,26 @@ pub const routes = [_]Route{
         .variants = &.{variant(protocol.model_list_request, .{})},
         .reply = jsonReply(.{.{ protocol.model_list_reply.head, ListOf(ModelListEntry), protocol.model_list_reply.tail }}),
     },
+    .{
+        .path = "/v1/control/tools-reload",
+        .kind = .tools_reload,
+        .summary = "Asks the Host to list one MCP server, or every configured server, again. Each reply names the generation asked; tools-status reports when it has landed.",
+        .variants = &.{ variant(protocol.tools_reload_request.all, .{}), variant(protocol.tools_reload_request.named, .{}) },
+        .reply = jsonReply(.{protocol.tools_reload_reply.head ++ .{BoundedListOf(protocol.tools_reload_reply.entry, @import("host_settings.zig").max_mcp_servers, false)} ++ .{protocol.tools_reload_reply.tail}}),
+    },
+    .{
+        .path = "/v1/tools-status",
+        .kind = .tools_status,
+        .summary = "Each configured MCP server's list state, last outcome, finished generation and tool count.",
+        .variants = &.{variant(protocol.tools_status_request, .{})},
+        .reply = jsonReply(.{protocol.tools_status_reply.head ++ .{BoundedListOf(protocol.tools_status_reply.entry, @import("host_settings.zig").max_mcp_servers, false)} ++ .{protocol.tools_status_reply.tail}}),
+    },
 };
 
 const since_example = "00000000000000000000000000000000.1";
 
 comptime {
+    @setEvalBranchQuota(10_000);
     for (std.meta.tags(protocol.Kind)) |kind| {
         var count = 0;
         for (routes) |route| count += @intFromBool(route.kind == kind);

@@ -241,6 +241,12 @@ A budget-limited reply may contain no matches and still have `next`; the exclusi
 `read_transcript` with `query` uses this same search, prints each matching entry's outline followed by quoted snippets, each prefixed `part N: ` when it matched inside a parts value, and preserves the query in its continuation hint; `query` with `full` is refused.
 Search adds no Store format, index or SQL text-matching dependency.
 
+`POST /v1/control/tools-reload` takes `kind:"tools_reload"`, `store` and an optional `server`, and asks the execution owner to list that MCP server, or every configured server when `server` is absent (D110).
+It replies `tools_reload_reply` with `asked`: each asked server in configured order with the `generation` it was given; an unknown `server` is refused as `unknown_mcp_server`.
+Asking only records a request, so a lost reply is recovered by asking again.
+`POST /v1/tools-status` takes `kind:"tools_status"` and `store` and replies `servers`, each configured server in configured order with its `state` (`idle` or `waiting` as its list settles), its `last` outcome (`never`, `listed`, `failed` or `collision`), its `finished` generation (the latest ask whose list has landed) and its `tools` count in the Host tool set.
+A client sees an asked generation g land once `finished` is at least g.
+
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
 The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.

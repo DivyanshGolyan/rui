@@ -401,6 +401,7 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
+                        .tools_reload => protocol.max_tools_reload_request_bytes,
                         .action_publish => protocol.shapeBytes(protocol.action_publish_request),
                         inline else => |route| if (comptime route.commandKind()) |kind|
                             if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
@@ -1529,6 +1530,8 @@ const Route = enum {
     public_part_content,
     skill_suggestions,
     model_list,
+    tools_reload,
+    tools_status,
     unsupported_control,
 
     fn commandKind(comptime self: Route) ?protocol.CommandKind {
@@ -1540,7 +1543,7 @@ const Route = enum {
 
     fn isControl(self: Route) bool {
         return switch (self) {
-            .host_stop, .host_pause, .unsupported_control => true,
+            .host_stop, .host_pause, .tools_reload, .unsupported_control => true,
             inline else => |route| if (comptime route.commandKind()) |command_kind|
                 command_spec.spec(command_kind).is_control
             else
@@ -1549,7 +1552,7 @@ const Route = enum {
     }
 
     fn atomicOnly(self: Route) bool {
-        return self == .host_info or self == .host_stop or self == .host_pause;
+        return self == .host_info or self == .host_stop or self == .host_pause or self == .tools_reload;
     }
 
     fn kind(self: Route) protocol.Kind {
@@ -1577,7 +1580,7 @@ test "command route projection preserves control classification" {
         };
         try std.testing.expectEqual(expected, comptime route.commandKind());
         const expected_control = switch (route) {
-            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
+            .host_stop, .host_pause, .tools_reload, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
             else => false,
         };
         try std.testing.expectEqual(expected_control, route.isControl());
@@ -1831,6 +1834,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .activity_content => |*command| try replyActivityContent(host, fd, command),
         .skill_suggestions => |*command| try replySkillSuggestions(host, fd, command),
         .model_list => try replyModelList(host, fd),
+        .tools_reload => |*reload| try replyToolsReload(host, fd, reload),
+        .tools_status => try replyToolsStatus(host, fd),
     }
 }
 
@@ -2077,6 +2082,37 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
+/// Asks the execution owner to list one server, or every configured server. Asking only records a
+/// request, so the reply needs no wait: the caller polls tools_status for each asked generation.
+noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType(wire_request.Request, "tools_reload")) !void {
+    if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    const owner = host.mcp_relist;
+    const servers: []const server_mcp_settings.Server = if (owner) |relist_owner| relist_owner.servers else &.{};
+    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
+    var count: usize = 0;
+    for (servers, 0..) |*server, index| {
+        if (request.server) |name| if (!std.mem.eql(u8, name.slice(), server.name.slice())) continue;
+        asked[count] = .{ .server = server.name.slice(), .generation = owner.?.ask(index) };
+        count += 1;
+    }
+    if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
+    if (count != 0) host.dispatch_wake.set(host.io);
+    try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{asked[0..count]});
+}
+
+/// Reads every configured server's published list status. Lock-free: it never waits for the owner.
+noinline fn replyToolsStatus(host: *Host, fd: *Reply) !void {
+    var rows: [host_settings.max_mcp_servers]host_reply.ToolServerStatus = undefined;
+    var count: usize = 0;
+    if (host.mcp_relist) |owner| {
+        for (owner.servers, 0..) |server, index| {
+            rows[count] = .{ .server = server.name.slice(), .status = owner.status(index) };
+            count += 1;
+        }
+    }
+    try fd.json(200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{rows[0..count]});
+}
+
 fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
     host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
@@ -2294,6 +2330,10 @@ const HeaderReader = struct {
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
+        else if (std.mem.eql(u8, path, "/v1/control/tools-reload"))
+            .tools_reload
+        else if (std.mem.eql(u8, path, "/v1/tools-status"))
+            .tools_status
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -3459,6 +3499,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .host_info => "host-info",
                 .host_stop => "control/host-stop",
                 .host_pause => "control/host-pause",
+                .tools_reload => "control/tools-reload",
                 .session_stop => "control/session-stop",
                 .session_archive => "control/session-archive",
                 .session_pin => "control/session-pin",

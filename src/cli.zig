@@ -302,7 +302,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
                 store_schema.mysql_schema;
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
-        .host_start, .host_pause, .host_status => try host(init, command, parsed),
+        .host_start, .host_pause, .host_reload_tools, .host_status => try host(init, command, parsed),
         .host_restart => try @import("host_coordinator.zig").restartAll(init),
         .host_serve => unreachable,
         .host_set, .host_unset, .host_settings => try hostSettings(init, command, parsed),
@@ -990,6 +990,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         }
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
+    if (command == .host_reload_tools) return reloadTools(init.io, init.gpa, selected, parsed.get("server"));
     if (command == .host_pause) {
         const drain: ?u32 = if (parsed.has("drain") or parsed.has("drain-seconds")) (try parsed.number(u32, "drain-seconds")) orelse host_drain.default_seconds else null;
         return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null, drain);
@@ -1040,6 +1041,56 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_di
     }
     try writer.writeAll("}\n");
     try output.finish();
+}
+
+/// Asks the running Host to list again, then polls tools_status until each asked list has landed.
+/// Prints one JSON line with each asked server's outcome and tool count.
+fn reloadTools(io: std.Io, gpa: std.mem.Allocator, selected: []const u8, name: ?[]const u8) !void {
+    const asked = try client.reloadTools(io, gpa, selected, name);
+    var status: client.ToolsStatus = .{};
+    if (asked.len != 0) {
+        const deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+        while (true) {
+            status = try client.toolsStatus(io, gpa, selected);
+            var still: usize = 0;
+            for (asked.slice()) |ask| {
+                const row = try statusOf(&status, ask.server.slice());
+                if (row.finished < ask.generation) {
+                    still += 1;
+                    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) stderr.diagnostic("rui: MCP server {s} is still listing its tools after 60 seconds; its tools are not yet reloaded\n", .{ask.server.slice()});
+                }
+            }
+            if (still == 0) break;
+            if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) {
+                reportCallerCode(.wait_timed_out);
+                return error.CallerFailure;
+            }
+            try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        }
+    }
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
+    try writer.print("{{\"version\":\"{s}\",\"type\":\"host_reload_tools\",\"servers\":[", .{protocol.wire_version});
+    for (asked.slice(), 0..) |ask, index| {
+        const row = try statusOf(&status, ask.server.slice());
+        const outcome = switch (row.last) {
+            .listed => "listed",
+            .failed => "failed",
+            .collision => "collision",
+            .never => unreachable,
+        };
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"server\":");
+        try std.json.Stringify.value(ask.server.slice(), .{}, writer);
+        try writer.print(",\"outcome\":\"{s}\",\"tools\":{d}}}", .{ outcome, row.tools });
+    }
+    try writer.writeAll("]}\n");
+    try output.finish();
+}
+
+fn statusOf(status: *const client.ToolsStatus, name: []const u8) !client.ToolServerStatus {
+    for (status.slice()) |row| if (std.mem.eql(u8, row.server.slice(), name)) return row;
+    return error.InvalidResponse;
 }
 
 fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId, drain_seconds: ?u32) !void {

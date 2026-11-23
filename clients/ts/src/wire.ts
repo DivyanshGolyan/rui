@@ -497,6 +497,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/tools-reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Asks the Host to list one MCP server, or every configured server, again. Each reply names the generation asked; tools-status reports when it has landed. */
+        post: operations["toolsReload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tools-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Each configured MCP server's list state, last outcome, finished generation and tool count. */
+        post: operations["toolsStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3407,6 +3441,52 @@ export interface components {
             code: "unresolved" | "pending_permission" | "background" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
             publication_position: components["schemas"]["Decimal"] | null;
         };
+        ToolsReloadReply: {
+            /** @constant */
+            version: "24";
+            /** @constant */
+            type: "tools_reload_reply";
+            asked: {
+                server: string;
+                generation: components["schemas"]["Decimal"];
+            }[];
+        };
+        ToolsReloadRequest: {
+            /** @constant */
+            version: "24";
+            /** @constant */
+            kind: "tools_reload";
+            store: string;
+        } | {
+            /** @constant */
+            version: "24";
+            /** @constant */
+            kind: "tools_reload";
+            store: string;
+            server: string;
+        };
+        ToolsStatusReply: {
+            /** @constant */
+            version: "24";
+            /** @constant */
+            type: "tools_status";
+            servers: {
+                server: string;
+                /** @enum {string} */
+                state: "idle" | "listing" | "waiting";
+                /** @enum {string} */
+                last: "never" | "listed" | "failed" | "collision";
+                finished: components["schemas"]["Decimal"];
+                tools: components["schemas"]["Decimal"];
+            }[];
+        };
+        ToolsStatusRequest: {
+            /** @constant */
+            version: "24";
+            /** @constant */
+            kind: "tools_status";
+            store: string;
+        };
         WorkActionsJson: {
             stop: boolean;
             interrupt: components["schemas"]["WorkInterruptJson"] | null;
@@ -4956,6 +5036,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelListReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    toolsReload: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolsReloadRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolsReloadReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    toolsStatus: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolsStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolsStatusReply"];
                 };
             };
             /** @description A refusal or failure. */

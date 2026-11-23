@@ -58,6 +58,7 @@ pub const Command = enum {
     action_read_part,
     host_start,
     host_pause,
+    host_reload_tools,
     host_status,
     host_restart,
     host_serve,
@@ -115,6 +116,7 @@ pub const Command = enum {
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
             .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only. --drain first holds new Turns and lets running work finish, up to --drain-seconds (default {d}, 1..{d}; implies --drain): work waiting on a person or a held Turn never holds it open, and what is still running at the limit is interrupted as pause does. The Host keeps draining if this command is interrupted; a repeat can only make the stop sooner.", .{ product_defaults.host_shutdown_seconds, host_drain.default_seconds, host_drain.max_seconds }), .options = destination ++ &[_]Option{ value("instance", "HEX"), flag("drain"), numeric("drain-seconds", "N", 1, host_drain.max_seconds, .count_malformed) } },
+            .host_reload_tools => .{ .resource = .host, .name = "reload-tools", .description = "Ask the running Host to list one MCP server, or every configured server with no --server, again, and wait until each list lands. Prints one JSON line with each server's outcome (listed, failed or collision) and its tool count. Gives up after 60 seconds.", .options = destination ++ &[_]Option{value("server", "NAME")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
             .host_serve => serve_grammar.definition,
@@ -802,6 +804,14 @@ test "tool help lists every built-in including skill in name order" {
         try command.definition().help(&help.writer);
         try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools " ++ product_defaults.tools ++ "|none") != null);
     }
+}
+
+test "host reload-tools takes an optional server name" {
+    var storage: [1024]u8 = undefined;
+    const named = try testParse(Command.host_reload_tools.definition(), &.{ "--server", "docs" }, &storage);
+    try std.testing.expectEqualStrings("docs", named.get("server").?);
+    const all = try testParse(Command.host_reload_tools.definition(), &.{}, &storage);
+    try std.testing.expect(all.get("server") == null);
 }
 
 test "Host restart requires all and refuses Store selection" {
