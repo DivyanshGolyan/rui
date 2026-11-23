@@ -1824,8 +1824,7 @@ def main(selected="all"):
         (fresh_provider_home / ".config/rui").mkdir(parents=True, mode=0o700)
         codex_fixture.credentials(fresh_provider_home / ".config/rui/codex.json")
         defaults(fresh_provider_home, "--model", "gpt-6-luna")
-        assert (fresh_provider_home / ".config/rui/preferences").read_text().endswith(
-            "store=\nprovider=codex\nmodel=gpt-6-luna\n")
+        assert saved_fields(fresh_provider_home / ".config/rui/preferences", "store", "provider", "model") == ("", "codex", "gpt-6-luna")
         credential.unlink()
         os.mkfifo(credential, mode=0o600)
         try:
