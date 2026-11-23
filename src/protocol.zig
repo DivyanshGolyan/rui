@@ -2702,9 +2702,9 @@ pub const model_list_reply = struct {
         return head.len + model_list.providersBytes(facts) + tail.len;
     }
 };
-/// `asked` lists the configured servers a reload asked, in configured order.
+/// `instance` names the Host that took the ask; `asked` lists the configured servers a reload asked, in configured order.
 pub const tools_reload_reply = struct {
-    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_reload_reply\",\"asked\":["};
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"asked\":[" };
     pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"generation\":\"", Hole.decimal, "\"}" };
     pub const tail = "]}";
     /// The bound for `servers` configured servers, each one entry.
@@ -2712,9 +2712,9 @@ pub const tools_reload_reply = struct {
         return shapeBytes(head) + jsonListBytes(servers, shapeBytes(entry)) + tail.len;
     }
 };
-/// `servers` lists every configured server in configured order. `tools` counts the server's MCP tools in the set.
+/// `instance` names the Host that replied; `servers` lists every configured server in configured order. `tools` counts the server's MCP tools in the set.
 pub const tools_status_reply = struct {
-    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_status\",\"servers\":["};
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"servers\":[" };
     pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"state\":\"", Hole{ .tag = @import("mcp/relist.zig").State }, "\",\"last\":\"", Hole{ .tag = @import("mcp/relist.zig").Last }, "\",\"finished\":\"", Hole.decimal, "\",\"tools\":\"", Hole.decimal, "\"}" };
     pub const tail = "]}";
     /// The bound for `servers` configured servers, each one entry.
@@ -4064,7 +4064,7 @@ test "MCP tool reload and status replies bound one entry per configured server" 
     const name_bytes: [@import("tool_record.zig").max_server_bytes]u8 = @splat('s');
     const longest_name: []const u8 = &name_bytes;
     var reply: FixedJsonBuffer(tools_reload_reply.maxBytes(servers)) = .{};
-    try reply.appendShape(tools_reload_reply.head, .{});
+    try reply.appendShape(tools_reload_reply.head, .{@as(InstanceId, @splat(0xab))});
     for (0..servers) |index| {
         if (index != 0) try reply.append(",");
         try reply.appendShape(tools_reload_reply.entry, .{ longest_name, std.math.maxInt(u64) });
@@ -4073,7 +4073,7 @@ test "MCP tool reload and status replies bound one entry per configured server" 
     try std.testing.expect(try std.json.validate(std.testing.allocator, reply.slice()));
 
     var status: FixedJsonBuffer(tools_status_reply.maxBytes(servers)) = .{};
-    try status.appendShape(tools_status_reply.head, .{});
+    try status.appendShape(tools_status_reply.head, .{@as(InstanceId, @splat(0xab))});
     for (0..servers) |index| {
         if (index != 0) try status.append(",");
         try status.appendShape(tools_status_reply.entry, .{ longest_name, relist.State.waiting, relist.Last.collision, std.math.maxInt(u64), std.math.maxInt(u32) });

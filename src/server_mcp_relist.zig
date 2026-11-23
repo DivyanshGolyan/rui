@@ -302,7 +302,9 @@ pub const Relist = struct {
         for (self.servers, self.names[0..self.servers.len]) |*server, *name| name.* = server.name.slice();
         owned.configured_servers = self.names[0..self.servers.len];
         try store.saveHostToolSet(owned);
-        for (self.servers, self.tools[0..self.servers.len]) |*server, *count| count.* = countOwned(owned, server.name.slice());
+        for (self.servers, fresh, self.tools[0..self.servers.len]) |*server, listed, *count| {
+            if (listed != null) count.* = countOwned(owned, server.name.slice());
+        }
         if (self.current) |*previous| previous.deinit();
         self.current = arena;
         return .listed;
@@ -344,6 +346,66 @@ test "re-list folds asks made during a list into one more list" {
     try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
     try std.testing.expect(storage.hostTools().host_tool_set.find("beta") != null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("alpha") == null);
+}
+
+test "a list in flight keeps its generation: an ask made mid-list waits for the next list" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const poll = @import("test_poll");
+    const io = std.testing.io;
+    const first = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"alpha\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    const second = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"beta\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = first, .more = &.{second} };
+    try script.start();
+    defer script.stop();
+    var url: [128]u8 = undefined;
+    var server: server_mcp_settings.Server = .{};
+    try server.name.set("docs");
+    @memcpy(server.bearer_token.bytes[0..6], "secret");
+    server.bearer_token.len = 6;
+    try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+    const servers = [_]server_mcp_settings.Server{server};
+    var owner = Relist.init(std.testing.allocator, &servers);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    const Reach = struct {
+        owner: *Relist,
+        storage: *store_module.Store,
+        target: u64,
+        failure: ?anyerror = null,
+
+        fn reached(drive: *@This()) bool {
+            _ = drive.owner.service(drive.storage, 0, &drive.failure);
+            return drive.failure != null or drive.owner.status(0).finished >= drive.target;
+        }
+    };
+
+    // Generation 1 begins its list; generation 2 is asked while that list is in flight.
+    try std.testing.expectEqual(@as(u64, 1), owner.ask(0));
+    var begin_failure: ?anyerror = null;
+    _ = owner.service(&storage, 0, &begin_failure);
+    try std.testing.expect(owner.listing());
+    try std.testing.expectEqual(@as(u64, 2), owner.ask(0));
+
+    // The list in flight lands generation 1 alone. The next list begins at once for generation 2.
+    var landing: Reach = .{ .owner = &owner, .storage = &storage, .target = 1 };
+    try poll.waitUntil(io, poll.after(io, .fromSeconds(30)), &landing, Reach.reached);
+    try std.testing.expectEqual(@as(?anyerror, null), landing.failure);
+    try std.testing.expectEqual(@as(u64, 1), owner.status(0).finished);
+    try std.testing.expect(owner.listing());
+
+    // The next service lists again and reaches generation 2.
+    var reaching: Reach = .{ .owner = &owner, .storage = &storage, .target = 2 };
+    try poll.waitUntil(io, poll.after(io, .fromSeconds(30)), &reaching, Reach.reached);
+    try std.testing.expectEqual(@as(?anyerror, null), reaching.failure);
+    try std.testing.expectEqual(@as(u64, 2), owner.status(0).finished);
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+    try std.testing.expect(storage.hostTools().host_tool_set.find("beta") != null);
 }
 
 test "published status follows each list and keeps its tool count through a failed list" {

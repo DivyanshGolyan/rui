@@ -3446,6 +3446,7 @@ export interface components {
             version: "24";
             /** @constant */
             type: "tools_reload_reply";
+            instance: string;
             asked: {
                 server: string;
                 generation: components["schemas"]["Decimal"];
@@ -3470,6 +3471,7 @@ export interface components {
             version: "24";
             /** @constant */
             type: "tools_status";
+            instance: string;
             servers: {
                 server: string;
                 /** @enum {string} */

@@ -14437,6 +14437,10 @@
           "type": {
             "const": "tools_reload_reply"
           },
+          "instance": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
           "asked": {
             "type": "array",
             "items": {
@@ -14464,6 +14468,7 @@
         "required": [
           "version",
           "type",
+          "instance",
           "asked"
         ],
         "additionalProperties": false
@@ -14531,6 +14536,10 @@
           "type": {
             "const": "tools_status"
           },
+          "instance": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
           "servers": {
             "type": "array",
             "items": {
@@ -14581,6 +14590,7 @@
         "required": [
           "version",
           "type",
+          "instance",
           "servers"
         ],
         "additionalProperties": false

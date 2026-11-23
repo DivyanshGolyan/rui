@@ -2092,7 +2092,7 @@ noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType
     }
     if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
     if (count != 0) host.dispatch_wake.set(host.io);
-    try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{asked[0..count]});
+    try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{ host.instance, asked[0..count] });
 }
 
 /// Reads every configured server's published list status. Lock-free: it never waits for the owner.
@@ -2100,12 +2100,12 @@ noinline fn replyToolsStatus(host: *Host, fd: *Reply) !void {
     var rows: [host_settings.max_mcp_servers]host_reply.ToolServerStatus = undefined;
     var count: usize = 0;
     if (host.mcp_relist) |owner| {
-        for (owner.servers, 0..) |server, index| {
+        for (owner.servers, 0..) |*server, index| {
             rows[count] = .{ .server = server.name.slice(), .status = owner.status(index) };
             count += 1;
         }
     }
-    try fd.json(200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{rows[0..count]});
+    try fd.json(200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ host.instance, rows[0..count] });
 }
 
 fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
@@ -5357,6 +5357,95 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     const offered_digest = protocol.contentDigest(description);
     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2", .{ binding.operation_id, testing.Blob{ .bytes = &offered_digest } }));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "MCP list routes ask one named server or every server, refuse unknown or fenced asks, and report the Host instance" {
+    const io = std.testing.io;
+    const instance_hex = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+    var docs: server_mcp_settings.Server = .{};
+    try docs.name.set("docs");
+    var notes: server_mcp_settings.Server = .{};
+    try notes.name.set("notes");
+    const servers = [_]server_mcp_settings.Server{ docs, notes };
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    defer owner.deinit();
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .mcp_relist = &owner, .instance = @splat(0x7e) };
+
+    // An unknown server is refused, and no list is asked.
+    var request: @FieldType(wire_request.Request, "tools_reload") = .{};
+    request.server = .{};
+    try request.server.?.set("missing");
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 400 "));
+        try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"code\":\"unknown_mcp_server\"") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire) + owner.asks[1].load(.acquire));
+    try std.testing.expect(!host.dispatch_wake.isSet());
+
+    // A fenced Host refuses the ask before recording it.
+    host.phase.store(.stopping, .release);
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        request.server = null;
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 503 "));
+        try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "dispatch_fenced") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire) + owner.asks[1].load(.acquire));
+    host.phase.store(.open, .release);
+
+    // A named server asks only its own list, and the reply carries the Host instance.
+    request.server = .{};
+    try request.server.?.set("notes");
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 200 "));
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[{\"server\":\"notes\",\"generation\":\"1\"}]}", reply.body.json);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), owner.asks[1].load(.acquire));
+    try std.testing.expect(host.dispatch_wake.isSet());
+
+    // Without a server name every configured server is asked, in configured order.
+    host.dispatch_wake.reset();
+    request.server = null;
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[{\"server\":\"docs\",\"generation\":\"1\"},{\"server\":\"notes\",\"generation\":\"2\"}]}", reply.body.json);
+    }
+    try std.testing.expect(host.dispatch_wake.isSet());
+
+    // The status reply lists every configured server, lock-free, with the same instance.
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsStatus(&host, &reply);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"}]}", reply.body.json);
+    }
+
+    // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
+    var bare = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&bare, &reply, &.{});
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[]}", reply.body.json);
+    }
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsStatus(&bare, &reply);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[]}", reply.body.json);
+    }
+    try std.testing.expect(!bare.dispatch_wake.isSet());
 }
 
 test "configure parent inherits the Host environment only after a fresh creation" {

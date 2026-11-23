@@ -538,23 +538,32 @@ const RELOAD_WAIT_MS = 60_000;
 
 export interface ToolReloadOutcome {
 	server: string;
-	outcome: "never" | "listed" | "failed" | "collision";
+	/** The latest outcome of the asked list. */
+	outcome: "listed" | "failed" | "collision";
 	tools: number;
 }
 
+type ToolsAsk = Schemas["ToolsReloadReply"]["asked"][number];
+type ToolsStatusRow = Schemas["ToolsStatusReply"]["servers"][number];
+
 /**
  * Asks the Host to list one MCP server, or every configured server, again, then polls `tools_status` until each asked
- * generation has landed. Rejects with RuiWaitTimeoutError after 60 s.
+ * generation has landed. An empty ask resolves at once with no poll. Rejects with RuiWaitTimeoutError after 60 s.
+ *
+ * Landing follows the CLI's owner (`toolsProgress` in client.zig): a server has landed in the Host that asked once
+ * its finished generation reaches the ask's; a Host with another instance has restarted its generations, so a
+ * server has landed there once any list has finished. A missing row, or `never` once landed, is an invalid reply.
  */
 export async function reloadTools(link: Link, server?: string): Promise<ToolReloadOutcome[]> {
-	const asked = parse<Schemas["ToolsReloadReply"]>(
+	const reply = parse<Schemas["ToolsReloadReply"]>(
 		await link.exchange("/v1/control/tools-reload", (store) => JSON.stringify({
 			version: WIRE_VERSION,
 			kind: "tools_reload",
 			store,
 			...(server === undefined ? {} : { server }),
 		} satisfies Schemas["ToolsReloadRequest"])),
-	).asked;
+	);
+	if (reply.asked.length === 0) return [];
 	const deadline = Date.now() + RELOAD_WAIT_MS;
 	for (;;) {
 		const status = parse<Schemas["ToolsStatusReply"]>(
@@ -563,20 +572,41 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 				kind: "tools_status",
 				store,
 			} satisfies Schemas["ToolsStatusRequest"])),
-		).servers;
-		const rows = asked.map((ask) => {
-			const row = status.find((entry) => entry.server === ask.server);
-			return { ask, row };
-		});
-		const landed = rows.every(({ ask, row }) => row !== undefined && BigInt(row.finished) >= BigInt(ask.generation));
-		if (landed) {
-			return rows.map(({ ask, row }) => ({ server: ask.server, outcome: row!.last, tools: Number(row!.tools) }));
+		);
+		const pending = reply.asked.filter((ask) => !serverLanded(reply.instance, status, ask));
+		if (pending.length === 0) {
+			return reply.asked.map((ask) => {
+				const row = statusRow(status, ask.server);
+				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools) };
+			});
 		}
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) {
-			const pending = rows.filter(({ ask, row }) => row === undefined || BigInt(row.finished) < BigInt(ask.generation)).map(({ ask }) => ask.server);
-			throw new RuiWaitTimeoutError(`MCP tool lists still pending after 60 seconds: ${pending.join(", ")}`);
+			throw new RuiWaitTimeoutError(`MCP tool lists still pending after 60 seconds: ${pending.map((ask) => ask.server).join(", ")}`);
 		}
 		await new Promise((resolve) => setTimeout(resolve, Math.min(RELOAD_POLL_MS, remaining)));
 	}
+}
+
+function serverLanded(reloadInstance: string, status: Schemas["ToolsStatusReply"], ask: ToolsAsk): boolean {
+	const row = statusRow(status, ask.server);
+	const finished = BigInt(row.finished);
+	const landed = status.instance === reloadInstance ? finished >= BigInt(ask.generation) : finished >= 1n;
+	if (landed && row.last === "never") throw invalidToolsReply();
+	return landed;
+}
+
+function statusRow(status: Schemas["ToolsStatusReply"], name: string): ToolsStatusRow {
+	const row = status.servers.find((entry) => entry.server === name);
+	if (row === undefined) throw invalidToolsReply();
+	return row;
+}
+
+function toolOutcome(row: ToolsStatusRow): ToolReloadOutcome["outcome"] {
+	if (row.last === "never") throw invalidToolsReply();
+	return row.last;
+}
+
+function invalidToolsReply(): RuiRequestError {
+	return new RuiRequestError("invocation_error", "invalid_response");
 }
