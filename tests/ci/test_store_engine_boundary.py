@@ -14,6 +14,7 @@ ALLOWED = {
     "engine/Sqlite.zig",
     "schema.zig",
     "testing.zig",
+    "history.zig",
     "sqlite_tests.zig",
     "rsql.zig",
 }
