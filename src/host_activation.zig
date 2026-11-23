@@ -21,7 +21,7 @@ pub const Limitation = enum {
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
 
 /// The target-build steps before any stop; a failure there leaves the Host untouched.
-pub const TargetStep = enum { resolving, inspecting, checking };
+pub const TargetStep = enum { resolving, checking };
 
 /// How one Host's restart ended. `HostLifecycle` re-exports it as
 /// `ActivationOutcome`; `host_coordinator` serializes it by field name.
@@ -130,8 +130,6 @@ pub const Facts = struct {
     same_executable: ?bool = null,
     /// Read only when the executable is the same.
     current: ?union(enum) { unreadable, changed, same: Same } = null,
-    /// The target is the released build known to refuse a detached start.
-    known_bad: ?bool = null,
     /// The running Host's sources were reconstructed for the target.
     sources: ?bool = null,
     /// The target's public settings check; `ok` carries the digest of the frame it printed.
@@ -157,7 +155,6 @@ pub const Facts = struct {
 pub const Effect = union(enum) {
     resolve_target,
     confirm_current,
-    inspect_target,
     reconstruct_sources,
     check_target,
     reobserve,
@@ -210,7 +207,6 @@ pub fn next(facts: Facts, cancelled: bool) Effect {
         // build before the digest) has nothing to compare: the same build stays.
         .same => |value| if (value.settings == null) return .{ .done = .{ .already_ready = value.running } } else value,
     };
-    if (facts.known_bad orelse return .inspect_target) return keep(kept, .{ .unsupported = .target_capability });
     if (!(facts.sources orelse return .reconstruct_sources)) return keep(kept, .{ .unsupported = .configuration_unavailable });
     const checked: settings_handoff.Digest = switch (facts.check orelse return .check_target) {
         .cancelled => return .{ .done = .cancelled },
@@ -449,7 +445,6 @@ const sh60 = struct {
         .{ .outcome = .replacement_observed, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .cancelled, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .resolving }, .category = .failed, .guides = true, .safe = true },
-        .{ .outcome = .{ .target_unusable = .inspecting }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .target_unusable = .checking }, .category = .failed, .guides = true, .safe = true },
         .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
         .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = failure } }, .category = .failed, .guides = true, .safe = false },
@@ -634,7 +629,6 @@ const fixture = struct {
         return .{
             .eligibility = .{ .managed = .{ .order = .lt, .environment_parses = true } },
             .same_executable = false,
-            .known_bad = false,
             .sources = true,
             .check = .{ .ok = digest },
             .before_stop = .same,
@@ -668,11 +662,11 @@ test "SH-24 a stop is asked for only after every check before it holds" {
     };
     var stops: usize = 0;
     var count: usize = 0;
-    const target_failures = [_]?TargetStep{ null, .resolving, .inspecting, .checking };
+    const target_failures = [_]?TargetStep{ null, .resolving, .checking };
     for (eligibilities) |eligible| for ([_]@FieldType(Facts, "census"){ .same, .replaced }) |census| for ([_]bool{ false, true }) |cancelled|
-        for (target_failures) |target_failed| for (fixture.flags) |same_executable| for (currents) |current| for (fixture.flags) |known_bad| for (fixture.flags) |sources|
+        for (target_failures) |target_failed| for (fixture.flags) |same_executable| for (currents) |current| for (fixture.flags) |sources|
             for (checks) |check| for (fixture.readings) |before_stop| for (fixture.readings) |snapshot| {
-                const facts: Facts = .{ .eligibility = eligible, .census = census, .target_failed = target_failed, .same_executable = same_executable, .current = current, .known_bad = known_bad, .sources = sources, .check = check, .before_stop = before_stop, .snapshot = snapshot };
+                const facts: Facts = .{ .eligibility = eligible, .census = census, .target_failed = target_failed, .same_executable = same_executable, .current = current, .sources = sources, .check = check, .before_stop = before_stop, .snapshot = snapshot };
                 const expected: Effect = expected: {
                     // 1. Not a managed Host.
                     const managed = switch (eligible) {
@@ -704,11 +698,9 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                         .changed => break :expected .{ .done = .replacement_observed },
                         .same => |value| if (value.settings == null) break :expected .{ .done = .{ .already_ready = value.running } } else value,
                     };
-                    // 8. The known-bad released target.
-                    if (known_bad orelse break :expected .inspect_target) break :expected kept_done orelse .{ .done = .{ .unsupported = .target_capability } };
-                    // 9. Sources the target cannot be given.
+                    // 8. Sources the target cannot be given.
                     if (!(sources orelse break :expected .reconstruct_sources)) break :expected kept_done orelse .{ .done = .{ .unsupported = .configuration_unavailable } };
-                    // 10. The target's check.
+                    // 9. The target's check.
                     const checked_digest: settings_handoff.Digest = switch (check orelse break :expected .check_target) {
                         .cancelled => break :expected .{ .done = .cancelled },
                         .unavailable => break :expected kept_done orelse .{ .done = .{ .target_unusable = .checking } },
@@ -750,7 +742,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 const unchanged = running_settings != null and checked_settings != null and std.mem.eql(u8, &running_settings.?, &checked_settings.?);
                 const restarts = same_executable == false or (same_executable == true and running_settings != null and !unchanged);
                 const holds = eligible == .managed and eligible.managed.order != .gt and eligible.managed.environment_parses and census == .same and
-                    target_failed == null and restarts and known_bad == false and sources == true and check != null and check.? == .ok and
+                    target_failed == null and restarts and sources == true and check != null and check.? == .ok and
                     before_stop == .same and snapshot == .same;
                 try std.testing.expectEqual(holds, actual == .stop);
                 // Nothing before the stop is reported at a stage after it.
@@ -763,7 +755,7 @@ test "SH-24 a stop is asked for only after every check before it holds" {
                 stops += @intFromBool(holds);
                 count += 1;
             };
-    try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * currents.len * 3 * 3 * checks.len * 4 * 4, count);
+    try std.testing.expectEqual(eligibilities.len * 2 * 2 * target_failures.len * 3 * currents.len * 3 * checks.len * 4 * 4, count);
     // Per order and `cancelled`: a differing executable restarts for every current (6 * 2 checks),
     // and the same executable restarts only when a reported digest differs from the checked one (2 pairs).
     try std.testing.expectEqual(2 * 2 * (currents.len * 2 + 2), stops);

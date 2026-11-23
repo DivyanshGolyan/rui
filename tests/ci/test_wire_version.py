@@ -16,6 +16,7 @@ TS_OWNER = re.compile(r'^export const WIRE_VERSION = "(\d+)";$', re.MULTILINE)
 TS_OWNER_FILE = "clients/ts/src/transport.ts"
 OWNER_FILE = "src/wire_version.zig"
 EARLIER_OWNER_FILE = "src/protocol.zig"
+PROFILE_FILE = "src/protocol_reply.zig"
 NAME = "wire_version"
 HEADER = r'Wire-Version\\?"?\s*:\s*\\?"?\d'
 LITERALS = (
@@ -103,6 +104,15 @@ def wire_contract_error(tag, released, candidate, released_document, candidate_d
     return None
 
 
+def profile_error(tag, released, current, profile_source):
+    if released == current or re.search(rf"^\s*released_{released},$", profile_source, re.MULTILINE):
+        return None
+    return (f"{PROFILE_FILE} has no released_{released} HostInfoProfile, but release {tag} speaks wire "
+            f"{released} and wire_version is {current}: add `released_{released}` to HostInfoProfile "
+            f"(wire \"{released}\", Providers as the released host_info shape) so upgrades from {tag} "
+            "can recognise its Host")
+
+
 def literal_findings(root):
     findings = []
     for directory, suffixes, pattern in LITERALS:
@@ -157,6 +167,25 @@ class WireVersionTest(unittest.TestCase):
             sys.path.remove(str(ROOT / "tests/integration"))
         self.assertEqual(host_process.WIRE_VERSION, str(owner))
 
+    def test_newest_release_has_a_host_info_profile(self):
+        tag = released_tag(ROOT)
+        if tag is None:
+            self.skipTest("no v* release tags in this checkout; the policy job checks out with fetch-depth 0")
+        error = profile_error(tag, wire_version_at(tag), wire_version((ROOT / OWNER_FILE).read_text()),
+                              (ROOT / PROFILE_FILE).read_text())
+        if error:
+            self.fail(error)
+
+    def test_host_info_profile_guard_names_the_missing_profile(self):
+        source = "pub const HostInfoProfile = enum {\n    current,\n    released_22,\n};\n"
+        self.assertIsNone(profile_error("v0.88.0", 22, 23, source), "the newest release's profile is present")
+        self.assertIsNone(profile_error("v0.88.0", 23, 23, source), "a release on main's wire needs no profile")
+        error = profile_error("v0.89.0", 23, 24, source)
+        self.assertIsNotNone(error)
+        self.assertIn("released_23", error)
+        self.assertIn("add `released_23`", error)
+        self.assertIn("v0.89.0", error)
+
     def test_bump_rule(self):
         self.assertIsNone(bump_error(NAME, 4, 4, 4))
         self.assertIsNone(bump_error(NAME, 5, 4, 4), "one past the release is a fresh bump")
@@ -169,28 +198,28 @@ class WireVersionTest(unittest.TestCase):
 
     def test_wire_contract_comparison(self):
         cases = (
-            ("enum added without bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 13, '$["enum"][1]'),
-            ("enum added with bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 14, None),
+            ("enum added without bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 22, '$["enum"][1]'),
+            ("enum added with bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 23, None),
             ("documentation at every depth", {"description": "before", "items": [{"summary": "old"}]},
-             {"description": "after", "items": [{"summary": "new", "example": 1, "examples": [2]}]}, 13, None),
+             {"description": "after", "items": [{"summary": "new", "example": 1, "examples": [2]}]}, 22, None),
             ("wire bound changed", {"items": {"x-rui-max-bytes": 10}},
-             {"items": {"x-rui-max-bytes": 20}}, 13, '$["items"]["x-rui-max-bytes"]'),
-            ("release label only", {"info": {"version": "13"}}, {"info": {"version": "14"}}, 13, None),
+             {"items": {"x-rui-max-bytes": 20}}, 22, '$["items"]["x-rui-max-bytes"]'),
+            ("release label only", {"info": {"version": "22"}}, {"info": {"version": "23"}}, 22, None),
             ("nested version is wire", {"items": {"info": {"version": "a"}}},
-             {"items": {"info": {"version": "b"}}}, 13, '$["items"]["info"]["version"]'),
-            ("wire field removed", {"required": True}, {}, 13, '$["required"]'),
-            ("JSON type changed", {"value": 1}, {"value": True}, 13, '$["value"]'),
-            ("enum removed", {"enum": ["old", "new"]}, {"enum": ["old"]}, 13, '$["enum"][1]'),
-            ("object order only", {"a": 1, "b": 2}, {"b": 2, "a": 1}, 13, None),
+             {"items": {"info": {"version": "b"}}}, 22, '$["items"]["info"]["version"]'),
+            ("wire field removed", {"required": True}, {}, 22, '$["required"]'),
+            ("JSON type changed", {"value": 1}, {"value": True}, 22, '$["value"]'),
+            ("enum removed", {"enum": ["old", "new"]}, {"enum": ["old"]}, 22, '$["enum"][1]'),
+            ("object order only", {"a": 1, "b": 2}, {"b": 2, "a": 1}, 22, None),
         )
         for name, before, after, candidate, path in cases:
             with self.subTest(name=name):
-                error = wire_contract_error("v0.69.1", 13, candidate, before, after)
+                error = wire_contract_error("v0.88.0", 22, candidate, before, after)
                 if path is None:
                     self.assertIsNone(error)
                 else:
-                    self.assertEqual(error, f"wire contract differs from release v0.69.1 (wire_version 13) at {path}, "
-                                     f"but wire_version is {candidate}; set src/wire_version.zig to 14, "
+                    self.assertEqual(error, f"wire contract differs from release v0.88.0 (wire_version 22) at {path}, "
+                                     f"but wire_version is {candidate}; set src/wire_version.zig to 23, "
                                      "regenerate openapi.json")
 
     def test_annotation_changes_at_object_positions_are_ignored(self):
