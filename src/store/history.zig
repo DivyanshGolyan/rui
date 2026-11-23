@@ -12,6 +12,7 @@ const protocol = @import("../protocol.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const store_testing = @import("testing.zig");
+const store_core = @import("Store.zig");
 const mysql_testing = @import("mysql_testing.zig");
 const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const c = sqlite.c;
@@ -68,6 +69,8 @@ pub const Built = struct {
     format: u32,
     raw: ?*c.sqlite3,
     upgraded: bool = false,
+    /// True when the Store holds only the baseline rows: the fresh twin of the MySQL upgrade check holds those rows.
+    baseline_only: bool,
     /// The Store directory (the tmp dir's realpath). Its own storage so a Built can be returned by value.
     root_storage: [protocol.max_store_bytes]u8,
     root_len: usize,
@@ -105,7 +108,7 @@ pub const Built = struct {
             .mysql => {
                 const migration = schema.mysqlMigrationFrom(self.format) orelse return error.StartFormatOutOfRange;
                 if (migration.len > 0) try mysql_dialect_check.historyLoad(migration, false);
-                try mysql_dialect_check.historyExpectUpgraded(self.root());
+                try mysql_dialect_check.historyExpectUpgraded(self.root(), self.baseline_only);
             },
         }
         self.upgraded = true;
@@ -132,6 +135,7 @@ pub fn build(io: std.Io, engine: Engine, tmp: *std.testing.TmpDir, start: *const
         .engine = engine,
         .format = start.format,
         .raw = null,
+        .baseline_only = start.baseline_rows and start.sql.text(.mysql).len == 0 and start.sql.text(.sqlite).len == 0,
         .root_storage = undefined,
         .root_len = 0,
         .path_storage = undefined,
@@ -206,6 +210,39 @@ fn expectNoForeignKeyViolations(database: *c.sqlite3) !void {
         c.SQLITE_ROW => return error.HistoryRowBreaksForeignKey,
         else => return error.StatementFailed,
     }
+}
+
+/// Builds the Start's Store, upgrades it with the operator's path, and opens it as the test Store. SQLite opens the
+/// upgraded file. MySQL opens the history database, which gets the oracle and the conformance grants after the upgrade.
+pub fn openAt(case: *const store_testing.Case, storage: *store_core.Store, tmp: *std.testing.TmpDir, io: std.Io, start: *const Start) !void {
+    var built = try build(io, case.engine, tmp, start);
+    errdefer built.deinit();
+    try built.upgrade();
+    built.deinit();
+    switch (case.engine) {
+        .sqlite => try store_testing.testingStore(case, storage, tmp, io),
+        .mysql => {
+            try mysql_testing.installBuiltFixture(io, mysql_dialect_check.historyDatabase());
+            try openHistoryDatabase(case, storage, io, built.root());
+        },
+    }
+}
+
+/// Reopens the Store that openAt upgraded, without building or upgrading it again.
+pub fn reopen(case: *const store_testing.Case, storage: *store_core.Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
+    switch (case.engine) {
+        .sqlite => try store_testing.testingStore(case, storage, tmp, io),
+        .mysql => {
+            var root_storage: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(io, &root_storage);
+            try openHistoryDatabase(case, storage, io, root_storage[0..root_length]);
+        },
+    }
+}
+
+fn openHistoryDatabase(case: *const store_testing.Case, storage: *store_core.Store, io: std.Io, selector: []const u8) !void {
+    try mysql_testing.openBuilt(storage, io, mysql_dialect_check.historyDatabase(), selector, .{});
+    storage.engine.mysql.state.testing_drop_armed = case.rerun;
 }
 
 test "a Store built at every format from the baseline to the current one upgrades to a current Store" {

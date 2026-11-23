@@ -10,6 +10,7 @@ const command_domain = @import("../domain/command.zig");
 const content_domain = @import("../domain/content.zig");
 const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
+const history = @import("../history.zig");
 const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
 const Faults = store_core.Faults;
@@ -703,6 +704,34 @@ test "child ending forward is the single durable owed fact across recovery for e
     }.run);
 }
 
+/// Format 66 rows for the ending upgrade, in the shape the shipped steps leave at 66: a parent Session, and the child
+/// Session's two completed Turns from the baseline. Turn 1's ending is delivered. Turn 3's ending is owed, and its
+/// forward row exists only when the test keeps pending forwards.
+fn endingRows66(comptime keep_pending_forward: bool, comptime suppress_message: bool) [:0]const u8 {
+    const keep_forward = if (keep_pending_forward) "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) VALUES(2,'parent','d8mv7p',2,3,NULL,0,NULL);" else "";
+    return comptime std.fmt.comptimePrint("{s}{s}{s}", .{
+        "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,created_at,next_position,created_seq,workspace_digest,workspace_key) " ++
+            "SELECT 'parent',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,created_at,3,4,workspace_digest,workspace_key FROM session WHERE session_ref='rhvzwc';" ++
+            "UPDATE session SET parent_ref='parent',next_position=9 WHERE session_ref='d8mv7p';" ++
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'upgrade-ask',kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,10 FROM core_command WHERE command_key='fixture-answer-key';" ++
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
+            "SELECT 'rui.core/ending/1',kind,'parent',input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,11 FROM core_command WHERE command_key='fixture-answer-key';" ++
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) VALUES(3,'d8mv7p','upgrade-ask',2,6,NULL,1793781720,NULL,NULL),(4,'parent','rui.core/ending/1',5,2,NULL,1793781720,'d8mv7p',8);" ++
+            "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at,continuation_operation_id) VALUES(3,'d8mv7p',3,3,3,'completed',5,7,1793781720,NULL);" ++
+            "UPDATE message_admission SET turn_id=3 WHERE admission_id=3;" ++
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+            "SELECT 3,3,session_ref,settings_revision,3,6,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,5,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override FROM model_operation WHERE operation_id=1;" ++
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) VALUES(1,'parent','d8mv7p',2,1,NULL,0,NULL);",
+        keep_forward,
+        std.fmt.comptimePrint("INSERT INTO session_ending_owed(turn_id,delivered,suppress_message) VALUES(1,1,0),(3,0,{d});", .{@intFromBool(suppress_message)}),
+    });
+}
+
+fn endingStart66(comptime keep_pending_forward: bool, comptime suppress_message: bool) history.Start {
+    return .{ .format = 66, .sql = history.FormatSql.neutral(endingRows66(keep_pending_forward, suppress_message)) };
+}
+
 test "ending migration preserves unsettled and settled Messages exactly once with the new digest" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -710,43 +739,27 @@ test "ending migration preserves unsettled and settled Messages exactly once wit
                 inline for (.{ false, true }) |suppress_message| {
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
+                    const start = comptime endingStart66(keep_pending_forward, suppress_message);
                     var storage: Store = undefined;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    try history.openAt(case, &storage, &tmp, std.testing.io, &start);
                     var opened = true;
                     defer if (opened) {
                         storage.close() catch unreachable;
                     };
-                    const parent = try configureTestSession(&storage, "upgrade-parent");
-                    const child = try configureTestSession(&storage, "upgrade-child");
-                    try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
-                    var turns: [2]u64 = undefined;
-                    inline for (0..2) |index| {
-                        const key = if (index == 0) "upgrade-settled" else "upgrade-unsettled";
-                        try submitTestMessage(&storage, &tmp, key, key, child.slice(), "answer");
-                        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                        turns[index] = model.turn_id;
-                        try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
-                    }
-                    try std.testing.expect(try storage.deliverChildEnding(turns[0], .{}));
-                    if (suppress_message) try store_testing.exec(&storage, "UPDATE session_forward SET suppress_message=1 WHERE source_id=?1 AND message_delivered=0", .{turns[1]});
-                    try store_testing.stageEndingMessageUpgrade(&storage, keep_pending_forward);
-                    try storage.close();
-                    opened = false;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                    opened = true;
+                    const turns = [2]u64{ 1, 3 };
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{turns[0]}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{turns[1]}));
                     try std.testing.expectEqual(@as(u64, @intFromBool(suppress_message)), try store_testing.queryU64(&storage, "SELECT suppress_message FROM session_forward WHERE source_id=?1 AND message_delivered=0", .{turns[1]}));
                     try std.testing.expect(!try storage.deliverChildEnding(turns[0], .{}));
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{"parent"}));
                     try std.testing.expect(try storage.deliverChildEnding(turns[1], .{}));
                     try storage.close();
                     opened = false;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    try history.reopen(case, &storage, &tmp, std.testing.io);
                     opened = true;
                     try std.testing.expect(!try storage.deliverChildEnding(turns[0], .{}));
                     try std.testing.expect(!try storage.deliverChildEnding(turns[1], .{}));
-                    try std.testing.expectEqual(@as(u64, if (suppress_message) 1 else 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                    try std.testing.expectEqual(@as(u64, if (suppress_message) 1 else 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{"parent"}));
                 }
             }
         }

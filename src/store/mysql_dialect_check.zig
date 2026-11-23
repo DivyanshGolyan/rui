@@ -648,6 +648,11 @@ fn expectSameResults(comptime migrated: []const []const u8, comptime fresh: []co
 pub const history_sql = "{[history]s}";
 pub const history_fresh_sql = "{[history_fresh]s}";
 
+/// The history Store's database name at run time, which history.zig opens as the test Store on MySQL.
+pub fn historyDatabase() []const u8 {
+    return names.history;
+}
+
 /// Empties the history Store's database and selects it. Runs with the dialect driver's root login.
 pub fn historyReset() !void {
     const io = std.testing.io;
@@ -684,8 +689,9 @@ pub fn historyFormat() !u32 {
 }
 
 /// The history Store, upgraded by the operator's DDL, must match a fresh schema.ddl(.mysql) Store with the
-/// fresh rows and the same selector: the same shape, the same rows, and a catalog that is current.
-pub fn historyExpectUpgraded(selector: []const u8) !void {
+/// fresh rows and the same selector: the same shape and a catalog that is current. The rows match only when the
+/// Store holds the baseline rows and nothing a Start added: a fresh twin holds the expected rows alone.
+pub fn historyExpectUpgraded(selector: []const u8, compare_rows: bool) !void {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -697,7 +703,7 @@ pub fn historyExpectUpgraded(selector: []const u8) !void {
     defer std.testing.allocator.free(meta);
     try load(history_fresh_sql, meta, false);
     try expectSameResults(comptime &shapeQueries(history_sql), comptime &shapeQueries(history_fresh_sql));
-    try expectSameResults(comptime rowQueries(history_sql), comptime rowQueries(history_fresh_sql));
+    if (compare_rows) try expectSameResults(comptime rowQueries(history_sql), comptime rowQueries(history_fresh_sql));
     try expectCatalog(history_fresh_sql);
     try expectCatalog(history_sql);
 }

@@ -122,22 +122,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
         };
         if (!exists) {
             for (comptime schema.objects(.mysql)) |object| try run(object.sql);
-            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle" ++ dialect.touch_oracle_definition, .{ name, name }));
-            inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
-                var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
-                defer text.deinit();
-                var rest: []const u8 = sql;
-                while (std.mem.indexOf(u8, rest, "ORACLE")) |offset| {
-                    try text.writer.writeAll(rest[0..offset]);
-                    try text.writer.print("{s}_oracle", .{name});
-                    rest = rest[offset + "ORACLE".len ..];
-                }
-                try text.writer.writeAll(rest);
-                try run(text.written());
-            }
-            const config = (try dialect.rootConfig()).?;
-            try run(try std.fmt.bufPrint(&buffer, "CREATE USER IF NOT EXISTS '{s}'@'localhost' IDENTIFIED BY 'rui_conformance'", .{config.conformance_user}));
-            try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO '{s}'@'localhost'", .{ name, config.conformance_user }));
+            try installFixture(name);
         }
         databases.appendAssumeCapacity(.{ .name = fresh_name, .path = owned_path });
         break :name fresh_name;
@@ -145,6 +130,47 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
     const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
     try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = config.conformance_user, .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
+    storage.engine.mysql.state.testing_database = name_buffer;
+}
+
+/// The oracle database, its touch triggers and the conformance account's grants for the Store database `name`.
+/// Caller holds the mutex.
+fn installFixture(name: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    try run(try std.fmt.bufPrint(&buffer, "DROP DATABASE IF EXISTS {s}_oracle", .{name}));
+    try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle" ++ dialect.touch_oracle_definition, .{ name, name }));
+    inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
+        var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer text.deinit();
+        var rest: []const u8 = sql;
+        while (std.mem.indexOf(u8, rest, "ORACLE")) |offset| {
+            try text.writer.writeAll(rest[0..offset]);
+            try text.writer.print("{s}_oracle", .{name});
+            rest = rest[offset + "ORACLE".len ..];
+        }
+        try text.writer.writeAll(rest);
+        try run(text.written());
+    }
+    const config = (try dialect.rootConfig()).?;
+    try run(try std.fmt.bufPrint(&buffer, "CREATE USER IF NOT EXISTS '{s}'@'localhost' IDENTIFIED BY 'rui_conformance'", .{config.conformance_user}));
+    try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO '{s}'@'localhost'", .{ name, config.conformance_user }));
+}
+
+/// Installs the fixture for a Store database a test built itself (history.zig), which `open` never creates.
+pub fn installBuiltFixture(io: std.Io, name: []const u8) !void {
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = try connection();
+    try installFixture(name);
+}
+
+/// Opens the test Store on the database `name`, a database that already holds the schema and an installed fixture.
+pub fn openBuilt(storage: *Store, io: std.Io, name: []const u8, selector: []const u8, options: testing.TestingStoreOptions) !void {
+    const config = (try dialect.rootConfig()).?;
+    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = config.conformance_user, .password = "rui_conformance", .database = name } }, selector, .{ .served = options.served, .host_tool_set = options.host_tool_set });
+    var name_buffer: [40]u8 = @splat(0);
+    @memcpy(name_buffer[0..name.len], name);
     storage.engine.mysql.state.testing_database = name_buffer;
 }
 
