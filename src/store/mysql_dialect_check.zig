@@ -1271,6 +1271,8 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                 defer std.testing.allocator.free(text);
                 try load(migrated_database_sql, text, false);
             }
+            // Today's core_command carries format 89's missing_settings, which step 89 adds in place.
+            try load(migrated_database_sql, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP COLUMN missing_settings') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0);PREPARE rui_missing FROM @rui_missing_ddl;EXECUTE rui_missing;DEALLOCATE PREPARE rui_missing;SET @rui_missing_ddl=NULL", false);
             // The expected fixture describes the current schema, while this Store is at format 74.
             const format_74_rows = comptime blk: {
                 @setEvalBranchQuota(1_000_000);

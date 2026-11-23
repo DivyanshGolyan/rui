@@ -709,7 +709,6 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
-    try dropFormat89MissingSettings(storage);
     try dropFormat87Indexes(storage);
     try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
@@ -720,6 +719,8 @@ fn dropPinOrganization(storage: *Store) !void {
         }
     };
     try dropBackgroundUpgradeShape(storage);
+    // After dropBackgroundUpgradeShape's refusals, so a refused rewind leaves a usable Store.
+    try dropFormat89MissingSettings(storage);
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='creator_ref' AND REFERENCED_TABLE_NAME='session')");
         try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
