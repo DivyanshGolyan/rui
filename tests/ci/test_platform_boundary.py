@@ -8,8 +8,8 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, pty_close_violations, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
-                               unlistened_binds, violations, zig_sites)
+from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, pty_close_violations, python_sites, self_executable_violations,  # noqa: E402
+                               shell_sites, sites, typescript_sites, unlistened_binds, violations, zig_sites)
 import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
 
@@ -277,6 +277,19 @@ class PlatformBoundaryTest(unittest.TestCase):
             test "refused" { const port = try socket_fixture.refusedPort(); _ = port; }''')
         self.assertEqual(unlistened_binds(listener), [])
         self.assertEqual(bind_sites(), {})
+
+    def test_only_the_startup_pin_reads_the_running_executable(self):
+        self.assertEqual(self_executable_violations(), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "os").mkdir(parents=True)
+            (root / "src" / "self_executable.zig").write_text("const n = std.process.executablePath(io, &b);\n")
+            (root / "src" / "signal_stack_probe.zig").write_text("const s = std.process.executablePathAlloc(io, a);\n")
+            (root / "src" / "quiet.zig").write_text('// std.process.executablePath(io, &b)\nconst s = "executablePathAlloc";\n')
+            (root / "src" / "os" / "spawn.zig").write_text("const e = try std.process.executablePathAlloc(io, a);\n")
+            found = self_executable_violations(root)
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0].startswith("src/os/spawn.zig: "), found)
 
     def test_sites_outside_mac_paths_are_violations(self):
         self.assertEqual(violations({}), [])
