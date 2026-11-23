@@ -22,7 +22,7 @@ export type { HostSettings } from "./settings.ts";
 export interface ClientOptions {
 	/** How long connect retries another Host's Store lock. Default 120 000 ms. */
 	lockWaitMs?: number;
-	/** Default: the installed platform package's executable, else rui on PATH. */
+	/** Default: the installed platform package's executable; `connect` refuses when there is none. */
 	binary?: string;
 }
 

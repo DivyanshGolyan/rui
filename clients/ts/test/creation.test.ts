@@ -32,7 +32,7 @@ async function checkCreationCombinations() {
 			},
 		};
 		assert.equal((await new Sessions(link).create(spec, { idempotencyKey })).id, "abc123");
-		const launch = launchFor({ presets: { review: spec } }, "/runtime");
+		const launch = launchFor({ presets: { review: spec } }, "/runtime", { binary: "/fixture/rui" });
 		try {
 			assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")).presets.review, expected);
 		} finally {
@@ -72,7 +72,7 @@ async function checkPresetOverrides() {
 
 function checkSparsePreset() {
 	const spec: AgentSpec = { model: "gpt-6.1-sol" };
-	const launch = launchFor({ presets: { review: spec } }, "/runtime");
+	const launch = launchFor({ presets: { review: spec } }, "/runtime", { binary: "/fixture/rui" });
 	try {
 		assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")).presets.review, { model: "gpt-6.1-sol" });
 	} finally {

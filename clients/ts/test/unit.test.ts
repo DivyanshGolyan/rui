@@ -18,7 +18,7 @@ test("the wire version is the one openapi.json describes", () => {
 });
 
 function documentFor(settings: HostSettings) {
-	const launch = launchFor(settings, "/r");
+	const launch = launchFor(settings, "/r", { binary: "/fixture/rui" });
 	try {
 		return JSON.parse(launch.document.subarray(4).toString("utf8"));
 	} finally {
@@ -59,7 +59,7 @@ test("interface lifetime defaults to stdin and an explicit choice wins", () => {
 	assert.deepEqual(documentFor({}).interface, { dir: "/r", lifetime: "stdin" });
 	assert.deepEqual(documentFor({ interface: { dir: "/custom", lifetime: "detached" } }).interface, { dir: "/custom", lifetime: "detached" });
 	assert.deepEqual(documentFor({ interface: { dir: null, lifetime: "detached" } }).interface, { dir: "/r", lifetime: "detached" });
-	const launch = launchFor({ interface: { lifetime: "detached" } }, "/r");
+	const launch = launchFor({ interface: { lifetime: "detached" } }, "/r", { binary: "/fixture/rui" });
 	assert.equal(launch.detached, true);
 	launch.document.fill(0);
 });
@@ -135,7 +135,7 @@ test("only explicitly named secret environment sources join the base child envir
 				{ store: { mysql: { url: { env: name } } } },
 				{ tools: { mcp: { source: { url: "http://127.0.0.1:1", bearerToken: { env: name } } } } },
 			] satisfies HostSettings[]) {
-				const launch = launchFor(settings, "/r");
+				const launch = launchFor(settings, "/r", { binary: "/fixture/rui" });
 				try {
 					assert.equal(launch.env[selected], "selected-private-value");
 					assert.equal(launch.env[unused], undefined);
@@ -158,7 +158,7 @@ test("environment names preserve reserved keys, Unicode and a UTF-8 BOM byte for
 		process.env[selected] = "selected-private-value";
 		try {
 			for (const env of [selected, Buffer.from(selected), { hex: Buffer.from(selected).toString("hex") }]) {
-				const launch = launchFor({ providers: { openai: { key: { env } } } }, "/r");
+				const launch = launchFor({ providers: { openai: { key: { env } } } }, "/r", { binary: "/fixture/rui" });
 				try {
 					assert.equal(Object.hasOwn(launch.env, selected), true, selected);
 					assert.equal(launch.env[selected], "selected-private-value");
@@ -198,7 +198,7 @@ test("byte sources use their serialized data once rather than JavaScript represe
 				const settings = seam === "openai" ? { providers: { openai: { key: { env: source } } } }
 					: seam === "mysql" ? { store: { mysql: { url: { env: source } } } }
 					: { tools: { mcp: { source: { url: "http://127.0.0.1:1", bearerToken: { env: source } } } } };
-				const launch = launchFor(settings as HostSettings, "/r");
+				const launch = launchFor(settings as HostSettings, "/r", { binary: "/fixture/rui" });
 				try {
 					assert.equal(launch.env[selected], kind === "omitted-toJSON" || kind === "extra-toJSON" ? undefined : "selected-private-value", "forward only the serialized source name");
 					assert.equal(launch.env[ignored], undefined, "never forward an unserialized representation's name");
@@ -238,7 +238,7 @@ test("metadata arrays retain their invalid shape without own or inherited serial
 			assert.equal(hooks, 0, "no array serializer may rewrite canonical data");
 			assert.equal(forwarded, 0, "invalid secret arrays select no environment source");
 			if (layer === "interface" || layer === "root") {
-				const launch = launchFor(input as HostSettings, "/client-interface");
+				const launch = launchFor(input as HostSettings, "/client-interface", { binary: "/fixture/rui" });
 				try {
 					const final = JSON.parse(launch.document.subarray(4).toString("utf8"));
 					assert.deepEqual(layer === "root" ? final : final.interface, ["invalid-record", null], "launch encoding must retain array shape too");
@@ -251,7 +251,7 @@ test("metadata arrays retain their invalid shape without own or inherited serial
 
 test("invalid root shapes are not reinterpreted by launch defaults", () => {
 	for (const input of [[], ["invalid"], null, 123, false, "invalid"]) {
-		const launch = launchFor(input as unknown as HostSettings, "/client-interface");
+		const launch = launchFor(input as unknown as HostSettings, "/client-interface", { binary: "/fixture/rui" });
 		try {
 			assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")), input, "invalid root must remain for Host refusal");
 		} finally { launch.document.fill(0); }
@@ -284,7 +284,7 @@ test("canonical settings records cannot rewrite env or interface decisions durin
 			if (layer === "provider" || layer === "all") attach(provider, replacement.providers.openai);
 			if (layer === "secret" || layer === "all") attach(key, { env: emitted });
 			if (literal) attach(key, { value: "emitted-literal-value" });
-			const launch = launchFor(settings, "/r");
+			const launch = launchFor(settings, "/r", { binary: "/fixture/rui" });
 			try {
 				const wire = JSON.parse(launch.document.subarray(4).toString("utf8"));
 				assert.deepEqual(wire.providers.openai.key, literal ? { value: "selected-literal-value" } : { env: selected }, "canonical environment/literal decision must match emitted source");
@@ -352,7 +352,7 @@ test("canonical non-hex sources never read an inherited hex getter", () => {
 	Object.defineProperty(Object.prototype, "hex", { get() { reads++; return "616e792d6e616d65"; }, configurable: true });
 	try {
 		for (const env of [{}, { unexpected: true }]) {
-			const launch = launchFor({ providers: { openai: { key: { env } } } } as HostSettings, "/r");
+			const launch = launchFor({ providers: { openai: { key: { env } } } } as HostSettings, "/r", { binary: "/fixture/rui" });
 			try {
 				assert.equal(reads, 0, "a non-hex serialized source must not read the prototype getter");
 			} finally {
@@ -434,7 +434,7 @@ test("malformed environment sources are never looked up or forwarded", () => {
 
 test("non-UTF-8 environment names refuse without selecting a lossy replacement", () => {
 	for (const env of [Uint8Array.of(255), { hex: "ff" }]) {
-		assert.throws(() => launchFor({ providers: { openai: { key: { env } } } }, "/r"), (error: unknown) => {
+		assert.throws(() => launchFor({ providers: { openai: { key: { env } } } }, "/r", { binary: "/fixture/rui" }), (error: unknown) => {
 			assert.ok(error instanceof RuiStartError);
 			assert.equal(error.code, "settings_invalid");
 			assert.match(error.message, /providers\.openai\.key\.env:/);
@@ -604,11 +604,11 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 
 function launchTypeChecks() {
 	// @ts-expect-error The owner accepts only the two lifetime choices, not null.
-	launchFor({ interface: { lifetime: null } }, "/r");
+	launchFor({ interface: { lifetime: null } }, "/r", { binary: "/fixture/rui" });
 	// @ts-expect-error Store Adapters are objects, not the old URL/path field.
 	encodeSettings({ store: "/s" });
 	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
-	launchFor({ network: { caFile: false } }, "/r");
+	launchFor({ network: { caFile: false } }, "/r", { binary: "/fixture/rui" });
 	new RuiStartError("store_fenced", "refused");
 	new RuiStartError("mysql_version", "refused");
 	new RuiStartError("mariadb", "refused");

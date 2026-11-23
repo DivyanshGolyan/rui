@@ -16,9 +16,8 @@ npm install ruicode
 The `ruicode` package installs the matching `rui` executable for your platform as an optional dependency (`ruicode-linux-x64`, `ruicode-darwin-arm64`, or `ruicode-linux-arm64` with experimental platform support).
 Each [GitHub release](https://github.com/DivyanshGolyan/rui/releases) also attaches the same packages as `rui-VERSION.tgz` and `rui-PLATFORM-VERSION.tgz` tarballs for offline installs.
 
-Alternatively, install the client with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
-The client looks for its platform package first, then `rui` on `PATH`.
-Pass `binary` in the second argument to `Rui.connect(settings, options)` to choose an executable explicitly.
+Without a platform package (another platform, or `--omit=optional`), `Rui.connect` refuses with `RuiUnavailableError` and names the supported platforms.
+Pass `binary` in the second argument to `Rui.connect(settings, options)` to use a standalone `rui` instead.
 Keep the client and binary versions matched.
 See [client installation](../clients/ts/README.md#install) for application-owned updates and custom binary options.
 
@@ -58,6 +57,7 @@ const rui = await Rui.connect({
 
 try {
 	const session = await rui.sessions.create({
+		workspace: process.cwd(),
 		model,
 		effort: "low",
 		compactAt: 100000,
@@ -71,7 +71,7 @@ try {
 	for await (const entry of session.listActivity({ follow: true })) {
 		if (entry.kind === "assistant") console.log(await session.readContent(entry));
 		if (entry.kind === "turn_ended" && entry.sessionId === session.id) {
-			if (entry.ending !== "done") throw new Error(entry.code);
+			if (entry.ending !== "done") throw new Error(`The turn ended ${entry.ending}: ${entry.code} ${entry.text ?? ""}`);
 			break;
 		}
 	}
@@ -106,8 +106,8 @@ For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (
 The client defaults `interface.lifetime` to `stdin`: the child lives while the application keeps that pipe open unless you explicitly choose `detached`.
 Calling `rui.close()` shuts it down, so do not close immediately after admitting work that you still want to run.
 
-Each Session needs `model`, `effort`, `compactAt`, `tools`, and `permissionMode`, or a complete named preset.
-If you enable `bash`, also supply the Session's `workspace`.
+Each Session needs a `model` and a `workspace`, and a provider when the Host serves several; a named preset or a parent Session can supply the `workspace`.
+Bash runs in that `workspace`.
 Bash runs with your user's full privileges, not in a sandbox.
 Approval settings are per Session.
 An `ask` Session needs your application to review `approval_requested` entries and call `session.decide` before the command can run.
