@@ -179,6 +179,60 @@ test "earlier Action settlement remains authoritative after Session stop" {
     }.run);
 }
 
+// EXR-68: every runner SQL fragment derived from a tool row agrees with a pinned runner table and with Runner.of.
+test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name" {
+    try store_testing.forEachEngine(struct {
+        const records = @import("../../tool_record.zig");
+        const Runner = records.Runner;
+        const Case = struct { owner: records.Owner, name: []const u8 };
+        // Every owner against every built-in name and one unknown name, built at comptime.
+        const cases = blk: {
+            var names: []const []const u8 = &.{};
+            for (std.enums.values(records.Tool)) |tool| names = names ++ .{@tagName(tool)};
+            names = names ++ .{"not_a_built_in_tool"};
+            var out: []const Case = &.{};
+            for (std.enums.values(records.Owner)) |owner| {
+                for (names) |name| out = out ++ .{Case{ .owner = owner, .name = name }};
+            }
+            break :blk out;
+        };
+
+        // The oracle, written out by hand rather than read from the table under test.
+        fn pinned(comptime entry: Case) Runner {
+            return switch (entry.owner) {
+                .mcp => .mcp,
+                .provider => .provider,
+                .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
+            };
+        }
+
+        fn expectSql(storage: *Store, comptime probe: []const u8, expected: u64) !void {
+            try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT " ++ probe, .{}));
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            inline for (cases) |entry| {
+                const record: records.Record = .{ .name = entry.name, .owner = entry.owner };
+                const expected = comptime pinned(entry);
+                errdefer std.debug.print("runner SQL disagrees for owner {s} name {s}\n", .{ @tagName(entry.owner), entry.name });
+                try std.testing.expectEqual(expected, Runner.of(&record));
+                const owner = "'" ++ @tagName(entry.owner) ++ "'";
+                const name = "'" ++ entry.name ++ "'";
+                try expectSql(&storage, "(" ++ records.sql.runnerOf(owner, name) ++ ")='" ++ @tagName(expected) ++ "'", 1);
+                try expectSql(&storage, "CASE WHEN " ++ records.sql.notDefaultTest(owner, name) ++ " THEN 1 ELSE 0 END", @intFromBool(expected != records.default_runner));
+                inline for (comptime std.enums.values(Runner)) |runner| {
+                    try expectSql(&storage, "CASE WHEN " ++ records.sql.runnerTest(owner, name, runner) ++ " THEN 1 ELSE 0 END", @intFromBool(expected == runner));
+                }
+            }
+        }
+    }.run);
+}
+
 test "core tool table routes every built-in and promotion excludes the full core domain" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
