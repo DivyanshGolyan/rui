@@ -158,7 +158,6 @@ failure_buffer: [failure_capacity]u8 = undefined,
 chrome: SessionChrome = undefined,
 line: reads.Line = .{},
 hint: reads.Hint = .unread,
-shown: session_line.Shown = .{},
 
 const rejection_suffix = " · /discard";
 const too_large_advice = "\nUnset or shorten them in another shell, then run rui request recover there.";
@@ -10267,10 +10266,9 @@ test "chat footer facts use current Session permission and applied default or ex
         try self.line.label.?.set("Chat");
         self.line.effort = inspected.effort;
         self.line.left = 62;
-        self.line.asks = ask;
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
         const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
-        const want = if (explicit) (if (ask) "Chat · model · low · ask" else "Chat · model · low") else (if (ask) "Chat · model · high · ask" else "Chat · model · high");
+        const want = if (explicit) "Chat · model · low" else "Chat · model · high";
         try std.testing.expectEqualStrings(want, text);
     };
 }
@@ -10475,10 +10473,8 @@ test "chat footer permission transitions follow the current line with absent cur
         self.line.left = 62;
         for ([_]bool{ before, !before }) |ask| {
             self.line.read.?.revision += 1;
-            self.line.asks = ask;
             if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
             const facts = self.footerFacts().?;
-            try std.testing.expectEqual(ask, facts.asks);
             try std.testing.expectEqualStrings("Chat", facts.name);
             try std.testing.expectEqualStrings("model", facts.model);
             try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
@@ -10486,7 +10482,7 @@ test "chat footer permission transitions follow the current line with absent cur
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
                 const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
-                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · ask" else "Chat · model · low", text);
+                try std.testing.expectEqualStrings("Chat · model · low", text);
             }
         }
         self.line.read = null;
@@ -11355,12 +11351,9 @@ test "SUI-44 empty chat welcome is centred until the first message" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "cotton") == null);
         held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .folder = .{} };
         try held.self.line.folder.?.set("/work");
-        for ([_]bool{ false, true }) |asks| {
-            held.self.line.asks = asks;
-            const welcome = try held.shown();
-            for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
-                try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
-        }
+        const welcome = try held.shown();
+        for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
+            try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
         const empty = try held.shown();
         var lines = std.mem.splitScalar(u8, empty, '\n');
         var found = false;
