@@ -126,7 +126,8 @@ fn splitmix64(input: u64) u64 {
     return z ^ (z >> 31);
 }
 
-fn retryDelay(failures: u32) u64 {
+/// The one backoff formula: 1 s doubling per failure, capped at 300 s. `failures` is at least 1.
+pub fn retryDelay(failures: u32) u64 {
     const doublings = failures - 1;
     if (doublings >= 32) return max_retry_ms;
     return @min(first_retry_ms << @intCast(doublings), max_retry_ms);

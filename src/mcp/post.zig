@@ -39,6 +39,12 @@ pub fn writeList(writer: *std.Io.Writer, server: Server, client: Client, id: u64
     try body.write(writer);
 }
 
+pub fn writeListen(writer: *std.Io.Writer, server: Server, client: Client, id: u64) Error!void {
+    const body: ListenBody = .{ .client = client, .id = id };
+    try writeHead(writer, server, "subscriptions/listen", null, null, body.length());
+    try body.write(writer);
+}
+
 pub fn writeCall(writer: *std.Io.Writer, server: Server, client: Client, id: u64, call: Call) Error!void {
     const body: CallBody = .{ .client = client, .id = id, .call = call };
     try writeHead(writer, server, "tools/call", call.name, call, body.length());
@@ -95,6 +101,24 @@ const ListBody = struct {
     }
 
     fn length(self: ListBody) usize {
+        var counter: std.Io.Writer.Discarding = .init(&.{});
+        self.write(&counter.writer) catch unreachable;
+        return @intCast(counter.fullCount());
+    }
+};
+
+const ListenBody = struct {
+    client: Client,
+    id: u64,
+
+    fn write(self: ListenBody, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"subscriptions/listen\",\"params\":{{", .{self.id});
+        try writeMeta(writer, self.client);
+        try writer.writeByte('}');
+        try writer.writeAll(",\"notifications\":{\"toolsListChanged\":true}}}");
+    }
+
+    fn length(self: ListenBody) usize {
         var counter: std.Io.Writer.Discarding = .init(&.{});
         self.write(&counter.writer) catch unreachable;
         return @intCast(counter.fullCount());
@@ -210,6 +234,23 @@ test "a root Session sends no parent, and an unsafe name is base64" {
     try std.testing.expect(std.mem.indexOf(u8, request, "parentSessionId") == null);
     try std.testing.expect(std.mem.indexOf(u8, request, "\"dev.rui/sessionId\":\"ses_root\",\"dev.rui/rootSessionId\":\"ses_root\"") != null);
     try std.testing.expect(std.mem.endsWith(u8, request, "\"name\":\"caf\xc3\xa9\",\"arguments\":{}}}"));
+}
+
+test "EXR-77 a subscriptions/listen request asks for tool list changes with the same headers and meta" {
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeListen(&writer, test_server, test_client, 1);
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"subscriptions/listen\",\"params\":{\"_meta\":{" ++
+        "\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"," ++
+        "\"io.modelcontextprotocol/clientCapabilities\":{}," ++
+        "\"io.modelcontextprotocol/clientInfo\":{\"name\":\"rui\",\"version\":\"test-version\"}}," ++
+        "\"notifications\":{\"toolsListChanged\":true}}}";
+    try expectRequest("POST /api/mcp HTTP/1.1\r\nHost: 127.0.0.1:3000\r\n" ++
+        "Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n" ++
+        "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: subscriptions/listen\r\n" ++
+        "Authorization: Bearer secret-token\r\n" ++
+        std.fmt.comptimePrint("Content-Length: {d}\r\n", .{body.len}) ++ "Connection: close\r\n\r\n", body, writer.buffered());
+    try std.testing.expectEqual(writer.buffered().len, try length(writeListen, .{ test_server, test_client, @as(u64, 1) }));
 }
 
 test "a token that cannot be a header value is refused" {

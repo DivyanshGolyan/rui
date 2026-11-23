@@ -2,6 +2,7 @@ const std = @import("std");
 const document = @import("document.zig");
 const json = @import("../codecs/json.zig");
 const headers = @import("headers.zig");
+const listen = @import("listen.zig");
 
 pub const Body = enum { json, event_stream };
 
@@ -61,6 +62,64 @@ pub fn readMessage(bytes: []const u8, id: u64) (document.Error || Invalid)!Messa
     try document.check(bytes);
     const object: Object = .whole(bytes);
     return readEnvelope(object, .wholeMember(object, .@"error"), id);
+}
+
+const subscription_key = "io.modelcontextprotocol/subscriptionId";
+const acknowledged_method = "notifications/subscriptions/acknowledged";
+const tools_changed_method = "notifications/tools/list_changed";
+
+/// Reads one event of the `subscriptions/listen` stream that answers request `id`.
+/// A final result is the graceful end; an error answering `id` (or null) is a refusal.
+pub fn readNotice(bytes: []const u8, id: u64) (document.Error || Invalid)!listen.Event {
+    try document.check(bytes);
+    const object: Object = .whole(bytes);
+    const version = object.get(.jsonrpc) orelse return error.NotJsonRpc;
+    if (!version.stringIs("2.0")) return error.NotJsonRpc;
+    if (object.get(.method)) |method| {
+        if (!method.complete or method.kind() != .string) return error.NotJsonRpc;
+        if (object.get(.id) != null) return error.ServerRequest;
+        return notice(bytes, method);
+    }
+    const message = try readEnvelope(object, .wholeMember(object, .@"error"), id);
+    return switch (message) {
+        .result => |result| .{ .ended = try subscriptionIn(result) },
+        .rpc_error => |failure| .{ .refused = .{ .status = null, .rpc_code = failure.code } },
+        .notification => error.NotJsonRpc,
+    };
+}
+
+fn notice(bytes: []const u8, method: Value) Invalid!listen.Event {
+    if (method.stringIs(acknowledged_method)) {
+        const params = try paramsOf(bytes);
+        const filter = if (params) |found| document.member(found, "notifications") else null;
+        return .{ .acknowledged = .{ .subscription = try subscriptionIn(params), .tools = honoursTools(filter) } };
+    }
+    if (method.stringIs(tools_changed_method)) return .{ .tools_changed = try subscriptionIn(try paramsOf(bytes)) };
+    return .ignored;
+}
+
+fn paramsOf(bytes: []const u8) Invalid!?[]const u8 {
+    const value = document.member(bytes, "params") orelse return null;
+    if (document.kind(value) != .object) return error.InvalidResult;
+    return value;
+}
+
+/// The subscriptionId in an object's `_meta`, or null when it names none.
+fn subscriptionIn(object: ?[]const u8) Invalid!?u64 {
+    const found = object orelse return null;
+    const meta = document.member(found, "_meta") orelse return null;
+    if (document.kind(meta) != .object) return error.InvalidResult;
+    const value = document.member(meta, subscription_key) orelse return null;
+    if (document.kind(value) != .number) return error.InvalidResult;
+    return std.fmt.parseInt(u64, value, 10) catch error.InvalidResult;
+}
+
+/// An acknowledgment's filter keeps `toolsListChanged` only when it is `true`.
+fn honoursTools(filter: ?[]const u8) bool {
+    const found = filter orelse return false;
+    if (document.kind(found) != .object) return false;
+    const value = document.member(found, "toolsListChanged") orelse return false;
+    return document.kind(value) == .true_value;
 }
 
 const Field = enum { jsonrpc, id, method, result, @"error", resultType, content, isError, structuredContent, code, message, data };
@@ -386,6 +445,39 @@ test "a message answers this request, or is a notification" {
         .{ "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":", error.UnexpectedJsonEnd },
     };
     for (refused) |case| try std.testing.expectError(case[1], readMessage(case[0], 4));
+}
+
+test "EXR-76 a listen stream event reads as its domain event, and a malformed one is refused" {
+    const cases = [_]struct { []const u8, listen.Event }{
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1},\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"file:///a\"]}}}", .{ .acknowledged = .{ .subscription = 1, .tools = true } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1},\"notifications\":{\"resourceSubscriptions\":[]}}}", .{ .acknowledged = .{ .subscription = 1, .tools = false } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1},\"notifications\":{\"toolsListChanged\":false}}}", .{ .acknowledged = .{ .subscription = 1, .tools = false } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\"}", .{ .acknowledged = .{ .subscription = null, .tools = false } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":9},\"notifications\":{\"toolsListChanged\":true}}}", .{ .acknowledged = .{ .subscription = 9, .tools = true } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}", .{ .tools_changed = null } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1}}}", .{ .tools_changed = 1 } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":9}}}", .{ .tools_changed = 9 } },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}", .ignored },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":\"not read\"}", .ignored },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1}}}", .{ .ended = 1 } },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\"}}", .{ .ended = null } },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}", .{ .refused = .{ .status = null, .rpc_code = -32601 } } },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}", .{ .refused = .{ .status = null, .rpc_code = -32700 } } },
+    };
+    for (cases) |case| try std.testing.expectEqualDeep(case[1], try readNotice(case[0], 1));
+
+    const refused = [_]struct { []const u8, anyerror }{
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}", error.WrongId },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sampling/createMessage\"}", error.ServerRequest },
+        .{ "{\"id\":1,\"method\":\"notifications/progress\"}", error.NotJsonRpc },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":5}", error.NotJsonRpc },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}", error.InvalidResult },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":[]}", error.InvalidResult },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"x\"}}}", error.InvalidResult },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1.5}}}", error.InvalidResult },
+        .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"", error.UnexpectedJsonEnd },
+    };
+    for (refused) |case| try std.testing.expectError(case[1], readNotice(case[0], 1));
 }
 
 test "a tools/list page lists its tools and leaves out invalid ones" {
