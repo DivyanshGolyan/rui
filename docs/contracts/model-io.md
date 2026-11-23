@@ -48,15 +48,15 @@ The adapter derives the address from the originating Operation, including on rep
 It reconstructs this context after compaction and normal Host restart, separately from user instructions.
 The address is not a PID, execution slot, Workspace or provider continuation identifier, and grants no additional authority.
 
-The collaboration context adds only the Session's own address, a pointer to installed `rui --help`, the command that sets its own Label, and how to start and message other Sessions and get their answers back (ask for a report sent to this address, or read the saved result by its request handle).
+The collaboration context adds only the Session's own address, a pointer to installed `rui --help` and the command that sets its own Label. It does not teach how to reach other Sessions: the built-in `start_agent` and `message_agent` tools, which every fresh Session loads, carry that in their own descriptions, so a tool's description is the one place it is explained.
 Scoped help and errors describe command syntax, model selection and recovery.
 The general agent preamble, Workspace fact and caller-authored Session instructions remain unchanged.
 Shared text files own context wording; request builders and fixtures independently encode their supplied facts.
 Ordinary Bash runs in the environment of the terminal that last sent the Session work, with the running Host executable's directory first on `PATH`, `RUI_ADDRESS` (the bare Session ID) and `RUI_STORE` (the canonical Store selector); [Bash environment](execution.md#bash-environment) owns the rule.
 Bash never inherits the Host's own environment or credentials.
-No identity tool, peer tool, alternate CLI-path variable or bundled skill is required.
+No identity tool, alternate CLI-path variable or bundled skill is required.
 
-Agents compose ordinary Session configuration and Message admission through the CLI, and the Host records who sent each Message.
+Agents reach other Sessions through `start_agent` and `message_agent`; the CLI's `rui session start` and `rui session send` serve people and scripts, and also work from a Session's Bash. Either way the Host records who sent each Message.
 `rui session send --session k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
 A peer destination is in the trusted sender's Store, before HOME preferences; an explicit Store override that canonicalizes to that same Store keeps the peer identity.
