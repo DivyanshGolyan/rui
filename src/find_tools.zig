@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core_tools.zig");
+const relist = @import("server_mcp_relist.zig").Relist;
 const storage = @import("store.zig");
 
 /// One `find_tools` call as read from its arguments. A refusal is settled without a search.
@@ -22,6 +23,22 @@ pub fn read(store: *storage.Store, arena: std.mem.Allocator, input: *const stora
         .rejected => |reason| call.refusal = reason,
     }
     return call;
+}
+
+/// Writes a reload's report: the MCP servers asked to list again, or that none is configured. The lists land later,
+/// so the report names no tools; a later search finds them.
+pub fn writeReload(out: *std.Io.Writer, asked: []const relist.Asked) !void {
+    if (asked.len == 0) return out.writeAll("No MCP servers are configured, so nothing was reloaded.");
+    try out.print("Asked {d} MCP server{s} to list {s} tools again: ", .{ asked.len, if (asked.len == 1) "" else "s", if (asked.len == 1) "its" else "their" });
+    for (asked, 0..) |each, index| {
+        if (index != 0) try out.writeAll(", ");
+        try out.writeAll(each.server);
+    }
+    if (asked.len == 1) {
+        try out.writeAll(". Its new tools can be found with find_tools once its list lands, usually within a few seconds.");
+    } else {
+        try out.writeAll(". Each server's new tools can be found with find_tools once its list lands, usually within a few seconds.");
+    }
 }
 
 /// Reads and settles a search call with no reload report. The Host settles a reload itself, with its report.

@@ -1526,20 +1526,6 @@ pub const Store = struct {
         return transition.apply(self, @import("domain/find_tools.zig").FindTools, .{ .binding = binding, .arena = arena, .words = words, .refusal = refusal }, faults);
     }
 
-    /// The highest Action id the Store holds. The Host reads it once at startup: a reload Action with an id at or
-    /// below it, and no record in memory, was asked before this process started.
-    pub fn highestActionId(self: *Store) !u64 {
-        return self.queue().run(highestActionIdHeld, .{self});
-    }
-
-    fn highestActionIdHeld(self: *Store) !u64 {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.highestActionId(&access));
-    }
-
     pub fn settleSkillTool(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
         return self.queue().write(settleSkillToolHeld, .{ self, binding, allocator, captured, faults });
     }

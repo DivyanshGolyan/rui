@@ -351,8 +351,6 @@ pub const Host = struct {
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     /// The owner of MCP re-lists; null when no MCP server is configured.
     mcp_relist: ?*@import("server_mcp_relist.zig").Relist = null,
-    /// The model's `find_tools` reloads this process is waiting on, and the restart watermark (find_tools_reload.zig).
-    find_reloads: @import("find_tools_reloads.zig").Table = .{},
     retention: *output_retention.Queue = undefined,
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },

@@ -1100,8 +1100,6 @@ fn serveOpened(
         .turns_paused = .init(settings.execution.paused.value),
         .mcp_relist = mcp_relist,
     };
-    defer host.find_reloads.deinit(allocator);
-    host.find_reloads.watermark = try storage.highestActionId();
     const test_pause = @import("testing/pause.zig");
     var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
     defer pause_owner.deinit();
@@ -2072,17 +2070,12 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
 /// request, so the reply needs no wait: the caller polls tools_status for each asked generation.
 noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType(wire_request.Request, "tools_reload")) !void {
     if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-    const owner = host.mcp_relist;
-    const servers: []const server_mcp_settings.Server = if (owner) |relist_owner| relist_owner.servers else &.{};
-    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
-    var count: usize = 0;
-    for (servers, 0..) |*server, index| {
-        if (request.server) |name| if (!std.mem.eql(u8, name.slice(), server.name.slice())) continue;
-        asked[count] = .{ .server = server.name.slice(), .generation = owner.?.ask(index) };
-        count += 1;
-    }
+    var asked_by_owner: [host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
+    const count: usize = if (host.mcp_relist) |owner| owner.askAll(if (request.server) |name| name.slice() else null, &asked_by_owner) else 0;
     if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
     if (count != 0) host.dispatch_wake.set(host.io);
+    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
+    for (asked_by_owner[0..count], asked[0..count]) |ask, *each| each.* = .{ .server = ask.server, .generation = ask.generation };
     try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{ host.instance, asked[0..count] });
 }
 

@@ -93,6 +93,21 @@ pub const Relist = struct {
         return self.asks[index].fetchAdd(1, .acq_rel) + 1;
     }
 
+    /// One server's ask: its name and the generation it was given.
+    pub const Asked = struct { server: []const u8, generation: u64 };
+
+    /// Asks every configured server, or only the one named `only`, to list again. Writes each ask to `out` in
+    /// configured order and returns how many were asked. Any thread may call it.
+    pub fn askAll(self: *Relist, only: ?[]const u8, out: *[hs.max_mcp_servers]Asked) usize {
+        var count: usize = 0;
+        for (self.servers, 0..) |*server, index| {
+            if (only) |name| if (!std.mem.eql(u8, name, server.name.slice())) continue;
+            out[count] = .{ .server = server.name.slice(), .generation = self.ask(index) };
+            count += 1;
+        }
+        return count;
+    }
+
     /// Reads server `index`'s published status from any thread. `finished` is loaded first, so a
     /// reader that sees generation g also sees a status at least as new as the list that finished g.
     pub fn status(self: *const Relist, index: usize) relist.Status {

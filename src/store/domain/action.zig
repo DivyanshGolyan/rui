@@ -329,19 +329,6 @@ const owed_ending = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const highest_action = rsql.Read(.{
-    .sql = "SELECT COALESCE(MAX(action_id),0) AS highest FROM action_operation",
-    .Args = struct {},
-    .Row = struct { highest: u64 },
-    .cardinality = .one,
-});
-
-pub fn highestActionId(a: anytype) !u64 {
-    var row: highest_action.Result = undefined;
-    a.read(highest_action, .{}, &row);
-    return row.highest;
-}
-
 const owed_stop = rsql.Read(.{
     .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed WHERE settled=0 ORDER BY child_ref LIMIT 1",
     .Args = struct {},
