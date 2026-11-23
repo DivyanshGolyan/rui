@@ -460,13 +460,13 @@ def shard_targets(job):
     return [PART_TARGETS.get(token, token) for token in named[1].split("+")] if named else []
 
 
-EscapeOwners = namedtuple("EscapeOwners", "own_files unit_roots never fixtures covers")
+EscapeOwners = namedtuple("EscapeOwners", "own_files selected unit_roots never fixtures covers")
 
 
 def escape_owners():
     """The selection owners the classifier reads. Imported here: select_tests reads the repository when it loads."""
-    from select_tests import FIXTURES, PR_NEVER_TARGETS, PR_OWN_FILE_TARGETS, PR_UNIT_ROOTS, covers
-    return EscapeOwners(own_files=PR_OWN_FILE_TARGETS, unit_roots=PR_UNIT_ROOTS, never=PR_NEVER_TARGETS,
+    from select_tests import FIXTURES, PR_NEVER_TARGETS, PR_OWN_FILE_TARGETS, PR_SELECTED_TARGETS, PR_UNIT_ROOTS, covers
+    return EscapeOwners(own_files=PR_OWN_FILE_TARGETS, selected=PR_SELECTED_TARGETS, unit_roots=PR_UNIT_ROOTS, never=PR_NEVER_TARGETS,
                         fixtures=frozenset(FIXTURES), covers=covers)
 
 
@@ -479,7 +479,7 @@ def target_class(target, leg, owners):
         return f"own-files:{target}"
     if leg:
         return f"live-mysql:{target}"
-    if target in owners.unit_roots:
+    if target in owners.unit_roots or target in owners.selected:
         return "pr-tier"
     if target in owners.never:
         return f"promotion-only:{target}"

@@ -2665,6 +2665,8 @@ class PolicySelfCheckTableTest(unittest.TestCase):
 
 MANIFEST = (ROOT / "build.zig.zon").read_text()
 PR_ROOTS = sorted(PR_UNIT_ROOTS)
+# build.zig.zon is a frame gate input, so a manifest change also runs stack-frames on the PR.
+MANIFEST_PR_SET = sorted(PR_UNIT_ROOTS | {"stack-frames"})
 BUILD_MODULE_PATHS = tuple(BUILD_MODULES)
 CONTENT_RULE_PATHS = tuple(pattern for patterns, _ in CONTENT_RULES.values() for pattern in patterns)
 
@@ -2727,22 +2729,22 @@ class LinkedDependencySelectionTest(unittest.TestCase):
                                  '            .url = "https://example.invalid/unlinked.tar.gz",\n'
                                  '            .hash = "N-V-unlinked",\n        },', 1)
         result = self.manifest_change(MANIFEST, added)
-        self.assertEqual(result["fast_targets"], PR_ROOTS)
+        self.assertEqual(result["fast_targets"], MANIFEST_PR_SET)
         self.assertIn("build.zig.zon: a changed package the link table does not know, or an unreadable manifest: full PR set",
                       result["reasons"])
 
     def test_an_unreadable_manifest_selects_the_full_pr_set(self):
         truncated = MANIFEST[: MANIFEST.index(".vaxis")]
-        self.assertEqual(self.manifest_change(MANIFEST, truncated)["fast_targets"], PR_ROOTS)
-        self.assertEqual(self.manifest_change(None, MANIFEST)["fast_targets"], PR_ROOTS)
+        self.assertEqual(self.manifest_change(MANIFEST, truncated)["fast_targets"], MANIFEST_PR_SET)
+        self.assertEqual(self.manifest_change(None, MANIFEST)["fast_targets"], MANIFEST_PR_SET)
 
     def test_a_manifest_without_a_contents_diff_selects_the_full_pr_set(self):
-        self.assertEqual(select([DEPENDENCY_MANIFEST], "review", AVAILABLE)["fast_targets"], PR_ROOTS)
+        self.assertEqual(select([DEPENDENCY_MANIFEST], "review", AVAILABLE)["fast_targets"], MANIFEST_PR_SET)
 
     def test_manifest_edit_outside_dependencies_keeps_bootstrap_selection(self):
         after = MANIFEST.replace('.version = "0.1.0"', '.version = "0.1.1"', 1)
         self.assertEqual(changed_dependencies(MANIFEST, after), [])
-        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["test-logic"])
+        self.assertEqual(self.manifest_change(MANIFEST, after)["fast_targets"], ["stack-frames", "test-logic"])
 
     def test_every_manifest_dependency_is_linked_by_some_target(self):
         linked = {name for packages in tree_graph().links.values() for name in packages}
