@@ -1,4 +1,5 @@
 
+import { REJECTION_SENTENCES } from "./rejections.ts";
 import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
@@ -16,7 +17,10 @@ type StartErrorCode = Schemas["StartError"]["rui_start_error"]["code"];
 /** A setting a new Session lacked, named by a `missing_settings` rejection. */
 export type MissingSetting = NonNullable<Extract<RequestAnswer, { missing: unknown }>["missing"]>[number];
 
-/** Rui rejected one request. `code` is the Host's rejection code; `message` preserves advisory detail when provided. */
+/**
+ * Rui rejected one request. `code` is the Host's rejection code. The message is the Host's advisory detail when it sent
+ * one, else the Host catalog's plain sentence for `code`, with any missing settings and the code.
+ */
 export class RuiRequestError extends Error {
 	override readonly name = "RuiRequestError";
 	readonly code: RequestErrorCode;
@@ -26,7 +30,8 @@ export class RuiRequestError extends Error {
 	readonly missing: readonly MissingSetting[] | undefined;
 
 	constructor(type: RequestErrorType, code: RequestErrorCode, message?: string | null, missing?: readonly MissingSetting[] | null) {
-		super(message ?? (missing ? `Rui rejected the request: ${code} (${missing.join(", ")})` : `Rui rejected the request: ${code}`));
+		const sentence = REJECTION_SENTENCES[code] ?? "Rui rejected the request.";
+		super(message ?? `${sentence}${missing ? ` Missing: ${missing.join(", ")}.` : ""} [${code}]`);
 		this.type = type;
 		this.code = code;
 		this.missing = missing ?? undefined;

@@ -107,7 +107,7 @@ Initial connect still rejects `mysql_unreachable` immediately.
 Errors:
 
 - `RuiStartError { code, message }`: Rui refused to open, for example `store_locked` once `lockWaitMs` (default 120 s) has passed.
-- `RuiRequestError { code }`: Rui rejected one request.
+- `RuiRequestError { code, missing }`: Rui rejected one request. Its `message` is the Host's detail when it sent one, else the plain sentence the `rui` CLI prints for that `code`.
 - `RuiUnavailableError`: the child is gone.
 
 For `sessions.create` and `session.update`, `mcp_server_unavailable` means a requested tool is unknown and at least one configured MCP server has no tools, including no saved copies.

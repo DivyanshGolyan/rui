@@ -4,7 +4,8 @@ const caller_error = @import("caller_error.zig");
 const Code = caller_error.Code;
 const names = caller_error.names;
 
-const rejection_enums = .{
+/// Every saved rejection the protocol answers with; each maps to one caller_error Code.
+pub const rejection_enums = .{
     protocol.ConfigurationRejection,     protocol.MessageRejection,
     protocol.SessionStopRejection,       protocol.SessionArchiveRejection,
     protocol.ModelInterruptionRejection, protocol.PermissionDecisionRejection,

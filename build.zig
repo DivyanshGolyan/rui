@@ -66,7 +66,8 @@ pub fn build(b: *std.Build) void {
     const emit_openapi = b.addRunArtifact(openapi_emitter);
     const update_openapi = b.addUpdateSourceFiles();
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
-    b.step("openapi", "Write openapi.json from the wire types; a unit test fails while it is stale").dependOn(&update_openapi.step);
+    update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("rejections.ts"), "clients/ts/src/rejections.ts");
+    b.step("openapi", "Write openapi.json from the wire types and the TS client's rejection sentences; unit tests fail while either is stale").dependOn(&update_openapi.step);
 
     const catalog_emitter = b.addExecutable(.{
         .name = "model-catalog",

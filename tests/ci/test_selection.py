@@ -807,6 +807,11 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(path=path, family=family):
                     self.assertIn("measurement-check", result[family])
 
+    def test_generated_rejection_sentences_select_their_staleness_test(self):
+        result = select(["clients/ts/src/rejections.ts"], "review", AVAILABLE)
+        self.assertIn("test", result["targets"])
+        self.assertIn("ts-client", result["targets"])
+
     def test_cli_invocation_selects_logic_and_human_cli(self):
         result = select(["src/cli_invocation.zig"], "review", AVAILABLE)
         self.assertIn("test-logic", result["targets"])
