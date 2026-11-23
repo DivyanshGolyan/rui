@@ -312,7 +312,7 @@ test "listed tools join the built-ins in name order" {
     try std.testing.expectEqual(@as(usize, 0), report.drops.len);
 }
 
-test "EXR-68 a clash with a built-in is offered under the server prefix, and the built-in keeps its name" {
+test "EXR-69 a clash with a built-in is offered under the server prefix, and the built-in keeps its name" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     var report: Report = .{};
@@ -327,7 +327,7 @@ test "EXR-68 a clash with a built-in is offered under the server prefix, and the
     try std.testing.expectEqual(@as(usize, 0), report.drops.len);
 }
 
-test "EXR-68 two servers that list one name are both offered under their prefixes" {
+test "EXR-69 two servers that list one name are both offered under their prefixes" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     var report: Report = .{};
@@ -344,7 +344,7 @@ test "EXR-68 two servers that list one name are both offered under their prefixe
     try std.testing.expectEqual(@as(usize, 0), report.drops.len);
 }
 
-test "EXR-68 a prefixed name over the byte limit leaves its tool out with its reason" {
+test "EXR-69 a prefixed name over the byte limit leaves its tool out with its reason" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     var report: Report = .{};
@@ -374,7 +374,7 @@ test "EXR-68 a prefixed name over the byte limit leaves its tool out with its re
     try std.testing.expectEqual(@as(u32, 0), report.droppedFrom(2));
 }
 
-test "EXR-68 a prefixed name that clashes leaves its tool out while the other tool keeps its name" {
+test "EXR-69 a prefixed name that clashes leaves its tool out while the other tool keeps its name" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     var report: Report = .{};
@@ -406,7 +406,7 @@ test "a name a server lists twice is left out by both entries" {
     for (report.drops) |drop| try std.testing.expectEqual(Drop.Reason.listed_twice, drop.reason);
 }
 
-test "EXR-68 the same tools in a different source order give the same offered names and servers" {
+test "EXR-69 the same tools in a different source order give the same offered names and servers" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     const x = [_]Listing.Entry{ listed("x"), listed("bash") };
@@ -434,7 +434,7 @@ test "EXR-68 the same tools in a different source order give the same offered na
     try std.testing.expectEqual(report_one.drops.len, report_two.drops.len);
 }
 
-test "EXR-68 over the record limit the built-ins and then the servers in configuration order are kept" {
+test "EXR-69 over the record limit the built-ins and then the servers in configuration order are kept" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     const built_ins = tools.built_in_tool_set.records.len;

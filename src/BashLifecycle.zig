@@ -126,6 +126,21 @@ fn beginGrace(self: *Self, now: Timestamp) ?Signal {
 
 pub fn expireGrace(self: *Self, now: Timestamp) ?Signal {
     if (self.process != .grace or !deadline.reached(now, self.process.grace.kill_at)) return null;
+    return self.endGrace();
+}
+
+/// The grace exists so group members can act on TERM. Once the leader is
+/// observed and nothing else is in its group, there is no one to wait for.
+pub fn awaitsGroup(self: *const Self) bool {
+    return self.process == .grace and self.process.grace.observed != null;
+}
+
+pub fn groupHoldsOnlyLeader(self: *Self) Signal {
+    std.debug.assert(self.awaitsGroup());
+    return self.endGrace();
+}
+
+fn endGrace(self: *Self) Signal {
     const grace = self.process.grace;
     self.process = .{ .reaping = .{
         .cleanup_deadline = grace.cleanup_deadline,
@@ -355,6 +370,30 @@ test "a later reap disagreeing with the observation keeps the observed status" {
     _ = unobserved.expireGrace(at(101)).?;
     try unobserved.reaped(.{ .signal = 9 });
     try std.testing.expectEqual(Term{ .signal = 9 }, unobserved.process.checking_group.term);
+}
+
+test "a lone observed leader ends the grace at once, and only then" {
+    const Entry = enum { exit_while_running, stop_then_exit, stop_unobserved, running };
+    for (std.enums.values(Entry)) |entry| {
+        var lifecycle = Self.start(at(0), 1_000);
+        switch (entry) {
+            .exit_while_running => _ = lifecycle.observeLeader(.{ .exited = 0 }, at(10)),
+            .stop_then_exit => {
+                _ = lifecycle.requestTermination(.stopped, at(10));
+                try std.testing.expect(lifecycle.observeLeader(.{ .signal = 15 }, at(20)) == null);
+            },
+            .stop_unobserved => _ = lifecycle.requestTermination(.stopped, at(10)),
+            .running => {},
+        }
+        const lone = entry == .exit_while_running or entry == .stop_then_exit;
+        try std.testing.expectEqual(lone, lifecycle.awaitsGroup());
+        if (!lone) continue;
+        try std.testing.expectEqual(Signal.kill_group, lifecycle.groupHoldsOnlyLeader());
+        try std.testing.expect(lifecycle.process == .reaping);
+        try std.testing.expect(!lifecycle.awaitsGroup());
+        try std.testing.expect(lifecycle.expireGrace(at(1_000)) == null);
+        try std.testing.expectEqual(at(5_010).raw.nanoseconds, lifecycle.process.reaping.cleanup_deadline.raw.nanoseconds);
+    }
 }
 
 test "reaping is unconfirmed only from the cleanup watchdog" {

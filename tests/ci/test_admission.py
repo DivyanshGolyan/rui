@@ -1089,7 +1089,7 @@ class PromoteJobGraphTest(unittest.TestCase):
                             variables=variables, names=PROMOTE_JOBS)
 
     def test_each_batch_result_runs_exactly_its_jobs(self):
-        idle = {'size': '0', 'reuse': 'false', 'weekly': 'false', 'daily': 'false'}
+        idle = {'size': '0', 'reuse': 'false', 'weekly': 'false', 'daily': 'false', 'scheduled': 'true'}
         cases = {
             # A red HEAD: batch fails after choosing, and weekly or daily work still runs.
             'red HEAD, weekly and daily': ('failure', dict(idle, weekly='true', daily='true'), {'dependency_lag', 'race_sweep'}),
@@ -1111,6 +1111,11 @@ class PromoteJobGraphTest(unittest.TestCase):
         with self.subTest(case='paused scheduled releases hold a reused green record'):
             self.assertEqual(self.runs('success', dict(idle, size='2', reuse='true', run='41', version='0.80.0'),
                                        variables={'SCHEDULED_RELEASES': 'paused'}), {'batch'})
+        with self.subTest(case='paused scheduled releases still let a manual promotion publish'):
+            self.assertEqual(self.runs('success', dict(idle, size='2', reuse='true', run='41', version='0.80.0',
+                                                       scheduled='false'),
+                                       event='workflow_dispatch', variables={'SCHEDULED_RELEASES': 'paused'}),
+                             {'batch', 'release'})
 
 
 class JobGraphTest(unittest.TestCase):
@@ -1209,17 +1214,44 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertRegex(text, r"(?m)^concurrency:\n  # .*\n  # .*\n  group: \$\{\{ inputs.bisect-step != '' && 'promote-bisect' \|\| 'promote' \}\}\n  cancel-in-progress: false$")
         batch = job(text, 'batch')
         self.assertIn("github.ref == 'refs/heads/main'", batch)
-        self.assertIn("SCHEDULED: ${{ github.event_name == 'schedule' }}", batch)
+        # One step owns whether a run is a scheduled slot; every scheduled-only rule reads its output.
+        self.assertEqual(text.count('github.event_name'), 1)
+        self.assertEqual(batch.count('SCHEDULED: ${{ steps.slot.outputs.scheduled }}'), 2)
+        self.assertIn('scheduled: ${{ steps.slot.outputs.scheduled }}', batch)
+        self.assertIn('EVENT: ${{ github.event_name }}', batch)
         self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', batch)
         self.assertEqual(batch.count('--scheduled'), 1)
         self.assertIn('$( [ "$SCHEDULED" = true ] && echo --scheduled )', batch)
         qualify = job(text, 'qualify')
         self.assertIn('uses: ./.github/workflows/qualification-tier.yml', qualify)
-        self.assertIn("red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}", qualify)
+        self.assertIn("red-label: ${{ needs.batch.outputs.scheduled == 'true' && 'main-red' || 'promotion-red' }}", qualify)
         # Promote's scheduled and manual runs on one SHA never cancel each other's tiers.
         self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
         self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+
+    def test_a_slot_dispatch_runs_exactly_as_the_schedule(self):
+        # GitHub's scheduler drops most slots; a `slot` dispatch fills one and must take every scheduled rule.
+        script = step_script(job(PROMOTE.read_text(), 'batch'), 'Name whether this run is a scheduled slot')
+        rows = (
+            # event, slot input, sha input, scheduled output (None: the run fails)
+            ('schedule', '', '', 'true'),
+            ('workflow_dispatch', 'true', '', 'true'),
+            ('workflow_dispatch', 'false', '', 'false'),
+            ('workflow_dispatch', 'false', 'qualified', 'false'),
+            ('workflow_dispatch', 'true', 'qualified', None),
+        )
+        for event, slot, sha, expected in rows:
+            with self.subTest(event=event, slot=slot, sha=sha), tempfile.NamedTemporaryFile('r') as output:
+                ran = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                                     env=dict(os.environ, EVENT=event, SLOT=slot, CHOSEN=sha,
+                                              GITHUB_OUTPUT=output.name))
+                if expected is None:
+                    self.assertNotEqual(ran.returncode, 0)
+                    self.assertIn('slot takes no sha', ran.stdout)
+                else:
+                    self.assertEqual(ran.returncode, 0, ran.stderr)
+                    self.assertEqual(output.read(), f'scheduled={expected}\n')
 
     def test_one_tier_owns_qualification_and_its_verdict(self):
         text = TIER.read_text()
@@ -1286,7 +1318,7 @@ class ReleaseFlowTest(unittest.TestCase):
         for line in ('uses: ./.github/workflows/qualification-tier.yml',
                      "if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}",
                      'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
-                     "red-label: ${{ github.event_name == 'schedule' && 'main-red' || 'promotion-red' }}"):
+                     "red-label: ${{ needs.batch.outputs.scheduled == 'true' && 'main-red' || 'promotion-red' }}"):
             self.assertIn(line, qualify)
         self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
                                                    'checks': 'read', 'statuses': 'write', 'issues': 'write'})
@@ -1294,7 +1326,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('needs: [batch, qualify]', release)
         self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
                       "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && "
-                      "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release)
+                      "!(needs.batch.outputs.scheduled == 'true' && vars.SCHEDULED_RELEASES == 'paused') }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
         self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
                       " || needs.qualify.outputs.version }}", release)

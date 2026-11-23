@@ -346,7 +346,7 @@ The Store also advances an in-memory control generation after each accepted cont
 The Store advances an in-memory commit generation whenever a locked entry point changed rows, before releasing its lock; each turn skips its Bash, message and tool-continuation admission scans while the generation, the free-slot count and which shared preparation owners are open are unchanged since the last read found nothing.
 An Action Attempt loses custody without a saved outcome only after dispatch is fenced or the Host is shutting down, and neither admits work again, so uncertain Actions come only from an earlier Host; the lifecycle owner stops scanning for them once a scan after startup finds none.
 Retry admission depends on time and keeps its one-second poll.
-A Store commit from any thread and a finished stream wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
+A Store commit from any thread, a finished stream and a child exit wake the lifecycle owner at once; for everything else it waits at most 100 ms between turns, 25 ms while Bash runs, and the HTTP/2 Client's own timers end a wait sooner.
 A control always commits before its hint, so a lost hint still moves the control generation.
 Before transport handoff it rechecks superseding controls; stop or shutdown cancels preparation, closes readers and prevents launch.
 Canonical read faults fence dispatch.
@@ -360,9 +360,7 @@ Stream large strings, opaque objects and unknown open fields; do not decode comp
 Preserve exact historical order, and rebuild each item from its neutral form and bags so that it parses equal to the item the provider sent, minus only demonstrated non-replayable fields.
 Source integrity, output completion and scratch sealing must succeed before the existing atomic transport handoff.
 Partial read, write or capacity failure cannot expose an incomplete request.
-Unlinked scratch files (ingress request content, provider request, response capture, response metadata, decoded event data and Session reports) are flushed from Rui's buffers and length-checked at seal or before use, but not fsynced.
-They never outlive the Host process, so a sync adds no crash durability; durability lives in the Store.
-A write error still fails at write time, and a later read error fails the call that reads it.
+Request, response, metadata and event-data scratch follow the [scratch sealing rule](resources.md#shared-scratch-ownership): length-checked, never fsynced.
 
 Model transport is Rui's own HTTP/2 client in `src/h2/`, built on pinned nghttp2 and OpenSSL.
 It is a separate build module that imports nothing from Rui.

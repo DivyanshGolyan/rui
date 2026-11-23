@@ -73,7 +73,7 @@ prepare_dependencies() {
                 remote=${url#git+}
                 remote=${remote%%#*}
                 remote=${remote%%\?*}
-                [[ $remote == https://github.com/* ]] && { git_remote=$remote; git_revision=$revision; }
+                git_remote=$remote; git_revision=$revision
                 url="${remote%.git}/archive/$revision.tar.gz"
                 ;;
         esac

@@ -255,6 +255,15 @@ pub const Engine = union(Kind) {
         };
     }
 
+    /// Makes every commit so far durable. A MySQL commit is durable when it
+    /// returns, so only SQLite has work here.
+    pub inline fn settle(e: *Engine, synced: *u32) Failure!void {
+        return switch (e.*) {
+            .sqlite => |*s| s.settle(synced),
+            .mysql => {},
+        };
+    }
+
     pub inline fn control(e: *Engine, comptime which: Control) ControlError!void {
         return switch (e.*) {
             .sqlite => |*s| s.control(which),
