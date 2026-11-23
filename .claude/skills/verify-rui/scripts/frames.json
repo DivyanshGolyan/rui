@@ -6698,6 +6698,117 @@
         "140x40",
         "46x30"
       ]
+    },
+    {
+      "name": "drag-to-archive",
+      "note": "A chat pressed and dragged onto Archived: the tab is shaded and the tabs line says drop to archive; L1 SGR press and drag",
+      "cast": [
+        {
+          "label": "Drag me to Archived",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Seed history"
+          ]
+        }
+      ],
+      "open": "Sidebar chat",
+      "sizes": [
+        "140x40"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ],
+      "steps": [
+        {
+          "wait": "Drag me to Archived"
+        },
+        {
+          "mouse": {
+            "at": "Drag me to Archived",
+            "do": "press"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Schema migration",
+            "do": "move"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Archived",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "Archived",
+        "drop to archive",
+        "Drag me to Archived"
+      ],
+      "absent": [
+        "order held"
+      ]
+    },
+    {
+      "name": "drag-dropped",
+      "note": "Releasing the carried chat on Archived archives it through the Alt-A request",
+      "cast": [
+        {
+          "label": "Drop me on Archived",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Seed history"
+          ]
+        }
+      ],
+      "open": "Sidebar chat",
+      "sizes": [
+        "140x40"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ],
+      "steps": [
+        {
+          "wait": "Drop me on Archived"
+        },
+        {
+          "mouse": {
+            "at": "Drop me on Archived",
+            "do": "press"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Schema migration",
+            "do": "move"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Archived",
+            "do": "move"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Archived",
+            "do": "release"
+          }
+        },
+        {
+          "wait": "· Archived"
+        }
+      ],
+      "expect": [
+        "· Archived"
+      ],
+      "absent": [
+        "drop to archive"
+      ]
     }
   ]
 }
