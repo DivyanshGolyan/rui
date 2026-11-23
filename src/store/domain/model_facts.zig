@@ -16,6 +16,7 @@ pub const Fact = struct {
     efforts: u8,
     openai_listed: bool,
     generation: u64,
+    output_limit: ?u32,
 };
 
 pub const source = rsql.Read(.{
@@ -26,7 +27,7 @@ pub const source = rsql.Read(.{
 });
 
 pub const fact = rsql.Read(.{
-    .sql = "SELECT fact.context_window,fact.efforts,fact.openai_listed,fact.generation FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.model_id=?1",
+    .sql = "SELECT fact.context_window,fact.efforts,fact.openai_listed,fact.generation,fact.output_limit FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.model_id=?1",
     .Args = struct { id: []const u8 },
     .Row = Fact,
     .cardinality = .optional,
@@ -44,21 +45,26 @@ fn selectionSql(comptime columns: []const u8, comptime model: ?[]const u8) []con
         "ON fact.generation=source.generation" ++
         (if (model) |id| " AND fact.model_id=" ++ id else "") ++ " WHERE source.slot=1";
 }
-const selection_columns = "fact.model_id,fact.context_window,fact.efforts,fact.openai_listed";
+const selection_columns = "fact.model_id,fact.context_window,fact.efforts,fact.openai_listed,fact.output_limit";
 
 pub fn contextWindowSql(comptime model: []const u8, comptime shipped: []const u8, comptime unlisted: []const u8) []const u8 {
     return "coalesce((" ++ selectionSql("coalesce(fact.context_window," ++ unlisted ++ ")", model) ++ ")," ++ shipped ++ ")";
+}
+pub fn outputLimitSql(comptime model: []const u8, comptime shipped: []const u8, comptime unlisted: []const u8) []const u8 {
+    return "coalesce((" ++ selectionSql("coalesce(fact.output_limit," ++ unlisted ++ ")", model) ++ ")," ++ shipped ++ ")";
 }
 const SelectionRow = struct {
     model_id: ?Bounded(256),
     context_window: ?u32,
     efforts: ?u8,
     openai_listed: ?bool,
+    output_limit: ?u32,
 
     fn entry(self: *const SelectionRow, id: []const u8) catalog.Entry {
         return .{
             .id = id,
             .context_window = self.context_window,
+            .output_limit = self.output_limit,
             .efforts = .{ .bits = .{ .mask = @intCast(self.efforts.?) } },
             .openai_listed = self.openai_listed.?,
         };
@@ -136,14 +142,14 @@ const existing = rsql.Read(.{
     .Row = struct { model_id: Bounded(256) },
     .cardinality = .each,
 });
-const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai_listed: bool, generation: u64 };
+const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai_listed: bool, generation: u64, output_limit: ?u32 };
 const insert_fact = rsql.Write(.{
-    .sql = "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) VALUES(?1,?2,?3,?4,?5)",
+    .sql = "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation,output_limit) VALUES(?1,?2,?3,?4,?5,?6)",
     .Args = FactArgs,
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 const update_fact = rsql.Write(.{
-    .sql = "UPDATE model_fact SET context_window=?2,efforts=?3,openai_listed=?4,generation=?5 WHERE model_id=?1",
+    .sql = "UPDATE model_fact SET context_window=?2,efforts=?3,openai_listed=?4,generation=?5,output_limit=?6 WHERE model_id=?1",
     .Args = FactArgs,
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -200,6 +206,7 @@ pub const Save = struct {
                 .efforts = @intCast(entry.efforts.bits.mask),
                 .openai_listed = entry.openai_listed,
                 .generation = generation,
+                .output_limit = entry.output_limit,
             };
             const old = t.known.ids.getPtr(entry.id).?;
             if (old.*) r.write(update_fact, args) else r.write(insert_fact, args);

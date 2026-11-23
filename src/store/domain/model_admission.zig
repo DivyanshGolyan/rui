@@ -876,9 +876,9 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,output_limit,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
         "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
-        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++
+        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++ model_facts_domain.outputLimitSql("?14", "?18", "?19") ++ "," ++
         configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
         "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
         "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
@@ -900,6 +900,8 @@ const insert_operation = rsql.Write(.{
         shipped_context_window: u64,
         unlisted_context_window: u64,
         tool_set_id: u64,
+        shipped_output_limit: u32,
+        unlisted_output_limit: u32,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -1032,6 +1034,7 @@ pub const AdmitModel = struct {
         policy: model_capability.CompactionPolicy,
         reasoning_effort: ?model_capability.ReasoningEffort,
         shipped_context_window: u64,
+        shipped_output_limit: u32,
         instructions: u64,
         tool_set_id: u64,
         loaded_tool_set_id: ?u64,
@@ -1156,6 +1159,7 @@ pub const AdmitModel = struct {
             .policy = policy,
             .reasoning_effort = configuration_domain.effectiveReasoningEffort(facts),
             .shipped_context_window = model_capability.contextWindow(model_catalog.shipped, facts.model.slice()),
+            .shipped_output_limit = model_capability.outputLimit(model_catalog.shipped, facts.model.slice()),
             .instructions = if (purpose == .compaction) 0 else facts.instructions,
             .tool_set_id = facts.tool_set_id.get(),
             .loaded_tool_set_id = if (facts.loaded_tool_set_id) |id| id.get() else null,
@@ -1245,6 +1249,8 @@ pub const AdmitModel = struct {
             .shipped_context_window = admitting.shipped_context_window,
             .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
             .tool_set_id = t.offer,
+            .shipped_output_limit = admitting.shipped_output_limit,
+            .unlisted_output_limit = @import("../../product_defaults.zig").unlisted_output_limit,
         });
         if (t.input.faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
         t.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
