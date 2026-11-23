@@ -83,16 +83,7 @@ fn checkOptionName(comptime name: []const u8) void {
     if (name.len != 0 and !@import("cli_option_names.zig").contains(name)) @compileError("no CLI option is named --" ++ name);
 }
 
-pub const RetiredOption = struct { name: []const u8, assignments: []const []const u8, replacement: []const u8 };
-
-pub fn retired(comptime name: []const u8, comptime assignments: []const []const u8, comptime note: []const u8) RetiredOption {
-    comptime var replacement: []const u8 = "";
-    inline for (assignments, 0..) |assignment, n| replacement = replacement ++ (if (n == 0) "" else " ") ++ "--set " ++ assignment;
-    return .{ .name = name, .assignments = assignments, .replacement = replacement ++ note };
-}
-
 pub const Definition = struct {
-    retired_options: []const RetiredOption = &.{},
     positional_tail: ?[]const u8 = null,
     resource: Resource,
     name: []const u8,
@@ -220,18 +211,6 @@ pub const Definition = struct {
                 continue;
             }
             const n = self.indexOf(arg[2..]) orelse {
-                for (self.retired_options) |old| {
-                    if (std.mem.eql(u8, arg[2..], old.name)) {
-                        problem.* = .{
-                            .code = .host_option_retired,
-                            .token = arg,
-                            .option = false,
-                            .value = if (index + 1 < args.len and !std.mem.startsWith(u8, args[index + 1], "--")) args[index + 1] else null,
-                            .accepted = .{ .grammar = old.replacement },
-                        };
-                        return error.UnknownArgument;
-                    }
-                }
                 problem.* = .{ .code = .option_unknown, .token = arg, .option = false };
                 return error.UnknownArgument;
             };

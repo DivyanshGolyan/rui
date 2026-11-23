@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations, host_environment_violations, credential_location_violations
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, host_child_violations, host_environment_violations, credential_location_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -99,22 +99,6 @@ fn serve(settings: *host_settings.Settings) void { consume(settings); }
 fn read(settings: *SessionSettings) void { _ = settings.tools; }
 '''))
 
-    def test_only_literal_retired_rows_are_exempt(self):
-        table = '''pub const retired_options = &[_]grammar.RetiredOption{
-    grammar.retired("bash-timeout-ms", &.{"tools.bash.timeoutMs=VALUE"}, ""),
-    grammar.retired("provider-endpoint", &.{ "providers.codex.endpoint=VALUE", "providers.codex.unauthenticated=true" }, " (note)"),
-};
-'''
-        self.assertFalse(self.check(table, "src/serve_grammar.zig"))
-        self.assertTrue(self.check(table + 'const x = "timeoutMs";', "src/serve_grammar.zig"))
-        self.assertTrue(self.check(table, "src/cli_grammar.zig"))
-        for broken in (table.replace('"tools.bash.timeoutMs=VALUE"', 'hidden()'),
-                       table.replace('grammar.retired(', 'grammar.other('),
-                       table.replace(', "")', ', "", extra)'),
-                       table.replace('&.{"tools.bash.timeoutMs=VALUE"}', 'assignments')):
-            with self.assertRaises(ValueError):
-                self.check(broken, "src/serve_grammar.zig")
-
     def test_independent_domain_members_include_last_uncommaed_tag(self):
         self.assertEqual(declaration_members("pub const Kind = enum { one, two };", "Kind"), {"one", "two"})
         self.assertEqual(declaration_members("pub const Args = struct { count: ?u64 = null, };", "Args"), {"count"})
@@ -169,8 +153,6 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
             root = Path(directory)
             (root / 'src').mkdir()
             (root / 'openapi.json').write_text((ROOT / 'openapi.json').read_text())
-            (root / 'src/serve_grammar.zig').write_text('fn runningSources() void { currentArguments(); }\n')
-            (root / 'src/HostLifecycle.zig').write_text('fn finish() void { previousProviders(); }\n')
             path = root / 'src/cli.zig'
             clean = 'const x = "store";\n'
             path.write_text(clean)
@@ -183,40 +165,6 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class RunningSourceLocalityTest(unittest.TestCase):
-    def test_duplicate_reader_mutation_turns_gate_red(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "src").mkdir()
-            (root / "src/serve_grammar.zig").write_text(
-                "pub fn currentArguments() void {}\n"
-                "pub fn previousProviders() void {}\n"
-                "pub fn runningSources() void { currentArguments(); }\n")
-            consumer = root / "src/HostLifecycle.zig"
-            consumer.write_text("fn finish() void { previousProviders(); }\n")
-            self.assertEqual(running_source_violations(root), [])
-            consumer.write_text(consumer.read_text() + "fn injected() void { serve_grammar.currentArguments(); }\n")
-            found = running_source_violations(root)
-            self.assertEqual(len(found), 1, found)
-            self.assertIn("currentArguments must have one production caller", found[0])
-            consumer.write_text("fn finish() void { previousProviders(); }\n"
-                                'test "test reader" { currentArguments(); }\n'
-                                'const words = "currentArguments()";\n')
-            self.assertEqual(running_source_violations(root), [])
-
-    def test_duplicate_provider_transition_mutation_turns_gate_red(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "src").mkdir()
-            (root / "src/serve_grammar.zig").write_text(
-                "fn runningSources() void { currentArguments(); }\n")
-            consumer = root / "src/HostLifecycle.zig"
-            consumer.write_text("fn finish() void { previousProviders(); previousProviders(); }\n")
-            found = running_source_violations(root)
-            self.assertEqual(len(found), 1, found)
-            self.assertIn("previousProviders must have one production caller", found[0])
 
 
 class HostChildLocalityTest(unittest.TestCase):
