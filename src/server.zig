@@ -66,7 +66,9 @@ const executionFacts = server_host.executionFacts;
 const waitAtTestGate = server_host.waitAtTestGate;
 const traceSqliteDiagnostic = server_host.traceSqliteDiagnostic;
 
-fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
+// Rare work with a 4 KiB capture of its own: noinline keeps the capture off
+// the frame of every session inspection.
+noinline fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
     const selection = request.failed_response.?;
     const binding = try host.store.failedResponseBinding(request.session.slice(), selection.operation, selection.attempt);
     var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
@@ -1767,8 +1769,6 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
-// Kept out of prepareReply so the configure path pays only its own frame, not
-// the whole switch's frame.
 noinline fn prepareConfigure(host: *Host, fd: *Reply, header: Header, command: *const wire_request.ConfigureCommand) !void {
     // One bounded receipt per active creating exchange; ordinary exchanges
     // are limited by Host intake capacity. It lives only through encoding.
@@ -1777,6 +1777,9 @@ noinline fn prepareConfigure(host: *Host, fd: *Reply, header: Header, command: *
     _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
 }
 
+// Each request kind runs in its own noinline handler. A switch whose arms are
+// written inline gets one frame sized for every arm, and whether that frame sits
+// under a deep path (configure into the Store) is the inliner's choice.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
@@ -1795,226 +1798,263 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
     }
 
     switch (request.*) {
-        .host_info => {
-            if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-            try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
-                .store = host.lease.paths.store_identity.slice(),
-                .instance = host.instance,
-                .active_capacity = host.custody.records.len,
-                .intake_capacity = host.intake_capacity,
-                .descriptor_soft_limit = host.descriptor_soft_limit,
-                .started_at = host.started_at,
-                .custody_occupied = host.custody.held(),
-                .paused = host.turnsHeld(),
-                .routes = host.providers.routes(),
-                .doublewrite = host.store.admissionDiagnostic().doublewrite,
-                .settings_digest = host.settings_digest,
-            }});
-        },
-        .host_pause => |pause| {
-            if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
-            host.turns_paused.store(pause.paused, .release);
-            // A drain's hold outlasts an operator's release; reply the hold in force.
-            try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{host.turnsHeld()});
-        },
-        .host_stop => |stop| {
-            const bound = host_drain.Bound.seconds(stop.drain_seconds) catch unreachable;
-            const answer = host.askStop(bound);
-            if (answer == .stop_now) wakeListener(host);
-            if (header.drop == .after_commit) return;
-            switch (answer) {
-                .stop_now, .already_stopping => try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack}),
-                .drain => |drain| {
-                    const left_ms = (drain.until_ns -| nowNs(host)) / std.time.ns_per_ms;
-                    const until_unix_ms = (std.math.cast(u64, store_module.readUnixMilliseconds(host.io) catch 0) orelse 0) +| left_ms;
-                    try fd.json(200, comptime protocol.shapeBytes(protocol.host_drain_reply), host_reply.renderHostDrain, .{until_unix_ms});
-                },
-            }
-        },
+        .host_info => try replyHostInfo(host, fd),
+        .host_pause => |pause| try replyHostPause(host, fd, pause),
+        .host_stop => |stop| try replyHostStop(host, fd, stop, header),
         .configure => |*command| try prepareConfigure(host, fd, header, command),
-        .message => |*command| {
-            if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
-            const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
-            defer if (receipt) |value| host.allocator.destroy(value);
-            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessageInput(host, command, client_environment.?, parts, receipt));
-        },
-        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
-            const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
-            var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
-            const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
-            try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
-        },
-        .action_publish => |*command| {
-            if (command.text.length > protocol.max_action_value_bytes) return respondStatic(fd, 409, .invocation_error, "too_large");
-            const bytes = try host.allocator.alloc(u8, @intCast(command.text.length));
-            defer host.allocator.free(bytes);
-            const count = try command.text.file.?.readPositionalAll(host.io, bytes, 0);
-            if (count != bytes.len) return error.UnexpectedEndOfFile;
-            const result = host.store.publishActionValue(command.handle.slice(), command.key.slice(), bytes) catch |err| {
-                fenceDispatch(host, "action value publication", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            };
-            switch (result) {
-                .accepted => |receipt| try fd.json(200, comptime protocol.shapeBytes(protocol.action_publish_reply), renderActionValueReceipt, .{receipt}),
-                .refused => |reason| return respondStatic(fd, 409, .invocation_error, @tagName(reason)),
-            }
-        },
-        .observe_command => |*command| {
-            var observation: store_module.Observed = undefined;
-            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| return refuseRead(host, fd, "command observation", err);
-            switch (observation) {
-                .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
-                .not_modified => |token| if (command.since) |since| {
-                    server_host.traceCommandObservation(host, command.key.slice(), if (token.generation > since.generation)
-                        "request_observation_tier2"
-                    else
-                        "request_observation_tier1");
-                },
-            }
-            try fd.json(200, host_reply.commandObservationBytes(&observation), host_reply.renderCommandObservation, .{ command.key.slice(), &observation });
-        },
-        .read_result => |*command| {
-            const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
-                error.ResultNotFound => return respondStatic(fd, 409, .result_unavailable, "result_not_found"),
-                error.ResultNotReady => return respondStatic(fd, 409, .result_unavailable, "result_not_ready"),
-                error.ResultFailed => return respondStatic(fd, 409, .result_unavailable, "result_failed"),
-                else => return refuseRead(host, fd, "result observation", err),
-            };
-            const location = host.store.openContent(reference) catch |err| return refuseRead(host, fd, "result content read", err);
-            try fd.setContent(location, 0, true, false);
-        },
-        .read_action => |*command| {
-            const value = try createUnfilled(host.allocator, @import("action_read.zig").Read);
-            defer host.allocator.destroy(value);
-            host.store.readAction(command, value) catch |err| switch (err) {
-                error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
-                error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
-                else => return refuseRead(host, fd, "Action status observation", err),
-            };
-            try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
-        },
+        .message => |*command| try replyMessage(host, fd, command, header, client_environment, parts),
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| try replyControl(host, fd, header, accepted_at_ns, comptime @field(command_spec.CommandKind, @tagName(tag)), command),
+        .action_publish => |*command| try replyActionPublish(host, fd, command),
+        .observe_command => |*command| try replyObserveCommand(host, fd, command),
+        .read_result => |*command| try replyReadResult(host, fd, command),
+        .read_action => |*command| try replyReadAction(host, fd, command),
         .read_action_arguments => |*command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |*command| deliverActionContent(host, fd, command, true),
-        .inspect_session => |*request_value| {
-            if (request_value.failed_response != null) {
-                const capture = captureFailedResponse(host, request_value, request_number) catch |err| {
-                    if (err == error.ReportScratchCleanupFailed) {
-                        fenceDispatch(host, "failed response export scratch cleanup", err);
-                        return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-                    }
-                    if (host.store.isFenced()) {
-                        fenceDispatch(host, "failed response identity", err);
-                        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                    }
-                    return respondStatic(fd, 409, .failed_response_unavailable, @errorName(err));
-                };
-                try fd.setReport(capture);
-                try fd.prepareHeader(200, "application/octet-stream", capture.length);
-                return;
-            }
-            const report = captureSessionReport(host, request_value, request_number) catch |err| {
-                if (err == error.ReportScratchCleanupFailed) {
-                    fenceDispatch(host, "session report scratch cleanup", err);
-                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-                }
-                return refuseRead(host, fd, "session inspection", err);
-            };
-            try fd.setReport(report);
-            traceSubject(host, "inspection_captured", "session", request_value.session.slice());
-            traceSqliteDiagnostic(host, request_value.session.slice());
-            try fd.holdDelivery(host.hooks.inspection_reply);
-            if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
-        },
-        .list_sessions => |*request_value| {
-            if (request_value.since) |since| {
-                if (request_value.changed == null and host.store.notModified(since)) {
-                    return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
-                }
-            }
-            const page = captureSessionList(host, request_value, request_number) catch |err| {
-                if (err == error.ReportScratchCleanupFailed) {
-                    fenceDispatch(host, "Session list scratch cleanup", err);
-                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-                }
-                return refuseRead(host, fd, "Session list", err);
-            };
-            try fd.setReport(page);
-        },
-        .conversation_page => |*command| {
-            const page = try createUnfilled(host.allocator, store_module.PublicConversationPage);
-            defer host.allocator.destroy(page);
-            host.store.publicConversationPage(command, page, host.allocator) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-                else => return refuseRead(host, fd, "conversation page", err),
-            };
-            try fd.json(200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
-        },
+        .inspect_session => |*request_value| try replyInspectSession(host, fd, request_value, request_number),
+        .list_sessions => |*request_value| try replyListSessions(host, fd, request_value, request_number),
+        .conversation_page => |*command| try replyConversationPage(host, fd, command),
         .conversation_content => |*command| try prepareConversationContent(host, fd, command),
-        .activity_page => |*command| {
-            const page = try createUnfilled(host.allocator, protocol.ActivityFacts);
-            defer host.allocator.destroy(page);
-            host.store.activityPage(command, page) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => return refuseRead(host, fd, "activity page", err),
-            };
-            try fd.json(200, host_reply.activityPageBytes(page), host_reply.renderActivityPage, .{page});
-        },
-        .activity_search => |*command| {
-            const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
-            defer host.allocator.destroy(page);
-            host.store.searchActivity(command, page) catch |err| switch (err) {
-                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => return refuseRead(host, fd, "activity search", err),
-            };
-            try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
-        },
-        .public_parts => |*command| {
-            const report = capturePublicParts(host, fd, command, request_number) catch |err| switch (err) {
-                error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
-                error.ReportScratchCleanupFailed => {
-                    fenceDispatch(host, "public parts scratch cleanup", err);
-                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
-                },
-                else => return refuseRead(host, fd, "public parts", err),
-            };
-            try fd.setReport(report);
-        },
-        .public_part_content => |*command| {
-            const location = host.store.openPublicPart(command.session.slice(), command.owner, command.part, command.start) catch |err| switch (err) {
-                error.ContentNotFound, error.ContentIsText, error.RangeOutOfBounds => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
-                else => return refuseRead(host, fd, "public part content", err),
-            };
-            try deliverPublicContent(host, fd, location, command.start, command.stream);
-        },
-        .activity_content => |*command| {
-            const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound, error.ContentIsParts => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => return refuseRead(host, fd, "activity content", err),
-            };
-            try deliverPublicContent(host, fd, location, 0, true);
-        },
-        .skill_suggestions => |*command| {
-            const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
-            var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
-                if (err == error.CanonicalStoreFailure) return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                if (err == error.OutOfMemory) return error.OutOfMemory;
-                return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
-            };
-            defer page.deinit(host.allocator);
-            try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
-        },
-        .model_list => {
-            host.listings_requested.store(true, .release);
-            var arena: std.heap.ArenaAllocator = .init(host.allocator);
-            defer arena.deinit();
-            const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
-                if (err == error.OutOfMemory) return error.OutOfMemory;
-                fenceDispatch(host, "model catalog", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            };
-            try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
+        .activity_page => |*command| try replyActivityPage(host, fd, command),
+        .activity_search => |*command| try replyActivitySearch(host, fd, command),
+        .public_parts => |*command| try replyPublicParts(host, fd, command, request_number),
+        .public_part_content => |*command| try replyPublicPartContent(host, fd, command),
+        .activity_content => |*command| try replyActivityContent(host, fd, command),
+        .skill_suggestions => |*command| try replySkillSuggestions(host, fd, command),
+        .model_list => try replyModelList(host, fd),
+    }
+}
+
+noinline fn replyHostInfo(host: *Host, fd: *Reply) !void {
+    if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
+        .store = host.lease.paths.store_identity.slice(),
+        .instance = host.instance,
+        .active_capacity = host.custody.records.len,
+        .intake_capacity = host.intake_capacity,
+        .descriptor_soft_limit = host.descriptor_soft_limit,
+        .started_at = host.started_at,
+        .custody_occupied = host.custody.held(),
+        .paused = host.turnsHeld(),
+        .routes = host.providers.routes(),
+        .doublewrite = host.store.admissionDiagnostic().doublewrite,
+        .settings_digest = host.settings_digest,
+    }});
+}
+
+noinline fn replyHostPause(host: *Host, fd: *Reply, pause: @FieldType(wire_request.Request, "host_pause")) !void {
+    if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    host.turns_paused.store(pause.paused, .release);
+    // A drain's hold outlasts an operator's release; reply the hold in force.
+    try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{host.turnsHeld()});
+}
+
+noinline fn replyHostStop(host: *Host, fd: *Reply, stop: @FieldType(wire_request.Request, "host_stop"), header: Header) !void {
+    const bound = host_drain.Bound.seconds(stop.drain_seconds) catch unreachable;
+    const answer = host.askStop(bound);
+    if (answer == .stop_now) wakeListener(host);
+    if (header.drop == .after_commit) return;
+    switch (answer) {
+        .stop_now, .already_stopping => try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack}),
+        .drain => |drain| {
+            const left_ms = (drain.until_ns -| nowNs(host)) / std.time.ns_per_ms;
+            const until_unix_ms = (std.math.cast(u64, store_module.readUnixMilliseconds(host.io) catch 0) orelse 0) +| left_ms;
+            try fd.json(200, comptime protocol.shapeBytes(protocol.host_drain_reply), host_reply.renderHostDrain, .{until_unix_ms});
         },
     }
+}
+
+noinline fn replyMessage(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "message"), header: Header, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
+    if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
+    const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+    defer if (receipt) |value| host.allocator.destroy(value);
+    _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessageInput(host, command, client_environment.?, parts, receipt));
+}
+
+noinline fn replyControl(host: *Host, fd: *Reply, header: Header, accepted_at_ns: u64, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind))) !void {
+    var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
+    const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+    try answerControl(host, fd, header, kind, controlSubject(kind, command), result, timing);
+}
+
+noinline fn replyActionPublish(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "action_publish")) !void {
+    if (command.text.length > protocol.max_action_value_bytes) return respondStatic(fd, 409, .invocation_error, "too_large");
+    const bytes = try host.allocator.alloc(u8, @intCast(command.text.length));
+    defer host.allocator.free(bytes);
+    const count = try command.text.file.?.readPositionalAll(host.io, bytes, 0);
+    if (count != bytes.len) return error.UnexpectedEndOfFile;
+    const result = host.store.publishActionValue(command.handle.slice(), command.key.slice(), bytes) catch |err| {
+        fenceDispatch(host, "action value publication", err);
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+    };
+    switch (result) {
+        .accepted => |receipt| try fd.json(200, comptime protocol.shapeBytes(protocol.action_publish_reply), renderActionValueReceipt, .{receipt}),
+        .refused => |reason| return respondStatic(fd, 409, .invocation_error, @tagName(reason)),
+    }
+}
+
+noinline fn replyObserveCommand(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "observe_command")) !void {
+    var observation: store_module.Observed = undefined;
+    host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| return refuseRead(host, fd, "command observation", err);
+    switch (observation) {
+        .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
+        .not_modified => |token| if (command.since) |since| {
+            server_host.traceCommandObservation(host, command.key.slice(), if (token.generation > since.generation)
+                "request_observation_tier2"
+            else
+                "request_observation_tier1");
+        },
+    }
+    try fd.json(200, host_reply.commandObservationBytes(&observation), host_reply.renderCommandObservation, .{ command.key.slice(), &observation });
+}
+
+noinline fn replyReadResult(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "read_result")) !void {
+    const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
+        error.ResultNotFound => return respondStatic(fd, 409, .result_unavailable, "result_not_found"),
+        error.ResultNotReady => return respondStatic(fd, 409, .result_unavailable, "result_not_ready"),
+        error.ResultFailed => return respondStatic(fd, 409, .result_unavailable, "result_failed"),
+        else => return refuseRead(host, fd, "result observation", err),
+    };
+    const location = host.store.openContent(reference) catch |err| return refuseRead(host, fd, "result content read", err);
+    try fd.setContent(location, 0, true, false);
+}
+
+noinline fn replyReadAction(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "read_action")) !void {
+    const value = try createUnfilled(host.allocator, @import("action_read.zig").Read);
+    defer host.allocator.destroy(value);
+    host.store.readAction(command, value) catch |err| switch (err) {
+        error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
+        error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
+        else => return refuseRead(host, fd, "Action status observation", err),
+    };
+    try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
+}
+
+noinline fn replyInspectSession(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "inspect_session"), request_number: u64) !void {
+    if (request_value.failed_response != null) {
+        const capture = captureFailedResponse(host, request_value, request_number) catch |err| {
+            if (err == error.ReportScratchCleanupFailed) {
+                fenceDispatch(host, "failed response export scratch cleanup", err);
+                return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+            }
+            if (host.store.isFenced()) {
+                fenceDispatch(host, "failed response identity", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            }
+            return respondStatic(fd, 409, .failed_response_unavailable, @errorName(err));
+        };
+        try fd.setReport(capture);
+        try fd.prepareHeader(200, "application/octet-stream", capture.length);
+        return;
+    }
+    const report = captureSessionReport(host, request_value, request_number) catch |err| {
+        if (err == error.ReportScratchCleanupFailed) {
+            fenceDispatch(host, "session report scratch cleanup", err);
+            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+        }
+        return refuseRead(host, fd, "session inspection", err);
+    };
+    try fd.setReport(report);
+    traceSubject(host, "inspection_captured", "session", request_value.session.slice());
+    traceSqliteDiagnostic(host, request_value.session.slice());
+    try fd.holdDelivery(host.hooks.inspection_reply);
+    if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.hooks.inspection_reply.gate_path.?);
+}
+
+noinline fn replyListSessions(host: *Host, fd: *Reply, request_value: *@FieldType(wire_request.Request, "list_sessions"), request_number: u64) !void {
+    if (request_value.since) |since| {
+        if (request_value.changed == null and host.store.notModified(since)) {
+            return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
+        }
+    }
+    const page = captureSessionList(host, request_value, request_number) catch |err| {
+        if (err == error.ReportScratchCleanupFailed) {
+            fenceDispatch(host, "Session list scratch cleanup", err);
+            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+        }
+        return refuseRead(host, fd, "Session list", err);
+    };
+    try fd.setReport(page);
+}
+
+noinline fn replyConversationPage(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "conversation_page")) !void {
+    const page = try createUnfilled(host.allocator, store_module.PublicConversationPage);
+    defer host.allocator.destroy(page);
+    host.store.publicConversationPage(command, page, host.allocator) catch |err| switch (err) {
+        error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "conversation page", err),
+    };
+    try fd.json(200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
+}
+
+noinline fn replyActivityPage(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "activity_page")) !void {
+    const page = try createUnfilled(host.allocator, protocol.ActivityFacts);
+    defer host.allocator.destroy(page);
+    host.store.activityPage(command, page) catch |err| switch (err) {
+        error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "activity page", err),
+    };
+    try fd.json(200, host_reply.activityPageBytes(page), host_reply.renderActivityPage, .{page});
+}
+
+noinline fn replyActivitySearch(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "activity_search")) !void {
+    const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
+    defer host.allocator.destroy(page);
+    host.store.searchActivity(command, page) catch |err| switch (err) {
+        error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "activity search", err),
+    };
+    try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
+}
+
+noinline fn replyPublicParts(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "public_parts"), request_number: u64) !void {
+    const report = capturePublicParts(host, fd, command, request_number) catch |err| switch (err) {
+        error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+        error.ReportScratchCleanupFailed => {
+            fenceDispatch(host, "public parts scratch cleanup", err);
+            return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+        },
+        else => return refuseRead(host, fd, "public parts", err),
+    };
+    try fd.setReport(report);
+}
+
+noinline fn replyPublicPartContent(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "public_part_content")) !void {
+    const location = host.store.openPublicPart(command.session.slice(), command.owner, command.part, command.start) catch |err| switch (err) {
+        error.ContentNotFound, error.ContentIsText, error.RangeOutOfBounds => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "public part content", err),
+    };
+    try deliverPublicContent(host, fd, location, command.start, command.stream);
+}
+
+noinline fn replyActivityContent(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "activity_content")) !void {
+    const location = host.store.openActivityContent(command) catch |err| switch (err) {
+        error.ContentNotFound, error.ContentIsParts => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+        else => return refuseRead(host, fd, "activity content", err),
+    };
+    try deliverPublicContent(host, fd, location, 0, true);
+}
+
+noinline fn replySkillSuggestions(host: *Host, fd: *Reply, command: *@FieldType(wire_request.Request, "skill_suggestions")) !void {
+    const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
+    var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
+        if (err == error.CanonicalStoreFailure) return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
+    };
+    defer page.deinit(host.allocator);
+    try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, host_reply.renderSkillSuggestions, .{&page});
+}
+
+noinline fn replyModelList(host: *Host, fd: *Reply) !void {
+    host.listings_requested.store(true, .release);
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    const facts = host.store.readModelCatalog(arena.allocator()) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        fenceDispatch(host, "model catalog", err);
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+    };
+    try fd.jsonGrowing(200, protocol.model_list_reply.maxBytes(facts), renderModelList, .{ host, facts });
 }
 
 fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8) !@import("skill_suggestions.zig").Page {
@@ -2150,7 +2190,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
     };
 }
 
-fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
+noinline fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
         else => return refuseRead(host, fd, "conversation content", err),
@@ -2166,7 +2206,7 @@ fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentL
     };
 }
 
-fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call_id: bool) void {
+noinline fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call_id: bool) void {
     const phase = if (call_id) "Action call identity observation" else "Action argument observation";
     const reference = if (call_id)
         host.store.actionCallId(command.session.slice(), command.action_id)
