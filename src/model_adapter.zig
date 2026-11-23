@@ -6160,6 +6160,9 @@ fn expectOrderedPartsForTesting(actual: []const std.json.Value, expected: []cons
     };
 }
 
+/// The codecs that lower image parts. A codec that declines images (anthropic-messages/1 here) is not in these image tests.
+const responses_image_codecs = [_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" };
+
 test "canonical ordered Message lowers original PNG JPEG and Text parts on every Responses codec" {
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
     const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
@@ -6173,7 +6176,7 @@ test "canonical ordered Message lowers original PNG JPEG and Text parts on every
     };
     const image_only = [_]OrderedTestPart{.{ .bytes = progressive, .kind = .{ .image = .{} } }};
     const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
@@ -6536,7 +6539,7 @@ test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on e
     };
     const image_only = [_]OrderedTestPart{.{ .bytes = @embedFile("testing/fixtures/input-progressive.jpg"), .kind = .{ .image = .{} } }};
     const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
@@ -6726,7 +6729,7 @@ test "canonical ordered Action Resolution cancellation releases readers and reop
 }
 
 test "canonical ordered Action Resolution background final prefixes the same parts as user input" {
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -6855,9 +6858,9 @@ test "image model policy rechecks retained inputs after model switch" {
     }
 }
 
-test "old text request retries unchanged across later image message and final action on every codec" {
+test "old text request retries unchanged across later image message and final action on every Responses codec" {
     const saved_mcp_json = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}";
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
