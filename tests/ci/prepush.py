@@ -436,7 +436,7 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
     if "src/store/schema.zig" in paths:
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
-    generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs", "clients/ts/scripts/generate-rejections.mjs"}
+    generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}
     if any(path.startswith("src/") for path in paths):
         graph = tree_graph()
         generation |= graph.closure(graph.production, ["src/openapi_main.zig"])

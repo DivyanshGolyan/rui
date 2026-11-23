@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rejectionSentences } from "./generate-rejections.mjs";
 import { settingsKinds } from "./generate-settings.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "rui-wire-"));
@@ -18,10 +17,6 @@ try {
 }
 if (settingsKinds(JSON.parse(readFileSync("../../openapi.json", "utf8"))) !== readFileSync("src/settings-kinds.ts", "utf8")) {
 	console.error("src/settings-kinds.ts is stale: run `npm run generate` in clients/ts");
-	process.exit(1);
-}
-if (rejectionSentences(JSON.parse(readFileSync("../../openapi.json", "utf8"))) !== readFileSync("src/rejections.ts", "utf8")) {
-	console.error("src/rejections.ts is stale: run `npm run generate` in clients/ts");
 	process.exit(1);
 }
 execFileSync("npx", ["tsc", "-p", "."], { stdio: "inherit" });

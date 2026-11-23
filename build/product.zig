@@ -549,4 +549,5 @@ pub fn addSqliteShell(
 
 fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
+    compile.root_module.addAnonymousImport("rejections.ts", .{ .root_source_file = b.path("clients/ts/src/rejections.ts") });
 }

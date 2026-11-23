@@ -1123,19 +1123,7 @@ pub const Document = struct {
                 .schemas = Value{ .object = d.schemas },
                 .parameters = try d.parameters(),
             }),
-            .@"x-rui-rejections" = try d.rejectionSentences(),
         });
-    }
-
-    /// Each saved rejection code's plain sentence from the caller catalog, so a client explains a
-    /// rejection in the words the CLI uses instead of keeping its own copy.
-    fn rejectionSentences(d: *Document) !Value {
-        var sentences: ObjectMap = .empty;
-        inline for (caller_rejection.rejection_enums) |E| inline for (comptime std.meta.tags(E)) |tag| {
-            try sentences.put(d.arena, @tagName(tag), .{ .string = caller_error.facts(caller_rejection.fromProtocol(tag)).says });
-        };
-        sentences.sort(SortKeys{ .keys = sentences.keys() });
-        return .{ .object = sentences };
     }
 
     fn binary(d: *Document) !Value {
@@ -1333,6 +1321,35 @@ pub fn render(gpa: std.mem.Allocator) ![]u8 {
     try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, &out.writer);
     try out.writer.writeByte('\n');
     return out.toOwnedSlice();
+}
+
+/// The TypeScript client's table of each saved rejection code's plain sentence from the caller catalog,
+/// so a client explains a rejection in the CLI's words without its own copy. It is generated beside
+/// openapi.json, not inside it: rewording a sentence changes no wire contract.
+pub fn renderRejections(gpa: std.mem.Allocator) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var sentences: ObjectMap = .empty;
+    inline for (caller_rejection.rejection_enums) |E| inline for (comptime std.meta.tags(E)) |tag| {
+        try sentences.put(arena.allocator(), @tagName(tag), .{ .string = caller_error.facts(caller_rejection.fromProtocol(tag)).says });
+    };
+    sentences.sort(SortKeys{ .keys = sentences.keys() });
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try out.writer.writeAll("// Generated from src/caller_error.zig by `zig build openapi`. Do not edit.\n" ++
+        "export const REJECTION_SENTENCES: Readonly<Record<string, string>> = ");
+    try std.json.Stringify.value(Value{ .object = sentences }, .{ .whitespace = .indent_tab }, &out.writer);
+    try out.writer.writeAll(";\n");
+    return out.toOwnedSlice();
+}
+
+test "clients/ts/src/rejections.ts is what the caller catalog emits" {
+    const emitted = try renderRejections(std.testing.allocator);
+    defer std.testing.allocator.free(emitted);
+    if (!std.mem.eql(u8, emitted, @embedFile("rejections.ts"))) {
+        std.debug.print("clients/ts/src/rejections.ts is stale: run `zig build openapi` and commit it.\n", .{});
+        return error.StaleRejections;
+    }
 }
 
 test "openapi.json is what the wire types emit" {
