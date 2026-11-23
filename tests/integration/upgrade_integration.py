@@ -551,7 +551,7 @@ def frozen_credential_refusal_case(root, binary, releases):
         failures = [json.loads(line)["rui_start_error"] for line in output.splitlines()
                     if line.startswith('{"rui_start_error":')]
         assert failures == [{"code": "settings_invalid",
-                             "message": "providers.openai.key: credential source is missing, unreadable, insecure or invalid"}], combined
+                             "message": f"providers.openai.key: file {key_file} does not exist"}], combined
         assert test_key not in combined, "a child-only refusal exposed resolved credential bytes"
         assert not key_file.exists() and c.status()["status"] == "unavailable"
         print("upgrade native: checked credential reference survives stop, missing child file preserves exact typed starting refusal", flush=True)

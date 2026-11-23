@@ -234,8 +234,8 @@ def flag_start_failures(root):
         assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
 
 
-def missing_key_refusal(result, *, leaf, door, store, receipts):
-    message = "providers.openai.key: credential source is missing, unreadable, insecure or invalid"
+def missing_key_refusal(result, *, leaf, door, store, receipts, key_file):
+    message = f"providers.openai.key: file {key_file} does not exist"
     invalid = f"rui: the Host did not start: {message} [settings_invalid]\n"
     if leaf:
         expected_out = json.dumps({"rui_start_error": {"code": "settings_invalid", "message": message}}, separators=(",", ":")) + "\n"
@@ -304,7 +304,7 @@ def credential_location_matrix():
                 if should_start:
                     assert check.returncode == 0, (case, check)
                 else:
-                    missing_key_refusal(check, leaf=leaf, door="check", store=store, receipts=receipts)
+                    missing_key_refusal(check, leaf=leaf, door="check", store=store, receipts=receipts, key_file=explicit)
                 started = subprocess.run([RUI, "host", "start", *flags], env=env, capture_output=True, text=True, timeout=30)
                 try:
                     if should_start:
@@ -313,7 +313,7 @@ def credential_location_matrix():
                         assert kind in info["capabilities"]["providers"], (case, info)
                         host_stop(runtime / "rui.sock", str(store), info["instance"])
                     else:
-                        missing_key_refusal(started, leaf=leaf, door="start", store=store, receipts=receipts)
+                        missing_key_refusal(started, leaf=leaf, door="start", store=store, receipts=receipts, key_file=explicit)
                 finally:
                     if (runtime / "rui.sock").exists():
                         from host_launch_fixture import forced_crash_cleanup
