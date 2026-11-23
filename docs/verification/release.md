@@ -52,6 +52,10 @@ Correctness failures are fixed on the PR before it reaches `main`.
 ### Scheduled promotion
 
 [Promote](../../.github/workflows/promote.yml) runs every three hours, with empty inputs, so it promotes main HEAD.
+GitHub's scheduler is best effort and drops most of those slots: from 19 to 23 November 2026 only the 00:45, 09:45 and 18:45 UTC slots fired, each 50 to 135 minutes late.
+A watcher outside GitHub fills a missed slot with `gh workflow run promote.yml --ref main -f slot=true`.
+A `slot` dispatch is a scheduled run in every rule below (the red-HEAD skip, `main-red`, `SCHEDULED_RELEASES`, the weekly and daily checks); it takes no `sha`.
+The batch job's `scheduled` output alone decides whether a run is scheduled, and every other rule reads it.
 When [stable](#promote) already holds HEAD it does nothing.
 When HEAD has a red `main-qualified` record it skips qualification, since the failing run filed its issues under its own label (`main-red` when scheduled, `promotion-red` by hand).
 The scheduled run then fails with a `main HEAD failed qualification` error that names the red run and the way out: merge a fix to main, or, for a flake or infrastructure red, rerun that run's failed jobs with `gh run rerun <id> --failed`, which reruns the `qualified` recorder and rewrites the record.

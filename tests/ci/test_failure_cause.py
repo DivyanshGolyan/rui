@@ -157,7 +157,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn("needs: [batch, qualify]", release, "a rerun's Release waits for the rerun verdict")
         self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
                       "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') && "
-                      "!(github.event_name == 'schedule' && vars.SCHEDULED_RELEASES == 'paused') }}", release,
+                      "!(needs.batch.outputs.scheduled == 'true' && vars.SCHEDULED_RELEASES == 'paused') }}", release,
                       "Release runs only on a reused green record or a successful tier")
 
     def test_a_red_scheduled_head_fails_as_a_check_so_no_retry_reruns_it(self):
