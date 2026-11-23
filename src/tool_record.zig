@@ -101,7 +101,40 @@ pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"
 pub const bash_max_command_bytes: usize = 120 * 1024;
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
-pub const Owner = enum { rui, provider, mcp };
+pub const Owner = enum { rui, provider, mcp, app };
+
+/// How the Host may repeat an app call after a restart. Only `safe` may be repeated; `unsafe` is reported
+/// as "may have run" and never re-run (design U6, cut-off).
+pub const Replay = enum { unsafe, safe };
+
+/// Policy an app record carries. Only `owner = app` uses it; every other record holds the zero policy,
+/// so no other digest or row changes. All three fields are part of the record digest.
+pub const AppPolicy = struct {
+    replay: Replay = .unsafe,
+    /// Restarts a safe call may take before it fails with `restart_limit`. Ignored unless `replay` is safe.
+    restart_limit: u8 = default_app_restart_limit,
+    /// Milliseconds an unclaimed call waits from the moment it is ready before it fails.
+    wait_ms: u32 = default_app_wait_ms,
+
+    /// The policy as the Store keeps it and the digest hashes it. An unsafe call is never repeated, so
+    /// its restart limit is 0 whatever the declaration said: the digest does not depend on it.
+    pub fn canonical(self: AppPolicy) AppPolicy {
+        var policy = self;
+        if (self.replay == .unsafe) policy.restart_limit = 0;
+        return policy;
+    }
+
+    /// Whether the bounds the Store's CHECKs enforce hold for this policy.
+    pub fn valid(self: AppPolicy) bool {
+        return self.restart_limit <= max_app_restart_limit and self.wait_ms >= min_app_wait_ms and self.wait_ms <= max_app_wait_ms;
+    }
+};
+
+pub const default_app_restart_limit: u8 = 3;
+pub const default_app_wait_ms: u32 = 900_000;
+pub const max_app_restart_limit: u8 = 16;
+pub const min_app_wait_ms: u32 = 1_000;
+pub const max_app_wait_ms: u32 = 3_600_000;
 
 pub const max_server_bytes = tool_name.max_bytes;
 
@@ -115,6 +148,8 @@ pub const Record = struct {
     input_schema: []const u8 = "",
     owner: Owner,
     server: []const u8 = "",
+    /// Set only on `owner = app`; the zero policy on every other owner.
+    app: AppPolicy = .{},
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -148,6 +183,7 @@ pub fn recordDigest(member: *const Record) [32]u8 {
         .server = member.server,
         .description = content_string.digest(member.description),
         .input_schema = content_string.digest(member.input_schema),
+        .app = if (member.owner == .app) member.app else null,
     }).digest();
 }
 
@@ -159,6 +195,9 @@ pub const RecordIdentity = struct {
     server: []const u8,
     description: [32]u8,
     input_schema: [32]u8,
+    /// Non-null exactly for `owner = app`, which joins the identity under its own tag; see `Record.app`.
+    /// Required, so every caller that rebuilds an identity from stored rows states its policy.
+    app: ?AppPolicy,
 
     pub fn digest(self: *const RecordIdentity) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -174,6 +213,15 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
+        if (self.app) |policy| {
+            const stored = policy.canonical();
+            hashField(&hash, "rui/tool-record/app-policy");
+            hashField(&hash, @tagName(stored.replay));
+            hashField(&hash, &.{stored.restart_limit});
+            var wait: [4]u8 = undefined;
+            std.mem.writeInt(u32, &wait, stored.wait_ms, .big);
+            hashField(&hash, &wait);
+        }
         return hash.finalResult();
     }
 };
@@ -295,6 +343,7 @@ pub const HostToolSet = struct {
         if (self.records.len != self.digests.len or self.records.len > max_host_tool_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
             if (!tool_name.valid(each.name) or !validServer(each) or !validRemoteName(each)) return false;
+            if (each.owner == .app and !each.app.valid()) return false;
             if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
             if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
         }
@@ -403,6 +452,7 @@ pub const Runner = enum {
     core,
     mcp,
     provider,
+    app,
 
     /// The offer comes from the frozen tool set of the model operation.
     pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
@@ -411,6 +461,8 @@ pub const Runner = enum {
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
             .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
+            // An app result is model-facing text from the app, shaped like an MCP result.
+            .app => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .provider => unreachable,
         };
     }
@@ -420,6 +472,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
+            .app => @import("action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
             .provider => unreachable,
         };
@@ -430,6 +483,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => "Stopped before this image read completed.",
             .mcp => result,
+            .app => "Stopped before the app returned a result.",
             .core, .provider => unreachable,
         };
     }
@@ -439,6 +493,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").indeterminate,
             .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
+            .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
         };
     }
@@ -455,6 +510,7 @@ pub const Runner = enum {
 pub const owner_runners = [_]struct { owner: Owner, runner: Runner }{
     .{ .owner = .mcp, .runner = .mcp },
     .{ .owner = .provider, .runner = .provider },
+    .{ .owner = .app, .runner = .app },
 };
 
 pub fn ownerRunner(owner: Owner) ?Runner {
@@ -714,6 +770,8 @@ test "EXR-65 tool identities survive matching, stale and missing digest snapshot
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
     const old = recordDigest(&before);
     try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
+
+    try expectAppPolicyDigests();
 }
 
 test "a remote name joins a digest only when it differs from the offered name" {
@@ -729,6 +787,53 @@ test "a remote name joins a digest only when it differs from the offered name" {
     try std.testing.expect(!std.mem.eql(u8, &recordDigest(&plain), &recordDigest(&prefixed)));
     try std.testing.expect(validRemoteName(&prefixed));
     try std.testing.expect(!validRemoteName(&.{ .name = "docs__search", .remote_name = "search", .owner = .rui, .input_schema = "{}" }));
+}
+
+fn expectAppPolicyDigests() !void {
+    const base: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{} };
+    const base_digest = recordDigest(&base);
+    // The default app record's digest is pinned: a change to canonical() or to the app policy tag fails here.
+    const default_app_pinned = [32]u8{
+        0x2B, 0xA9, 0x41, 0xA8, 0x68, 0x77, 0x99, 0xED, 0x64, 0xC2, 0xA8, 0x0B, 0xD4, 0x9D, 0x0E, 0x0A,
+        0x2F, 0xAD, 0x46, 0xC1, 0xAC, 0xAE, 0xED, 0x39, 0x3E, 0x09, 0x13, 0x6D, 0x3F, 0xAE, 0x2C, 0xCD,
+    };
+    try std.testing.expectEqualSlices(u8, &default_app_pinned, &base_digest);
+    const variants = [_]AppPolicy{
+        .{ .replay = .safe, .restart_limit = 3, .wait_ms = default_app_wait_ms },
+        .{ .replay = .safe, .restart_limit = 4, .wait_ms = default_app_wait_ms },
+        .{ .replay = .unsafe, .restart_limit = 3, .wait_ms = default_app_wait_ms + 1 },
+    };
+    var digests: [variants.len][32]u8 = undefined;
+    for (variants, &digests) |policy, *digest| {
+        var changed = base;
+        changed.app = policy;
+        digest.* = recordDigest(&changed);
+        try std.testing.expect(!std.mem.eql(u8, &base_digest, digest));
+    }
+    for (digests, 0..) |first, index| for (digests[index + 1 ..]) |second| try std.testing.expect(!std.mem.eql(u8, &first, &second));
+
+    // Only app records read the policy: a non-app record ignores a stray policy, and its digest is pinned.
+    var built_in: Record = .{ .name = "bash", .owner = .rui, .input_schema = "{}" };
+    const plain = recordDigest(&built_in);
+    built_in.app = .{ .replay = .safe, .restart_limit = 9, .wait_ms = 5_000 };
+    try std.testing.expectEqualSlices(u8, &plain, &recordDigest(&built_in));
+    const pinned = [32]u8{
+        0x84, 0x3F, 0x40, 0x9E, 0x5E, 0x79, 0x2F, 0x28, 0xE0, 0x19, 0x6D, 0x4D, 0x23, 0x2B, 0xDD, 0x9D,
+        0xAC, 0x49, 0x33, 0x29, 0x30, 0x81, 0xCA, 0x0A, 0x97, 0x18, 0x68, 0x4C, 0xE9, 0xC3, 0x31, 0xFC,
+    };
+    try std.testing.expectEqualSlices(u8, &pinned, &plain);
+
+    // An unsafe call is never repeated, so its digest does not depend on the restart limit it declared.
+    const unsafe: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{ .replay = .unsafe, .restart_limit = 0, .wait_ms = default_app_wait_ms } };
+    const unsafe_digest = recordDigest(&unsafe);
+    for ([_]u8{ 1, default_app_restart_limit, max_app_restart_limit }) |limit| {
+        var declared = unsafe;
+        declared.app.restart_limit = limit;
+        try std.testing.expectEqualSlices(u8, &unsafe_digest, &recordDigest(&declared));
+    }
+    try std.testing.expect(!(AppPolicy{ .restart_limit = max_app_restart_limit + 1 }).valid());
+    try std.testing.expect((AppPolicy{ .restart_limit = max_app_restart_limit, .wait_ms = max_app_wait_ms }).valid());
+    try std.testing.expect(!(AppPolicy{ .wait_ms = min_app_wait_ms - 1 }).valid());
 }
 
 test "MCP missing tools tool set resolution covers every empty-server combination" {
@@ -781,7 +886,7 @@ test "all result profiles fit the shared excerpt maximum" {
     inline for (std.meta.tags(Runner)) |runner| {
         switch (runner) {
             .provider => {}, // Provider calls do not use the Result route.
-            .bash, .mcp, .read_image, .core => {
+            .bash, .mcp, .app, .read_image, .core => {
                 for ([_]bool{ false, true }) |offer| {
                     try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
                 }

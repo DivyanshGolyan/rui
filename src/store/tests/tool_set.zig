@@ -3,6 +3,10 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
+const tool_record = @import("../../tool_record.zig");
+const command_input = @import("../../command_input.zig");
+const tool_offer_domain = @import("../domain/tool_offer.zig");
+const tool_set_domain = @import("../domain/tool_set.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const command_domain = @import("../domain/command.zig");
@@ -1082,6 +1086,62 @@ test "creation receipts retain maximum configured and loaded tools" {
             try std.testing.expect(receipt != null);
             try std.testing.expectEqualStrings(expected, receipt.?.tools.slice());
             try std.testing.expectEqualStrings(expected, receipt.?.loaded_tools.slice());
+        }
+    }.run);
+}
+
+// SH-118: a tool record read back from the Store through the offer, the saved selection and readHostToolSet has the
+// digest it was saved with, on both engines.
+test "SH-118 a tool record read back from the Store through the offer, the selection and readHostToolSet has the digest it was saved with" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const app: tool_defs.Record = .{
+                .name = "ask",
+                .owner = .app,
+                .description = "Ask the app.",
+                .input_schema = "{\"type\":\"object\"}",
+                .app = .{ .replay = .safe, .restart_limit = 2, .wait_ms = 5_000 },
+            };
+            const saved_digest = tool_defs.recordDigest(&app);
+            const records = store_testing.hostToolRecordsWith(&.{app});
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var command = try store_testing.completeConfiguration("app-policy-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            command.configuration.tools = try .of(&.{"ask"});
+            const reply = try storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='ask' AND t.replay='safe' AND t.restart_limit=2 AND t.wait_ms=5000", .{reply.accepted.session.slice()}));
+
+            // readHostToolSet rebuilds the digest from the stored row.
+            var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
+            defer saved.deinit(std.testing.allocator);
+            const index = saved.toolSet().find("ask") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u8, &saved_digest, &saved.digests[index]);
+
+            // The offer and the saved selection rebuild it from the same rows.
+            const head = (try storage.readHostToolSetSet()).?;
+            const names = try command_input.ToolsField.of(&.{"ask"});
+            var offer: tool_offer_domain.Freeze = .{};
+            var selection: tool_set_domain.SavedSelection = .{ .names = &names };
+            try storage.readToolDigestsForTesting(head.tool_set_id.get(), &names, &offer, &selection);
+            var offered: ?[32]u8 = null;
+            for (offer.projection.members[0..offer.projection.count]) |member| {
+                if (std.mem.eql(u8, member.name.slice(), "ask")) offered = member.digest;
+            }
+            try std.testing.expectEqualSlices(u8, &saved_digest, &(offered orelse return error.TestUnexpectedResult));
+            var expected_set: tool_record.SetDigest = .init();
+            expected_set.add(&saved_digest);
+            const expected_selection = expected_set.final();
+            try std.testing.expectEqualSlices(u8, &expected_selection, &(try selection.selection()).digest);
         }
     }.run);
 }
