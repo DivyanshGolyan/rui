@@ -279,8 +279,8 @@ test "directory sync failures preserve complete preference publication" {
             return if (self.calls == self.at) -1 else NativeDirectorySync.sync(.{}, fd);
         }
     };
-    const old = "version=1\nstore=\nprovider=codex\nmodel=deliberate-pin\n";
-    const new = "version=1\nstore=\nprovider=codex\nmodel=new-pin\n";
+    const old = "version=4\nstore=\nprovider=codex\nmodel=deliberate-pin\nnotifications=on\nreasoning_effort=\npermission_mode=\n";
+    const new = "version=4\nstore=\nprovider=codex\nmodel=new-pin\nnotifications=on\nreasoning_effort=\npermission_mode=\n";
     for (0..4) |cut| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -487,9 +487,9 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     const kept = try update(home, .{ .model = .clear }, &codexOnly(.configured));
     try std.testing.expect(!kept.notifications and !(try load(home)).notifications);
     var bytes: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("version=2\nstore=\nprovider=codex\nmodel=\nnotifications=off\n", try savedFile(config, &bytes));
+    try std.testing.expectEqualStrings("version=4\nstore=\nprovider=codex\nmodel=\nnotifications=off\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
     try std.testing.expect((try update(home, .{ .notifications = true }, &codexOnly(.configured))).notifications);
-    try std.testing.expectEqualStrings("version=1\nstore=\nprovider=codex\nmodel=\n", try savedFile(config, &bytes));
+    try std.testing.expectEqualStrings("version=4\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
     for ([_][]const u8{ "version=2\nstore=\nprovider=codex\nmodel=\n", "version=2\nstore=\nprovider=codex\nmodel=\nnotifications=yes\n" }) |invalid| {
         const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try bad.writeStreamingAll(io, invalid);
@@ -498,7 +498,7 @@ test "notifications stay on until turned off, and a version 1 file reads as on" 
     }
 }
 
-test "a saved effort is kept across other edits, read back, and written as version 3 only while set" {
+test "a saved effort is kept across other edits, read back, and always written as version 4" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -508,13 +508,13 @@ test "a saved effort is kept across other edits, read back, and written as versi
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
     var bytes: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=high\n", try savedFile(config, &bytes));
+    try std.testing.expectEqualStrings("version=4\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=high\npermission_mode=\n", try savedFile(config, &bytes));
     const kept = try update(home, .{ .model = .{ .set = "gpt-6-luna" }, .notifications = false }, &codexOnly(.configured));
     try std.testing.expect(kept.reasoning_effort == .high and !kept.notifications);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try load(home)).reasoning_effort);
-    try std.testing.expectEqualStrings("version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n", try savedFile(config, &bytes));
+    try std.testing.expectEqualStrings("version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=\n", try savedFile(config, &bytes));
     _ = try update(home, .{ .reasoning_effort = .clear, .notifications = true }, &codexOnly(.configured));
-    try std.testing.expectEqualStrings("version=1\nstore=\nprovider=codex\nmodel=gpt-6-luna\n", try savedFile(config, &bytes));
+    try std.testing.expectEqualStrings("version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n", try savedFile(config, &bytes));
     for ([_][]const u8{ "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=\n", "version=3\nstore=\nprovider=codex\nmodel=\nnotifications=on\nreasoning_effort=fast\n" }) |invalid| {
         const bad = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try bad.writeStreamingAll(io, invalid);
@@ -523,7 +523,7 @@ test "a saved effort is kept across other edits, read back, and written as versi
     }
 }
 
-test "saved permissions round trip in version 4 and clearing restores the lowest version" {
+test "saved permissions round trip in version 4 and clearing leaves the permission line empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -547,8 +547,9 @@ test "saved permissions round trip in version 4 and clearing restores the lowest
                 try std.testing.expectEqual(mode, (try load(home)).permission_mode.?);
                 _ = try update(home, .{ .permission_mode = .clear }, &.initFill(.configured));
                 try std.testing.expectEqual(@as(?PermissionMode, null), (try load(home)).permission_mode);
-                const old_version = if (effort != null) "version=3\n" else if (!notifications) "version=1\n" else "version=2\n";
-                try std.testing.expect(std.mem.startsWith(u8, try savedFile(config, &bytes), old_version));
+                var cleared: [256]u8 = undefined;
+                const expected_cleared = try std.fmt.bufPrint(&cleared, "version=4\nstore=\nprovider=\nmodel=\nnotifications={s}\nreasoning_effort={s}\npermission_mode=\n", .{ if (notifications) "off" else "on", if (effort) |value| @tagName(value) else "" });
+                try std.testing.expectEqualStrings(expected_cleared, try savedFile(config, &bytes));
             }
         }
     }
@@ -577,10 +578,10 @@ test "saved permissions are absent in old versions and malformed version 4 is re
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, if (index == 2) .high else null), loaded.reasoning_effort);
         _ = try update(home, .{}, &.initFill(.configured));
         var bytes: [256]u8 = undefined;
-        try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+        try std.testing.expect(std.mem.startsWith(u8, try savedFile(config, &bytes), "version=4\n"));
     }
     const prefix = "version=4\nstore=\nprovider=\nmodel=\nnotifications=on\nreasoning_effort=";
-    for ([_][]const u8{ prefix ++ "\n", prefix ++ "\npermission_mode=\n", prefix ++ "\npermission_mode=plan\n", prefix ++ "fast\npermission_mode=ask\n", prefix ++ "\npermissions=ask\n", prefix ++ "\npermission_mode=ask\nextra\n" }) |text| {
+    for ([_][]const u8{ prefix ++ "\n", prefix ++ "\npermission_mode=plan\n", prefix ++ "fast\npermission_mode=ask\n", prefix ++ "\npermissions=ask\n", prefix ++ "\npermission_mode=ask\nextra\n" }) |text| {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try file.writeStreamingAll(io, text);
         file.close(io);
