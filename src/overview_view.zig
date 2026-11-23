@@ -1492,9 +1492,12 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         .clicked => |input| {
             state.launch = .done;
             endCarry(state);
-            if (input.target == .open) state.carry.pressed = input.target.open;
             if (!state.creating()) switch (input.target) {
-                .open => |reference| try clickOpen(state, reference, &effects),
+                .open => |reference| {
+                    // Only an admitted press can carry its row: while a chat is being created, clicks are refused.
+                    state.carry.pressed = reference;
+                    try clickOpen(state, reference, &effects);
+                },
                 .pin => |request| pinIntent(state, request, &effects),
                 .new_session => {
                     state.selected = .new_session;
@@ -5967,6 +5970,18 @@ test "a chat already being archived takes no drop, as Alt-A refuses it" {
         _ = try step(&state, .{ .pointer = .{ .over = over, .phase = .held } });
         try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = over, .phase = .released } }));
     }
+}
+
+test "a press refused while a chat is being created carries nothing" {
+    const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    var state = try opened(&.{a});
+    defer state.deinit();
+    _ = try step(&state, .{ .clicked = .{ .target = .new_session } });
+    try std.testing.expect(state.creating());
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = a.reference } } });
+    try std.testing.expect(state.carry.pressed == null);
+    _ = try step(&state, .{ .pointer = .{ .over = .archived, .phase = .held } });
+    try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .archived, .phase = .released } }));
 }
 
 test "a carry ends without a request on a free move, a key, another click or a release before any drag" {
