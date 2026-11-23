@@ -1895,8 +1895,8 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     held.self.skill_read = Fake.read;
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 16), held.self.menu.shown.?.list.count);
-    try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    try std.testing.expectEqual(@as(usize, 17), held.self.menu.shown.?.list.count);
+    try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
     try held.keys("\x15");
@@ -4044,7 +4044,7 @@ test "Tab accepts the drawn slash row exactly as Enter without submitting a Mess
     };
     const cases = [_]Case{
         .{ .text = "/eff", .draft = "/effort " },
-        .{ .text = "/r", .down = true, .draft = "/rename " },
+        .{ .text = "/r", .down = true, .draft = "", .command = "/reload-tools" },
         .{ .text = "/set", .draft = "", .command = "/setup" },
         .{ .text = "/setup --mo", .draft = "/setup --model " },
         .{ .text = "/setup --permission-mode a", .draft = "", .command = "/setup --permission-mode ask" },
@@ -9911,8 +9911,8 @@ test "App Session palette total budget stays between input rules and reserves fe
         }
     };
     for ([_]struct { width: u16, height: u16, more: []const u8 }{
-        .{ .width = 140, .height = 40, .more = "3 more" },
-        .{ .width = 46, .height = 30, .more = "6 more" },
+        .{ .width = 140, .height = 40, .more = "4 more" },
+        .{ .width = 46, .height = 30, .more = "7 more" },
     }) |case| {
         const held = try HeldFrontend.create();
         defer held.destroy();
