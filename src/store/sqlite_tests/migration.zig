@@ -526,6 +526,14 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
     try std.testing.expect(message_replay == .rejected);
     try std.testing.expect(!message_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.MessageRejection.missing_settings, message_replay.rejected.code);
+    // The saved set exists exactly on a missing_settings row, and only as 1 through 7.
+    const database = storage.sqliteDatabase();
+    for ([_][:0]const u8{
+        "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,missing_settings) VALUES('bad-a',1,'',zeroblob(32),0,'missing_settings',0,0,900001,NULL)",
+        "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,missing_settings) VALUES('bad-b',1,'',zeroblob(32),0,'invalid_model',0,0,900002,3)",
+        "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,missing_settings) VALUES('bad-c',1,'',zeroblob(32),0,'missing_settings',0,0,900003,0)",
+        "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,missing_settings) VALUES('bad-d',1,'',zeroblob(32),0,'missing_settings',0,0,900004,8)",
+    }) |bad| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, bad));
     const violations = try sqlite.prepare(storage.sqliteDatabase(), "PRAGMA foreign_key_check");
     defer _ = c.sqlite3_finalize(violations);
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));

@@ -68,7 +68,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 86, .digest = 0xde398910d1c953d0 },
     .{ .schema_version = 87, .digest = 0xfdfca84e02a0bdcb },
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
-    .{ .schema_version = 89, .digest = 0x72c88da35d2537c2 },
+    .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -906,7 +906,7 @@ pub const migrations = [_]Migration{
             "DELETE FROM sent_rejection WHERE command_key IN (SELECT command_key FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration')",
             "DELETE FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration'",
             "ALTER TABLE core_command RENAME TO core_command_before_89",
-            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0),\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR code='missing_settings' AND missing_settings BETWEEN 1 AND 7)\n) STRICT",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0),\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)\n) STRICT",
             "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_89",
             "DROP TABLE core_command_before_89",
             "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
@@ -914,7 +914,7 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "DELETE FROM sent_rejection WHERE command_key IN (SELECT command_key FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration')",
             "DELETE FROM core_command WHERE accepted=0 AND code='incomplete_initial_configuration'",
-            "ALTER TABLE core_command ADD COLUMN missing_settings BIGINT AFTER command_seq, ADD CHECK(missing_settings IS NULL AND code<>'missing_settings' OR code='missing_settings' AND missing_settings BETWEEN 1 AND 7)",
+            "ALTER TABLE core_command ADD COLUMN missing_settings BIGINT AFTER command_seq, ADD CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)",
         },
     },
 };
@@ -1370,7 +1370,7 @@ pub const tables = [_]Table{
             .{ .name = "created", .type = .flag },
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
             // Bits of required_settings.Setting: set exactly with a missing_settings rejection.
-            .{ .name = "missing_settings", .type = .int, .nullable = true, .check = "missing_settings IS NULL AND code<>'missing_settings' OR code='missing_settings' AND missing_settings BETWEEN 1 AND 7" },
+            .{ .name = "missing_settings", .type = .int, .nullable = true, .check = "missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7" },
         },
         .primary_key = &.{"command_seq"},
         .uniques = &.{&.{"command_key"}},
@@ -3063,7 +3063,7 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
 fn historicalCoreCommand(allocator: std.mem.Allocator, sql: []const u8, kind: []const u8) ![]u8 {
     const ranged = try std.mem.replaceOwned(u8, allocator, sql, "kind BETWEEN 1 AND 9", kind);
     defer allocator.free(ranged);
-    return std.mem.replaceOwned(u8, allocator, ranged, ",\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR code='missing_settings' AND missing_settings BETWEEN 1 AND 7)", "");
+    return std.mem.replaceOwned(u8, allocator, ranged, ",\n missing_settings INTEGER CHECK(missing_settings IS NULL AND code<>'missing_settings' OR missing_settings IS NOT NULL AND code='missing_settings' AND missing_settings BETWEEN 1 AND 7)", "");
 }
 
 test "schema 76 migration creates canonical promotion objects on SQLite and MySQL" {

@@ -696,7 +696,7 @@ pub const SubmitMessage = struct {
     fn finishRefusal(t: *SubmitMessage, r: *transition.Round(SubmitMessage), content_id: u64) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
-        t.answer = .{ .accepted = false, .missing = t.missing };
+        t.answer = .{ .accepted = false, .missing = if (t.rejection == .missing_settings) t.missing.? else null };
         try t.answer.code.set(@tagName(t.rejection));
         try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, content_id, t.refusal_diagnostic, &t.answer);
         if (command.sender != null and t.sender_valid) {
@@ -2453,7 +2453,9 @@ pub const saved_command = rsql.Read(.{
 /// The settings a saved `missing_settings` rejection named; null for every other saved answer.
 fn savedMissing(saved: *const saved_command.Result) error{CorruptStore}!?required_settings.Missing {
     const row = if (saved.*) |*row| row else return error.CorruptStore;
-    const value = row.missing_settings orelse return null;
+    const named = std.mem.eql(u8, row.code.slice(), "missing_settings");
+    const value = row.missing_settings orelse return if (named) error.CorruptStore else null;
+    if (!named) return error.CorruptStore;
     return try required_settings.Missing.fromStored(value);
 }
 
