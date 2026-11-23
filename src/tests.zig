@@ -99,6 +99,8 @@ test {
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/relist.zig");
     _ = @import("mcp/Request.zig");
+    _ = @import("mcp/test_server.zig");
+    _ = @import("mcp/test_server_listen_test.zig");
     _ = @import("command_spec.zig");
     _ = @import("protocol.zig");
     _ = @import("wire_request.zig");
