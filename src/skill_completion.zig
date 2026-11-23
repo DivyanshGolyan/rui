@@ -838,8 +838,9 @@ test "skill rows are the held page's, numbered by the read that made them" {
     try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, .{}, null));
     const start = reads.shown(&rows, "/rel", 4, 3, .{}, null).?;
-    try std.testing.expectEqual(@as(usize, 1), start.list.count);
+    try std.testing.expectEqual(@as(usize, 2), start.list.count);
     try std.testing.expectEqualStrings("/reload-skills", start.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/reload-tools", start.list.entries[1].shown);
     try std.testing.expect(start.source != 0);
 }
 

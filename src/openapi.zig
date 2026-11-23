@@ -1448,8 +1448,8 @@ fn publishedRequestSchemas() !void {
         switch (route.kind) {
             .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
             // Live and since reads, or an Archived window; a plain or a draining
-            // stop: a one-of over the two request forms.
-            .list_sessions, .host_stop => {
+            // stop; every MCP server or one named server: a one-of over the two request forms.
+            .list_sessions, .host_stop, .tools_reload => {
                 try std.testing.expectEqual(@as(usize, 2), route.variants.len);
                 try std.testing.expect(schema.contains("anyOf"));
             },
