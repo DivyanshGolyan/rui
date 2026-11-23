@@ -6347,7 +6347,7 @@
       "expect": [
         "Host stop witness",
         "Kept while stopped",
-        "Host not ready. Draft retained.",
+        "Host not ready.",
         "Host stopped"
       ],
       "absent": [

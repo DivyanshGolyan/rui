@@ -12,13 +12,13 @@ pub const Phase = enum {
     active,
 };
 
-pub const recovery = "! Host requests paused after Upgrade; draft and original retained. Select Version in app settings or use the selected Rui in a new terminal.";
+pub const recovery = "! Host requests paused after Upgrade. Select Version in app settings or use the selected Rui in a new terminal.";
 pub const rereading = "Reading this Session…";
 
 pub fn refusal(phase: Phase) []const u8 {
     return switch (phase) {
-        .quiescing => "! Upgrade running; nothing sent. Draft and original retained.",
-        .reobserving => "! Reading this Session again after the Upgrade; nothing sent. Draft and original retained.",
+        .quiescing => "! Upgrade running; nothing sent.",
+        .reobserving => "! Reading this Session again after the Upgrade; nothing sent.",
         .blocked => recovery,
         .active => unreachable,
     };

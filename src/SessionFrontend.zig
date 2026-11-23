@@ -2265,7 +2265,7 @@ fn update(self: *Self) !Updated {
         .quiescing => self.quiesceUpgrade() catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; select Version in app settings to retry.", .{@errorName(err)});
+            try writer.print("! Upgrade could not settle Client work: {s}. Select Version in app settings to retry.", .{@errorName(err)});
             self.notice = writer.buffered();
             self.dirty = true;
             _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
@@ -2279,7 +2279,7 @@ fn update(self: *Self) !Updated {
                 self.settleReader() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Draft and original retained; select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Reattach failed: {s}. Select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
                     self.notice = writer.buffered();
                     _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };
@@ -2380,7 +2380,7 @@ fn refreshAcceptedMessage(self: *Self) void {
     self.reading.opening = true;
     self.reading.fills = .{};
     self.poll_at = 0;
-    self.notice = "Message accepted; refreshing conversation. Draft retained.";
+    self.notice = "Message accepted; refreshing conversation.";
     self.dirty = true;
 }
 
@@ -3119,7 +3119,7 @@ fn presentReadDiagnostic(self: *Self) !void {
     var out = std.Io.Writer.fixed(&self.notice_buffer);
     try out.writeAll(switch (reader_policy.unavailable(pending.phase, self.readInspection())) {
         .say => |text| text,
-        .copy => "! Copy unavailable; draft retained.",
+        .copy => "! Copy unavailable.",
     });
     try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
@@ -3914,7 +3914,7 @@ test "each source admits a slash command while another is active as it always di
         try sendKeys(self, text);
         try sendKeys(self, "\r");
         try std.testing.expectEqualStrings(text, self.input.composition().bytes);
-        try std.testing.expectEqualStrings("! Command still running. Draft retained.", try barShows(held));
+        try std.testing.expectEqualStrings("! Command still running.", try barShows(held));
         try std.testing.expect(self.leaving == null);
         try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
         self.input.clear();
@@ -5769,11 +5769,11 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         if (transport) {
             try std.testing.expect(self.notice == null);
         } else {
-            try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
+            try std.testing.expectEqualStrings("! Copy unavailable.", self.notice.?);
             try self.afterInput(&fixture.ctx);
             const rows = try fixture.rows();
             for (rows) |line| {
-                if (std.mem.indexOf(u8, line, "Copy unavailable; draft retained.") != null) break;
+                if (std.mem.indexOf(u8, line, "Copy unavailable.") != null) break;
             } else {
                 for (rows) |line| std.debug.print("{s}\n", .{line});
                 return error.TestUnexpectedResult;
@@ -6750,7 +6750,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("/effort low", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "! Command still running. Draft retained.") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "! Command still running.") != null);
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
