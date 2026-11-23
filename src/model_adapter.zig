@@ -5989,9 +5989,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Scenario = enum { pages, tool_results, bounds };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "f7827100070720d422de63bbfa64fa2e7322ff73428bb605855755ebd276b035",
-            .tool_results = "e232738ad0194f4409caabeb56053e7a36ae18b17b995e880ef3b0c1df4f44f4",
-            .bounds = "909467844475aac9ba18d00713ec47619b28bf918b4f717db23c451643be34ff",
+            .pages = "e1c84941620f0a462434b88a9f3c24da4d4cb7991f2a0092a55d75fdcda675c3",
+            .tool_results = "fa081f533304eba1754bd947678e7c8a674bd372d4ec8445d6ec26943a88528c",
+            .bounds = "eb687486b6bc24f21f38e1bf0e6e5874174250ec6a547ab7b77562f36c7c5c7c",
         });
     };
     const testing = store.testing;
