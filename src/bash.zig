@@ -22,13 +22,12 @@ pub const fault_gate_name = "bash-fault-gate";
 
 pub fn readHostFacts(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !environment.HostFacts {
     const mapped = try pages.Mapped(struct {
-        executable: [std.fs.max_path_bytes]u8,
         system: system_path.Buffer,
         path: [system_path.max_bytes]u8,
     }).map();
     defer mapped.unmap();
     const buffers = mapped.value;
-    const executable = buffers.executable[0..try std.process.executablePath(io, &buffers.executable)];
+    const executable = try @import("self_executable.zig").path(io);
     const directory = if (std.fs.path.dirname(executable)) |value| try allocator.dupe(u8, value) else null;
     errdefer if (directory) |value| allocator.free(value);
     const system = try allocator.dupe(u8, try system_path.read(io, &buffers.system, &buffers.path));
@@ -1691,8 +1690,7 @@ test "Bash descriptor decoding preserves authorized command bytes" {
 }
 
 test "Host facts carry this executable's directory, the system PATH and an absolute HOME" {
-    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const executable = executable_buffer[0..try std.process.executablePath(std.testing.io, &executable_buffer)];
+    const executable = try @import("self_executable.zig").path(std.testing.io);
     const facts = try readHostFacts(std.testing.io, std.testing.allocator, "/home/peer");
     defer freeHostFacts(std.testing.allocator, facts);
     try std.testing.expectEqualStrings(std.fs.path.dirname(executable).?, facts.executable_dir.?);

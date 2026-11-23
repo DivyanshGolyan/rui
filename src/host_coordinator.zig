@@ -33,9 +33,10 @@ const Event = union(enum) {
     done,
 };
 
-fn submit(init: std.process.Init, allocator: std.mem.Allocator, task: Task, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
-    const executable = try std.process.executablePathAlloc(init.io, allocator);
-    defer allocator.free(executable);
+fn submit(init: std.process.Init, task: Task, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
+    // The coordinator speaks this build's private pipe, so it must be this
+    // build even after the upgrade published another one (self_executable).
+    const executable = try @import("self_executable.zig").path(init.io);
     var child = try std.process.spawn(init.io, .{
         .argv = &.{ executable, "--host-coordinator" },
         .environ_map = init.environ_map,
@@ -52,15 +53,15 @@ fn submit(init: std.process.Init, allocator: std.mem.Allocator, task: Task, stdo
     return child;
 }
 
-pub fn restartAll(init: std.process.Init, allocator: std.mem.Allocator) !void {
-    var child = try submit(init, allocator, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
+pub fn restartAll(init: std.process.Init) !void {
+    var child = try submit(init, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
     const term = try child.wait(init.io);
     if (!term.success()) return error.HostRestartFailed;
 }
 
 pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options) !restart_all.Batch {
     try @import("upgrade_process.zig").check(options.cancellation);
-    var child = try submit(init, allocator, .{
+    var child = try submit(init, .{
         .home = options.home,
         .target = if (options.target) |target| target.* else null,
         .report = .events,

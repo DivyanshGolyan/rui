@@ -105,6 +105,8 @@ fn reportCallerError(err: anyerror) void {
 
 fn run(init: std.process.Init) !void {
     try signal_stack.attachMain();
+    // Before any thread or upgrade: every self-launch reads this pin.
+    try @import("self_executable.zig").pin(init.io);
     const allocator = std.heap.c_allocator;
     const raw_args = try init.minimal.args.toSlice(init.arena.allocator());
     const args = try allocator.alloc([]const u8, raw_args.len);
@@ -301,7 +303,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
         .host_start, .host_pause, .host_status => try host(init, command, parsed),
-        .host_restart => try @import("host_coordinator.zig").restartAll(init, init.gpa),
+        .host_restart => try @import("host_coordinator.zig").restartAll(init),
         .host_serve => unreachable,
         .host_set, .host_unset, .host_settings => try hostSettings(init, command, parsed),
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
