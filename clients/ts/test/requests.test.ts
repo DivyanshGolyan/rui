@@ -5,6 +5,7 @@ import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } fr
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import { RuiRequestError } from "../src/errors.ts";
+import { REJECTION_SENTENCES } from "../src/rejections.ts";
 import type { HostSettings } from "../src/settings.ts";
 
 test("configuration preserves omitted, null and value states and normalizes tools", async () => {
@@ -368,6 +369,19 @@ test("unknown tool refusals preserve MCP advisory detail through request errors"
 		]) {
 			await assert.rejects(request(), (error: unknown) => error instanceof RuiRequestError && error.code === code && error.message === (detail ?? `Rui rejected the request: ${code}`));
 		}
+	}
+});
+
+test("TS-11 a rejection without detail reads as the Host catalog's sentence", async () => {
+	const codes = Object.keys(REJECTION_SENTENCES);
+	assert.ok(codes.includes("missing_settings") && codes.includes("unknown_session"));
+	for (const code of [...codes, "future_rejection"]) {
+		const missing = code === "missing_settings" ? ["model", "workspace"] : null;
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: null, missing } })) };
+		const sentence = REJECTION_SENTENCES[code] ?? "Rui rejected the request.";
+		await assert.rejects(new Session(link, "abc123").send("task", { idempotencyKey: "send" }), (error: unknown) =>
+			error instanceof RuiRequestError && error.code === code
+			&& error.message === `${sentence}${missing ? " Missing: model, workspace." : ""} [${code}]`);
 	}
 });
 

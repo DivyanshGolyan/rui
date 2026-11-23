@@ -14,6 +14,8 @@ const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const session_list = @import("session_list.zig");
+const caller_error = @import("caller_error.zig");
+const caller_rejection = @import("caller_rejection.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -1121,7 +1123,19 @@ pub const Document = struct {
                 .schemas = Value{ .object = d.schemas },
                 .parameters = try d.parameters(),
             }),
+            .@"x-rui-rejections" = try d.rejectionSentences(),
         });
+    }
+
+    /// Each saved rejection code's plain sentence from the caller catalog, so a client explains a
+    /// rejection in the words the CLI uses instead of keeping its own copy.
+    fn rejectionSentences(d: *Document) !Value {
+        var sentences: ObjectMap = .empty;
+        inline for (caller_rejection.rejection_enums) |E| inline for (comptime std.meta.tags(E)) |tag| {
+            try sentences.put(d.arena, @tagName(tag), .{ .string = caller_error.facts(caller_rejection.fromProtocol(tag)).says });
+        };
+        sentences.sort(SortKeys{ .keys = sentences.keys() });
+        return .{ .object = sentences };
     }
 
     fn binary(d: *Document) !Value {
