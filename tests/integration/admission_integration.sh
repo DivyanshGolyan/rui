@@ -45,6 +45,10 @@ body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
 with pathlib.Path(record).open('xb') as captured:
     captured.write(body)
 pathlib.Path(record).chmod(0o600)
+# Every capture publishes its private routing companion beside the request.
+with pathlib.Path(record + '.routing').open('xb') as route:
+    route.write(json.dumps({'format': 1, 'host_directory': store, 'runtime_hint': ''}).encode())
+pathlib.Path(record + '.routing').chmod(0o600)
 if not drop:
     sys.exit(subprocess.run([binary, 'request', 'recover', '--store', store,
         '--record', record, '--kind', 'configure'], timeout=15).returncode)
