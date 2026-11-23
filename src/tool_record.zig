@@ -400,6 +400,15 @@ pub const Runner = enum {
         };
     }
 
+    /// Whether an Action of this runner is attempted, and so recovered after a Host stop. Every new
+    /// runner must decide this, which also decides whether recovery's SQL derives it.
+    pub fn takesAttempts(self: Runner) bool {
+        return switch (self) {
+            .bash, .read_image, .mcp => true,
+            .core, .provider => false,
+        };
+    }
+
     pub fn of(tool: *const Record) Runner {
         if (ownerRunner(tool.owner)) |runner| return runner;
         return builtInRunner(tool.name);
@@ -423,59 +432,115 @@ pub fn builtInRunner(name: []const u8) Runner {
     for (built_in_rows.values) |row| {
         if (std.mem.eql(u8, name, row.record.name)) return row.runner;
     }
-    return .bash;
+    return default_runner;
 }
 
 /// SQL predicates over a tool row's `owner` and `name` expressions, generated from the tables above.
-/// A built-in name is runner-derived only on a rui-owned row, as `Runner.of` does after owner rules.
+/// A built-in name derives the runner only on a row whose owner has no owner rule, as `Runner.of` does.
 pub const sql = struct {
-    /// True when the owner column holds the owner that fixes `runner`.
-    pub fn ownerTest(comptime owner: []const u8, comptime runner: Runner) []const u8 {
+    /// `owner` names an owner with no owner rule, so the row's built-in name decides its runner.
+    fn nameRuledOwner(comptime owner: []const u8) []const u8 {
         comptime {
-            for (owner_runners) |rule| {
-                if (rule.runner == runner) return owner ++ "='" ++ @tagName(rule.owner) ++ "'";
+            @setEvalBranchQuota(100_000);
+            var owners: []const u8 = "";
+            for (std.enums.values(Owner)) |value| {
+                if (ownerRunner(value) != null) continue;
+                owners = owners ++ (if (owners.len == 0) "" else ",") ++ "'" ++ @tagName(value) ++ "'";
             }
-            return "";
+            return owner ++ " IN (" ++ owners ++ ")";
         }
     }
 
-    /// True when the row is rui-owned and its name is a built-in whose table row derives `runner`; "" when none does.
+    fn ownerTest(comptime owner: []const u8, comptime runner: Runner) []const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
+            var owners: []const u8 = "";
+            for (owner_runners) |rule| {
+                if (rule.runner != runner) continue;
+                owners = owners ++ (if (owners.len == 0) "" else ",") ++ "'" ++ @tagName(rule.owner) ++ "'";
+            }
+            return if (owners.len == 0) "" else owner ++ " IN (" ++ owners ++ ")";
+        }
+    }
+
+    /// True when the row's owner has no owner rule and its name is a built-in whose row derives `runner`.
     pub fn builtInTest(comptime owner: []const u8, comptime name: []const u8, comptime runner: Runner) []const u8 {
         comptime {
+            @setEvalBranchQuota(100_000);
             var names: []const u8 = "";
             for (built_in_rows.values) |row| {
                 if (row.runner != runner) continue;
-                names = names ++ (if (names.len == 0) "" else " OR ") ++ name ++ "='" ++ row.record.name ++ "'";
+                names = names ++ (if (names.len == 0) "" else ",") ++ "'" ++ row.record.name ++ "'";
             }
             if (names.len == 0) return "";
-            return owner ++ "='rui' AND (" ++ names ++ ")";
+            return nameRuledOwner(owner) ++ " AND " ++ name ++ " IN (" ++ names ++ ")";
         }
     }
 
-    /// True exactly when `Runner.of` returns `runner` for the row. Owner tests and built-in name tests
-    /// select disjoint rows (a rui-owned row is never an owner-fixed row), so their union is exact.
+    /// True exactly when `Runner.of` returns `runner` for the row. Bash, the runner of a name that is not
+    /// built-in, is the complement of every other runner.
     pub fn runnerTest(comptime owner: []const u8, comptime name: []const u8, comptime runner: Runner) []const u8 {
         comptime {
+            @setEvalBranchQuota(100_000);
+            if (runner == default_runner) return "NOT " ++ notDefaultTest(owner, name);
             const by_owner = ownerTest(owner, runner);
             const by_name = builtInTest(owner, name, runner);
-            if (by_owner.len == 0) {
-                if (by_name.len == 0) @compileError("no rule derives runner " ++ @tagName(runner));
-                return by_name;
-            }
-            if (by_name.len == 0) return by_owner;
+            if (by_owner.len == 0 and by_name.len == 0) @compileError("no rule derives runner " ++ @tagName(runner));
+            if (by_owner.len == 0) return "(" ++ by_name ++ ")";
+            if (by_name.len == 0) return "(" ++ by_owner ++ ")";
             return "(" ++ by_owner ++ " OR " ++ by_name ++ ")";
         }
     }
 
-    /// A CASE that yields each listed runner, in order, and Bash for any other row.
-    pub fn runnerCase(comptime owner: []const u8, comptime name: []const u8, comptime runners: []const Runner) []const u8 {
+    /// True exactly when `Runner.of` returns any runner other than Bash.
+    pub fn notDefaultTest(comptime owner: []const u8, comptime name: []const u8) []const u8 {
         comptime {
+            @setEvalBranchQuota(100_000);
+            var out: []const u8 = "";
+            for (std.enums.values(Runner)) |runner| {
+                if (runner == default_runner) continue;
+                out = out ++ (if (out.len == 0) "" else " OR ") ++ runnerTest(owner, name, runner);
+            }
+            return "(" ++ out ++ ")";
+        }
+    }
+
+    /// The runner `Runner.of` derives, as a CASE with one arm per runner `keep` admits and Bash for the rest.
+    fn runnerCase(comptime owner: []const u8, comptime name: []const u8, comptime keep: fn (Runner) bool) []const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
             var out: []const u8 = "CASE";
-            for (runners) |runner| out = out ++ " WHEN " ++ runnerTest(owner, name, runner) ++ " THEN '" ++ @tagName(runner) ++ "'";
-            return out ++ " ELSE '" ++ @tagName(Runner.bash) ++ "' END";
+            for (std.enums.values(Runner)) |runner| {
+                if (runner == default_runner or !keep(runner)) continue;
+                out = out ++ " WHEN " ++ runnerTest(owner, name, runner) ++ " THEN '" ++ @tagName(runner) ++ "'";
+            }
+            return out ++ " ELSE '" ++ @tagName(default_runner) ++ "' END";
+        }
+    }
+
+    fn any(_: Runner) bool {
+        return true;
+    }
+
+    /// The runner of the row, exactly as `Runner.of`.
+    pub fn runnerOf(comptime owner: []const u8, comptime name: []const u8) []const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
+            return runnerCase(owner, name, any);
+        }
+    }
+
+    /// The runner an attempted Action's recovery uses: `Runner.of` for every runner that takes attempts.
+    pub fn attemptRunnerOf(comptime owner: []const u8, comptime name: []const u8) []const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
+            return runnerCase(owner, name, Runner.takesAttempts);
         }
     }
 };
+
+/// The runner of a rui-owned name that is not built-in, and the SQL CASE's fallback.
+pub const default_runner: Runner = .bash;
 
 pub const BuiltInRow = struct { record: *const Record, runner: Runner };
 pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{

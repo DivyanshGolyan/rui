@@ -179,10 +179,11 @@ test "earlier Action settlement remains authoritative after Session stop" {
     }.run);
 }
 
-// EXR-68: the runner SQL derives from a tool row equals Runner.of over every owner and built-in name.
+// EXR-68: every runner SQL fragment derived from a tool row agrees with a pinned runner table and with Runner.of.
 test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name" {
     try store_testing.forEachEngine(struct {
         const records = @import("../../tool_record.zig");
+        const Runner = records.Runner;
         const Case = struct { owner: records.Owner, name: []const u8 };
         // Every owner against every built-in name and one unknown name, built at comptime.
         const cases = blk: {
@@ -196,6 +197,19 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
             break :blk out;
         };
 
+        // The oracle, written out by hand rather than read from the table under test.
+        fn pinned(comptime entry: Case) Runner {
+            return switch (entry.owner) {
+                .mcp => .mcp,
+                .provider => .provider,
+                .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
+            };
+        }
+
+        fn expectSql(storage: *Store, comptime probe: []const u8, expected: u64) !void {
+            try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT " ++ probe, .{}));
+        }
+
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
@@ -204,14 +218,21 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
             defer storage.close() catch unreachable;
             inline for (cases) |entry| {
                 const record: records.Record = .{ .name = entry.name, .owner = entry.owner };
-                const expected = records.Runner.of(&record);
+                const expected = comptime pinned(entry);
                 errdefer std.debug.print("runner SQL disagrees for owner {s} name {s}\n", .{ @tagName(entry.owner), entry.name });
-                const probe = comptime std.fmt.comptimePrint("SELECT ({s})=?1", .{records.sql.runnerCase(
-                    "'" ++ @tagName(entry.owner) ++ "'",
-                    "'" ++ entry.name ++ "'",
-                    std.meta.tags(records.Runner),
-                )});
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, probe, .{@tagName(expected)}));
+                try std.testing.expectEqual(expected, Runner.of(&record));
+                const owner = "'" ++ @tagName(entry.owner) ++ "'";
+                const name = "'" ++ entry.name ++ "'";
+                try expectSql(&storage, "(" ++ records.sql.runnerOf(owner, name) ++ ")='" ++ @tagName(expected) ++ "'", 1);
+                const attempted: Runner = comptime switch (expected) {
+                    .bash, .read_image, .mcp => expected,
+                    .core, .provider => .bash,
+                };
+                try expectSql(&storage, "(" ++ records.sql.attemptRunnerOf(owner, name) ++ ")='" ++ @tagName(attempted) ++ "'", 1);
+                try expectSql(&storage, "CASE WHEN " ++ records.sql.notDefaultTest(owner, name) ++ " THEN 1 ELSE 0 END", @intFromBool(expected != records.default_runner));
+                inline for (comptime std.enums.values(Runner)) |runner| {
+                    try expectSql(&storage, "CASE WHEN " ++ records.sql.runnerTest(owner, name, runner) ++ " THEN 1 ELSE 0 END", @intFromBool(expected == runner));
+                }
             }
         }
     }.run);

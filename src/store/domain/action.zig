@@ -162,10 +162,7 @@ fn offeredCallSelectSql(comptime action: []const u8, comptime operation: []const
 }
 
 fn nonBashCallSql(comptime first: u8) []const u8 {
-    const non_bash = tool_defs.sql.runnerTest("tool.owner", "tool.name", .mcp) ++ " OR " ++
-        tool_defs.sql.runnerTest("tool.owner", "tool.name", .read_image) ++ " OR " ++
-        tool_defs.sql.runnerTest("tool.owner", "tool.name", .provider);
-    return "(" ++ coreCallSql(first) ++ " OR EXISTS(" ++ offeredCallSelectSql("action", "operation", "1") ++ " AND (" ++ non_bash ++ ")))";
+    return "(" ++ coreCallSql(first) ++ " OR EXISTS(" ++ offeredCallSelectSql("action", "operation", "1") ++ " AND " ++ tool_defs.sql.notDefaultTest("tool.owner", "tool.name") ++ "))";
 }
 
 pub fn actionStopKeysSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
@@ -870,8 +867,10 @@ fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
     };
 }
 
+/// A call matching no offered record runs as Bash. Names are unique within a tool set (the Host refuses
+/// `ToolNameCollision` and `DuplicateToolName`), so the subquery yields at most one row.
 fn attemptRunnerSql() []const u8 {
-    return "COALESCE((" ++ offeredCallSelectSql("action", "operation", tool_defs.sql.runnerCase("tool.owner", "tool.name", &.{ .read_image, .mcp })) ++ "),'" ++ @tagName(tool_defs.Runner.bash) ++ "')";
+    return "COALESCE((" ++ offeredCallSelectSql("action", "operation", tool_defs.sql.attemptRunnerOf("tool.owner", "tool.name")) ++ "),'" ++ @tagName(tool_defs.default_runner) ++ "')";
 }
 
 const UncertainChoice = struct {
