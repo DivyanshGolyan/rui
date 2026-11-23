@@ -138,7 +138,7 @@ The discovery cases keep one real curl 403 at release discovery, reported as `up
 `download_policy.zig` owns the rest at the Module level: curl's confined argument list for every request kind, fixture origin and address family (SH-70); one IPv4 retry only for exit 6 or 28 with the connection budget left, over every exit code, a signal and both families, and the attempt sequence of a whole run across discovery, checksums and archive, including IPv4 reuse within a run and normal selection on the next (SH-44); and the final diagnostic, which is only the last line of the last attempt (SH-71).
 `upgrade_process.zig` native tests check a decreasing budget across attempts, no retry after a transfer deadline, and no child after cancellation or an expired deadline.
 
-The historical Host-info profile is wire 22 (v0.88.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise it alongside the current wire; ordinary readiness remains current-wire only.
+The historical Host-info profiles are wire 22 (v0.88.0) and wire 23 (v0.88.1), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise it alongside the current wire; ordinary readiness remains current-wire only.
 
 Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
 Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.

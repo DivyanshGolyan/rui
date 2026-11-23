@@ -389,6 +389,7 @@ test "a model list reply reads as what the Host writes" {
 pub const HostInfoProfile = enum {
     current,
     released_22,
+    released_23,
 
     pub fn historical(self: HostInfoProfile) bool {
         return self != .current;
@@ -398,6 +399,7 @@ pub const HostInfoProfile = enum {
         return switch (self) {
             .current => protocol.wire_version,
             .released_22 => "22",
+            .released_23 => "23",
         };
     }
 
@@ -408,7 +410,7 @@ pub const HostInfoProfile = enum {
 
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
-            .current, .released_22 => protocol.Routes,
+            .current, .released_22, .released_23 => protocol.Routes,
         };
     }
 };
@@ -703,6 +705,7 @@ test "upgrade Host information profiles map every wire back to their profile" {
 test "WIR-5 released_host_info_profiles" {
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
     try std.testing.expectEqualStrings("22", HostInfoProfile.released_22.wire());
+    try std.testing.expectEqualStrings("23", HostInfoProfile.released_23.wire());
     try std.testing.expect(HostInfoProfile.released_22.historical());
     try std.testing.expect(!HostInfoProfile.current.historical());
     const facts = try parseHostInfoForProfile(released_22_host_info, "/one", .released_22);
