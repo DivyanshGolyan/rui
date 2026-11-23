@@ -400,15 +400,6 @@ pub const Runner = enum {
         };
     }
 
-    /// Whether an Action of this runner is attempted, and so recovered after a Host stop. Every new
-    /// runner must decide this, which also decides whether recovery's SQL derives it.
-    pub fn takesAttempts(self: Runner) bool {
-        return switch (self) {
-            .bash, .read_image, .mcp => true,
-            .core, .provider => false,
-        };
-    }
-
     pub fn of(tool: *const Record) Runner {
         if (ownerRunner(tool.owner)) |runner| return runner;
         return builtInRunner(tool.name);
@@ -505,36 +496,16 @@ pub const sql = struct {
         }
     }
 
-    /// The runner `Runner.of` derives, as a CASE with one arm per runner `keep` admits and Bash for the rest.
-    fn runnerCase(comptime owner: []const u8, comptime name: []const u8, comptime keep: fn (Runner) bool) []const u8 {
+    /// The runner of the row, exactly as `Runner.of`: a CASE with one arm per runner and Bash for the rest.
+    pub fn runnerOf(comptime owner: []const u8, comptime name: []const u8) []const u8 {
         comptime {
             @setEvalBranchQuota(100_000);
             var out: []const u8 = "CASE";
             for (std.enums.values(Runner)) |runner| {
-                if (runner == default_runner or !keep(runner)) continue;
+                if (runner == default_runner) continue;
                 out = out ++ " WHEN " ++ runnerTest(owner, name, runner) ++ " THEN '" ++ @tagName(runner) ++ "'";
             }
             return out ++ " ELSE '" ++ @tagName(default_runner) ++ "' END";
-        }
-    }
-
-    fn any(_: Runner) bool {
-        return true;
-    }
-
-    /// The runner of the row, exactly as `Runner.of`.
-    pub fn runnerOf(comptime owner: []const u8, comptime name: []const u8) []const u8 {
-        comptime {
-            @setEvalBranchQuota(100_000);
-            return runnerCase(owner, name, any);
-        }
-    }
-
-    /// The runner an attempted Action's recovery uses: `Runner.of` for every runner that takes attempts.
-    pub fn attemptRunnerOf(comptime owner: []const u8, comptime name: []const u8) []const u8 {
-        comptime {
-            @setEvalBranchQuota(100_000);
-            return runnerCase(owner, name, Runner.takesAttempts);
         }
     }
 };

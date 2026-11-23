@@ -224,11 +224,6 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
                 const owner = "'" ++ @tagName(entry.owner) ++ "'";
                 const name = "'" ++ entry.name ++ "'";
                 try expectSql(&storage, "(" ++ records.sql.runnerOf(owner, name) ++ ")='" ++ @tagName(expected) ++ "'", 1);
-                const attempted: Runner = comptime switch (expected) {
-                    .bash, .read_image, .mcp => expected,
-                    .core, .provider => .bash,
-                };
-                try expectSql(&storage, "(" ++ records.sql.attemptRunnerOf(owner, name) ++ ")='" ++ @tagName(attempted) ++ "'", 1);
                 try expectSql(&storage, "CASE WHEN " ++ records.sql.notDefaultTest(owner, name) ++ " THEN 1 ELSE 0 END", @intFromBool(expected != records.default_runner));
                 inline for (comptime std.enums.values(Runner)) |runner| {
                     try expectSql(&storage, "CASE WHEN " ++ records.sql.runnerTest(owner, name, runner) ++ " THEN 1 ELSE 0 END", @intFromBool(expected == runner));
