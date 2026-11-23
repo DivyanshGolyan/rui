@@ -1016,9 +1016,8 @@ pub noinline fn serve(
     defer allocator.destroy(serving);
     const lease = &serving.lease;
     const endpoint = &serving.endpoint;
-    try acquireEndpoint(io, lease, endpoint, settings, mysql_url != null, socket_path);
+    try acquireLease(io, lease, endpoint, settings, mysql_url != null, socket_path);
     defer lease.release();
-    defer endpoint.retire() catch |err| stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
     if (tuning.admitted_directory) |directory|
         try lease.paths.host_directory.set(directory)
     else
@@ -1043,11 +1042,13 @@ pub noinline fn serve(
     mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers);
     defer mcp_relist.deinit();
     const storage = &serving.storage;
-    openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    openStore(io, storage, lease, endpoint, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
+    // Registered after the Store's close, so it runs first: the endpoint retires before the Store closes and the lease releases.
+    defer endpoint.retire() catch |err| stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
     return finishServing(storage, failure, serveOpened(
         io,
         allocator,
@@ -1075,12 +1076,12 @@ pub noinline fn serve(
     ));
 }
 
-/// Ownership comes first, in the order each Store kind proves it. A SQLite
-/// Host holds its Store's lease before it claims the endpoint, so a second
-/// Host of the Store reports the Store as owned. A MySQL Host has no Store
-/// lock before its open, so it claims the endpoint before it opens the
-/// directory beside it, which keeps any census from removing that directory.
-noinline fn acquireEndpoint(
+/// Takes what each Store kind needs before the Store opens. A SQLite Host
+/// holds its Store's lease; the endpoint waits for `openStore`, so a Store it
+/// refuses leaves the socket and interface directory untouched. A MySQL Host
+/// has no Store lock before its open, so it claims the endpoint first, then
+/// takes its lease, which keeps any census from removing the directory beside it.
+noinline fn acquireLease(
     io: std.Io,
     lease: *platform.StoreLease,
     endpoint: *host_endpoint.Endpoint,
@@ -1089,14 +1090,40 @@ noinline fn acquireEndpoint(
     socket_path: []const u8,
 ) !void {
     if (mysql) {
-        endpoint.* = try host_endpoint.claim(io, try .init(settings.interface.dir.slice()));
+        endpoint.* = try claimEndpoint(io, settings.interface.dir.slice());
         errdefer endpoint.retire() catch {};
         return lease.acquireMysql(io, settings.interface.dir.slice(), socket_path);
     }
     lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     errdefer lease.release();
     if (!settings.interface.dir.anchored) try lease.paths.socket.set(socket_path);
-    endpoint.* = try host_endpoint.claim(io, try .init(std.fs.path.dirname(lease.paths.socket.slice()).?));
+}
+
+/// Opens the Store, then, for SQLite, claims the endpoint. Each engine's claim
+/// happens in exactly one place, and a failed open or claim gives back what
+/// this call took. The caller owns the endpoint's retire and the Store's close
+/// once this returns.
+noinline fn openStore(
+    io: std.Io,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    endpoint: *host_endpoint.Endpoint,
+    served: *const providers.Providers,
+    limits: *const Limits,
+    has_mcp: bool,
+    mysql_url: ?*MysqlUrl,
+    diagnostics: ?*HostDiagnostics,
+) !void {
+    // A MySQL endpoint was claimed by `acquireLease`; a refused open gives it back here.
+    errdefer if (mysql_url != null) endpoint.retire() catch {};
+    try openStoreForHost(io, storage, lease, served, limits, has_mcp, mysql_url, diagnostics);
+    if (mysql_url != null) return;
+    errdefer storage.close() catch {};
+    endpoint.* = try claimEndpoint(io, std.fs.path.dirname(lease.paths.socket.slice()).?);
+}
+
+fn claimEndpoint(io: std.Io, directory: []const u8) !host_endpoint.Endpoint {
+    return host_endpoint.claim(io, try .init(directory));
 }
 
 /// A stopping Host's socket goes as soon as its listener closes; the endpoint
