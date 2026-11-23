@@ -881,6 +881,9 @@ int fsync(int fd) {
     stop = {"version": host_process.WIRE_VERSION, "kind": "session_stop", "store": str(store.resolve()),
         "key": stopped, "session": session}
     (records / f"{stopped}.json").write_text(json.dumps(stop, separators=(",", ":")))
+    route = records / f"{stopped}.json.routing"
+    route.write_text(json.dumps({"format": 1, "host_directory": str(store.resolve()), "runtime_hint": ""}))
+    route.chmod(0o600)
     (records / "not-a-handle.json").write_text("not a record")
     listed = json.loads(run(home, "request", "list"))
     assert invalid in listed and stopped in listed and "not-a-handle" not in listed, listed

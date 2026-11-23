@@ -1992,17 +1992,14 @@ const CaptureRouting = struct {
         return std.fmt.bufPrint(buffer, "{s}.routing", .{record_name});
     }
 
-    fn read(io: std.Io, record_path: []const u8) !?CaptureRouting {
+    fn read(io: std.Io, record_path: []const u8) !CaptureRouting {
         var parent = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(record_path) orelse ".", .{ .iterate = true }) catch return error.InvalidRequestRecord;
         defer parent.close(io);
         var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
         const route_name = try name(std.fs.path.basename(record_path), &name_buffer);
         var bytes: [6 * (Path.max_bytes + Runtime.max_bytes) + 128]u8 = undefined;
         defer std.crypto.secureZero(u8, &bytes);
-        const text = @import("private_file.zig").readAt(io, parent, route_name, &bytes) catch |err| switch (err) {
-            error.FileNotFound => return null, // old raw-request records
-            else => return error.InvalidRequestRecord,
-        };
+        const text = @import("private_file.zig").readAt(io, parent, route_name, &bytes) catch return error.InvalidRequestRecord;
         @import("private_file.zig").validateDirectory(io, parent) catch return error.InvalidRequestRecord;
         const Fields = struct { format: u8, host_directory: []const u8, runtime_hint: []const u8 };
         var storage: [2048]u8 = undefined;
@@ -2025,7 +2022,7 @@ pub const CapturedRecord = struct {
     target: protocol_reply.MutationTarget,
     replay: Replay,
     paths: ?platform.Paths = null,
-    routing: ?CaptureRouting = null,
+    routing: CaptureRouting,
 
     pub fn resolvePaths(self: *const CapturedRecord, io: std.Io) !platform.Paths {
         return resolveCapturedPaths(io, self.saved.store.slice(), self.paths, self.routing);
@@ -2033,7 +2030,7 @@ pub const CapturedRecord = struct {
 
     pub fn selector(self: *const CapturedRecord) []const u8 {
         if (self.paths) |*paths| return paths.selector();
-        if (self.routing) |*route| if (route.host_directory.len != 0) return route.host_directory.slice();
+        if (self.routing.host_directory.len != 0) return self.routing.host_directory.slice();
         return self.saved.store.slice();
     }
 
@@ -2049,11 +2046,8 @@ pub const CapturedRecord = struct {
 
 // Both retransmission and bounded read-only inspection use this route owner.
 // Identity is a binding assertion, never a substitute for a present selector.
-fn resolveCapturedPaths(io: std.Io, store_identity: []const u8, retained: ?platform.Paths, routing: ?CaptureRouting) !platform.Paths {
-    const paths = retained orelse if (routing) |route|
-        try route.resolve(io, store_identity)
-    else
-        try resolveClientPaths(io, store_identity);
+fn resolveCapturedPaths(io: std.Io, store_identity: []const u8, retained: ?platform.Paths, routing: CaptureRouting) !platform.Paths {
+    const paths = retained orelse try routing.resolve(io, store_identity);
     if (!paths.store_identity.eql(store_identity)) return error.RequestBindingMismatch;
     return paths;
 }
@@ -2108,8 +2102,8 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     const routing = try CaptureRouting.read(io, path);
     if (saved == .explicit) {
         const supplied = saved.explicit.store;
-        paths = if (routing != null and routing.?.runtime_hint.len != 0 and @import("store_id.zig").valid(supplied))
-            try platform.mysqlClientPaths(io, supplied, routing.?.runtime_hint.slice())
+        paths = if (routing.runtime_hint.len != 0 and @import("store_id.zig").valid(supplied))
+            try platform.mysqlClientPaths(io, supplied, routing.runtime_hint.slice())
         else
             try resolveClientPaths(io, supplied);
         expected.store = paths.store_identity.slice();
@@ -2120,9 +2114,9 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     };
     const replay: Replay = switch (saved) {
         .generated => .generated,
-        .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .host_directory = if (routing) |route| route.host_directory else paths.host_directory } },
+        .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .host_directory = routing.host_directory } },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and (routing == null or routing.?.matchesPlacement(&paths))) paths else null, .routing = routing };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and routing.matchesPlacement(&paths)) paths else null, .routing = routing };
 }
 
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !protocol_reply.MutationIdentity {
@@ -2426,8 +2420,8 @@ fn runCapture(
     capture.input_failure = input_failure;
     errdefer capture.abort();
     try @call(.auto, write, .{&capture} ++ args);
-    try capture.writeRouting(paths);
-    var record = try finishCapture(io, &capture, location, paths.store_identity.slice(), session, kind);
+    const routing = try capture.writeRouting(paths);
+    var record = try finishCapture(io, &capture, location, routing, paths.store_identity.slice(), session, kind);
     record.paths = paths.*;
     if (record.replay == .explicit) record.replay.explicit.host_directory = paths.host_directory;
     return record;
@@ -2536,14 +2530,14 @@ pub fn captureActionStop(io: std.Io, input: ActionStopInput, target: CaptureTarg
     return runCapture(io, &paths, &location, input.session, .action_stop, null, Capture.writeRequest, .{ protocol.action_stop_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
 }
 
-fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
+fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, routing: CaptureRouting, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
     var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
     errdefer file.close(io);
     try capture.commit();
     const length = try file.length(io);
     const binding = try readCapturedBinding(io, &file);
     if (!(Binding{ .store = store, .key = location.key, .session = session, .kind = kind }).matches(&binding.saved, binding.target)) return error.InvalidRequestRecord;
-    return .{ .file = file, .length = length, .saved = binding.saved, .target = binding.target, .replay = location.replay };
+    return .{ .file = file, .length = length, .saved = binding.saved, .target = binding.target, .replay = location.replay, .routing = routing };
 }
 
 const Capture = struct {
@@ -2625,7 +2619,7 @@ const Capture = struct {
         self.active = false;
     }
 
-    fn writeRouting(self: *Capture, paths: *const platform.Paths) !void {
+    fn writeRouting(self: *Capture, paths: *const platform.Paths) !CaptureRouting {
         const route = try CaptureRouting.fromPaths(paths);
         var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
         const name = try CaptureRouting.name(self.final_name.slice(), &name_buffer);
@@ -2654,6 +2648,7 @@ const Capture = struct {
         self.routing_published = true;
         // Routing must be durable before the request marker can become visible.
         try self.syncParent();
+        return route;
     }
 
     fn commit(self: *Capture) !void {
@@ -5624,7 +5619,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     var token: Cancellation = .{};
     token.requestStop();
     const requests: Requests = .{ .io = std.testing.io, .cancellation = &token };
-    var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{ .kind = .configure }, .target = .configure, .replay = .generated };
+    var captured: CapturedRecord = .{ .file = .{ .handle = -1, .flags = .{ .nonblocking = false } }, .length = 0, .saved = .{ .kind = .configure }, .target = .configure, .replay = .generated, .routing = .{} };
     try captured.saved.store.set("/never-open");
     var buffer: ReplyBuffer = .{};
     try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, .empty, &buffer).get());
@@ -6126,6 +6121,9 @@ test "archive recovery preserves the protocol default and refuses ambiguous or m
         .{ ",\"archived\":\"true\"", @as(?bool, null) },
         .{ ",\"archived\":true,\"archived\":false", @as(?bool, null) },
     };
+    var route_buffer: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const route = try std.fmt.bufPrint(&route_buffer, "{{\"format\":1,\"host_directory\":\"{s}\",\"runtime_hint\":\"\"}}", .{root});
+    try tmp.dir.writeFile(io, .{ .sub_path = handle ++ ".json.routing", .data = route, .flags = .{ .permissions = .fromMode(0o600) } });
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_archive\",\"store\":");
@@ -6658,8 +6656,7 @@ test "capture routing round trips six placements without conflating selector and
         var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
         defer recovered.close(io);
         try std.testing.expect(recovered.paths == null);
-        try std.testing.expect(recovered.routing != null);
-        try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
+        try std.testing.expectEqualStrings(directory, recovered.routing.host_directory.slice());
         const rediscovered = try recovered.resolvePaths(io);
         try std.testing.expectEqualStrings(directory, rediscovered.selector());
         try std.testing.expectEqualStrings(paths.socket.slice(), rediscovered.socket.slice());
@@ -6690,7 +6687,7 @@ test "capture routing round trips six placements without conflating selector and
     };
 }
 
-test "capture routing metadata rejects invalid private sources and keeps legacy raw records" {
+test "capture routing metadata rejects invalid, missing and public companions" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = try @import("socket_fixture.zig").Directory.init();
@@ -6719,11 +6716,8 @@ test "capture routing metadata rejects invalid private sources and keeps legacy 
         return error.TestUnexpectedResult;
     } else |_| {}
     try tmp.dir.deleteFile(io, name);
-    var legacy = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
-    defer legacy.close(io);
-    try std.testing.expect(legacy.routing == null);
-    const paths = try legacy.resolvePaths(io);
-    try std.testing.expectEqualStrings(root, paths.store_identity.slice());
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    try std.testing.expectError(error.InvalidRequestRecord, inspectCapturedRequest(io, root, key.slice()));
 }
 
 test "capture routing publication faults preserve request custody and never replace an existing pair" {
@@ -6799,7 +6793,6 @@ test "capture routing publication faults preserve request custody and never repl
         if (stage == .request_directory_sync) {
             var recovered = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } });
             defer recovered.close(io);
-            try std.testing.expect(recovered.routing != null);
             try std.testing.expectEqualStrings(root, (try recovered.resolvePaths(io)).selector());
         } else {
             try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request.json", .{}));
@@ -6837,7 +6830,7 @@ test "capture routing retains OS bytes and legacy opaque runtime without storing
     captured.close(io);
     var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
     defer recovered.close(io);
-    try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
+    try std.testing.expectEqualStrings(directory, recovered.routing.host_directory.slice());
     const legacy = try platform.mysqlClientPaths(io, "0123456789abcdef0123456789abcdef", root);
     const route = try CaptureRouting.fromPaths(&legacy);
     try std.testing.expectEqual(@as(usize, 0), route.host_directory.len);
@@ -6852,7 +6845,7 @@ test "capture routing retains OS bytes and legacy opaque runtime without storing
     saved_legacy.close(io);
     var generated = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = legacy_key.slice() } });
     defer generated.close(io);
-    try std.testing.expectEqualStrings(root, generated.routing.?.runtime_hint.slice());
+    try std.testing.expectEqualStrings(root, generated.routing.runtime_hint.slice());
     try std.testing.expectEqualStrings(legacy.socket.slice(), (try generated.resolvePaths(io)).socket.slice());
     var explicit = try openCaptured(io, .{ .explicit = .{ .store = legacy.store_identity.slice(), .record = legacy_location.record, .kind = .session_stop } });
     defer explicit.close(io);
