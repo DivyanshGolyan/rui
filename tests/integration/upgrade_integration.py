@@ -590,6 +590,31 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
         print("upgrade native: actual pre-1480 public-check-capable target refused before stop; old PID/instance unchanged", flush=True)
 
 
+@contextlib.contextmanager
+def unprovable_socket(runtime_socket, label):
+    """Listen on `rui.sock` in a derived interface directory with no `rui.lock`.
+
+    The census reads only derived directories, and one without a lock is unprovable: restart fails
+    with its path and never removes it. `runtime_socket` is any Host socket of the same runtime.
+    Yields (path, listener); the caller may close the listener, and the path and its directory
+    are removed on exit.
+    """
+    directory = pathlib.Path(runtime_socket).parent.parent / hashlib.sha256(label.encode()).hexdigest()[:32]
+    unreadable = directory / "rui.sock"
+    directory.mkdir(mode=0o700)
+    try:
+        with os_semantics.unix_stream() as listener:
+            listener.bind(str(unreadable))
+            # Never accepted, every census probe stays queued. A backlog of 1 fills
+            # after the first probe on Darwin, which then refuses the post-publication
+            # census and makes this live listener look like a leftover socket.
+            listener.listen(16)
+            yield unreadable, listener
+    finally:
+        unreadable.unlink(missing_ok=True)
+        directory.rmdir()
+
+
 def upgrade_journey(root, binary, releases):
     """One install proves SH-23: every eligible Host, found afresh after
     publication, restarts on the selected build; others are left with a
@@ -610,39 +635,30 @@ def upgrade_journey(root, binary, releases):
             assert previous["store"] in warning, warning
         assert "left running: application-owned Host" in warning, warning
 
-        unreadable = pathlib.Path(a.ready["socket"]).parent / "upgrade-unreadable.sock"
-        try:
-            with os_semantics.unix_stream() as listener:
-                listener.bind(str(unreadable))
-                # Never accepted, every census probe stays queued. A backlog of 1 fills
-                # after the first probe on Darwin, which then refuses the post-publication
-                # census and makes this live listener look like a leftover socket.
-                listener.listen(16)
-                gate = releases.gate_archive()
-                start = len(releases.requests)
-                child = a.spawn_upgrade()
-                wait_for(gate.entered.is_set, "download while the old Host still serves")
-                assert old_a.poll() is None and a.status()["instance"] == previous_a["instance"], "Host touched before publication"
-                assert a.link.resolve() == a.original, "selection changed before the archive was verified"
-                # A Host started after the census is found afresh after publication.
-                old_b, previous_b = b.start_host("journey-b", store_hex=True)
-                gate.release.set()
-                output = a.finish_upgrade(child, success=False)
-                assert child.returncode == 6, (child.returncode, output)
-                assert "Upgraded to Rui" in output and "[host_restart_failed]" in output, output
-                for previous in (previous_a, previous_b):
-                    assert f"{previous['store']}: restarted on {releases.version}" in output, output
-                assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
-                assert str(unreadable) in output and "failed at discovery" in output, output
-                assert "4 Hosts: 2 restarted, 0 already current, 1 left unchanged, 1 failed." in output, output
-                assert releases.requests[start:].count(releases.archive_path) == 1, releases.requests[start:]
-                assert a.link.resolve() != a.original, "restart failure rolled the installation back"
-                proof_ready(a, previous_a, old_a)
-                proof_ready(b, previous_b, old_b)
-                assert old_foreign.poll() is None and foreign.status()["instance"] == previous_foreign["instance"]
-                assert os_semantics.process_executable(old_foreign.pid) != a.link.resolve()
-        finally:
-            unreadable.unlink(missing_ok=True)
+        with unprovable_socket(a.ready["socket"], "journey-unreadable") as (unreadable, _):
+            gate = releases.gate_archive()
+            start = len(releases.requests)
+            child = a.spawn_upgrade()
+            wait_for(gate.entered.is_set, "download while the old Host still serves")
+            assert old_a.poll() is None and a.status()["instance"] == previous_a["instance"], "Host touched before publication"
+            assert a.link.resolve() == a.original, "selection changed before the archive was verified"
+            # A Host started after the census is found afresh after publication.
+            old_b, previous_b = b.start_host("journey-b", store_hex=True)
+            gate.release.set()
+            output = a.finish_upgrade(child, success=False)
+            assert child.returncode == 6, (child.returncode, output)
+            assert "Upgraded to Rui" in output and "[host_restart_failed]" in output, output
+            for previous in (previous_a, previous_b):
+                assert f"{previous['store']}: restarted on {releases.version}" in output, output
+            assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
+            assert str(unreadable) in output and "failed at discovery" in output, output
+            assert "4 Hosts: 2 restarted, 0 already current, 1 left unchanged, 1 failed." in output, output
+            assert releases.requests[start:].count(releases.archive_path) == 1, releases.requests[start:]
+            assert a.link.resolve() != a.original, "restart failure rolled the installation back"
+            proof_ready(a, previous_a, old_a)
+            proof_ready(b, previous_b, old_b)
+            assert old_foreign.poll() is None and foreign.status()["instance"] == previous_foreign["instance"]
+            assert os_semantics.process_executable(old_foreign.pid) != a.link.resolve()
 
         ready_a, ready_b = a.status(), b.status()
         start = len(releases.requests)
@@ -1215,25 +1231,17 @@ def restart_all_cases(root, binary, releases):
 
         # A socket in a derived interface directory with no rui.lock is unprovable: it fails, and
         # discovery never removes it. The probe is the rui.sock of another derived directory.
-        probe_dir = pathlib.Path(first.ready["socket"]).parent.parent / hashlib.sha256(b"restart-unreadable").hexdigest()[:32]
-        unreadable = probe_dir / "rui.sock"
-        probe_dir.mkdir(mode=0o700)
-        try:
-            with os_semantics.unix_stream() as listener:
-                listener.bind(str(unreadable))
-                listener.listen(16)  # Room for every probe; see upgrade_journey.
-                output = first.run("host", "restart", "--all", expect=6)
-                assert "Store unknown (socket " in output and "failed at discovery:" in output, output
-                assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
-                assert "[host_restart_failed]" in output, output
-                assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+        with unprovable_socket(first.ready["socket"], "restart-unreadable") as (unreadable, listener):
+            output = first.run("host", "restart", "--all", expect=6)
+            assert "Store unknown (socket " in output and "failed at discovery:" in output, output
+            assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
+            assert "[host_restart_failed]" in output, output
+            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            listener.close()
             # Once nothing listens, the socket still has no lock, so it stays unprovable and fails.
             output = first.run("host", "restart", "--all", expect=6)
             assert str(unreadable) in output and "failed at discovery:" in output, output
             assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-        finally:
-            unreadable.unlink(missing_ok=True)
-            probe_dir.rmdir()
         output = first.run("host", "restart", "--all")
         assert "2 Hosts: 0 restarted, 2 already current" in output, output
         assert str(unreadable) not in output and "failed at discovery" not in output, output
