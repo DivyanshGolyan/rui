@@ -243,6 +243,8 @@ const AnswerFields = struct {
 pub const ListPage = struct {
     tools: []const u8,
     next_cursor: ?[]const u8,
+    /// The page's `ttlMs` when it is a positive whole number of milliseconds; null otherwise.
+    ttl_ms: ?u64,
 };
 
 pub fn readList(result: []const u8) Invalid!ListPage {
@@ -254,7 +256,16 @@ pub fn readList(result: []const u8) Invalid!ListPage {
         .null_value => null,
         else => return error.InvalidResult,
     } else null;
-    return .{ .tools = tools, .next_cursor = cursor };
+    const ttl: ?u64 = if (document.member(result, "ttlMs")) |value| positiveTtl(value) else null;
+    return .{ .tools = tools, .next_cursor = cursor, .ttl_ms = ttl };
+}
+
+/// A `ttlMs` value that names a positive whole number of milliseconds; absent, zero, negative,
+/// fractional, non-numeric or beyond u64 values name none.
+fn positiveTtl(value: []const u8) ?u64 {
+    if (document.kind(value) != .number) return null;
+    const ms = std.fmt.parseInt(u64, value, 10) catch return null;
+    return if (ms == 0) null else ms;
 }
 
 pub const Tool = struct {
@@ -391,6 +402,7 @@ test "a tools/list page lists its tools and leaves out invalid ones" {
         \\]}}
     ;
     const page = try readList((try readMessage(message, 1)).result);
+    try std.testing.expectEqual(@as(?u64, 300_000), page.ttl_ms);
     try std.testing.expectEqualStrings("next\\u002dpage", page.next_cursor.?);
     var tools = Tools.init(page);
     const weather = tools.next().?.tool;
@@ -415,6 +427,22 @@ test "a tools/list page lists its tools and leaves out invalid ones" {
     try std.testing.expectError(error.InvalidResult, readList("{}"));
     try std.testing.expectError(error.InvalidResult, readList("{\"tools\":[],\"nextCursor\":3}"));
     try std.testing.expectError(error.UnknownResultType, readList("{\"resultType\":\"partial\",\"tools\":[]}"));
+}
+
+test "EXR-70 a tools/list page's ttlMs counts only as a positive whole number of milliseconds" {
+    const cases = [_]struct { []const u8, ?u64 }{
+        .{ "{\"tools\":[]}", null },
+        .{ "{\"ttlMs\":-1,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":0,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":1.5,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":1e3,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":\"300000\",\"tools\":[]}", null },
+        .{ "{\"ttlMs\":null,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":18446744073709551616,\"tools\":[]}", null },
+        .{ "{\"ttlMs\":1,\"tools\":[]}", 1 },
+        .{ "{\"ttlMs\":18446744073709551615,\"tools\":[]}", std.math.maxInt(u64) },
+    };
+    for (cases) |case| try std.testing.expectEqual(case[1], (try readList(case[0])).ttl_ms);
 }
 
 test "a tool lists the same with or without a readOnlyHint" {
