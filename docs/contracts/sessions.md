@@ -24,6 +24,14 @@ Existing parent links provide a known creator, and format 88 applies the first-M
 Labels, shared Workspaces and peer Messages after the first never establish a creator.
 [Session listing](cli.md#session-listing) and [public Session activity](inspection.md#public-session-activity) expose this saved fact.
 
+### App lane
+
+A Session's `app_lane` names the lane root whose app tool declaration it runs on: the Session itself for a lane root, and its parent's lane for a child.
+The Store saves it at creation and never updates it, so a child keeps the lane it was created on.
+`session.app_tool_set_id` is the content-addressed app tool set that lane root declares; NULL means no declaration.
+This step saves the columns only: no Session can declare app tools yet, so every lane's declaration is NULL and the offer is unchanged.
+[Store format and upgrades](store.md#store-format-and-upgrades) owns the step that adds them.
+
 ### Stops and terminal outcomes
 
 #### Stopping selected work
