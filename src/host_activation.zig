@@ -36,7 +36,7 @@ pub const Outcome = union(enum) {
     unsupported: Limitation,
     replacement_observed,
     cancelled,
-    /// The target build could not be resolved, inspected or checked; nothing was stopped (#1791, #1793).
+    /// The target build could not be resolved or checked; nothing was stopped (#1791, #1793).
     target_unusable: TargetStep,
     refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
     failed: Stage,
