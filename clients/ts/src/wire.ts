@@ -768,7 +768,7 @@ export interface components {
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed";
+                    ending: "done" | "context_full" | "provider_refused" | "out_of_quota" | "provider_unavailable" | "stopped" | "interrupted" | "failed";
                     code: string;
                     content: components["schemas"]["ContentValue"] | null;
                 };
