@@ -250,13 +250,6 @@ fn refusal(allocator: std.mem.Allocator, result: process.Result) !?start_report.
     return null;
 }
 
-fn knownBadTarget(build: Installation.Selection) bool {
-    // Process-witnessed released v0.75.0 accepts stdin lifetime in check then
-    // refuses detached start. A fixed intentional source build is NOT this
-    // artifact, even if its version text is identical. No future cutoff guessed.
-    return build == .released and build.released.version.schema == 75 and build.released.version.patch == 0;
-}
-
 fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, context: process.Context) !client.HostStopResult {
     const directory = plan.sources.request.dir;
     if (plan.observed.profile.historical()) {
@@ -417,22 +410,6 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
                     .{ .same = .{ .running = .{ .instance = value.facts.instance, .pid = value.pid }, .settings = value.facts.settings_digest } })
             else |_|
                 .unreadable,
-            .inspect_target => {
-                const home = init.environ_map.get("HOME") orelse {
-                    facts.target_failed = .inspecting;
-                    continue;
-                };
-                var build = Installation.inspectBuild(private, init.io, home, target, cancellation) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    error.Cancelled => return .cancelled,
-                    else => {
-                        facts.target_failed = .inspecting;
-                        continue;
-                    },
-                };
-                defer build.deinit(private);
-                facts.known_bad = knownBadTarget(build);
-            },
             .reconstruct_sources => facts.sources = if (host_start.restartSources(arena.allocator(), plan.sources.request, plan.observed.facts.active_capacity)) |value| sources: {
                 request = value;
                 break :sources true;
@@ -577,12 +554,7 @@ test "all credential location variables must be restartable paths" {
     }
 }
 
-test "upgrade target capability exception is the witnessed release not a future version threshold" {
-    try std.testing.expect(knownBadTarget(.{ .released = .{ .build = "/managed", .version = .{ .schema = 75, .patch = 0 } } }));
-    for ([_]candidate.Version{ .{ .schema = 74, .patch = 0 }, .{ .schema = 75, .patch = 1 }, .{ .schema = 76, .patch = 0 } }) |version| {
-        try std.testing.expect(!knownBadTarget(.{ .released = .{ .build = "/managed", .version = version } }));
-    }
-    try std.testing.expect(!knownBadTarget(.{ .source = "/managed/fixed-source-same-version" }));
+test "upgrade restartable environment refuses inherited unsafe variables" {
     try std.testing.expect(!restartableEnvironment(&.{"LD_PRELOAD=/custom"}));
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
     try std.testing.expect(restartableEnvironment(&.{ "HOME=/home/fixture", "PRIVATE=secret\xff" }));
