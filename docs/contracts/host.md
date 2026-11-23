@@ -61,7 +61,7 @@ On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and ever
 `GET_LOCK` only refuses early a second Host on the same database.
 One MySQL server is the one writer: multi-primary topologies, where `GET_LOCK` is local to one member, are not supported. Reclaim after a lost COMMIT reads `commit_seq` as final once it holds the lock, so on such a topology it may rerun a batch an old session still commits; the fence then stops the duplicate and the Host fences.
 Every message the Host sends starts with its session settings, so no message relies on settings an earlier one left on the server connection.
-There is no `host.lock`: every Host holds `rui.lock` in its interface directory for life, which reserves that directory's socket, so two Stores can neither share nor reclaim each other's live endpoint.
+There is no `host.lock`: every Host holds `rui.lock` in its interface directory for life, which reserves that directory's socket, so two Stores can neither share nor reclaim each other's live endpoint. OS temp cleaners (macOS periodic clean-tmps, systemd-tmpfiles) can delete an old, untouched `rui.lock` while its Host runs; this is not yet guarded against.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase

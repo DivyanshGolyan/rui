@@ -52,7 +52,7 @@ Socket discovery retries transient connection refusal for up to 200 ms inside it
 A standard SQLite Host serves from its private interface directory `/tmp/rui-<uid>/<hash>/`, which holds `rui.lock` and `rui.sock`; it holds `rui.lock` for its whole life, and no routing hint file exists.
 For an unreachable socket, discovery drops it silently only when a fresh look finds its `rui.lock` free, and removes that dead endpoint.
 A busy `rui.lock`, a socket in a directory without a lock file, or a connected unreadable peer is reported as unconfirmed and counted as failed, with the socket path and recovery advice. `rui.lock` is liveness state, not activation authority.
-It does not reclaim sockets or infer absence from failed transport.
+It reclaims an endpoint only when its `rui.lock` is free, and never infers absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
 Success requires readiness on DIR's socket, a different instance from the stopped Host, and the answering managed executable's target release version. A concurrent starter of that version may win; it need not be our child or the selected executable path. If only the target client can read the new wire, its public status is bracketed by authenticated peer generations and the result advises using that client; incompatible transport alone is never success.
