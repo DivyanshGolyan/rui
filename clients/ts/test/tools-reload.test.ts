@@ -20,7 +20,7 @@ const RESTARTED_HOST = "22".repeat(16);
 type Row = { server: string; state: "idle" | "listing" | "waiting"; last: "never" | "listed" | "failed" | "collision"; finished: string; tools: string };
 
 /** A Link whose tools-reload reply comes from `reloadInstance` and whose status replies come from `statusInstance`. */
-function fakeLink(asked: { server: string; generation: string }[], statuses: Row[][], reloadInstance = HOST, statusInstance = HOST) {
+function fakeLink(asked: { server: string; generation: string }[], statuses: (Row[] | "busy")[], reloadInstance = HOST, statusInstance = HOST) {
 	const bodies: { path: string; body: unknown }[] = [];
 	let polls = 0;
 	const link: Link = {
@@ -33,6 +33,7 @@ function fakeLink(asked: { server: string; generation: string }[], statuses: Row
 			assert.equal(path, "/v1/tools-status");
 			const next = statuses[Math.min(polls, statuses.length - 1)];
 			polls += 1;
+			if (next === "busy") throw new RuiRequestError("busy", "ordinary_capacity_exhausted");
 			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "tools_status", instance: statusInstance, servers: next }));
 		},
 	};
@@ -119,4 +120,14 @@ test("reloadTools rejects with RuiWaitTimeoutError after 60 seconds naming the s
 	assert.ok(error instanceof RuiWaitTimeoutError);
 	assert.equal(error.code, "wait_timed_out");
 	assert.match(error.message, /docs/);
+});
+
+test("reloadTools keeps polling through a busy Host until the asked list lands", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	const landed: Row[] = [{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "12" }];
+	const { link, polls } = fakeLink([{ server: "docs", generation: "2" }], ["busy", "busy", landed]);
+	const result = reloadTools(link);
+	await advance(t, 500);
+	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 12 }]);
+	assert.equal(polls(), 3);
 });

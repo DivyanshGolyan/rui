@@ -3678,13 +3678,15 @@ fn readReportBody(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator
 }
 
 /// A tools refusal. A 503 that a control command reads as an unavailable Host (`hostStatus`, the same
-/// `validHostUnavailable` test) is a stopped Host here, not a protocol error.
-fn toolsRefusal(reply: protocol_reply.CommandReply) error{ UnknownMcpServer, HostStopped, InvalidResponse } {
-    if (reply.status == 503 and protocol_reply.validHostUnavailable(reply.body)) return error.HostStopped;
-    const Refusal = struct { code: []const u8 = "" };
+/// `validHostUnavailable` test) is not a protocol error: a Host out of connection capacity is busy and worth
+/// asking again, and a fenced Host is stopping.
+fn toolsRefusal(reply: protocol_reply.CommandReply) error{ UnknownMcpServer, HostStopped, HostBusy, InvalidResponse } {
+    const Refusal = struct { type: []const u8 = "", code: []const u8 = "" };
     var storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&storage);
     const refusal = std.json.parseFromSliceLeaky(Refusal, arena.allocator(), reply.body, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    if (reply.status == 503 and protocol_reply.validHostUnavailable(reply.body))
+        return if (std.mem.eql(u8, refusal.type, "busy")) error.HostBusy else error.HostStopped;
     if (std.mem.eql(u8, refusal.code, "unknown_mcp_server")) return error.UnknownMcpServer;
     return error.InvalidResponse;
 }
@@ -7441,11 +7443,11 @@ test "tools reload and status replies parse into typed rows with the Host instan
     try std.testing.expectError(error.InvalidResponse, parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"paused\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\"}]}"));
 }
 
-test "tools refusals map an unknown server and a stopped or fenced Host to their own errors, and any other refusal to a protocol error" {
+test "tools refusals map an unknown server, a fenced Host and a busy Host to their own errors, and any other refusal to a protocol error" {
     try std.testing.expectEqual(error.UnknownMcpServer, toolsRefusal(.{ .status = 400, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"unknown_mcp_server\"}" }));
-    // The same 503 a control command reads as unavailable, for a fenced or capacity-exhausted Host, is not a protocol error.
+    // The same 503 a control command reads as unavailable is not a protocol error: fenced is stopping, capacity is busy.
     try std.testing.expectEqual(error.HostStopped, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}" }));
-    try std.testing.expectEqual(error.HostStopped, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}" }));
+    try std.testing.expectEqual(error.HostBusy, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}" }));
     try std.testing.expectEqual(error.InvalidResponse, toolsRefusal(.{ .status = 400, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"dispatch_fenced\"}" }));
     try std.testing.expectEqual(error.InvalidResponse, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"WrongWireVersion\"}" }));
 }

@@ -566,15 +566,10 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 	if (reply.asked.length === 0) return [];
 	const deadline = Date.now() + RELOAD_WAIT_MS;
 	for (;;) {
-		const status = parse<Schemas["ToolsStatusReply"]>(
-			await link.exchange("/v1/tools-status", (store) => JSON.stringify({
-				version: WIRE_VERSION,
-				kind: "tools_status",
-				store,
-			} satisfies Schemas["ToolsStatusRequest"])),
-		);
-		const pending = reply.asked.filter((ask) => !serverLanded(reply.instance, status, ask));
-		if (pending.length === 0) {
+		// A busy Host is still listing; ask again until the deadline, as the Zig client does.
+		const status = await readToolsStatus(link);
+		const pending = status === undefined ? reply.asked : reply.asked.filter((ask) => !serverLanded(reply.instance, status, ask));
+		if (status !== undefined && pending.length === 0) {
 			return reply.asked.map((ask) => {
 				const row = statusRow(status, ask.server);
 				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools) };
@@ -585,6 +580,21 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 			throw new RuiWaitTimeoutError(`MCP tool lists still pending after 60 seconds: ${pending.map((ask) => ask.server).join(", ")}`);
 		}
 		await new Promise((resolve) => setTimeout(resolve, Math.min(RELOAD_POLL_MS, remaining)));
+	}
+}
+
+async function readToolsStatus(link: Link): Promise<Schemas["ToolsStatusReply"] | undefined> {
+	try {
+		return parse<Schemas["ToolsStatusReply"]>(
+			await link.exchange("/v1/tools-status", (store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "tools_status",
+				store,
+			} satisfies Schemas["ToolsStatusRequest"])),
+		);
+	} catch (error) {
+		if (error instanceof RuiRequestError && error.type === "busy") return undefined;
+		throw error;
 	}
 }
 

@@ -1070,11 +1070,18 @@ fn awaitToolLists(sender: client.Requests, gpa: std.mem.Allocator, selected: []c
     const deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     var status: ?client.ToolsStatus = null;
     while (true) {
-        if (asked.len != 0) status = try sender.toolsStatus(gpa, selected);
+        // A busy Host is still listing; ask again until the deadline, as other waits do.
+        if (asked.len != 0) {
+            if (sender.toolsStatus(gpa, selected)) |read| status = read else |err| switch (err) {
+                error.HostBusy => {},
+                else => |other| return other,
+            }
+        }
         if (try client.toolsProgress(asked, if (status) |*read| read else null, outcomes) == .landed) return;
         if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline) {
             for (asked.slice()) |ask| {
-                if (!try client.serverLanded(asked, &status.?, ask)) stderr.diagnostic("rui: MCP server {s} is still listing its tools after 60 seconds; its tools are not yet reloaded\n", .{ask.server.slice()});
+                const landed = if (status) |*read| try client.serverLanded(asked, read, ask) else false;
+                if (!landed) stderr.diagnostic("rui: MCP server {s} is still listing its tools after 60 seconds; its tools are not yet reloaded\n", .{ask.server.slice()});
             }
             reportCallerCode(.wait_timed_out);
             return error.CallerFailure;
