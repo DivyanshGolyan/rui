@@ -1046,12 +1046,13 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_di
 /// Asks the running Host to list again, then polls tools_status until each asked list has landed.
 /// Prints one JSON line with each asked server's outcome and tool count.
 fn reloadTools(io: std.Io, gpa: std.mem.Allocator, selected: []const u8, name: ?[]const u8) !void {
-    const asked = try client.reloadTools(io, gpa, selected, name);
+    const sender: client.Requests = .{ .io = io };
+    const asked = try sender.reloadTools(gpa, selected, name);
     var status: client.ToolsStatus = .{};
     if (asked.len != 0) {
         const deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
         while (true) {
-            status = try client.toolsStatus(io, gpa, selected);
+            status = try sender.toolsStatus(gpa, selected);
             var still: usize = 0;
             for (asked.slice()) |ask| {
                 const row = try statusOf(&status, ask.server.slice());
