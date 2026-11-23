@@ -607,6 +607,10 @@ pub fn executionMain(host: *Host) void {
     if (reactor) |active| active.wake = &host.dispatch_wake;
     host.store.commitWake().store(&host.dispatch_wake, .release);
     defer host.store.commitWake().store(null, .release);
+    // The loop's own commits stay unsynced until something could observe
+    // them; Store.settle syncs once for all of them.
+    host.store.queue().deferring.store(std.Thread.getCurrentId(), .monotonic);
+    defer host.store.queue().deferring.store(0, .monotonic);
     // One process-wide SIGCHLD owner: with two Hosts in one process the later
     // attach wins and the other falls back to its Bash wait timeout.
     const child_wake: child_exit_wake.Wake = .{ .event = &host.dispatch_wake, .io = host.io };
