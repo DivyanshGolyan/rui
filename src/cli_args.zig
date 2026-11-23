@@ -283,23 +283,6 @@ pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
     try writer.print("Use rui {s} COMMAND --help for options.\n", .{@tagName(resource)});
 }
 
-const retired_names = [_][2][]const u8{
-    .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
-    .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
-    .{ "login", "auth login" },                            .{ "configure", "session configure" },                 .{ "message", "session send" },
-    .{ "inspect-session", "session inspect" },             .{ "sessions", "session list" },                       .{ "stop-session", "session stop" },
-    .{ "interrupt-model", "session interrupt-model" },     .{ "read-conversation", "session read-conversation" }, .{ "resume", "session resume" },
-    .{ "observe-command", "request inspect" },             .{ "recover", "request recover" },                     .{ "retry", "request recover" },
-    .{ "read-result", "request read-result" },             .{ "requests", "request list" },                       .{ "inspect-action", "action inspect" },
-    .{ "allow-action", "action allow" },                   .{ "deny-action", "action deny" },                     .{ "read-action-call-id", "action read-call-id" },
-    .{ "read-action-arguments", "action read-arguments" }, .{ "host stop", "host pause" },
-};
-
-pub fn retired(name: []const u8) ?[]const u8 {
-    for (retired_names) |entry| if (std.mem.eql(u8, entry[0], name)) return entry[1];
-    return null;
-}
-
 pub fn find(resource: Resource, name: []const u8) ?Command {
     inline for (comptime std.meta.tags(Command)) |command| {
         const definition = command.definition();
@@ -504,10 +487,6 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expectEqualStrings("kind", (try expectMissing(.request_recover, &.{ "--record", "r" })).?);
     try std.testing.expect(try expectMissing(.defaults_configure, &.{}) != null);
     try std.testing.expect(try expectMissing(.session_configure, &.{}) == null);
-    try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
-    try std.testing.expect(retired("session") == null and retired("fix the build") == null);
-    try std.testing.expectEqualStrings("host pause", retired("host stop").?);
-    try std.testing.expect(retired("session stop") == null and find(.host, "stop") == null);
 }
 
 test "store schema requires an explicit mysql engine" {

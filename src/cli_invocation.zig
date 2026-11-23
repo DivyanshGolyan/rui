@@ -71,35 +71,17 @@ test "CLI-2 invalid invocation is refused before effects" {
         try writeRefusal(&writer, route.refused);
         try std.testing.expectEqualStrings(case.line, writer.buffered());
     }
-    const retired = [_]struct { args: []const []const u8, line: []const u8 }{
-        .{ .args = &.{ "rui", "setup" }, .line = "\nrui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n" },
-        .{ .args = &.{ "rui", "host", "stop" }, .line = "\nrui: `host stop` is now `rui host pause`; see rui host --help. Nothing was captured or sent.\n" },
+    const unknown = [_]struct { args: []const []const u8, line: []const u8 }{
+        .{ .args = &.{ "rui", "host", "stop" }, .line = "\nrui: unknown host operation; use rui host --help.\n" },
         .{ .args = &.{ "rui", "host", "missing" }, .line = "\nrui: unknown host operation; use rui host --help.\n" },
     };
-    for (retired) |case| {
+    for (unknown) |case| {
         const route = next(.{ .args = case.args }, std.testing.allocator);
         try std.testing.expectEqual(.refused, std.meta.activeTag(route));
         var buffer: [4096]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buffer);
         try writeRefusal(&writer, route.refused);
         try std.testing.expectEqualStrings(case.line, writer.buffered());
-    }
-    const retired_names = [_][2][]const u8{
-        .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
-        .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
-        .{ "login", "auth login" },                            .{ "configure", "session configure" },                 .{ "message", "session send" },
-        .{ "inspect-session", "session inspect" },             .{ "sessions", "session list" },                       .{ "stop-session", "session stop" },
-        .{ "interrupt-model", "session interrupt-model" },     .{ "read-conversation", "session read-conversation" }, .{ "resume", "session resume" },
-        .{ "observe-command", "request inspect" },             .{ "recover", "request recover" },                     .{ "retry", "request recover" },
-        .{ "read-result", "request read-result" },             .{ "requests", "request list" },                       .{ "inspect-action", "action inspect" },
-        .{ "allow-action", "action allow" },                   .{ "deny-action", "action deny" },                     .{ "read-action-call-id", "action read-call-id" },
-        .{ "read-action-arguments", "action read-arguments" },
-    };
-    for (retired_names) |entry| {
-        const route = next(.{ .args = &.{ "rui", entry[0] } }, std.testing.allocator);
-        try std.testing.expectEqual(.refused, std.meta.activeTag(route));
-        try std.testing.expectEqualStrings(entry[1], route.refused.retired.replacement);
-        try std.testing.expect(touchesNothing(route));
     }
     const missing_cases = [_]struct { args: []const []const u8, line: []const u8 }{
         .{ .args = &.{ "rui", "session", "send" }, .line = "rui session send: --to ID: A required option or selector is missing. Accepted: --to ID. Next: Supply one of the accepted alternatives. Nothing was captured or sent. [option_required]\n" },
@@ -166,7 +148,6 @@ pub const Facts = struct {
 };
 
 pub const Refused = union(enum) {
-    retired: struct { name: []const u8, operation: ?[]const u8 = null, replacement: []const u8 },
     unknown_operation: cli_args.Resource,
     syntax: struct { resource: cli_args.Resource, operation: []const u8, problem: cli_args.Refusal },
     missing: struct { resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8 },
@@ -205,16 +186,9 @@ pub fn next(facts: Facts, allocator: std.mem.Allocator) Route {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) return .{ .installation = .state };
     if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) return .{ .installation = .facts };
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return .{ .new_session = args[1..] };
-    if (cli_args.retired(args[1])) |replacement| return .{ .refused = .{ .retired = .{ .name = args[1], .replacement = replacement } } };
     const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return .{ .new_session = args[1..] };
     if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) return .{ .resource_help = resource };
-    const command = cli_args.find(resource, args[2]) orelse {
-        var operation: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| {
-            if (cli_args.retired(name)) |replacement| return .{ .refused = .{ .retired = .{ .name = args[1], .operation = args[2], .replacement = replacement } } };
-        }
-        return .{ .refused = .{ .unknown_operation = resource } };
-    };
+    const command = cli_args.find(resource, args[2]) orelse return .{ .refused = .{ .unknown_operation = resource } };
     const definition = command.definition();
     var problem: cli_args.Refusal = undefined;
     const parsed = definition.parseSyntax(args[3..], allocator, &problem) catch return .{ .refused = .{ .syntax = .{ .resource = resource, .operation = definition.name, .problem = problem } } };
@@ -238,14 +212,6 @@ pub fn writeParseProblem(writer: *std.Io.Writer, problem: cli_args.Refusal, reso
 
 pub fn writeRefusal(writer: *std.Io.Writer, refused: Refused) !void {
     switch (refused) {
-        .retired => |r| {
-            if (r.operation) |op| {
-                try writer.print("\nrui: `{s} {s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ r.name, op, r.replacement, r.name });
-            } else {
-                const resource = r.replacement[0..std.mem.indexOfScalar(u8, r.replacement, ' ').?];
-                try writer.print("\nrui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ r.name, r.replacement, resource });
-            }
-        },
         .unknown_operation => |resource| try writer.print("\nrui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) }),
         .syntax => |s| try writeParseProblem(writer, s.problem, @tagName(s.resource), s.operation, null),
         .missing => |m| {

@@ -147,6 +147,13 @@ def defaults(home, *args, success=True, environment=None):
     return value
 
 
+def saved_fields(path, *keys):
+    """Values of the named lines in a saved preferences file, after its version line."""
+    lines = path.read_text().splitlines()
+    fields = dict(line.split("=", 1) for line in lines[1:])
+    return tuple(fields[key] for key in keys)
+
+
 def help_case():
     with tempfile.TemporaryDirectory(prefix="rui-help.") as directory:
         home = pathlib.Path(directory)
@@ -173,21 +180,6 @@ def help_case():
             assert list(home.iterdir()) == [], "invalid input created runtime state"
         finally:
             dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
-
-        master, slave = pty.openpty()
-        try:
-            caller = spawn([str(fixture.RUI), "setup"],
-                env={**os.environ, "HOME": str(home), "TERM": "xterm-256color"},
-                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            output, errors = terminal_exit(caller, master)
-        finally:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
-        assert caller.returncode == 2, (output, errors)
-        assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
-            "Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n").encode() in errors, errors
-        assert b"Provider:" not in output + errors and b"ChatGPT login" not in output + errors, (output, errors)
-        assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
-        assert list(home.iterdir()) == [], "retired name created runtime state"
 
 
 def compiled_model_cases():
@@ -243,7 +235,7 @@ def compiled_model_cases():
             assert accepted.stderr.count(unlisted_note) == 1 and model in accepted.stderr, accepted.stderr
             assert json.loads(accepted.stdout)["next_session"]["model"] == model, accepted.stdout
         saved = home / ".config/rui/preferences"
-        assert saved.read_text().endswith("model=GPT-6-SOL\n")
+        assert saved_fields(saved, "model") == ("GPT-6-SOL",)
         saved.write_bytes(saved.read_bytes().replace(b"model=GPT-6-SOL", b"model=retired-model"))
         original = saved.read_bytes()
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
@@ -1737,7 +1729,7 @@ def main(selected="all"):
         oversized_setup = defaults(long_home, "--provider", "codex")
         assert oversized_setup["store_available"] is False and oversized_setup["provider"] == "codex", oversized_setup
         assert oversized_setup["host"] == {"status": "store_unavailable"}, oversized_setup
-        assert (preferences_home / ".config/rui/preferences").read_text().endswith("provider=codex\nmodel=\n")
+        assert saved_fields((preferences_home / ".config/rui/preferences"), "provider", "model") == ("codex", "")
         invalid_home = os.fsencode(state) + b"/home-\xff"
         try:
             os.mkdir(invalid_home, mode=0o700)
@@ -1765,7 +1757,7 @@ def main(selected="all"):
         defaults(preferences_home, "--store", alias,
             "--provider", "codex", "--model", "gpt-6-luna")
         saved = preferences_home / ".config/rui/preferences"
-        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
         preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
         for invalid_saved in (
@@ -1780,7 +1772,7 @@ def main(selected="all"):
                 assert not refused_saved.stdout and "[preferences_invalid]" in refused_saved.stderr, refused_saved
                 assert saved.read_bytes() == invalid_bytes, (defaults_args, "malformed saved defaults were rewritten")
         saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=gpt-5.6-sol"))
-        assert saved.read_text().endswith("provider=codex\nmodel=gpt-5.6-sol\n")
+        assert saved_fields(saved, "provider", "model") == ("codex", "gpt-5.6-sol")
         assert defaults(preferences_home)["model"] == "gpt-5.6-sol"
         saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
@@ -1796,7 +1788,7 @@ def main(selected="all"):
         (linked_home / ".config/rui").symlink_to(saved.parent, target_is_directory=True)
         defaults(linked_home, "--store", store,
             "--provider", "codex", "--model", "gpt-6-luna", success=False)
-        assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
+        assert saved.read_text() == f"version=4\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=\npermission_mode=\n"
         backup = saved.parent / "saved-preferences"
         saved.rename(backup)
         os.mkfifo(saved, mode=0o600)
@@ -1815,7 +1807,7 @@ def main(selected="all"):
         assert (unavailable_setup["store"], unavailable_setup["store_available"]) == (str(retired_store), False), unavailable_setup
         assert unavailable_setup["host"] == {"status": "store_unavailable"}, unavailable_setup
         defaults(preferences_home, "--clear-model")
-        assert saved.read_text().endswith("provider=codex\nmodel=\n")
+        assert saved_fields(saved, "provider", "model") == ("codex", "")
         assert f"store={retired_store}\n" in saved.read_text()
         defaults(preferences_home, "--model", "gpt-6-luna")
         defaults(preferences_home, "--store", store)
@@ -1851,9 +1843,9 @@ def main(selected="all"):
         credential.unlink()
         defaults(preferences_home, "--provider", "other", success=False)
         defaults(preferences_home, "--model", "gpt-5.5")
-        assert saved.read_text().endswith("model=gpt-5.5\n")
+        assert saved_fields(saved, "model") == ("gpt-5.5",)
         defaults(preferences_home, "--model", "gpt-6-luna")
-        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        assert saved_fields(saved, "model") == ("gpt-6-luna",)
         original_defaults = saved.read_bytes()
         for flag, value, code, accepted in (
                 ("--model", "two words", "preference_model_invalid",
@@ -1875,7 +1867,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(preferences_home)},
             capture_output=True, text=True, timeout=2)
         assert blocked.returncode == 6 and "[preferences_unavailable]" in blocked.stderr, blocked
-        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        assert saved_fields(saved, "model") == ("gpt-6-luna",)
         temp.rmdir()
         os.mkfifo(temp, mode=0o600)
         try:
@@ -1883,18 +1875,18 @@ def main(selected="all"):
                 env={**os.environ, "HOME": str(preferences_home)},
                 capture_output=True, text=True, timeout=2)
             assert blocked.returncode == 6 and "[preferences_unavailable]" in blocked.stderr, blocked
-            assert saved.read_text().endswith("model=gpt-6-luna\n")
+            assert saved_fields(saved, "model") == ("gpt-6-luna",)
         finally:
             dispose_all(temp.unlink)
         codex_fixture.credentials(credential)
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         stale = defaults(preferences_home)
         assert stale["local_credentials"]["codex"] == "configured" and stale["next_session"] == {"status": "unsupported_provider"}, stale
-        assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert saved_fields(saved, "provider", "model") == ("retired", "old-model")
         defaults(preferences_home, "--store", store)
-        assert saved.read_text().endswith("provider=retired\nmodel=old-model\n")
+        assert saved_fields(saved, "provider", "model") == ("retired", "old-model")
         defaults(preferences_home, "--provider", "codex")
-        assert saved.read_text().endswith("provider=codex\nmodel=\n")
+        assert saved_fields(saved, "provider", "model") == ("codex", "")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=retired\nmodel=old-model\n")
         defaults(preferences_home, "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
@@ -1917,7 +1909,7 @@ def main(selected="all"):
         saved.unlink()
         (saved.parent / "real-preferences").rename(saved)
         defaults(preferences_home, "--model", "bad\nmodel", success=False)
-        assert saved.read_text().endswith("model=gpt-6-luna\n")
+        assert saved_fields(saved, "model") == ("gpt-6-luna",)
         config = admit(home, "session", "configure", "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
@@ -2310,7 +2302,7 @@ def main(selected="all"):
             saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
             interactive_saved = preferences_home / ".config/rui/preferences"
             saved_default(master, "/setup --clear-model", "Model: not selected")
-            assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
+            assert saved_fields(interactive_saved, "provider", "model") == ("codex", "")
             cleared_preferences = interactive_saved.read_bytes()
             for command, error in (("/setup --clear-model --model gpt-6-luna", "model_excludes_clear_model"),
                                    ('/setup --model ""', 'preference_model_invalid'),

@@ -190,7 +190,6 @@ The admitted creation snapshot supplies saved effort only when the launch uses d
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 A chat Message to an existing Session captures `require_model`, so chat Messages require the Session's provider to be served: the Host refuses one while it is unserved, and the chat names that provider and `rui host settings`.
 Scripts use `session start` with stdin.
-A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
 
 `rui session resume [--store PATH] ID` re-enters that exact six-character Session ID without changing its settings.
 Noncanonical, unknown or conflicting selectors reject without submission.
