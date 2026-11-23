@@ -1317,6 +1317,38 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
     };
 }
 
+// The DDL a format-74 build created for core_command and its target-order index. Its kind
+// CHECK is format 74's (1 AND 6) and it has no missing_settings (format 89). It never changes.
+const fresh_74_core_command_mysql =
+    \\CREATE TABLE core_command(
+    \\ command_key VARCHAR(128) NOT NULL,
+    \\ kind BIGINT NOT NULL,
+    \\ target VARCHAR(128) NOT NULL,
+    \\ input_digest BLOB NOT NULL,
+    \\ primary_content_id BIGINT,
+    \\ secondary_content_id BIGINT,
+    \\ accepted TINYINT NOT NULL,
+    \\ code TEXT NOT NULL,
+    \\ revision BIGINT NOT NULL,
+    \\ created TINYINT NOT NULL,
+    \\ command_seq BIGINT NOT NULL,
+    \\ PRIMARY KEY(command_seq),
+    \\ UNIQUE(command_key),
+    \\ FOREIGN KEY(primary_content_id) REFERENCES content(content_id),
+    \\ FOREIGN KEY(secondary_content_id) REFERENCES content(content_id),
+    \\ CHECK(OCTET_LENGTH(command_key)<=128),
+    \\ CHECK(kind BETWEEN 1 AND 6),
+    \\ CHECK(OCTET_LENGTH(target)<=128),
+    \\ CHECK(length(input_digest)=32),
+    \\ CHECK(accepted IN (0,1)),
+    \\ CHECK(OCTET_LENGTH(code)<=96),
+    \\ CHECK(revision>=0),
+    \\ CHECK(created IN (0,1)),
+    \\ CHECK(command_seq>0)
+    \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+    \\CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq);
+;
+
 test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -1326,39 +1358,17 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
     inline for (.{ false, true }) |historical| {
         try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
         try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
-        if (historical) try load(migrated_database_sql, store_testing.baseline_rows, true);
+        try load(migrated_database_sql, store_testing.baseline_rows, true);
         inline for (schema.migrations) |step| {
             if (step.from < 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
         }
         if (!historical) {
+            // Swap in the frozen format-74 shape, keeping the baseline-upgraded rows.
+            try load(migrated_database_sql, "CREATE TEMPORARY TABLE fresh_74_commands AS SELECT * FROM core_command", false);
+            defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".fresh_74_commands");
             try load(migrated_database_sql, "DROP TABLE core_command", true);
-            for (comptime schema.objects(.mysql)) |object| {
-                if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 6");
-                defer std.testing.allocator.free(text);
-                try load(migrated_database_sql, text, false);
-            }
-            // Today's core_command carries format 89's missing_settings, which step 89 adds in place.
-            try load(migrated_database_sql, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP COLUMN missing_settings') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0);PREPARE rui_missing FROM @rui_missing_ddl;EXECUTE rui_missing;DEALLOCATE PREPARE rui_missing;SET @rui_missing_ddl=NULL", false);
-            // The expected fixture describes the current schema, while this Store is at format 74.
-            const format_74_rows = comptime blk: {
-                @setEvalBranchQuota(1_000_000);
-                var rows = store_testing.expected_mysql_rows;
-                const baseline = store_testing.baseline_rows;
-                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {
-                    const start = std.mem.indexOf(u8, rows, insert).?;
-                    const end = start + std.mem.indexOf(u8, rows[start..], ";\n").? + 2;
-                    const old_start = std.mem.indexOf(u8, baseline, insert).?;
-                    const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
-                    rows = rows[0..start] ++ baseline[old_start..old_end] ++ rows[end..];
-                }
-                // Format 90 adds tool_record.remote_name; format 74 has no such column.
-                const tool_start = std.mem.indexOf(u8, rows, "INSERT INTO tool_record(").?;
-                const tool_end = tool_start + std.mem.indexOf(u8, rows[tool_start..], ";\n").? + 2;
-                rows = rows[0..tool_start] ++ "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES\n(1,'bash','rui','',14,15),\n(2,'web_search','provider','',1,1);\n" ++ rows[tool_end..];
-                break :blk rows;
-            };
-            try load(migrated_database_sql, format_74_rows, true);
+            try load(migrated_database_sql, fresh_74_core_command_mysql, false);
+            try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM fresh_74_commands", true);
         }
         try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
         defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_commands");
