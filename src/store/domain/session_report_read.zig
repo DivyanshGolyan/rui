@@ -295,7 +295,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     const facts = &scratch.facts;
     facts.* = .{
         .counts = .{ .session = session_ref },
-        .compaction = .init(session_ref, current.next_position, current.provider, current.provider.codec(), current.model.slice(), policy),
+        .compaction = .init(session_ref, current.next_position, current.provider, current.codec, current.model.slice(), policy),
         .work = .{ .session = session_ref },
         .tools = &scratch.tools,
     };

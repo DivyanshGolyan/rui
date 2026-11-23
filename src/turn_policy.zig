@@ -230,17 +230,17 @@ test "a codec that does not compact is never admitted a compaction, over the tri
         .{ .previous = settled, .bytes = 400, .pressure = true },
         .{ .previous = overflow, .bytes = 0, .pressure = false },
     };
-    for ([_]bool{ true, false }) |compacts| for (cases) |case| {
+    for ([_]bool{ true, false }) |compacts| for ([_]?u64{ 100, null }) |trigger| for (cases) |case| {
         const facts: CompactionFacts = .{
             .previous = case.previous,
-            .trigger = 100,
+            .trigger = trigger,
             .compacts = compacts,
             .context_changed = true,
             .usage_tokens = 0,
             .uncovered_bytes = case.bytes,
             .output_reservation = 0,
         };
-        const expected: Purpose = if (compacts and (case.pressure or case.previous.context_overflow)) .compaction else .assistant_response;
+        const expected: Purpose = if (compacts and (case.previous.context_overflow or (case.pressure and trigger != null))) .compaction else .assistant_response;
         try std.testing.expectEqual(expected, nextPurpose(facts));
         try std.testing.expectEqual(compacts, recoversOverflow(.assistant_response, true, compacts));
     };
