@@ -1,10 +1,8 @@
-import hashlib
-import os
 import pathlib
 import subprocess
 import sys
 
-from host_process import is_peer_disconnect
+from host_process import is_peer_disconnect, store_endpoint
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -15,11 +13,6 @@ def status(store, *, timed=False):
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
-
-
-def socket_path(store):
-    digest = hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]
-    return pathlib.Path(f"/tmp/rui-{os.geteuid()}/{digest}.sock")
 
 
 def complete_response(stream):

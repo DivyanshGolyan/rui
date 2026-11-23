@@ -311,46 +311,11 @@ func (h *Host) StopWithExit(allowance time.Duration) (HostExit, error) {
 		stderrError = nil
 	}
 	status := HostExit{StopSignalSent: stopSignalSent}
-	var retireError error
 	if h.Cmd.ProcessState != nil {
 		status.Exited = true
 		status.Code = h.Cmd.ProcessState.ExitCode()
 	}
-	if h.Cmd.ProcessState != nil {
-		retireError = retireSocket(h.Ready["socket"], h.Ready["store"])
-	}
-	return status, errors.Join(killError, waitError, stdoutError, stderrError, retireError)
-}
-
-// retireSocket removes a reaped Host's socket and its .store hint (#1855, #1880) once the
-// socket refuses connections and the hint still names this Host's Store. Stop kills the
-// Host, which then never unlinks them; a caller that deletes the Store afterwards would
-// leave a stale socket in the runtime directory. A socket that accepts is a live Host or
-// a successor on the same path, and a hint naming another Store belongs to that Host:
-// both stay. tests/integration/runtime_leftovers.py owns the same rule for Python fixtures.
-func retireSocket(socket, store string) error {
-	if socket == "" || store == "" || !strings.HasSuffix(socket, ".sock") {
-		return nil
-	}
-	hint := strings.TrimSuffix(socket, ".sock") + ".store"
-	named, err := os.ReadFile(hint)
-	if err != nil || string(named) != store {
-		return nil
-	}
-	if err := CheckUnixPath(socket); err != nil {
-		return err
-	}
-	connection, err := DialUnix(socket, time.Second)
-	if err == nil {
-		connection.Close()
-		return nil
-	}
-	if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.ENOENT) {
-		return nil
-	}
-	os.Remove(socket)
-	os.Remove(hint)
-	return nil
+	return status, errors.Join(killError, waitError, stdoutError, stderrError)
 }
 
 // UnixPathLimit is Darwin's sun_path capacity: a path of this many bytes or more, the NUL
