@@ -17,15 +17,15 @@ const lookup_set = rsql.Read(.{
 });
 
 const lookup_record = rsql.Read(.{
-    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND owner=?2 AND server=?3 AND description_content_id=?4 AND input_schema_content_id=?5",
-    .Args = struct { name: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND remote_name=?2 AND owner=?3 AND server=?4 AND description_content_id=?5 AND input_schema_content_id=?6",
+    .Args = struct { name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
     .Row = struct { tool_record_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_record = rsql.Write(.{
-    .sql = "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6)",
-    .Args = struct { id: u64, name: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    .Args = struct { id: u64, name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -59,7 +59,7 @@ const insert_tool_set_member = rsql.Write(.{
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
         "WHERE tool.name=?3 AND tool.owner=?4 AND tool.server=?5 AND description.digest=?6 AND description.byte_length=?7 AND description.private=0 " ++
-        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0",
+        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0 AND tool.remote_name=?10",
     .Args = struct {
         set: u64,
         ordinal: u64,
@@ -70,6 +70,7 @@ const insert_tool_set_member = rsql.Write(.{
         description_bytes: u64,
         input_schema: [32]u8,
         input_schema_bytes: u64,
+        remote: []const u8,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -112,7 +113,7 @@ pub const SavingRecords = struct {
             saving.existing[index] = null;
             if (both) {
                 known = true;
-                a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
             }
         }
         return known;
@@ -122,7 +123,7 @@ pub const SavingRecords = struct {
         for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
             const ids = saving.content_ids[index];
             const id = try a.identity(.tool_record_id);
-            a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] });
+            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] });
         };
     }
 };
@@ -244,7 +245,7 @@ const RecordBatch = struct {
 };
 
 pub const host_tool_records = rsql.Read(.{
-    .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.server,description.content_id AS description_id,description.byte_length AS description_length," ++
+    .sql = "SELECT member.ordinal,tool.name,tool.remote_name,tool.owner,tool.server,description.content_id AS description_id,description.byte_length AS description_length," ++
         "description.digest AS description_digest,description.private AS description_private,input_schema.content_id AS schema_id," ++
         "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
@@ -255,6 +256,7 @@ pub const host_tool_records = rsql.Read(.{
     .Row = struct {
         ordinal: u64,
         name: Bounded(tool_record.max_name_bytes),
+        remote_name: Bounded(tool_record.max_name_bytes),
         owner: tool_record.Owner,
         server: Bounded(tool_record.max_server_bytes),
         description_id: rsql.Positive,
@@ -283,6 +285,7 @@ pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, d
         .description_bytes = each.description.len,
         .input_schema = content_string.digest(each.input_schema),
         .input_schema_bytes = each.input_schema.len,
+        .remote = each.storedRemoteName(),
     });
 }
 
@@ -300,13 +303,14 @@ pub const Selection = struct {
 };
 
 const selection_records = rsql.Read(.{
-    .sql = "SELECT tool.name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema " ++
+    .sql = "SELECT tool.name,tool.remote_name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
     .Args = struct { set: u64 },
     .Row = struct {
         name: Bounded(tool_record.max_name_bytes),
+        remote_name: Bounded(tool_record.max_name_bytes),
         owner: tool_record.Owner,
         server: Bounded(tool_record.max_server_bytes),
         description: [32]u8,
@@ -334,6 +338,7 @@ pub const SavedSelection = struct {
         while (names.next()) |name| if (std.mem.eql(u8, name, row.name.slice())) {
             const identity: tool_record.RecordIdentity = .{
                 .name = row.name.slice(),
+                .remote_name = row.remote_name.slice(),
                 .owner = row.owner,
                 .server = row.server.slice(),
                 .description = row.description,

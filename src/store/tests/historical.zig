@@ -458,6 +458,7 @@ test "a tool walk longer than a page reads the rest from its next member, in ord
             var tools: [count]tool_defs.Record = undefined;
             for (&tools, 0..) |*tool, index| tool.* = .{
                 .name = std.fmt.comptimePrint("tool_{d:0>2}", .{index}),
+                .remote_name = std.fmt.comptimePrint("tool_{d:0>2}", .{index}),
                 .owner = .mcp,
                 .server = "many",
                 .description = std.fmt.comptimePrint("Tool {d}.", .{index}),

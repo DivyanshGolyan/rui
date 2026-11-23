@@ -3431,7 +3431,7 @@ export interface components {
         StartError: {
             rui_start_error: {
                 /** @enum {string} */
-                code: "settings_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision" | "proxy_unusable";
+                code: "settings_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "proxy_unusable";
                 message: string;
             };
         };
@@ -3477,9 +3477,10 @@ export interface components {
                 /** @enum {string} */
                 state: "idle" | "listing" | "waiting";
                 /** @enum {string} */
-                last: "never" | "listed" | "failed" | "collision";
+                last: "never" | "listed" | "failed";
                 finished: components["schemas"]["Decimal"];
                 tools: components["schemas"]["Decimal"];
+                left_out: components["schemas"]["Decimal"];
             }[];
         };
         ToolsStatusRequest: {

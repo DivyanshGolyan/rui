@@ -21,7 +21,7 @@ import os_semantics
 from preset_creation_cases import preset_creation
 from empty_creation_cases import empty_creation
 from preferences_bridge_cases import preferences_bridge
-from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
+from settings_fixture import WIRE, frame, host_info, mcp_server, offered_tool_names, output, post, refusal, wait_for_host
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -73,18 +73,13 @@ def sdk_tool_set(root, good, network, ci):
             for name in ("echo", "fail", "slow", "progress"):
                 collision = mcp_server([name])
                 try:
+                    # The clashing name is offered under its server prefix, so the Host starts and stops cleanly.
                     host = launch(frame(dict(base, tools={"mcp": dict([entry, mcp_entry("collision", collision)])})))
-                    with selectors.DefaultSelector() as selector:
-                        selector.register(host.stdout, selectors.EVENT_READ)
-                        host_process.wait_for(lambda: bool(selector.select(timeout=0)),
-                                              "the SDK tool-set collision refusal", timeout=30)
-                    line = host.stdout.readline()
-                    assert line.startswith(b"{"), (name, "expected a drift-sdk tool-set collision refusal", line)
-                    refused = json.loads(line)["rui_start_error"]
-                    assert host.wait(timeout=20) != 0
-                    assert refused["code"] == "tool_name_collision", refused
-                    assert all(value in refused["message"] for value in
-                               (name, "drift-sdk", "collision")), refused
+                    wait_for_host(runtime / "rui.sock", base["store"]["sqlite"]["dir"], host)
+                    names = offered_tool_names(base["store"]["sqlite"]["dir"])
+                    assert f"collision__{name}" in names and name not in names, (name, sorted(names))
+                    host_process.close_stdin(host)
+                    assert host.wait(timeout=30) == 0, (name, output(host))
                 finally:
                     if host.poll() is None:
                         host.kill()
@@ -534,13 +529,13 @@ def main(network, ci):
     wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
+    # `bash` from clash clashes with the built-in: it is offered as clash__bash, so the Host starts.
     colliding = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs), mcp_entry("clash", clash)])})))
-    line = colliding.stdout.readline()
-    refused = json.loads(line)["rui_start_error"]
-    assert colliding.wait(timeout=20) == 1
-    assert output(colliding)[1].strip(), "a tool-name refusal omitted the stderr diagnostic"
-    assert refused["code"] == "tool_name_collision", refused
-    assert "bash" in refused["message"] and "clash" in refused["message"], refused
+    wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], colliding)
+    names = offered_tool_names(base["store"]["sqlite"]["dir"])
+    assert {"bash", "clash__bash", "search"} <= names, sorted(names)
+    host_process.close_stdin(colliding)
+    assert colliding.wait(timeout=30) == 0, output(colliding)
     docs.shutdown()
     docs.server_close()
     host = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs)])})))

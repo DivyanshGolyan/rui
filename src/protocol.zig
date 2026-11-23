@@ -2715,7 +2715,7 @@ pub const tools_reload_reply = struct {
 /// `instance` names the Host that replied; `servers` lists every configured server in configured order. `tools` counts the server's MCP tools in the set.
 pub const tools_status_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"servers\":[" };
-    pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"state\":\"", Hole{ .tag = @import("mcp/relist.zig").State }, "\",\"last\":\"", Hole{ .tag = @import("mcp/relist.zig").Last }, "\",\"finished\":\"", Hole.decimal, "\",\"tools\":\"", Hole.decimal, "\"}" };
+    pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"state\":\"", Hole{ .tag = @import("mcp/relist.zig").State }, "\",\"last\":\"", Hole{ .tag = @import("mcp/relist.zig").Last }, "\",\"finished\":\"", Hole.decimal, "\",\"tools\":\"", Hole.decimal, "\",\"left_out\":\"", Hole.decimal, "\"}" };
     pub const tail = "]}";
     /// The bound for `servers` configured servers, each one entry.
     pub fn maxBytes(comptime servers: usize) usize {
@@ -4076,7 +4076,7 @@ test "MCP tool reload and status replies bound one entry per configured server" 
     try status.appendShape(tools_status_reply.head, .{@as(InstanceId, @splat(0xab))});
     for (0..servers) |index| {
         if (index != 0) try status.append(",");
-        try status.appendShape(tools_status_reply.entry, .{ longest_name, relist.State.waiting, relist.Last.collision, std.math.maxInt(u64), std.math.maxInt(u32) });
+        try status.appendShape(tools_status_reply.entry, .{ longest_name, relist.State.waiting, relist.Last.failed, std.math.maxInt(u64), std.math.maxInt(u32), std.math.maxInt(u32) });
     }
     try status.append(tools_status_reply.tail);
     try std.testing.expect(try std.json.validate(std.testing.allocator, status.slice()));
