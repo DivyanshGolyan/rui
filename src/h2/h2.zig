@@ -69,13 +69,13 @@ pub fn checkProxy(allocator: std.mem.Allocator, proxy: Proxy) InitError!void {
 
 fn proxyFrom(comptime lookup: fn ([*:0]const u8) callconv(.c) ?[*:0]u8) ?Proxy {
     return .{
-        .url = environmentSetting(lookup, "https_proxy", "HTTPS_PROXY") orelse return null,
-        .no_proxy = environmentSetting(lookup, "no_proxy", "NO_PROXY") orelse "",
+        .url = environmentSetting(lookup, tls_client.environment.https_proxy) orelse return null,
+        .no_proxy = environmentSetting(lookup, tls_client.environment.no_proxy) orelse "",
     };
 }
 
-fn environmentSetting(comptime lookup: anytype, lowercase: [*:0]const u8, uppercase: [*:0]const u8) ?[]const u8 {
-    const value = std.mem.span(lookup(lowercase) orelse lookup(uppercase) orelse return null);
+fn environmentSetting(comptime lookup: anytype, names: [2][:0]const u8) ?[]const u8 {
+    const value = std.mem.span(lookup(names[0]) orelse lookup(names[1]) orelse return null);
     return if (value.len > 0) value else null;
 }
 

@@ -1206,12 +1206,13 @@ def saved_settings(root, env):
         host_ok(env, "set", "--store", proxy_dir, path, value)
     keyless = root / "saved-keyless"
     host_ok(env, "set", "--store", keyless, "providers", '{"openai":{}}')
-    for directory, changes, report in (
+    for directory, changes, report, receipt in (
             (proxy_dir, {"HTTPS_PROXY": "https://proxy.example:1", "https_proxy": "https://proxy.example:1"},
-             "Rui tunnels only through an http:// proxy. The Host did not start."),
-            (keyless, {"RUI_OPENAI_KEY_FILE": str(root / "saved-absent-key")}, "[sign_in_required]")):
+             "Rui tunnels only through an http:// proxy [proxy_unusable]", '"proxy_unusable"'),
+            (keyless, {"RUI_OPENAI_KEY_FILE": str(root / "saved-absent-key")}, "[sign_in_required]", None)):
         failed = run_start(directory, dict(env, **changes))
-        assert failed.returncode != 0 and not failed.stdout and report in failed.stderr, failed
+        assert failed.returncode != 0 and report in failed.stderr, failed
+        assert (receipt in failed.stdout) if receipt else not failed.stdout, failed
         assert "settings_invalid" not in failed.stderr and not matching_processes(directory), failed
 
     print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"

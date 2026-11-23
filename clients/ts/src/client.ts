@@ -9,6 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { prepareSettings, type HostSettings, type PreparedSettings } from "./settings.ts";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
+import { TRANSPORT_ENVIRONMENT } from "./host-environment.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
 import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
@@ -272,9 +273,16 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 }
 
+/**
+ * The application's environment a child Host inherits: process basics, and the proxy and trust variables its transport
+ * reads, so a Host behind a proxy or a private CA reaches its provider and models.dev. Secrets reach it only through
+ * `{ env }` sources in the settings.
+ */
+export const INHERITED_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", ...TRANSPORT_ENVIRONMENT] as const;
+
 export function launchFor(settings: HostSettings, runtimeDir: string, options: ClientOptions = {}): Launch {
 	const env: NodeJS.ProcessEnv = Object.create(null);
-	for (const name of ["PATH", "HOME", "TMPDIR"]) {
+	for (const name of INHERITED_ENVIRONMENT) {
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}

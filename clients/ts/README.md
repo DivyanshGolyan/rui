@@ -74,8 +74,9 @@ await Rui.connect({
 Secret strings are a TypeScript input convenience: the pipe serializer wraps each as `{ value: "secret" }`.
 Explicit `{ value: "secret" }`, `{ file: "/private/key" }`, `{ env: "NAME" }`, and the generated owner/default forms are also accepted where the schema allows them.
 Literal values are permitted only for pipe-origin documents, never settings files.
-The child inherits `PATH`, `HOME` and `TMPDIR`, plus only the environment variables explicitly named by secret `{ env: ... }` sources in the document.
-Unreferenced application, proxy and provider-override environment variables are not inherited.
+The child inherits `PATH`, `HOME`, `TMPDIR`, the proxy variables (`https_proxy`, `HTTPS_PROXY`, `no_proxy`, `NO_PROXY`) and the trust variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`) its transport reads (`TRANSPORT_ENVIRONMENT`, generated from the Host), plus only the environment variables explicitly named by secret `{ env: ... }` sources in the document.
+So a Host started behind the application's proxy or private CA reaches its provider and models.dev; a proxy URL that is not `http://` refuses the start with `proxy_unusable`.
+Other application and provider-override environment variables are not inherited.
 Node can pass environment names only as Unicode strings: a non-UTF-8 byte name is refused with `settings_invalid` and its leaf path rather than silently selecting another key; use a file source instead.
 Literal keys, tokens and MySQL URLs travel only in stdin, never argv, environment or disk; an explicitly selected environment source is inherited instead.
 The client erases its mutable serialized buffers after writes and on close or failed connect; JavaScript strings, including caller-owned inputs and temporary JSON strings, cannot be reliably erased.

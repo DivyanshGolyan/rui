@@ -1343,6 +1343,30 @@ pub fn renderRejections(gpa: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// The transport's environment variables, which a TS client passes to the Host it starts.
+pub fn renderHostEnvironment(gpa: std.mem.Allocator) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try out.writer.writeAll("// Generated from src/tls_client/environment.zig by `zig build openapi`. Do not edit.\n" ++
+        "/** The environment variables a Host's transport reads: its https proxy, no-proxy list and OpenSSL trust store. */\n" ++
+        "export const TRANSPORT_ENVIRONMENT = [");
+    inline for (@import("transport_environment").all, 0..) |name, index| {
+        if (index != 0) try out.writer.writeAll(", ");
+        try out.writer.print("\"{s}\"", .{name});
+    }
+    try out.writer.writeAll("] as const;\n");
+    return out.toOwnedSlice();
+}
+
+test "clients/ts/src/host-environment.ts is what the transport reads" {
+    const emitted = try renderHostEnvironment(std.testing.allocator);
+    defer std.testing.allocator.free(emitted);
+    if (!std.mem.eql(u8, emitted, @embedFile("host-environment.ts"))) {
+        std.debug.print("clients/ts/src/host-environment.ts is stale: run `zig build openapi` and commit it.\n", .{});
+        return error.StaleHostEnvironment;
+    }
+}
+
 test "clients/ts/src/rejections.ts is what the caller catalog emits" {
     const emitted = try renderRejections(std.testing.allocator);
     defer std.testing.allocator.free(emitted);
