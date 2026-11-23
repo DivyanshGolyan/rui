@@ -1,6 +1,8 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
 const tool_settle = @import("tool_settle.zig");
+const server_mcp_relist = @import("server_mcp_relist.zig");
+const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
 const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
@@ -1583,7 +1585,18 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
 noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    find_tools.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    var call = find_tools.read(host.store, arena.allocator(), input) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        else => {
+            fenceDispatch(host, "find_tools core command", err);
+            return .retry_later;
+        },
+    };
+    if (call.reloads()) {
+        // The report writer fails only when the arena is out of memory, the same retry as the search's.
+        call.words.report = findToolsReload(host, arena.allocator()) catch return .retry_later;
+    }
+    find_tools.settle(host.store, input, &call, arena.allocator(), host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -1592,6 +1605,16 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
         },
     };
     return .admitted;
+}
+
+/// A `find_tools` reload asks every configured server through the re-list owner, the same ask `tools_reload` makes,
+/// and settles in this pass: the lists land on the execution loop later, so nothing here waits.
+fn findToolsReload(host: *Host, arena: std.mem.Allocator) ![]const u8 {
+    var asked: [@import("host_settings.zig").max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
+    const count = server_host.askMcpLists(host, null, &asked);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try find_tools.writeReload(&out.writer, asked[0..count]);
+    return out.written();
 }
 
 noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
@@ -5428,6 +5451,378 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     }
     try std.testing.expect(fail_index > 2);
     try std.testing.expect((try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len != entries.len);
+}
+
+/// A reload's test fixture: one configured docs server whose startup list is `startup`, then `later` in order.
+const ReloadScript = struct {
+    const Script = @import("mcp/test_server.zig");
+    script: Script,
+    url: [128]u8 = undefined,
+    servers: [1]server_mcp_settings.Server = .{.{}},
+    fn start(self: *ReloadScript, startup: []const u8, later: []const []const u8) !void {
+        self.script = .{ .reply = startup, .more = later };
+        try self.script.start();
+        try self.servers[0].name.set("docs");
+        @memcpy(self.servers[0].bearer_token.bytes[0..6], "secret");
+        self.servers[0].bearer_token.len = 6;
+        try self.servers[0].url.set(try std.fmt.bufPrint(&self.url, "http://127.0.0.1:{d}/mcp", .{self.script.port}));
+    }
+};
+
+fn listOf(comptime names: []const []const u8) []const u8 {
+    const Script = @import("mcp/test_server.zig");
+    const body = comptime blk: {
+        var text: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[";
+        for (names, 0..) |name, index| {
+            if (index != 0) text = text ++ ",";
+            text = text ++ "{\"name\":\"" ++ name ++ "\",\"inputSchema\":{\"type\":\"object\"}}";
+        }
+        break :blk text ++ "]}}";
+    };
+    return Script.jsonReply(body);
+}
+
+const reload_asked_one = "Asked 1 MCP server to list its tools again: docs. New tools can be searched for with find_tools after a server answers.";
+
+fn reloadText(storage: *store_module.Store, session: @FieldType(@import("action_read.zig").Request, "session"), action_id: u64, out: []u8) ![]const u8 {
+    var read: @import("action_read.zig").Read = undefined;
+    try storage.readAction(&.{ .session = session, .action_id = action_id }, &read);
+    const text = read.status.resolved.window.text.slice();
+    @memcpy(out[0..text.len], text);
+    return out[0..text.len];
+}
+
+/// Configures a Session that offers only `find_tools` and submits one Message, so its next model Operation can settle
+/// calls. Returns the Session.
+fn reloadSession(storage: *store_module.Store, tmp: *std.testing.TmpDir, io: std.Io, comptime name: []const u8) !@FieldType(@import("action_read.zig").Request, "session") {
+    const testing = store_module.testing;
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration(name, "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(storage, tmp, name ++ "-message", name ++ "-message", session.slice(), "reload");
+    return session;
+}
+
+test "a model reload settles in the pass that asks, and a find_tools search finds the tool once its list lands" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{ "alpha", "gamma" }), &.{listOf(&.{ "alpha", "beta" })});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "reload-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    try std.testing.expect(input.tool == .find_tools);
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+
+    // One pass settles the reload: the server is asked again, its generation advanced, and nothing waits.
+    try std.testing.expectEqual(@as(u64, 1), owner.asks[0].load(.acquire));
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    try std.testing.expectEqual(@as(u64, 2), owner.asks[0].load(.acquire));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(reload_asked_one, try reloadText(&storage, session, input.binding.action_id, &text));
+    try std.testing.expect(!storage.isFenced());
+
+    // The list lands in the owner, and a later find_tools search over the offered tools finds the new one.
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expect(storage.hostTools().host_tool_set.find("beta") != null);
+    try std.testing.expect(storage.hostTools().host_tool_set.find("gamma") == null);
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try testing.settleItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+    // The search Session allows beta but has not loaded it, so a words search over its candidates finds beta.
+    var search_cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var search_configure = try testing.completeConfiguration("reload-search-config", "", try testing.canonicalCwd(io, &search_cwd), "model-a");
+    search_configure.configuration.tools = try .of(&.{ "beta", "find_tools" });
+    search_configure.configuration.loaded_tools = try .of(&.{"find_tools"});
+    const search = (try storage.configure(&search_configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "reload-search-config-message", "reload-search-config-message", search.slice(), "search");
+    const search_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, search_model, "reload-search-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"words\\\":\\\"beta\\\"}",
+        .decoded_arguments = "{\"words\":\"beta\"}",
+    }});
+    const search_input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &search_input));
+    var found: [512]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try reloadText(&storage, search, search_input.binding.action_id, &found), "- beta: ") != null);
+}
+
+test "a reload while a list is in flight folds into the next list, one extra list and not two" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const same = listOf(&.{"alpha"});
+    var fixture: ReloadScript = undefined;
+    try fixture.start(same, &.{ same, same });
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "fold-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "fold-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+
+    // A list is already in flight when the reload asks; the reload's generation waits for the list after it.
+    _ = owner.ask(0);
+    var failure: ?anyerror = null;
+    _ = owner.service(&storage, 0, &failure);
+    try std.testing.expect(owner.listing());
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(reload_asked_one, try reloadText(&storage, session, input.binding.action_id, &text));
+
+    // The two asks made before the first list landed fold into one further list: three lists in all.
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(usize, 3), fixture.script.requests.load(.acquire));
+    try std.testing.expectEqual(@as(?anyerror, null), failure);
+}
+
+test "a reload does not hold back a later core Action in another Session" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    // The reload Action is the lowest-id core Action; a search from another Session comes after it.
+    _ = try reloadSession(&storage, &tmp, io, "hold-reload-config");
+    const reload_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, reload_model, "hold-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    _ = try reloadSession(&storage, &tmp, io, "hold-search-config");
+    const search_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, search_model, "hold-search-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"words\\\":\\\"alpha\\\"}",
+        .decoded_arguments = "{\"words\":\"alpha\"}",
+    }});
+    const reload = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &reload));
+
+    // Once the reload settles, the next core Action is the other Session's search, not the reload again.
+    const next = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    try std.testing.expect(next.binding.action_id != reload.binding.action_id);
+    try std.testing.expect(next.tool == .find_tools);
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &next));
+}
+
+test "a reload with no MCP server configured says so and asks nothing" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, io, .{});
+    defer storage.close() catch unreachable;
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("no-mcp-reload-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "no-mcp-reload-message", "no-mcp-reload-message", session.slice(), "reload");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "no-mcp-reload-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":\\\"alpha\\\"}",
+        .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("No MCP servers are configured, so nothing was reloaded.\nNo tools matched. 0 tools are still not loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
+}
+
+test "a find_tools reload with words reports the asks, then the loaded tools, and writes one revision" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    // The Session offers alpha, which the startup list saved, but has not loaded it, so the search can load it.
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("reload-words-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{ "alpha", "find_tools" });
+    configure.configuration.loaded_tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "reload-words-message", "reload-words-message", session.slice(), "reload and search");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-words-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":\\\"alpha\\\"}",
+        .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    const revisions = try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
+
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    try std.testing.expectEqual(@as(u64, 2), owner.asks[0].load(.acquire));
+    var text: [512]u8 = undefined;
+    const bytes = try reloadText(&storage, session, input.binding.action_id, &text);
+    try std.testing.expect(std.mem.startsWith(u8, bytes, reload_asked_one ++ "\nLoaded these tools; they are available on your next request:\n"));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "- alpha: ") != null);
+    try std.testing.expectEqual(revisions + 1, try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a find_tools reload with invalid words is refused and asks no server" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "reload-refused-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-refused-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":7}",
+        .decoded_arguments = "{\"reload\":true,\"words\":7}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Rui could not find tools: words must be a string. Nothing was loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
+    // The refused call asked no server: the owner's generation is still the one the startup list left.
+    try std.testing.expectEqual(@as(u64, 1), owner.asks[0].load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a find_tools reload under heap exhaustion retries later without fencing, and its asks fold into one more list" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const same = listOf(&.{"alpha"});
+    var fixture: ReloadScript = undefined;
+    try fixture.start(same, &.{ same, same, same });
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "reload-oom-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-oom-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const admission = runFindTools(&host, &input);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
+            break;
+        }
+        try std.testing.expectEqual(execution_turn.Admission.retry_later, admission);
+    }
+    // Attempts that failed after asking leave their asks in place; the owner's one list covers all of them.
+    try std.testing.expect(owner.asks[0].load(.acquire) >= 3);
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(reload_asked_one, try reloadText(&storage, session, input.binding.action_id, &text));
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(usize, 2), fixture.script.requests.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "aggregate custody reconciles MCP and slots and rejects tokens shared across populations" {

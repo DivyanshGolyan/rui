@@ -406,7 +406,8 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try store.settleCallsForTesting(&storage, &tmp, model, "load-intent-call", &.{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch_b\\\"}", .decoded_arguments = "{\"words\":\"fetch_b\"}" }});
                 const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-                try @import("find_tools.zig").run(&storage, arena.allocator(), &input, .{});
+                const found = try @import("find_tools.zig").read(&storage, arena.allocator(), &input);
+                try @import("find_tools.zig").settle(&storage, &input, &found, arena.allocator(), .{});
                 try std.testing.expectEqual(a_loaded, try intended(&storage, session.slice(), "fetch_a", true));
                 try std.testing.expect(try intended(&storage, session.slice(), "fetch_b", true));
                 const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;

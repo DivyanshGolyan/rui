@@ -380,6 +380,21 @@ else:
                 self.assertFalse((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
                 self.receipt['inputs'][foreign] = self.inputs[foreign]
 
+    def test_a_local_compile_refuses_a_stale_store_table(self):
+        (self.root / 'build').mkdir(exist_ok=True)
+        (self.root / 'src/store').mkdir(parents=True, exist_ok=True)
+        (self.root / 'build/product.zig').write_text('pub const rsql_table_inputs = [_][]const u8{"input"};\n')
+        (self.root / 'input').write_text('statements')
+        fresh = build_artifact.rsql_table.fingerprint(self.root)
+        for recorded, refused in ((fresh, False), ('0' * 32, True)):
+            with self.subTest(refused=refused):
+                (self.root / 'src/store/rsql_table.zig').write_text(f'pub const inputs = "{recorded}";\n')
+                if refused:
+                    with self.assertRaises(SystemExit):
+                        build_artifact.refuse_stale_table(self.root)
+                else:
+                    build_artifact.refuse_stale_table(self.root)
+
     def test_unsplit_restore_cli_ignores_the_skipped_unit_artifact_id(self):
         with patch.object(sys, 'argv', ['build_artifact.py', 'restore', '["test"]',
                                        '--artifact-id', '101', '--artifact-id', '']):

@@ -428,7 +428,7 @@ The adapter Session selections are not non-interactive CLI commands:
 
 `rui request wait HANDLE` or `rui request wait --store PATH --key KEY` accepts optional `--timeout-seconds N`, a positive integer from 1 through 86400, default 300; other values are invalid arguments.
 Handle resolution is the same as `request inspect`, without keeping the capture open between reads.
-`client.waitCommand` owns the single poll loop, starting at 250 ms and rising to 2 s like the TypeScript feed follower.
+`client.waitCommand` owns the single poll loop, starting at 250 ms and rising to 2 s.
 It passes the last full reply's `since` token to `observeCommand`; `not_modified` retains that full observation and updates the token.
 Busy or transient read replies matching the shared Host-unavailable classifier are retried within the timeout; transport disappearance and other read failures retain their existing failure path.
 There is no new Host thread or resident waiter, and the client adds no thread. A line holds no waiter and carries no saved fact: it is the one held connection, [documented here](#live-line).
