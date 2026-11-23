@@ -263,7 +263,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	/**
-	 * The one owner of the Store-failed latch. Every fence signal reaches it: a reply that `isStoreFence`, and the
+	 * The one owner of the Store-failed latch. Every fence signal reaches it: a canonical 500 reply (`isCanonicalFailure`), and the
 	 * `store_fenced` line. The first latch wins, rejects the pending calls with the same error and stops restarts.
 	 */
 	#latchStoreFailed(cause: unknown): RuiStoreFailedError {

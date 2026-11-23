@@ -211,20 +211,51 @@ test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and not
 		}
 	});
 
-	await t.test("dispatch_fenced from an ordinary stop is not a signal: the call gets its own error and the Host restarts", async () => {
-		const { rui, close } = await openScripted([{ kind: "reply_then_exit", status: 503, body: dispatched }], []);
-		try {
-			const exited = once(rui, "exit");
-			const stopped = await failureOf(info(rui));
-			assert.ok(stopped instanceof RuiRequestError);
-			assert.equal(stopped.code, "dispatch_fenced");
-			const [event] = await exited;
-			assert.equal(event.restarting, true);
-			assert.ok(Buffer.isBuffer(await info(rui)));
-		} finally {
-			await close();
-		}
-	});
+	const dispatchOutcomes: { name: string; steps: Step[]; latched: boolean; restarting?: boolean }[] = [
+		{
+			name: "a 503 dispatch_fenced followed by a store_fenced line and an exit latches RuiStoreFailedError, and the Host is not restarted",
+			steps: [{ kind: "reply_then_fence", status: 503, body: dispatched }],
+			latched: true,
+			restarting: false,
+		},
+		{
+			name: "a 503 dispatch_fenced followed by a plain exit, as a stop or cleanup phase does, is its own error and the Host restarts",
+			steps: [{ kind: "reply_then_exit", status: 503, body: dispatched }],
+			latched: false,
+			restarting: true,
+		},
+		{
+			name: "a 503 dispatch_fenced from a Host still running past the grace is its own error and does not latch",
+			steps: [{ kind: "reply", status: 503, body: dispatched }],
+			latched: false,
+		},
+	];
+	for (const outcome of dispatchOutcomes) {
+		await t.test(outcome.name, async () => {
+			const { rui, close } = await openScripted(outcome.steps, []);
+			try {
+				const exited = outcome.restarting === undefined ? undefined : once(rui, "exit");
+				const first = await failureOf(info(rui));
+				if (outcome.latched) {
+					assert.ok(first instanceof RuiStoreFailedError);
+					assert.equal(first.code, "store_failed");
+				} else {
+					assert.ok(first instanceof RuiRequestError);
+					assert.equal(first.code, "dispatch_fenced");
+					assert.ok(!(first instanceof RuiStoreFailedError));
+				}
+				if (exited) {
+					const [event] = await exited;
+					assert.equal(event.restarting, outcome.restarting);
+				}
+				const later = await failureOf(info(rui));
+				if (outcome.latched) assert.equal(later, first);
+				else assert.equal(later, undefined, "a Host that is not fenced still answers");
+			} finally {
+				await close();
+			}
+		});
+	}
 
 	await t.test("an exit without the fence line restarts the Host and the call gets RuiUnavailableError, not the latch", async () => {
 		const { rui, close } = await openScripted([{ kind: "exit" }], [{ kind: "exit" }], []);
