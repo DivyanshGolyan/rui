@@ -9,7 +9,8 @@ pub const ReasoningEffort = catalog.ReasoningEffort;
 pub const validModelSyntax = catalog.validModelSyntax;
 
 pub const CompactionPolicy = struct {
-    compaction_trigger: u64,
+    /// Null when the Session's codec does not compact, so no trigger can fire.
+    compaction_trigger: ?u64,
     output_reservation: u64,
 };
 
@@ -84,10 +85,11 @@ pub fn outputLimit(facts: []const catalog.Entry, model: []const u8) u32 {
     return row.output_limit orelse product_defaults.unlisted_output_limit;
 }
 
-pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
+/// The policy of one Session: `compacts` is its pinned codec's (`codecs.compacts`).
+pub fn compactionPolicy(model: []const u8, compacts: bool, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
     _ = model;
     return .{
-        .compaction_trigger = trigger_override orelse product_defaults.unlisted_context_window * product_defaults.compaction_trigger_percent / 100,
+        .compaction_trigger = if (!compacts) null else trigger_override orelse product_defaults.unlisted_context_window * product_defaults.compaction_trigger_percent / 100,
         .output_reservation = reservation_override orelse product_defaults.output_reservation,
     };
 }
@@ -103,19 +105,26 @@ pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_
 
 test "compaction policy never infers a spec from the model catalog" {
     for (catalog.shipped) |row| {
-        const policy = compactionPolicy(row.id, null, null);
+        const policy = compactionPolicy(row.id, true, null, null);
         const expected: u64 = 115200;
-        try std.testing.expectEqual(expected, policy.compaction_trigger);
+        try std.testing.expectEqual(expected, policy.compaction_trigger.?);
         try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
-        const overridden = compactionPolicy(row.id, 7, 3);
-        try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger);
+        const overridden = compactionPolicy(row.id, true, 7, 3);
+        try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger.?);
         try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
     }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
-        try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, true, null, null).compaction_trigger.?);
         try std.testing.expect(!supportsModel(catalog.shipped, other));
     }
-    try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", true, 11, null).compaction_trigger.?);
+}
+
+test "a codec that does not compact has no compaction trigger, whatever the override" {
+    for ([_]?u64{ null, 7 }) |override| {
+        try std.testing.expectEqual(@as(?u64, null), compactionPolicy("model-a", false, override, 3).compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 3), compactionPolicy("model-a", false, override, 3).output_reservation);
+    }
 }
 
 test "CM-11 reasoning effort catalog admission" {

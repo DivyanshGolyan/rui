@@ -3599,7 +3599,7 @@ export interface components {
             /** @enum {string} */
             provider: "codex" | "openai" | "chatgpt";
             model: string;
-            compaction_trigger: components["schemas"]["Decimal"];
+            compaction_trigger: components["schemas"]["Decimal"] | null;
             context_estimate: components["schemas"]["Decimal"] | null;
             output_reservation: components["schemas"]["Decimal"];
             compaction_trigger_override: components["schemas"]["Decimal"] | null;

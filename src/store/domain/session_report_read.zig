@@ -6,6 +6,7 @@ const cli_value = @import("../../cli_value.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const model_capability = @import("../../model_capability.zig");
+const codecs = @import("../../codecs.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const session_report = @import("../../session_report.zig");
 const tool_name = @import("../../tool_name.zig");
@@ -290,7 +291,7 @@ const set_names = rsql.Read(.{
 const CurrentScratch = struct { facts: CurrentFacts, tools: ToolNames };
 
 noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype, pressure: *Pressure) !void {
-    const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
+    const policy = model_capability.compactionPolicy(current.model.slice(), codecs.compacts(current.codec), current.compaction_trigger, current.output_reservation);
     const scratch = a.store.reportScratch(CurrentScratch);
     const facts = &scratch.facts;
     facts.* = .{

@@ -513,14 +513,14 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
     if (self.ready) {
         self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
-        if (self.session.context_estimate) |tokens| {
+        // Without a trigger (a codec that does not compact) the context row is omitted.
+        if (self.session.context_estimate) |tokens| if (self.session.compaction_trigger) |trigger| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
             try status.writeGrouped(&context.writer, tokens);
             try context.writer.writeAll(" of ");
-            // Current validation requires a reported trigger whenever it reports an estimate.
-            try status.writeGrouped(&context.writer, self.session.compaction_trigger.?);
+            try status.writeGrouped(&context.writer, trigger);
             self.fields[5].value = context.written();
-        }
+        };
     }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;

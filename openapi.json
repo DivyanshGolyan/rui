@@ -15145,7 +15145,14 @@
             "x-rui-max-bytes": 256
           },
           "compaction_trigger": {
-            "$ref": "#/components/schemas/Decimal"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "context_estimate": {
             "anyOf": [
