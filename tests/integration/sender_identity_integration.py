@@ -90,13 +90,13 @@ def main():
                 env["RUI_SENDER_HANDLE"] = handle
             if not accepted and (sender is None or not handle):
                 record = state / f"{key}.json"
-                refused = subprocess.run([str(installed), "session", "send", "--to", endpoint.receiver,
+                refused = subprocess.run([str(installed), "session", "send", "--session", endpoint.receiver,
                     "--record", str(record), "--key", key], env=env,
                     text=True, capture_output=True, timeout=15, input="report")
                 assert refused.returncode == 2 and "[peer_context_invalid]" in refused.stderr, refused
                 assert refused.stdout == "" and not record.exists(), refused
                 return None
-            response = run("session", "send", "--to", endpoint.receiver,
+            response = run("session", "send", "--session", endpoint.receiver,
                            "--record", state / f"{key}.json", "--key", key, env=env, accepted=accepted, input="report")
             assert response["answer"]["status"] == ("accepted" if accepted else "rejected"), "wrong admission status"
             if not accepted:
@@ -124,7 +124,7 @@ def main():
         handles = []
         for ending in ("exit", "stop", "crash"):
             session = configure("--tools", "bash", "--permission-mode", "bypass")
-            run("session", "send", "--to", session, input="hold sender")
+            run("session", "send", "--session", session, input="hold sender")
             handle_path = workspace / f"{session}.handle"
             handle = wait_for(lambda: handle_path.read_text() if handle_path.exists() else None, "issued Action handle", timeout=20)
             assert re.fullmatch("[0-9a-f]{32}", handle) and handle not in handles, "invalid or reused handle"
@@ -147,7 +147,7 @@ def main():
                                            ("foreign", ("--store", str(state / "foreign-store")))):
                     key = f"partial-{ending}-{index}-{selection}"
                     record = state / f"{key}.json"
-                    refused = subprocess.run([str(installed), "session", "send", *options, "--to", endpoint.receiver,
+                    refused = subprocess.run([str(installed), "session", "send", *options, "--session", endpoint.receiver,
                         "--record", str(record), "--key", key],
                         env={**environment, **fields}, text=True, capture_output=True, timeout=15, input="report")
                     assert refused.returncode == 2 and "[peer_context_invalid]" in refused.stderr, refused

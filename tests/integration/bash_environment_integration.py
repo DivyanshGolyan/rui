@@ -57,7 +57,7 @@ class Model(TestHTTPServer):
                     self.results.setdefault(session, []).append(found.groups())
                 return fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", "done")[0]
         text = last_user_text(request)
-        command = SHOW if text == "show" else f"printf show | rui session send --to {text.removeprefix('relay ')}"
+        command = SHOW if text == "show" else f"printf show | rui session send --session {text.removeprefix('relay ')}"
         arguments = json.dumps({"cmd": command, "timeout_ms": 20000, "description": "Report the environment"}, separators=(",", ":"))
         return fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", arguments)])
 
@@ -142,7 +142,7 @@ def main(placement="default"):
             return reply["context"]["session"]
 
         def send(environment, session, text, key, expect=0):
-            return run(environment, "session", "send", "--store", store, "--to", session,
+            return run(environment, "session", "send", "--store", store, "--session", session,
                        "--record", state / f"{key}.json", "--key", key, input=text, expect=expect)
 
         def next_result(session, count):

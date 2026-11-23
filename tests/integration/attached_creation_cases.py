@@ -145,7 +145,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         invoke("defaults", "configure", "--store", directory, "--provider", "openai", "--model", "gpt-6.1-sol")
         parent = value("session", "configure", "--store", directory, "--workspace", workspace,
                        "--provider", "codex", *spec)["context"]["session"]
-        seed = invoke("session", "send", "--store", directory, "--to", parent,
+        seed = invoke("session", "send", "--store", directory, "--session", parent,
                       input="seed the parent environment", mark="parent-original")
         wait(announced(seed))
         invoke("session", "configure", "--store", directory, "--session", parent,
@@ -206,7 +206,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
             if door == "start":
                 assert captured["text"] == {"state": "value", "value": TASK}, captured
                 assert endpoint.requested.wait(15), "the atomic child did not reach the provider"
-                newer = invoke("session", "send", "--store", directory, "--to", parent,
+                newer = invoke("session", "send", "--store", directory, "--session", parent,
                                input="replace the parent environment after child creation", mark="parent-newer")
                 wait(announced(newer))
             replay = value("request", "recover", handle, mark="recover-caller")

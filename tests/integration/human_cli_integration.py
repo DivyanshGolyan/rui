@@ -1270,7 +1270,7 @@ def renderer_cases():
         assert b"\x1b" not in rejected.stdout + rejected.stderr, rejected
         pipe_text = "/literal\nstdin café\n"
         pipe_answer = answer("pipe")
-        piped = subprocess.run([str(fixture.RUI), "session", "send", "--store", str(store), "--to", geometry],
+        piped = subprocess.run([str(fixture.RUI), "session", "send", "--store", str(store), "--session", geometry],
             cwd=workspace, env=env, input=pipe_text.encode(), capture_output=True, timeout=10)
         assert piped.returncode == 0 and json.loads(piped.stdout)["answer"]["status"] == "accepted", piped
         assert b"\x1b" not in piped.stdout + piped.stderr, piped
@@ -2177,7 +2177,7 @@ def main(selected="all"):
 
         text = state / "input"
         text.write_text("first input")
-        dropped = invoke(home, "session", "send", "--store", store, "--to", session,
+        dropped = invoke(home, "session", "send", "--store", store, "--session", session,
             "--test-drop-reply", "after-commit", input=text.read_text(), expect=4)
         assert dropped.stdout == "", dropped
         first = CAPTURE_NOTICE.match(dropped.stderr).group(1)
@@ -2192,7 +2192,7 @@ def main(selected="all"):
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
 
-        queued = admit(home, "session", "send", "--to", session,
+        queued = admit(home, "session", "send", "--session", session,
             input="queued behind permission")["request"]
         first_call_release.set()
         attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
@@ -2380,7 +2380,7 @@ def main(selected="all"):
         gate = state / "captured-before-handle"
         with text.open("rb") as stdin:
             caller = subprocess.Popen(
-                [str(fixture.RUI), "session", "send", "--to", session], stdin=stdin,
+                [str(fixture.RUI), "session", "send", "--session", session], stdin=stdin,
                 env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
@@ -2412,7 +2412,7 @@ def main(selected="all"):
         assert sibling_config["context"] == {"store": str(store), "session": sibling_session,
             "key": sibling_config["context"]["key"], "kind": "configure"}, sibling_config
         assert sibling_config["answer"]["status"] == "accepted" and sibling_config["answer"]["created"] is True, sibling_config
-        sibling_key = admit(home, "session", "send", "--to", sibling_session,
+        sibling_key = admit(home, "session", "send", "--session", sibling_session,
             input="two independent Actions")["request"]
         def two_actions():
             candidate = fixture.command("session", "inspect", "--store", store, "--session", sibling_session)
@@ -2446,10 +2446,10 @@ def main(selected="all"):
         ])
         failure_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
-        failed_key = admit(home, "session", "send", "--to", failure_session,
+        failed_key = admit(home, "session", "send", "--session", failure_session,
             input="first failing Turn")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "held first failed Turn")
-        queued_key = admit(home, "session", "send", "--to", failure_session,
+        queued_key = admit(home, "session", "send", "--session", failure_session,
             input="queued successor")["request"]
         waiting = fixture.observe(store, queued_key)
         assert waiting["status"] == "accepted" and waiting["state"] == "queued" and "result" not in waiting, waiting
@@ -2476,10 +2476,10 @@ def main(selected="all"):
             "stopped-message", "must not appear")[0], stop_release))
         stop_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
-        stopped_key = admit(home, "session", "send", "--to", stop_session,
+        stopped_key = admit(home, "session", "send", "--session", stop_session,
             input="running when stopped")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 8, "held stopped Turn")
-        excluded_key = admit(home, "session", "send", "--to", stop_session,
+        excluded_key = admit(home, "session", "send", "--session", stop_session,
             input="queued when stopped")["request"]
         excluded = fixture.observe(store, excluded_key)
         assert excluded["status"] == "accepted" and excluded["state"] == "queued" and "result" not in excluded, excluded
@@ -2494,7 +2494,7 @@ def main(selected="all"):
 
         known_sessions = {row["reference"] for row in json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"]}
         absent = next(candidate for candidate in ("000000", "111111", "222222") if candidate not in known_sessions)
-        rejected = admit(home, "session", "send", "--to", absent,
+        rejected = admit(home, "session", "send", "--session", absent,
             input="unknown session", expect=3)
         assert rejected["admission"]["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, rejected
@@ -2530,7 +2530,7 @@ def main(selected="all"):
             "large-message", large_answer)[0])
         large_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
-        large_key = admit(home, "session", "send", "--to", large_session,
+        large_key = admit(home, "session", "send", "--session", large_session,
             input="large output")["request"]
         fixture.wait_for(lambda: fixture.completed_observation(store, large_key), "large saved answer")
         reader = subprocess.Popen([str(fixture.RUI), "request", "read-result", large_key],
@@ -2565,13 +2565,13 @@ def main(selected="all"):
         race_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
-        prior_receipt = invoke(home, "session", "send", "--to", race_session, input="prior")
+        prior_receipt = invoke(home, "session", "send", "--session", race_session, input="prior")
         prior = CAPTURE_NOTICE.match(prior_receipt.stderr).group(1)
         prior_answer = json.loads(prior_receipt.stdout)
         assert prior_answer["context"] == {"store": str(store), "session": race_session, "key": prior, "kind": "message"}, prior_answer
         assert prior_receipt.stderr == CAPTURE_NOTICE.match(prior_receipt.stderr).group(0), prior_receipt.stderr
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
-        message_a = admit(home, "session", "send", "--to", race_session, input="A")["request"]
+        message_a = admit(home, "session", "send", "--session", race_session, input="A")["request"]
         queued_a = fixture.observe(store, message_a)
         assert queued_a["state"] == "queued" and "result" not in queued_a, queued_a
         race_predecessor_release.set()
@@ -2579,7 +2579,7 @@ def main(selected="all"):
         race_message_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, message_a), "A outcome before Current")
         fixture.wait_for(lambda: fixture.completed_observation(store, prior), "predecessor completion")
-        message_b = admit(home, "session", "send", "--to", race_session, input="B")["request"]
+        message_b = admit(home, "session", "send", "--session", race_session, input="B")["request"]
         def b_action():
             report = fixture.command("session", "inspect", "--store", store, "--session", race_session)
             return report["actionable_permissions"][0]["action"] if report["actionable_permissions"] else None
@@ -2609,7 +2609,7 @@ def main(selected="all"):
         interactive = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
-        interactive_key = admit(home, "session", "send", "--to", interactive,
+        interactive_key = admit(home, "session", "send", "--session", interactive,
             input="interactive request")["request"]
         current_action = fixture.wait_for(lambda: (value if (value := fixture.command("session", "inspect",
             "--store", store, "--session", interactive))["actionable_permissions"] else None), "interactive Action")
@@ -2677,7 +2677,7 @@ def main(selected="all"):
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         unsafe_text = state / "unsafe-input"
         unsafe_text.write_text("report status")
-        run(home, "session", "send", "--to", unsafe_session,
+        run(home, "session", "send", "--session", unsafe_session,
             "--record", state / "unsafe-record.json", "--key", unsafe_key, input=unsafe_text.read_text())
         fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store,
             "--session", unsafe_session)["selected_message"] == unsafe_key, "unsafe key selected")
@@ -2715,7 +2715,7 @@ def main(selected="all"):
             "empty key answer")[0], empty_release))
         empty_input = state / "empty-input"
         empty_input.write_text("empty key input")
-        admission = json.loads(run(home, "session", "send", "--to", empty_session,
+        admission = json.loads(run(home, "session", "send", "--session", empty_session,
             "--record", state / "empty-record.json", "--key", "", input=empty_input.read_text()))
         assert admission["answer"]["status"] == "accepted", admission
         fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store,

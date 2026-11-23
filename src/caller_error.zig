@@ -68,7 +68,6 @@ pub const Code = enum {
     preference_model_invalid,
     preference_provider_required,
     home_unavailable,
-    session_id_needs_to,
     session_id_needs_session,
     invalid_session_reference,
     unknown_session,
@@ -365,7 +364,7 @@ pub const Input = enum {
             }
         }
         return switch (self) {
-            .session => "--session / --to",
+            .session => "--session",
             .sender_handle => "RUI_SENDER_HANDLE",
             .preset => "preset",
             .initial_configuration => "--model, --workspace, --provider",
@@ -397,7 +396,7 @@ pub const Facts = struct {
 pub fn facts(code: Code) Facts {
     return switch (code) {
         .model_id_malformed => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a model ID of 1-256 printable non-space ASCII bytes" }, .says = "The model ID has invalid syntax.", .next = "Supply --model MODEL using a supported ID or a valid unlisted ID with default limits." },
-        .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --to ID with Message text on stdin." },
+        .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --session ID with Message text on stdin." },
         .message_empty => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "nonempty text or an image" }, .says = "The Message is empty.", .next = "Provide nonempty Message text or an image." },
         .message_stdin_unselected => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "stdin selected once with --text-file -" }, .says = "Standard input is not selected or is selected more than once.", .next = "Use --text-file - once to include piped input, or remove the unused input." },
         .message_parts_limit => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "at most 1500 Message parts" }, .says = "The Message has too many parts.", .next = "Use fewer text and image operands." },
@@ -429,7 +428,6 @@ pub fn facts(code: Code) Facts {
         .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --provider and a supported --model." },
         .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --provider chatgpt --model MODEL, or --provider openai --model MODEL." },
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
-        .session_id_needs_to => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--to ID, with Message text on stdin" }, .says = "A positional Session ID is not a destination selector.", .next = "Move the Session ID to --to ID and pipe or redirect the Message into stdin." },
         .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
         .host_option_retired => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That Host flag was removed; use the replacement shown below.", .next = "Use --set with the replacement path and value instead." },
         .host_settings_modes_conflict => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--paths or --check, not both" }, .says = "Listing paths and checking settings are different operations.", .next = "Keep one mode." },

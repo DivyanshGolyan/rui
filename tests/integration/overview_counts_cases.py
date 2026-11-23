@@ -16,7 +16,7 @@ def answer(name):
 
 
 def send(w, session, text):
-    w.run("session", "send", "--store", w.store, "--to", session, input=text)
+    w.run("session", "send", "--store", w.store, "--session", session, input=text)
 
 
 @contextmanager

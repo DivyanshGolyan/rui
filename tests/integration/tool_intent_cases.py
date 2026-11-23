@@ -232,7 +232,7 @@ def frozen_offer_case(engine="sqlite"):
             ]
             session = w.session("--tools", "bash,lookup", "--loaded-tools", "bash,lookup",
                                 "--permission-mode", "bypass")
-            first = admit(w.home, "session", "send", "--store", w.store, "--to", session, input="first")
+            first = admit(w.home, "session", "send", "--store", w.store, "--session", session, input="first")
             wait_for(lambda: len(w.endpoint.requests) == 1, "the held operation's provider request")
             original = w.endpoint.requests[0]
             assert offered_names(json.loads(original)) == ["bash", "lookup"], original

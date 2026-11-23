@@ -28,7 +28,7 @@ def capture(state, binary, label, size, repetition):
     gate = home / "gate"
     send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
         "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
-        str(state / "offline-store"), "--to", "k7m2qx"])
+        str(state / "offline-store"), "--session", "k7m2qx"])
     with source.open("rb") as stdin:
         process = subprocess.Popen([str(binary), *send], stdin=stdin,
             env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},

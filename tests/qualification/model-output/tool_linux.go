@@ -776,7 +776,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		seedRows[index] = map[string]any{"session": name, "bytes": len(text), "sha256": hex.EncodeToString(digest[:]), "estimated_tokens_bytes_div_4": len(text) / 4}
 		key := fmt.Sprintf("seed-%03d", index)
 		var answer map[string]any
-		if err := measurement.RunJSONInput(deadline, bytes.NewReader(text), &answer, binary, "session", "send", "--store", store, "--to", name, "--record", filepath.Join(records, key+".json"), "--key", key); err != nil {
+		if err := measurement.RunJSONInput(deadline, bytes.NewReader(text), &answer, binary, "session", "send", "--store", store, "--session", name, "--record", filepath.Join(records, key+".json"), "--key", key); err != nil {
 			return result, err
 		}
 	}

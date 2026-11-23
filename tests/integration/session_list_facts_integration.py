@@ -82,7 +82,7 @@ def prove_archive(root, home):
         exact = invoke("session", "inspect", "--store", store, "--session", reference)
         assert exact["archive_state"] == "active", exact
         mutate(reference, True, "archive-again")
-        sent = invoke("session", "send", "--store", store, "--to", reference,
+        sent = invoke("session", "send", "--store", store, "--session", reference,
             "--record", root / "restore-by-message.json", "--key", "restore-by-message",
             input="Restore by new work")
         assert sent["answer"]["status"] == "accepted", sent

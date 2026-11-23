@@ -206,9 +206,7 @@ pub const Definition = struct {
                 if (self.positional == null or (parsed.positional != null and (self.positional_tail == null or parsed.positional_tail != null)) or (!literal and arg.len > 1 and arg[0] == '-')) {
                     var code: caller_error.Code = if (self.resource == .session and (std.mem.eql(u8, self.name, "start") or std.mem.eql(u8, self.name, "send"))) .message_not_stdin else .positional_unexpected;
                     if (self.positional == null and session_id.valid(arg)) {
-                        if (self.indexOf("to") != null and !self.selectorPresent(args, "to")) {
-                            code = .session_id_needs_to;
-                        } else if (self.indexOf("session") != null and !self.selectorPresent(args, "session")) {
+                        if (self.indexOf("session") != null and !self.selectorPresent(args, "session")) {
                             code = .session_id_needs_session;
                         }
                     }

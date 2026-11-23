@@ -25,7 +25,7 @@ def answer(text):
 
 
 def send(w, session, text):
-    w.run("session", "send", "--store", w.store, "--to", session, input=text)
+    w.run("session", "send", "--store", w.store, "--session", session, input=text)
 
 
 def wait_state(w, session, kind):
@@ -94,8 +94,8 @@ def queued_in_active():
         second = w.session("--label", "Second peer task")
         dispatcher = w.session("--label", "Dispatcher")
         rui = shlex.quote(str(fixture.RUI))
-        command = (f"printf 'first task' | {rui} session send --to {first} && "
-                   f"printf 'second task' | {rui} session send --to {second}")
+        command = (f"printf 'first task' | {rui} session send --session {first} && "
+                   f"printf 'second task' | {rui} session send --session {second}")
         dict.__getitem__(replies, "dispatch two Messages")[0] = fixture.sse_tool_calls("dispatch", [
             ("bash", "call-dispatch", json.dumps({"cmd": command, "timeout_ms": 20000, "description": "Dispatch"}))])
         try:

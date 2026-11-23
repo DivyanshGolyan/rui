@@ -289,7 +289,7 @@ Marked multiline paste is one Message; ordinary Enter submits when permitted by 
 A paste that would exceed the draft's byte limit is rejected whole with a notice, preserving the preceding draft and caret.
 Typed text over the limit, or malformed or unsafe input, rejects the draft at its line end even if later shortened.
 App owns incomplete-input handling; Rui imposes no separate decoder deadlines or byte-fragment ordering contract.
-If cursor placement cannot be established safely, decline the edit explicitly without a request and direct the caller to one-shot `session send --to ID < FILE`.
+If cursor placement cannot be established safely, decline the edit explicitly without a request and direct the caller to one-shot `session send --session ID < FILE`.
 The persistent UI uses `vxfw.App` restoration on every exit path and `vaxis.Panic` on a Zig panic.
 Rui does not attest terminal restoration through its exit status; vaxis logs a failed termios restore.
 Only a fresh Enter at an Action's Allow once / Deny choice may decide it; the Host alone validates that exact target.
