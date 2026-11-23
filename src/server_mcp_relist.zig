@@ -713,7 +713,7 @@ test "EXR-70 each ttl cycle of one list draws its own jitter" {
     try std.testing.expect(second_deadline - first_deadline - 120_000 != first_deadline - 120_000);
 }
 
-test "EXR-70 a publish that fails clears the deadline and leaves the retry to backoff" {
+test "EXR-70 a publish that fails leaves the retry to backoff" {
     const Script = @import("mcp/test_server.zig");
     const store_module_testing = @import("store.zig").testing;
     const io = std.testing.io;

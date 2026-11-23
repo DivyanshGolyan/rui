@@ -8,7 +8,7 @@ pub const ttl_floor_ms: u64 = 60_000;
 pub const max_jitter_ms: u64 = 30_000;
 
 /// What a list that landed says about its freshness. `ttl_ms` is the smallest positive ttlMs over its
-/// pages, or null when no page carried one (absent, 0 or negative): no timer.
+/// pages, or null when no page carried a positive integer one (absent, 0, negative, non-integer or out of range): no timer.
 pub const Listed = struct { ttl_ms: ?u64, seed: u64 };
 pub const Outcome = union(enum) { listed: Listed, failed };
 pub const Last = enum { never, listed, failed };
@@ -290,8 +290,8 @@ test "re-list slots carry the ttl deadline through asks, folds, failures and suc
     const fourth = s.stale_at_ms.?;
     try expectSnap(&s, 201_000, .{ .state = .idle, .asked = 4, .started = 4, .finished = 4, .failures = 0, .retry_at_ms = 201_000, .last = .listed, .due = false, .wake = fourth, .stale_at_ms = fourth });
 
-    // Pending.start returning null ends the begun list as a failure, and a publish failure is settled the same way:
-    // both clear the deadline, so backoff owns the retry.
+    // A begun list that ends as a failure (the shell does this when Pending.start returns null or a publish fails)
+    // leaves no deadline, so backoff owns the retry.
     _ = s.want();
     s.begin();
     s.end(.failed, 300_000);
