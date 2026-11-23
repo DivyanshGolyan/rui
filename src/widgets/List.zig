@@ -60,8 +60,9 @@ pub fn List(comptime Target: type) type {
             userdata: *anyopaque,
             moved: *const fn (*anyopaque, *vxfw.EventContext, Held) anyerror!void,
         };
-        /// `held` is a left drag, `released` the release that ends it, `free` a move with no button held.
-        pub const Held = struct { over: ?Target, phase: enum { held, released, free } };
+        /// `held` is a left drag, `released` the release that ends it. Presses stay `on_press` clicks, and a free
+        /// pointer anywhere on screen is the root's to report.
+        pub const Held = struct { over: ?Target, phase: enum { held, released } };
         pub const Span = struct { row: i17, height: u16, target: ?Target, alternate_target: ?Target = null, regions: []const Region = &.{} };
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
         pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
@@ -140,16 +141,12 @@ pub fn List(comptime Target: type) type {
                 const phase: ?@FieldType(Held, "phase") = switch (mouse.type) {
                     .drag => if (mouse.button == .left) .held else null,
                     .release => if (mouse.button == .left or mouse.button == .none) .released else null,
-                    .motion => if (mouse.button == .none) .free else null,
-                    .press => null,
+                    .motion, .press => null,
                 };
                 if (phase) |held| {
                     const over = if (self.spanAt(mouse)) |span| targetIn(span, mouse.col) else null;
-                    try pointer.moved(pointer.userdata, ctx, .{ .over = over, .phase = held });
-                    if (held != .free) {
-                        ctx.consume_event = true;
-                        return;
-                    }
+                    ctx.consume_event = true;
+                    return pointer.moved(pointer.userdata, ctx, .{ .over = over, .phase = held });
                 }
             }
             // The wheel's shown rows are reported after the draw applies it (scrollReport), never from here:
@@ -1392,7 +1389,7 @@ test "SUI-107 List anchors mixed-height rows at the nearest attainable physical 
     try std.testing.expectEqual(@as(i17, 3), list.shown_at[1].row);
 }
 
-test "List reports a held pointer, its release and a free move over the drawn target under it, and keeps presses as clicks" {
+test "List reports a held pointer and its release over the drawn target under it, and keeps presses as clicks" {
     const rows: []const TestRow = &.{
         .{ .lines = &.{&.{.{ .text = "first controls" }}}, .target = 10, .regions = &.{.{ .start = 4, .end = 7, .target = 20 }} },
         .{ .lines = &.{&.{.{ .text = "second controls" }}}, .regions = &.{.{ .start = 4, .end = 30, .target = 30 }} },
@@ -1421,7 +1418,7 @@ test "List reports a held pointer, its release and a free move over the drawn ta
         .{ .row = 1, .col = 9, .button = .left, .kind = .release, .phase = .released, .over = 30, .consumed = true },
         .{ .row = 1, .col = 9, .button = .none, .kind = .release, .phase = .released, .over = 30, .consumed = true },
         .{ .row = 5, .col = 1, .button = .left, .kind = .release, .phase = .released, .over = null, .consumed = true },
-        .{ .row = 0, .col = 1, .button = .none, .kind = .motion, .phase = .free, .over = 10 },
+        .{ .row = 0, .col = 1, .button = .none, .kind = .motion, .phase = null },
         .{ .row = 0, .col = 1, .button = .right, .kind = .drag, .phase = null },
         .{ .row = 0, .col = 1, .button = .right, .kind = .release, .phase = null },
         .{ .row = 0, .col = 1, .button = .left, .kind = .press, .phase = null, .consumed = true },

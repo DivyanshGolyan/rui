@@ -656,14 +656,23 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
 /// The pointer after a press, from whichever list it is over; only a press on a chat row makes it matter.
 fn appPointer(raw: *anyopaque, ctx: *vxfw.EventContext, held: GroupedList.Held) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.state.carry.pressed == null) return;
-    const revision = self.state.presentation_revision;
-    try self.appNext(ctx, try self.event(.{ .pointer = .{ .over = held.over, .phase = switch (held.phase) {
+    try self.carryPointer(ctx, .{ .over = held.over, .phase = switch (held.phase) {
         .held => .held,
         .released => .released,
-        .free => .free,
-    } } }));
-    ctx.redraw = ctx.redraw or self.state.presentation_revision != revision or held.phase == .released;
+    } });
+}
+
+/// Root saw a press, a move with no button held, or a release no list took, anywhere on screen.
+fn appPointerFree(raw: *anyopaque, ctx: *vxfw.EventContext) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.carryPointer(ctx, .{ .over = null, .phase = .free });
+}
+
+fn carryPointer(self: *Self, ctx: *vxfw.EventContext, value: view.Pointer) !void {
+    if (self.state.carry.pressed == null) return;
+    const revision = self.state.presentation_revision;
+    try self.appNext(ctx, try self.event(.{ .pointer = value }));
+    ctx.redraw = ctx.redraw or self.state.presentation_revision != revision or value.phase == .released;
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
@@ -1162,7 +1171,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .interrupted = interrupted,
     };
-    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .pointer_free = .{ .context = self, .free = appPointerFree }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .caps = &self.caps };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
@@ -5339,7 +5348,7 @@ test "App overview list press follows only after the open child settles and open
     try std.testing.expect(!ctx.quit);
 }
 
-test "a chat row pressed in the list and released on the Archived tab archives it, and a release elsewhere does not" {
+test "a chat row pressed in the list and released on the Archived tab archives it, and a release on a row or off every list does not" {
     const Find = struct {
         fn originOf(surface: vxfw.Surface, target: vxfw.Widget, from: vxfw.RelativePoint) ?vxfw.RelativePoint {
             if (surface.widget.eql(target)) return from;
@@ -5376,7 +5385,9 @@ test "a chat row pressed in the list and released on the Archived tab archives i
             }
         }
     };
-    for ([_]bool{ true, false }) |on_tab| {
+    const Release = enum { tab, row, outside };
+    for (std.enums.values(Release)) |released| {
+        const on_tab = released == .tab;
         const rig = try openListed();
         defer rig.close();
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -5396,10 +5407,33 @@ test "a chat row pressed in the list and released on the Archived tab archives i
         for (0..30) |row| hint = hint or std.mem.indexOf(u8, try drawn.line(@intCast(row)), "Archived  · drop here") != null;
         drawn.deinit();
         try std.testing.expect(hint);
-        const release = if (on_tab) try Find.cell(rig, arena.allocator(), 140, .archived) else try Find.cell(rig, arena.allocator(), 140, .{ .row = other });
+        var release = switch (released) {
+            .tab => try Find.cell(rig, arena.allocator(), 140, .archived),
+            .row => try Find.cell(rig, arena.allocator(), 140, .{ .row = other }),
+            .outside => try Find.cell(rig, arena.allocator(), 140, .{ .row = other }),
+        };
+        // Off every list (the Settings line takes only presses), so Root ends the carry.
+        if (released == .outside) {
+            var shown = try rig.shown(140, 30);
+            defer shown.deinit();
+            for (0..30) |row| if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Settings")) |column| {
+                release = try Find.cell(rig, arena.allocator(), 140, .{ .row = other });
+                release.col = @intCast(column + 2);
+                release.row = @intCast(row);
+                break;
+            };
+        }
         try app_events.mouse(&ctx, release.frame, .{ .col = @intCast(release.col), .row = @intCast(release.row), .button = .left, .type = .drag, .mods = .{} });
         try app_events.mouse(&ctx, release.frame, .{ .col = @intCast(release.col), .row = @intCast(release.row), .button = .left, .type = .release, .mods = .{} });
         try std.testing.expect(!rig.overview.state.carry.carrying);
+        try std.testing.expect(rig.overview.state.carry.pressed == null);
+        if (released == .outside) {
+            // A later drag that starts on a blank list row and ends on Archived carries nothing.
+            const tab = try Find.cell(rig, arena.allocator(), 140, .archived);
+            try app_events.mouse(&ctx, tab.frame, .{ .col = 100, .row = 20, .button = .left, .type = .press, .mods = .{} });
+            try app_events.mouse(&ctx, tab.frame, .{ .col = @intCast(tab.col), .row = @intCast(tab.row), .button = .left, .type = .drag, .mods = .{} });
+            try app_events.mouse(&ctx, tab.frame, .{ .col = @intCast(tab.col), .row = @intCast(tab.row), .button = .left, .type = .release, .mods = .{} });
+        }
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, if (on_tab) 1 else 0), Seen.now.archives);
         if (on_tab) {

@@ -460,8 +460,8 @@ pub const Pointer = struct { over: ?Click, phase: enum { held, released, free } 
 
 /// A chat row pressed and dragged onto a tab: a live chat dropped on Archived is archived, an archived one dropped
 /// on Chats is restored, through the same requests as Alt-A and restore. The press itself opens the row as a click
-/// does; the drag starts once a held pointer leaves that row, and any release, a move with no button held, a key
-/// or another click ends it.
+/// does; the drag starts once a held pointer leaves that row. Any other release, any press or move with no button
+/// held anywhere on screen (Root reports those as `free`), a key or another click ends it.
 pub const Carry = struct {
     /// The row the last press opened, until that press ends.
     pressed: ?Reference = null,
@@ -470,11 +470,16 @@ pub const Carry = struct {
     /// The drawn target under the held pointer.
     over: ?Click = null,
 
-    /// The tab that takes the carried row, if any: Archived for a live chat, Chats for an archived one.
+    /// The tab that takes the carried row, if any: Archived for a live chat, Chats for an archived one, none for
+    /// one already being archived (Alt-A refuses it too).
     pub fn dropTarget(self: Carry, state: *const State) ?Click {
         if (!self.carrying) return null;
         const row = state.find(self.pressed.?) orelse return null;
-        return if (row.archive_state == .archived) .sessions else .archived;
+        return switch (row.archive_state) {
+            .active => .archived,
+            .archived => .sessions,
+            .archiving => null,
+        };
     }
 
     fn dropping(self: Carry, state: *const State) bool {
@@ -2855,7 +2860,10 @@ fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfM
     endCarry(state);
     if (!dropped) return;
     switch (target.?) {
-        .archived => archiveIntent(state, .{ .ask = .{ .reference = pressed, .work = (&state.find(pressed).?.state).asOf(state.now_ms), .archive = .active } }, effects),
+        .archived => {
+            const row = state.find(pressed).?;
+            archiveIntent(state, .{ .ask = .{ .reference = pressed, .work = (&row.state).asOf(state.now_ms), .archive = row.archive_state } }, effects);
+        },
         .sessions => archiveIntent(state, .{ .restore = pressed }, effects),
         else => unreachable,
     }
@@ -5939,6 +5947,26 @@ test "a pressed chat dropped on the other tab archives or restores it, and no ot
             try expectEffects(&.{}, effects);
         try std.testing.expectEqual(Carry{}, state.carry);
     };
+}
+
+test "a chat already being archived takes no drop, as Alt-A refuses it" {
+    var archiving = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    archiving.archive_state = .archiving;
+    const b = session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" });
+    var state = try opened(&.{ archiving, b });
+    defer state.deinit();
+    try std.testing.expectEqual(ArchiveState.archiving, state.find(archiving.reference).?.archive_state);
+    _ = try step(&state, .{ .clicked = .{ .target = .{ .open = archiving.reference } } });
+    _ = try step(&state, .{ .pointer = .{ .over = .archived, .phase = .held } });
+    try std.testing.expect(state.carry.carrying and state.carry.dropTarget(&state) == null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ((try controls(arena.allocator(), &state, 38, .{}))[1].segments) |segment| try std.testing.expectEqual(Background.ground, segment.style.background);
+    for ([_]Click{ .archived, .sessions }) |over| {
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .open = archiving.reference } } });
+        _ = try step(&state, .{ .pointer = .{ .over = over, .phase = .held } });
+        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = over, .phase = .released } }));
+    }
 }
 
 test "a carry ends without a request on a free move, a key, another click or a release before any drag" {
