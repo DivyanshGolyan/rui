@@ -1654,7 +1654,7 @@ const NewSessionOptions = struct {
 
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        stderr.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed. [terminal_required]\n", .{purpose});
+        stderr.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --session ID, with Message text on stdin. No Host or Session changed. [terminal_required]\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
@@ -2347,10 +2347,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
 
 fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage, step: *?client.Step) !void {
     const io = init.io;
-    const destination = if (configuration != null) "" else parsed.get("to").?;
-    if (configuration == null and !protocol.validSessionId(destination)) {
-        return error.InvalidSession;
-    }
+    const destination = if (configuration != null) "" else parsed.get("session").?;
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
     var iterator = parsed.ordered();
     var count: usize = 0;
@@ -4899,7 +4896,7 @@ test "stop-all refusal and uncertain recovery golden aggregates to exit four" {
     var out = std.Io.Writer.fixed(&storage);
     try writeSavedRejection(&out, reply);
     try writeUnconfirmed(&out, context, .generated, error.TruncatedResponse);
-    try std.testing.expectEqualStrings("rui session stop: --session / --to: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (internal_unexpected); do not replace uncertain work. Recover it with rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
+    try std.testing.expectEqualStrings("rui session stop: --session: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (internal_unexpected); do not replace uncertain work. Recover it with rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
     const refused = caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer));
     const uncertain = caller_exit.forCode(.unconfirmed, .reply_unconfirmed);
     try std.testing.expectEqual(caller_exit.Status.unconfirmed, refused.merge(uncertain));

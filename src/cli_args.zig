@@ -81,7 +81,7 @@ pub const Command = enum {
         return switch (self) {
             .session_start => .{ .resource = .session, .name = "start", .description = "Compose the first Message from stdin and ordered --text, --text-file and --image operands, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help ++ message_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings ++ message_operands, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults or a named preset; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ preset ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Compose a Message from stdin and ordered --text, --text-file and --image operands and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. An empty composition sends nothing.", .details = message_help, .options = destination ++ capture ++ &[_]Option{value("to", "ID")} ++ message_operands, .mutation = true, .requires = &.{&.{"to"}} },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Compose a Message from stdin and ordered --text, --text-file and --image operands and admit it to --session ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. An empty composition sends nothing.", .details = message_help, .options = destination ++ session ++ capture ++ message_operands, .mutation = true, .requires = need_session },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ .code = .all_excludes_session, .a = "all", .b = "session" }, .{ .code = .all_excludes_record, .a = "all", .b = "record" }, .{ .code = .all_excludes_key, .a = "all", .b = "key" }, .{ .code = .all_excludes_key, .a = "all", .b = "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
@@ -283,23 +283,6 @@ pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
     try writer.print("Use rui {s} COMMAND --help for options.\n", .{@tagName(resource)});
 }
 
-const retired_names = [_][2][]const u8{
-    .{ "exec", "session configure|send" },                 .{ "follow", "request inspect" },                      .{ "wait-session", "session inspect" },
-    .{ "result", "request read-result" },                  .{ "setup", "defaults inspect|configure" },            .{ "serve", "host serve" },
-    .{ "login", "auth login" },                            .{ "configure", "session configure" },                 .{ "message", "session send" },
-    .{ "inspect-session", "session inspect" },             .{ "sessions", "session list" },                       .{ "stop-session", "session stop" },
-    .{ "interrupt-model", "session interrupt-model" },     .{ "read-conversation", "session read-conversation" }, .{ "resume", "session resume" },
-    .{ "observe-command", "request inspect" },             .{ "recover", "request recover" },                     .{ "retry", "request recover" },
-    .{ "read-result", "request read-result" },             .{ "requests", "request list" },                       .{ "inspect-action", "action inspect" },
-    .{ "allow-action", "action allow" },                   .{ "deny-action", "action deny" },                     .{ "read-action-call-id", "action read-call-id" },
-    .{ "read-action-arguments", "action read-arguments" }, .{ "host stop", "host pause" },
-};
-
-pub fn retired(name: []const u8) ?[]const u8 {
-    for (retired_names) |entry| if (std.mem.eql(u8, entry[0], name)) return entry[1];
-    return null;
-}
-
 pub fn find(resource: Resource, name: []const u8) ?Command {
     inline for (comptime std.meta.tags(Command)) |command| {
         const definition = command.definition();
@@ -339,14 +322,14 @@ test "option name set covers every grammar and rejects unknown names" {
 }
 
 test "CLI-2 invalid_input_is_local" {
-    try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
-    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, false);
-    try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
-    try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
-    for ([_][]const u8{ "--session", "--session-hex" }) |old|
-        try expectValidation(.session_send, &.{ "--to", "a", old, "value", "hi" }, error.UnknownArgument);
-    try expectValidation(.session_send, &.{ "--store", "path", "--to", "k7m2qx" }, false);
-    try expectValidation(.session_send, &.{"--to"}, error.MissingArgumentValue);
+    try expectValidation(.session_send, &.{ "--session", "a", "--session", "a", "hi" }, error.DuplicateArgument);
+    try expectValidation(.session_send, &.{ "--session", "a", "--text", "f" }, false);
+    try expectValidation(.session_send, &.{ "--session", "a", "hi", "again" }, error.InvalidArguments);
+    try expectValidation(.session_send, &.{ "--session", "a", "--bogus" }, error.UnknownArgument);
+    for ([_][]const u8{ "--to", "--session-hex" }) |old|
+        try expectValidation(.session_send, &.{ "--session", "a", old, "value", "hi" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{ "--store", "path", "--session", "k7m2qx" }, false);
+    try expectValidation(.session_send, &.{"--session"}, error.MissingArgumentValue);
     try expectValidation(.session_configure, &.{ "--output-schema", "f", "--text-output" }, error.ConflictingArguments);
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
     try expectValidation(.request_inspect, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
@@ -355,15 +338,15 @@ test "CLI-2 invalid_input_is_local" {
     for ([_][]const u8{ "--session", "--record", "--key", "--key-hex" }) |single|
         try expectValidation(.session_stop, &.{ "--all", single, "6b" }, error.ConflictingArguments);
     try expectValidation(.session_list, &.{"--json"}, error.UnknownArgument);
-    try expectValidation(.session_send, &.{ "--to", "--help" }, false);
-    try expectValidation(.session_send, &.{ "--to", "a", "--", "-" }, error.InvalidArguments);
-    try expectValidation(.session_send, &.{ "--to", "a", "-" }, error.InvalidArguments);
+    try expectValidation(.session_send, &.{ "--session", "--help" }, false);
+    try expectValidation(.session_send, &.{ "--session", "a", "--", "-" }, error.InvalidArguments);
+    try expectValidation(.session_send, &.{ "--session", "a", "-" }, error.InvalidArguments);
     try expectValidation(.session_start, &.{"inline text"}, error.InvalidArguments);
     try expectValidation(.session_start, &.{ "--instructions", "-" }, error.UnknownArgument);
     try expectValidation(.session_configure, &.{ "--instructions", "file" }, error.InvalidInstructionsSource);
     try expectValidation(.session_configure, &.{ "--instructions", "-", "--output-schema", "-" }, error.ConflictingArguments);
     try expectValidation(.session_configure, &.{ "--instructions", "-" }, false);
-    try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);
+    try expectValidation(.session_send, &.{ "--session", "a", "--help" }, true);
     try expectValidation(.session_resume, &.{ "--store", "/s", "REF" }, false);
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
@@ -491,11 +474,11 @@ test "live /configure and /setup share the one-shot grammar" {
 }
 
 test "complete syntax still names the first missing requirement" {
-    try std.testing.expectEqualStrings("to", (try expectMissing(.session_send, &.{})).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a" }) == null);
-    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--to", "a", "--key", "k" })).?);
-    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--to", "a", "--record", "r" })).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--test-drop-reply", "x" }) == null);
+    try std.testing.expectEqualStrings("session", (try expectMissing(.session_send, &.{})).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--session", "a" }) == null);
+    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--session", "a", "--key", "k" })).?);
+    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--session", "a", "--record", "r" })).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--session", "a", "--test-drop-reply", "x" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s", "--session", "a" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s" }) != null);
     try std.testing.expect(try expectMissing(.session_stop, &.{"--all"}) == null);
@@ -504,10 +487,6 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expectEqualStrings("kind", (try expectMissing(.request_recover, &.{ "--record", "r" })).?);
     try std.testing.expect(try expectMissing(.defaults_configure, &.{}) != null);
     try std.testing.expect(try expectMissing(.session_configure, &.{}) == null);
-    try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
-    try std.testing.expect(retired("session") == null and retired("fix the build") == null);
-    try std.testing.expectEqualStrings("host pause", retired("host stop").?);
-    try std.testing.expect(retired("session stop") == null and find(.host, "stop") == null);
 }
 
 test "store schema requires an explicit mysql engine" {
@@ -556,8 +535,8 @@ fn expectRefusal(command: Command, args: []const []const u8, code: caller_error.
 
 test "parser refusals identify each invocation cause and its witness" {
     _ = try expectRefusal(.session_list, &.{"--bogus"}, .option_unknown, "--bogus");
-    _ = try expectRefusal(.session_send, &.{ "--to", "a", "--to", "b" }, .option_repeated, "to");
-    _ = try expectRefusal(.session_send, &.{"--to"}, .option_value_missing, "to");
+    _ = try expectRefusal(.session_send, &.{ "--session", "a", "--session", "b" }, .option_repeated, "session");
+    _ = try expectRefusal(.session_send, &.{"--session"}, .option_value_missing, "session");
     _ = try expectRefusal(.session_list, &.{"literal"}, .positional_unexpected, "literal");
     _ = try expectRefusal(.session_start, &.{"literal"}, .message_not_stdin, "literal");
     const bad_hex = try expectRefusal(.session_inspect, &.{ "--store-hex", "zz" }, .hex_malformed, "store-hex");
@@ -763,11 +742,11 @@ test "conflict golden lines name every incompatible spelling and complete repair
 }
 
 test "Session IDs in positional argv name the missing selector flag" {
-    _ = try expectRefusal(.session_send, &.{"v948er"}, .session_id_needs_to, "v948er");
-    _ = try expectRefusal(.session_send, &.{ "v948er", "--store", "/s" }, .session_id_needs_to, "v948er");
-    _ = try expectRefusal(.session_send, &.{ "v948er", "--to", "k7m2qx" }, .message_not_stdin, "v948er");
-    _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
-    _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
+    _ = try expectRefusal(.session_send, &.{"v948er"}, .session_id_needs_session, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "v948er", "--store", "/s" }, .session_id_needs_session, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "v948er", "--session", "k7m2qx" }, .message_not_stdin, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "--session", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "--record", "--session", "v948er" }, .session_id_needs_session, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
     inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
@@ -890,7 +869,7 @@ test "parent relation reaches only creating command grammars without hiding cano
         try expectValidation(command, &.{"--parent"}, error.MissingArgumentValue);
     }
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--parent", "09azvw" }, false);
-    try expectValidation(.session_send, &.{ "--to", "k7m2qx", "--parent", "09azvw" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{ "--session", "k7m2qx", "--parent", "09azvw" }, error.UnknownArgument);
 }
 
 test "preset is a Configure option and Start refuses it" {

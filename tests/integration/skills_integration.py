@@ -186,7 +186,7 @@ def main():
             endpoint.decoded()
 
         def send(key, text, session=None):
-            result = invoke("session", "send", "--store", store, "--to", session or parent,
+            result = invoke("session", "send", "--store", store, "--session", session or parent,
                             "--record", state / f"{key}.json", "--key", key, text=text)
             assert result["answer"]["status"] == "accepted", result
             complete(key)
@@ -334,7 +334,7 @@ def main():
 
         typed = "inline prose /demo then /shared, /tmp/x and /month stay text, /demo once, 雪\n"
         inline_record = state / "inline-mixed.json"
-        mixed = invoke("session", "send", "--store", store, "--to", parent, "--record", inline_record,
+        mixed = invoke("session", "send", "--store", store, "--session", parent, "--record", inline_record,
                        "--key", "inline-mixed", text=typed)
         assert mixed["answer"]["status"] == "accepted", mixed
         complete("inline-mixed")
@@ -410,7 +410,7 @@ def main():
                                 ("unknown-session", "zzzzzz", "unknown_session")):
             key = f"inline-refused-{label}"
             record = state / f"{key}.json"
-            arguments = ["session", "send", "--store", store, "--to", to, "--record", record, "--key", key]
+            arguments = ["session", "send", "--store", store, "--session", to, "--record", record, "--key", key]
             fresh = subprocess.run([str(fixture.RUI), *map(str, arguments)], input="/shared and /demo", text=True,
                                    capture_output=True, timeout=15, env=environment)
             assert fresh.returncode == 3, (label, fresh.returncode, fresh.stdout, fresh.stderr)

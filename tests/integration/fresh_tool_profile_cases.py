@@ -74,7 +74,7 @@ def fresh_callers(world, engine):
         configured = w.session()
         profile(w, configured, allowed, loaded)
         assert requests_for(w, configured) == []
-        w.run("session", "send", "--to", configured, input="configured")
+        w.run("session", "send", "--session", configured, input="configured")
         first_request(w, configured, loaded)
 
         started = json.loads(w.run("session", "start", "--workspace", w.workspace, input="started"))
@@ -127,7 +127,7 @@ def restrictions_and_resume(world, engine):
                                     "--loaded-tools", "bash,skill", expect=3))
         assert rejected["answer"]["code"] == "loaded_tools_unreachable", rejected
         assert profile(w, narrowed, next_tools, next_tools)["revision"] == current["revision"]
-        w.run("session", "send", "--to", narrowed, input="narrowed-fresh")
+        w.run("session", "send", "--session", narrowed, input="narrowed-fresh")
         first_request(w, narrowed, next_tools)
         for index, (tools, initial, allowed, loaded) in enumerate(cases):
             args = ["--tools", tools, "--permission-mode", "ask"]
@@ -147,7 +147,7 @@ def restrictions_and_resume(world, engine):
                 assert caller.wait(timeout=5) == 0
             resumed = profile(w, session, allowed, loaded, "ask")
             assert resumed["revision"] == revised["revision"], resumed
-            w.run("session", "send", "--to", session, input=f"restricted-{index}")
+            w.run("session", "send", "--session", session, input=f"restricted-{index}")
             first_request(w, session, loaded)
             profile(w, session, allowed, loaded, "ask")
     print(f"tool profiles ({engine}): explicit empty/restricted selections, explicit loaded subsets, label updates and resume preserve authority and first wire", flush=True)
@@ -168,7 +168,7 @@ def discovery(world, engine):
                 fixture.sse_tool_calls(name + "-search", [("find_tools", name + "-find", json.dumps({"words": words}))]),
                 answer(name + "-found"),
             ])
-            w.run("session", "send", "--to", session, input="discover " + name)
+            w.run("session", "send", "--session", session, input="discover " + name)
             finished(w, session)
             first, second = requests_for(w, session)
             assert declarations(first) == set(initial), first
@@ -213,7 +213,7 @@ def attached_child(world, engine):
     with world("attached-tool-profile", replies, active_capacity=2) as w:
         parent = w.session("--tools", "skill,start_agent", "--permission-mode", "ask")
         replies.model = profile(w, parent, ["skill", "start_agent"], ["skill", "start_agent"], "ask")["model"]
-        w.run("session", "send", "--to", parent, input="restricted parent")
+        w.run("session", "send", "--session", parent, input="restricted parent")
         finished(w, parent)
         children = [session for session in references(w) if w.inspect(session)["session"]["parent"] == parent]
         child, = children

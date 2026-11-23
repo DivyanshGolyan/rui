@@ -219,7 +219,7 @@ func (c Client) Message(key, session, text string) error {
 	}
 	var answer map[string]any
 	if err := RunJSONInput(c.Deadline, strings.NewReader(text), &answer, c.Binary,
-		"session", "send", "--store", c.Store, "--to", session, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"session", "send", "--store", c.Store, "--session", session, "--record", filepath.Join(c.Artifacts, key+".json"),
 		"--key", key); err != nil {
 		return err
 	}

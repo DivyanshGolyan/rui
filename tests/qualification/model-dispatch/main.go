@@ -180,7 +180,7 @@ func message(deadline measurement.Deadline, binary, parent, store, key, session 
 	defer input.Close()
 	var answer map[string]any
 	err = measurement.RunJSONInput(deadline, input, &answer, binary,
-		"session", "send", "--store", store, "--to", session, "--record", filepath.Join(parent, key+".json"),
+		"session", "send", "--store", store, "--session", session, "--record", filepath.Join(parent, key+".json"),
 		"--key", key)
 	if err != nil {
 		return err

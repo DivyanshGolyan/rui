@@ -14,7 +14,7 @@ Driving is internal, not public `advance`.
 
 The live human conversation mode handles input, approvals and resume while attached.
 The non-interactive mode serves agents and scripts: mutations return admission receipts, reads observe once and content reads explicitly stream saved bytes.
-There is no `exec`, `follow` or `wait-session` command and no compatibility waiting mode.
+There is no compatibility waiting mode.
 `request wait` is a client-side observation loop for one fixed request, not a Host waiting route: it never starts, resumes or retargets work and holds neither the capture record nor any Host resource between reads.
 Caller scripts can wait for that request and then read its saved answer with `request read-result`; Sessions should use Message delivery and end their turn rather than hold a Bash execution slot waiting.
 
@@ -94,7 +94,7 @@ Failure after upload begins leaves admission unconfirmed; inspection or recovery
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
 Invalid fresh invocation exits 2 with a catalog stderr diagnostic naming the relevant flag or field, accepted inputs and repair.
-A positional Session ID on a command whose selector is a flag names `--to ID` or `--session ID` rather than mistaking the ID for Message text.
+A positional Session ID on a command whose selector is a flag names `--session ID` rather than mistaking the ID for Message text.
 
 The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
 
@@ -243,12 +243,8 @@ Interactive defaults output escapes dynamic fields without changing stored bytes
 The chat’s `/setup` accepts double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
-Versions 1–3 have no saved permission mode.
-A version 1 file reads as notifications on, and Rui writes version 1 while they are on and no effort or permission mode is saved.
-Turning them off writes version 2 with a `notifications=off` line, which an older Rui refuses to read; turning them on again, or removing the file, lets it read preferences again.
-Without saved permissions, a saved effort writes version 3, which adds a `notifications=on|off` line and a `reasoning_effort=LEVEL` line; clearing it writes version 1 or 2 again.
-A saved permission mode writes version 4 with those same lines (an empty `reasoning_effort=` means absent), followed by `permission_mode=ask|bypass`.
-Publication always chooses the lowest version that holds the saved values.
+Versions 1–3 have no saved permission mode; a version 1 file reads as notifications on.
+Rui reads versions 1–3 and saves every update as version 4: `version=4`, the store, provider and model lines, `notifications=on|off`, `reasoning_effort=LEVEL` and `permission_mode=ask|bypass`, where an empty value means absent.
 Only `codex` is selectable as a provider in this slice.
 The CLI owns the bounded file of at most 1,024 bytes, validates private ownership/access and format on read, and serializes updates under a private lock.
 Publication writes/syncs a same-directory temporary file before atomic rename and directory sync, including HOME and `.config` parent entries on first creation.
@@ -361,7 +357,7 @@ Persisted model syntax and transport encoding remain independent of the compiled
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Mutation presentation](#public-operations) and canonical envelope | `canonical-failure-integration`, modes `producers`, `committed`, `interactive`, `presentMutationReply` tests | Negatives fail at exact assertion, not setup. PTYs use one unrenewed ten-second exit deadline. No macOS, power-loss or aggregate claim |
-| CLI help and invocation refusals | `cli_invocation.zig` CLI-1 and CLI-2, `cli_args.zig` grammar tests and `human_cli_integration.py:help_case` | Core tables cover argv decisions and diagnostics; the fixture checks an unwritable HOME, unread stdin and the retired name on a PTY. |
+| CLI help and invocation refusals | `cli_invocation.zig` CLI-1 and CLI-2, `cli_args.zig` grammar tests and `human_cli_integration.py:help_case` | Core tables cover argv decisions and diagnostics; the fixture checks an unwritable HOME and unread stdin. |
 | [Caller capture and recovery](#caller-capture-and-recovery) | `human_cli_integration.py` | Uncertain Bash effect never replayed |
 | Attached CLI creation | `cli_args.zig` parent grammar, `configure_input.zig` parent preference/read dependencies, `client.zig` parent capture through native ingress, `cli.zig` attached start receipt, native `configure parent` Store tests and `attached_creation_cases.py` | Omitted compactAt uses the inherited parent provider and resolved model; no parent preflight read |
 | Immutable creation receipts | Configure and creating-Message admission and replay tests; `start_receipt_cases.py` through `human_cli_integration.py start-receipt` | Creation answer and replay retain revision one after a later configure and restart; addressed configure and ordinary sends omit creation configuration. Exercise bounded answer retrieval against large history and verify it does not read a Full report. |

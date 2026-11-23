@@ -84,7 +84,7 @@ def opening_and_views():
     with world("clicks-open", replies) as w:
         sessions = {name: w.session("--label", name) for name in ("alpha", "bravo")}
         for name, session in sessions.items():
-            w.run("session", "send", "--store", w.store, "--to", session, input=f"ask {name}")
+            w.run("session", "send", "--store", w.store, "--session", session, input=f"ask {name}")
         wait_for_host(w, sessions.values(), finished, "both Sessions answer")
         charlie = w.session("--label", "charlie")
         w.run("session", "archive", "--store", w.store, "--session", charlie)
@@ -147,9 +147,9 @@ def flat_list():
         for n in range(7):
             peers_by_label[f"peer-{n}"] = w.session("--label", f"peer-{n}")
         lead = w.session("--label", "lead", "--tools", "bash", "--permission-mode", "bypass")
-        replies.command = "; ".join(f"printf %s hi | {shlex.quote(str(fixture.RUI))} session send --to {peer}"
+        replies.command = "; ".join(f"printf %s hi | {shlex.quote(str(fixture.RUI))} session send --session {peer}"
                                     for peer in peers_by_label.values())
-        w.run("session", "send", "--store", w.store, "--to", lead, input="fan out")
+        w.run("session", "send", "--store", w.store, "--session", lead, input="fan out")
         wait_for_host(w, [lead, *peers_by_label.values()], finished, "the lead and every peer finish")
         assert replies.lead_requests == 2, replies.lead_requests
 
@@ -275,7 +275,7 @@ def assert_inspection_unchanged(before, after):
 def new_chat_aliases():
     with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
         old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
-        w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+        w.run("session", "send", "--store", w.store, "--session", old, input="old task")
         before = settled_inspection(w, old)
         with w.overview(columns=WIDTH, rows=30) as screen:
             for alias in ("/new", "/clear"):
@@ -308,10 +308,10 @@ def inspection_waits_for_host_retirement():
     with world("inspect-retirement", responses) as w:
         try:
             old = w.session("--label", "Old unchanged")
-            w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+            w.run("session", "send", "--store", w.store, "--session", old, input="old task")
             before = settled_inspection(w, old)
             held = w.session("--label", "Held work")
-            w.run("session", "send", "--store", w.store, "--to", held, input="held task")
+            w.run("session", "send", "--store", w.store, "--session", held, input="held task")
             busy = wait_for(lambda: w.inspect(old), "unrelated Host custody", timeout=60,
                             ready=lambda report: report["execution"]["custody_occupied"] != "0")
             assert busy != before

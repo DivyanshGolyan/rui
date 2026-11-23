@@ -103,17 +103,17 @@ class PeerModel(TestHTTPServer):
             self.b_received.set()
             reply_to = text.splitlines()[1].removeprefix("Parent ID: ")
             assert reply_to == sender_of(request), request
-            send = f"rui session send --to {reply_to} "
+            send = f"rui session send --session {reply_to} "
             report = (send + "> b-reply.json 2> b-reply.err"
                       if self.report_source == "stdin" else
                       "cat > b-report.txt; " +
                       send + "< b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-before; '
-                f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --to {address} '
+                f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --session {address} '
                 f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
-                f"printf %s 'self report generated' | rui session send --to {address} "
+                f"printf %s 'self report generated' | rui session send --session {address} "
                 "> b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
                 'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-after.part && mv b-captures-after.part b-captures-after; '
@@ -132,10 +132,10 @@ class PeerModel(TestHTTPServer):
                    "When done, send findings back to this parent with rui session send.")
         return bash_call("a-ask", (
             "env | sed '/^RUI_SENDER_HANDLE=/d' > a-env.txt; command -v rui > a-which.txt; "
-            f"printf %s 'plain caller elsewhere' | rui session send --store {shlex.quote(str(self.foreign_store))} --to {self.external_session} "
+            f"printf %s 'plain caller elsewhere' | rui session send --store {shlex.quote(str(self.foreign_store))} --session {self.external_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'conflicting-store.json'))} --key conflicting-store "
             "> conflicting-store.out 2> conflicting-store.err || exit 91; "
-            f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
+            f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --session {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
             "[ $? -eq 3 ] || exit 90; "
             f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
@@ -229,13 +229,13 @@ def main(report_source):
                         '{"session":"x","store_hex":"2f73746f7265"}',
                         '{"session":"peer/nul\\u0000雪"}',
                         '{"session":"x","store":"/bad\\u0000path"}'):
-            refused = subprocess.run([str(installed), "session", "send", "--to", address,
+            refused = subprocess.run([str(installed), "session", "send", "--session", address,
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 2 and b"six lowercase Crockford" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
-        for old_flag in ("--session", "--session-hex"):
-            refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
+        for old_flag in ("--to", "--session-hex"):
+            refused = subprocess.run([str(installed), "session", "send", "--session", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 2, refused
@@ -261,7 +261,7 @@ def main(report_source):
             assert rejected.returncode == 2 and all(part in rejected.stderr for part in diagnostic), rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
             assert run(installed, "session", "list", "--store", foreign_store, "--all", home=home) == foreign_listing
-        external = run(installed, "session", "send", "--store", foreign_store, "--to", external_session,
+        external = run(installed, "session", "send", "--store", foreign_store, "--session", external_session,
             input="genuine external send", home=home)
         assert external["answer"]["status"] == "accepted" and external["context"]["session"] == external_session, external
         assert external["context"]["store"] == str(foreign_store), external
@@ -286,7 +286,7 @@ def main(report_source):
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.a = session_a
         run(installed, "defaults", "configure", "--store", store, home=home)
-        ask = subprocess.run([str(installed), "session", "send", "--to", session_a], input="Ask peer/b for 6*7.",
+        ask = subprocess.run([str(installed), "session", "send", "--session", session_a], input="Ask peer/b for 6*7.",
                              text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
@@ -505,7 +505,7 @@ class CohortModel(TestHTTPServer):
             return bash_call(session, (
                 "n=0; while [ ! -e cohort-report-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
                 "[ -e cohort-report-release ] || exit 124; "
-                f"printf %s 'report from {session}' | rui session send --to {self.parent} --record {shlex.quote(str(self.workspace.parent / f'{session}-report.json'))} "
+                f"printf %s 'report from {session}' | rui session send --session {self.parent} --record {shlex.quote(str(self.workspace.parent / f'{session}-report.json'))} "
                 f"--key report-{session} > {session}-report.out 2> {session}-report.err"
             ))
         for item in request["input"]:
@@ -558,8 +558,8 @@ def stdin_start_contract():
 
         failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store_unavailable", status=6)
         host = fixture.start_host(store, None)
-        for args in (("send", "--to", "k7m2qx", "--texts", "input"),
-                     ("send", "--to", "k7m2qx", "literal"),
+        for args in (("send", "--session", "k7m2qx", "--texts", "input"),
+                     ("send", "--session", "k7m2qx", "literal"),
                      ("configure", "--instructions", "input"),
                      ("start", "--instructions", "-")):
             result = invoke("session", *args, "--store", store)
@@ -629,9 +629,9 @@ def stdin_start_contract():
                 ("session", "read-conversation", "--session", session, "--position", "1", "--ordinal", "1"),
                 ("action", "inspect", "--session", session, "--action", "1")):
             failed(invoke(*arguments, "--store", store), "host_not_serving", status=6)
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "host_not_serving", status=6)
+        failed(invoke("session", "send", "--store", store, "--session", session, input=b"offline"), "host_not_serving", status=6)
         socket.unlink()
-        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "host_not_serving", status=6)
+        failed(invoke("session", "send", "--store", store, "--session", session, input=b"offline"), "host_not_serving", status=6)
         offline_record = state / "offline-start.json"
         failed(invoke("session", "start", "--store", store, "--record", offline_record, "--key", "offline-start",
             input=b"admit once after reconnect"), "host_not_serving", status=6)
@@ -723,7 +723,7 @@ def concurrent_peers():
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.parent = parent
-        started = run(installed, "session", "send", "--to", parent, input="Start ten peers", home=home)
+        started = run(installed, "session", "send", "--session", parent, input="Start ten peers", home=home)
         deadline = time.monotonic() + 20
         original = fixture.wait_for(lambda: fixture.completed_observation(store, started["context"]["key"], deadline=deadline),
                                     "parent original result before peer reports", deadline=deadline)
@@ -767,7 +767,7 @@ def concurrent_peers():
         missing_before = run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home)
         assert missing_before["session"] is None and missing_before["pending_messages"] == "0", missing_before
         for kind in ("send", "configure"):
-            args = (("session", "send", "--to", unknown) if kind == "send" else
+            args = (("session", "send", "--session", unknown) if kind == "send" else
                     ("session", "configure", "--store", store, "--session", unknown,
                      "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"))
             refused = run(installed, *args, home=home, expect=3, input="must not run" if kind == "send" else None)

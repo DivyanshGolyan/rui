@@ -77,7 +77,6 @@ class OpenPrTest(unittest.TestCase):
         cases = (
             ({"src/cli.zig"}, "Description", False),
             ({"src/cli.zig"}, "## Summary\n```text\ninput -> owner\n```", True),
-            ({"src/cli.zig"}, "## Shape\nLegacy description", True),
             ({"docs/guide.md"}, "Description", True),
         )
         for paths, body, accepted in cases:
@@ -123,7 +122,7 @@ class OpenPrTest(unittest.TestCase):
         with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
              patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
              patch.object(open_pr, "origin_repo", return_value="example/rui"), \
-             patch.object(open_pr.Path, "read_text", return_value=GOAL + "## Shape"), \
+             patch.object(open_pr.Path, "read_text", return_value=GOAL + "## Summary\n```text\ninput -> owner\n```"), \
              patch.object(open_pr, "branch_changes", return_value=({"src/overview_view.zig"}, {})), \
              patch.object(open_pr, "screens_required", return_value=True), \
              patch.object(open_pr, "overlaps", return_value=[]), patch.object(open_pr, "report"), \

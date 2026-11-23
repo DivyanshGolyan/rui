@@ -65,8 +65,7 @@ The plan checks the text, not whether the issue exists.
 ### Shape before code
 
 Before writing code for a change to `src/`, show the changed structure in a fenced diagram, diff-sketch or tree in the PR's `## Summary`.
-An existing `## Shape` section remains accepted for compatibility.
-The plan checks for a nonempty closed sketch in Summary or the legacy heading; review answers the applicable questions below, not a repeated section template:
+The plan checks for a nonempty closed sketch in Summary; review answers the applicable questions below, not a repeated section template:
 
 - **[Values in](#ownership-and-transitions).** The value each user action or worker result arrives as.
   An input carries what the user saw (the drawn row, list or frame), never state re-read later.

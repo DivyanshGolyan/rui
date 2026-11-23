@@ -195,7 +195,7 @@ def message(state, store, session, ordinal):
         "session", "send",
         "--store",
         store,
-        "--to",
+        "--session",
         session,
         "--record",
         state / f"message-{ordinal}.json",

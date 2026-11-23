@@ -117,10 +117,9 @@ def refusal(changed_paths, body, *, base=None) -> str | None:
                 "with at least three explanation words, "
                 "or 'No issue: <reason>' to the PR body. Body edits do not re-trigger the check; "
                 "re-run the failed jobs of this run after editing the body; no push needed.")
-    if any(path.startswith("src/") for path in changed_paths) and not (
-            re.search(r"^##\s+Shape\s*$", body, re.M) or summary_sketch(body)):
-        return ("PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section "
-                "(CODING_STANDARDS.md#shape-before-code). Add a ## Shape section to the PR body, "
+    if any(path.startswith("src/") for path in changed_paths) and not summary_sketch(body):
+        return ("PRs changing src/ need a nonempty fenced sketch in ## Summary "
+                "(CODING_STANDARDS.md#shape-before-code). Add a fenced sketch under ## Summary in the PR body, "
                 "then re-run the failed jobs of this run; no push needed.")
     return None
 
