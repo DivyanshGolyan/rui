@@ -28,6 +28,8 @@ pub const Relist = struct {
 
     allocator: std.mem.Allocator,
     servers: []const server_mcp_settings.Server,
+    /// Mixed into each list's jitter seed, so Hosts do not time their re-lists in step.
+    seed: u64,
     slots: [hs.max_mcp_servers]relist.Slot = @splat(.{}),
     asks: [hs.max_mcp_servers]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
     pending: [hs.max_mcp_servers]?*offered.Pending = @splat(null),
@@ -74,8 +76,8 @@ pub const Relist = struct {
     };
 
     /// `servers` must outlive the owner.
-    pub fn init(allocator: std.mem.Allocator, servers: []const server_mcp_settings.Server) Relist {
-        return .{ .allocator = allocator, .servers = servers };
+    pub fn init(allocator: std.mem.Allocator, servers: []const server_mcp_settings.Server, seed: u64) Relist {
+        return .{ .allocator = allocator, .servers = servers, .seed = seed };
     }
 
     pub fn deinit(self: *Relist) void {
@@ -171,7 +173,7 @@ pub const Relist = struct {
         }
         try self.publish(store, saved, held[0..self.servers.len]);
         const now_ms = offered.nowMs(io);
-        for (0..self.servers.len) |index| if (held[index]) self.settle(index, .listed, now_ms);
+        for (0..self.servers.len) |index| if (held[index]) self.settleListed(index, now_ms);
         for (0..self.servers.len) |index| self.publishView(index);
     }
 
@@ -236,7 +238,7 @@ pub const Relist = struct {
                         self.settle(index, .failed, now_ms);
                         return progress;
                     };
-                    self.settle(index, .listed, now_ms);
+                    self.settleListed(index, now_ms);
                 },
                 .failed => {
                     self.diagnoseFailure(index);
@@ -257,6 +259,17 @@ pub const Relist = struct {
             }
         }
         return progress;
+    }
+
+    /// Settles a list that landed: its ttl and this list's jitter seed set when it goes stale. Reads the
+    /// ttl before `settle` frees the pending list.
+    fn settleListed(self: *Relist, index: usize, now_ms: u64) void {
+        const pending = self.pending[index].?;
+        const outcome: relist.Outcome = .{ .listed = .{
+            .ttl_ms = pending.ttlMs(),
+            .seed = relist.mix(self.seed, index, self.slots[index].started),
+        } };
+        self.settle(index, outcome, now_ms);
     }
 
     fn settle(self: *Relist, index: usize, outcome: relist.Outcome, now_ms: u64) void {
@@ -368,7 +381,7 @@ test "a re-list of one server decides every server's names from the lists now in
     notes.bearer_token.len = 6;
     try notes.url.set(try std.fmt.bufPrint(&notes_url, "http://127.0.0.1:{d}/mcp", .{notes_script.port}));
     const servers = [_]server_mcp_settings.Server{ docs, notes };
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -426,7 +439,7 @@ test "re-list folds asks made during a list into one more list" {
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -465,7 +478,7 @@ test "a list in flight keeps its generation: an ask made mid-list waits for the 
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -524,7 +537,7 @@ test "published status follows each list and keeps its tool count through a fail
     server.bearer_token.len = 6;
     try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
     const servers = [_]server_mcp_settings.Server{server};
-    var owner = Relist.init(std.testing.allocator, &servers);
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -581,4 +594,70 @@ fn serviceUntilFinished(owner: *Relist, storage: *store_module.Store, generation
         _ = owner.service(storage, 0, &failure);
     }
     try std.testing.expectEqual(@as(?anyerror, null), failure);
+}
+
+fn oneServer(name: []const u8, port: u16) !server_mcp_settings.Server {
+    var server: server_mcp_settings.Server = .{};
+    try server.name.set(name);
+    @memcpy(server.bearer_token.bytes[0..6], "secret");
+    server.bearer_token.len = 6;
+    var url: [128]u8 = undefined;
+    try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{port}));
+    return server;
+}
+
+test "EXR-70 a list with a ttlMs re-lists once the clock passes its deadline, not before" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{timed} };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+
+    // The list is kept until its ttl plus at most a tenth of it (and at most 30 s) has passed.
+    const deadline = owner.wakeAt().?;
+    try std.testing.expect(deadline >= 120_000 and deadline <= 132_000);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, deadline - 1));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, deadline));
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+    try std.testing.expect(storage.hostTools().host_tool_set.find("search") != null);
+}
+
+test "EXR-70 a list without a ttlMs never re-lists by time" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const untimed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"keep\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = untimed };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("notes", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(?u64, null), owner.wakeAt());
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
 }

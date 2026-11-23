@@ -481,6 +481,8 @@ Under `openai-responses/1` the top-level `tools` holds the Operation's whole set
 The Host lists every configured MCP server at startup and re-lists a server when asked (D110).
 One owner on the execution loop keeps at most one list per server in flight, folds asks that arrive mid-list into one more list, and publishes only a complete list in one Store step.
 A list that fails keeps the previous tools and retries with backoff (1 second, doubling, capped at 5 minutes).
+A `tools/list` whose pages carry a positive `ttlMs` is re-listed once its smallest page ttl, at least one minute, plus up to a tenth of it (at most 30 seconds) of jitter, has passed since it landed on the monotonic clock; an absent, zero or negative `ttlMs` sets no timer, a failed list leaves the retry to backoff, and nothing is kept across restarts.
+The Host holds one credential per server per run, so nothing is shared across authorization contexts, and a saved list is offered only until the server lists.
 A client's `tools_reload` asks the owner; the reply carries each asked server's generation, and `tools_status` reports each server's state, last outcome, finished generation, tool count and `left_out` count.
 The model can trigger the same reload with `find_tools` and `reload` true, with or without `words`.
 Its Action asks every configured server through the same owner that `tools_reload` uses, and settles in the pass that asks: its one Tool Result names the servers asked, or says that none is configured. Its search, if it has words, uses the tools offered now.

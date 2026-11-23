@@ -48,6 +48,8 @@ cursor_bytes: [256]u8,
 count: usize,
 arena_used: usize,
 left_out: usize,
+/// The smallest positive `ttlMs` over the pages read so far; null while no page carried one.
+ttl_ms: ?u64,
 
 pub fn init(self: *Listing, server: post.Server, client: post.Client, storage: Storage) Error!void {
     self.* = .{
@@ -62,6 +64,7 @@ pub fn init(self: *Listing, server: post.Server, client: post.Client, storage: S
         .count = 0,
         .arena_used = 0,
         .left_out = 0,
+        .ttl_ms = null,
     };
     try self.openPage();
 }
@@ -85,6 +88,11 @@ pub fn entries(self: *const Listing) []const Entry {
 
 pub fn leftOut(self: *const Listing) usize {
     return self.left_out;
+}
+
+/// How long the listed tools stay fresh: the smallest positive page ttl, or null when no page gave one.
+pub fn ttlMs(self: *const Listing) ?u64 {
+    return self.ttl_ms;
 }
 
 fn openPage(self: *Listing) Error!void {
@@ -123,6 +131,7 @@ pub fn advance(self: *Listing) Error!Outcome {
 
 fn take(self: *Listing, result: []const u8) Error!bool {
     const list = reply.readList(result) catch return error.BadSchema;
+    if (list.ttl_ms) |ttl| self.ttl_ms = if (self.ttl_ms) |kept| @min(kept, ttl) else ttl;
     var tools = reply.Tools.init(list);
     while (tools.next()) |listed| switch (listed) {
         .left_out => |left| self.leave(left.name, "bad definition"),
@@ -305,4 +314,23 @@ test "more tools than the storage holds are left out, not a failed listing" {
     try std.testing.expectEqual(Outcome.listed, try run(&script, storage, &listing));
     try std.testing.expectEqual(@as(usize, 1), listing.entries().len);
     try std.testing.expectEqual(@as(usize, 1), listing.leftOut());
+}
+
+test "EXR-70 a listing keeps the smallest positive ttlMs over its pages" {
+    const first = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":300000,\"nextCursor\":\"p2\",\"tools\":[" ++ search ++ "]}}");
+    const second = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ttlMs\":120000,\"tools\":[" ++ write ++ "]}}");
+    var script: Script = .{ .reply = first, .more = &.{second} };
+    var room: TestRoom = .{};
+    var listing: Listing = undefined;
+    try std.testing.expectEqual(Outcome.listed, try run(&script, room.storage(), &listing));
+    try std.testing.expectEqual(@as(?u64, 120_000), listing.ttlMs());
+
+    // A zero or absent ttl on a later page does not cancel an earlier positive one.
+    const zero = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":0,\"nextCursor\":\"p2\",\"tools\":[" ++ search ++ "]}}");
+    const absent = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[" ++ write ++ "]}}");
+    var none: Script = .{ .reply = zero, .more = &.{absent} };
+    var none_room: TestRoom = .{};
+    var none_listing: Listing = undefined;
+    try std.testing.expectEqual(Outcome.listed, try run(&none, none_room.storage(), &none_listing));
+    try std.testing.expectEqual(@as(?u64, null), none_listing.ttlMs());
 }
