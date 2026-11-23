@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 92;
+pub const schema_version: u32 = 93;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -71,7 +71,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
     .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
-    .{ .schema_version = 92, .digest = 0xf3e9883c7f8384e6 },
+    .{ .schema_version = 92, .digest = 0xdbe10b74e562edbd },
+    .{ .schema_version = 93, .digest = 0xe3fa0d5fd8bbe9ea },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -969,13 +970,6 @@ pub const migrations = [_]Migration{
             "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n remote_name TEXT NOT NULL CHECK(length(CAST(remote_name AS BLOB))<=64 AND (remote_name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(remote_name)=length(CAST(remote_name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp' OR owner='app')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n replay TEXT NOT NULL CHECK(length(CAST(replay AS BLOB))<=6 AND replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay='')),\n restart_limit INTEGER NOT NULL CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0)),\n wait_ms INTEGER NOT NULL CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id),\n CHECK(replay<>'unsafe' OR restart_limit=0)\n) STRICT",
             "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) SELECT tool_record_id,name,remote_name,owner,server,'',0,0,description_content_id,input_schema_content_id FROM tool_record_90",
             "DROP TABLE tool_record_90",
-            // Declarations and lanes: a Session names the app records it declares (NULL: none) and the lane it runs on
-            // (itself for a root, its parent's for a child). Each existing Session takes the lane of its root, derived
-            // from parent_ref by one recursive read.
-            "ALTER TABLE session ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
-            "ALTER TABLE session ADD COLUMN app_lane TEXT REFERENCES session(session_ref) CHECK(app_lane IS NULL OR length(CAST(app_lane AS BLOB))=6)",
-            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) " ++
-                "UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
         },
         .mysql = &.{
             "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='owner = _utf8mb4''rui'' or owner = _utf8mb4''provider'' or owner = _utf8mb4''mcp'''",
@@ -994,7 +988,20 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0))",
             "ALTER TABLE tool_record ADD CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0))",
             "ALTER TABLE tool_record ADD CHECK(replay<>'unsafe' OR restart_limit=0)",
-            // Declarations and lanes, as on SQLite.
+        },
+    },
+    .{
+        .from = 92,
+        .sqlite = &.{
+            // Declarations and lanes: a Session names the app records it declares (NULL: none) and the lane it runs on
+            // (itself for a root, its parent's for a child). Each existing Session takes the lane of its root, derived
+            // from parent_ref by one recursive read.
+            "ALTER TABLE session ADD COLUMN app_tool_set_id INTEGER REFERENCES tool_set(tool_set_id) CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0)",
+            "ALTER TABLE session ADD COLUMN app_lane TEXT REFERENCES session(session_ref) CHECK(app_lane IS NULL OR length(CAST(app_lane AS BLOB))=6)",
+            "WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) " ++
+                "UPDATE session SET app_lane=(SELECT root FROM lanes WHERE child=session.session_ref)",
+        },
+        .mysql = &.{
             "ALTER TABLE session ADD COLUMN app_tool_set_id BIGINT NULL, ADD CHECK(app_tool_set_id IS NULL OR app_tool_set_id>0), ADD FOREIGN KEY(app_tool_set_id) REFERENCES tool_set(tool_set_id)",
             "ALTER TABLE session ADD COLUMN app_lane VARCHAR(6) NULL, ADD FOREIGN KEY(app_lane) REFERENCES session(session_ref)",
             "UPDATE session s JOIN (WITH RECURSIVE lanes(child,root) AS (SELECT session_ref,session_ref FROM session WHERE parent_ref IS NULL UNION ALL SELECT s.session_ref,l.root FROM session s JOIN lanes l ON s.parent_ref=l.child) SELECT child,root FROM lanes) l ON l.child=s.session_ref SET s.app_lane=l.root",
@@ -3993,7 +4000,7 @@ comptime {
     }
 }
 
-test "SH-119 schema 92 migration gives every saved tool record the zero app policy, and every Session no app declaration and its root lane, on SQLite" {
+test "SH-119 schema 92 migration gives every saved tool record the zero app policy and checks app policy on SQLite" {
     const step = migrations[91 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 91), step.from);
     var raw: ?*c.sqlite3 = null;
@@ -4007,11 +4014,6 @@ test "SH-119 schema 92 migration gives every saved tool record the zero app poli
         if (migration.from >= 91) break;
         for (migration.sqlite) |statement| try sqlite.exec(database, statement);
     }
-    // A root with a child and a grandchild, so the lane walk crosses two parent links.
-    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
-        "SELECT 'child1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,2,workspace_digest,workspace_key,'d8mv7p' FROM session WHERE session_ref='d8mv7p'");
-    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
-        "SELECT 'gchld1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,3,workspace_digest,workspace_key,'child1' FROM session WHERE session_ref='d8mv7p'");
     const before = try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record");
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('tool_record') WHERE name='replay'"));
     for (step.sqlite) |statement| try sqlite.exec(database, statement);
@@ -4039,7 +4041,29 @@ test "SH-119 schema 92 migration gives every saved tool record the zero app poli
     try sqlite.exec(database, app_row ++ "1013,'ask','','app','','safe',3,3600000,1,1)");
     try sqlite.exec(database, app_row ++ "1014,'ask','','app','','unsafe',0,900000,1,1)");
     try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(database, "SELECT count(*) FROM tool_record WHERE owner='app'"));
-    // Declarations and lanes: no Session declares app records, and every Session takes its root's lane.
+}
+
+test "SH-120 schema 93 migration gives every Session no app declaration and its root lane, on SQLite" {
+    const step = migrations[92 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 92), step.from);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 92) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    // A root with a child and a grandchild, so the lane walk crosses two parent links.
+    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
+        "SELECT 'child1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,2,workspace_digest,workspace_key,'d8mv7p' FROM session WHERE session_ref='d8mv7p'");
+    try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
+        "SELECT 'gchld1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,3,workspace_digest,workspace_key,'child1' FROM session WHERE session_ref='d8mv7p'");
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    // No Session declares app records, and every Session takes its root's lane.
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_tool_set_id IS NOT NULL"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_lane IS NULL"));
     try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_lane='d8mv7p'"));

@@ -721,7 +721,7 @@ fn dropPinOrganization(storage: *Store) !void {
     };
     try dropBackgroundUpgradeShape(storage);
     // After dropBackgroundUpgradeShape's refusals, so a refused rewind leaves a usable Store.
-    try dropFormat92SessionLanes(storage);
+    try dropFormat93SessionLanes(storage);
     try dropFormat92AppPolicy(storage);
     try dropFormat91OutputLimit(storage);
     try dropFormat89And90Columns(storage);
@@ -758,10 +758,10 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Undoes format 92 on MySQL: the session declaration and lane columns, added in place with their foreign keys
+/// Undoes format 93 on MySQL: the session declaration and lane columns, added in place with their foreign keys
 /// and checks. A column that a key or check names cannot be dropped, so those go first, in one statement.
 /// SQLite's step adds the columns at the end of the table, so it replays unchanged.
-fn dropFormat92SessionLanes(storage: *Store) !void {
+fn dropFormat93SessionLanes(storage: *Store) !void {
     if (storage.engine != .mysql) return;
     try mysql_testing.rawExec(storage, "SET @rui_lane_ddl=(SELECT CONCAT('ALTER TABLE session ',GROUP_CONCAT(ddl SEPARATOR ', ')) FROM (" ++
         "SELECT CONCAT('DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') AS ddl FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME IN ('app_tool_set_id','app_lane') AND REFERENCED_TABLE_NAME IS NOT NULL " ++

@@ -41,7 +41,7 @@ const session_settings = blk: {
 };
 
 pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []const u8) !State {
-    errdefer conn.close();
+    errdefer closeOwned(conn);
     // The database name is also MySQL's connection-owned lock name.
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
@@ -147,19 +147,32 @@ fn refusal(facts: *const FactsRow) ?policy.StartError {
     });
 }
 
-/// Releases the Store's GET_LOCK before the connection closes. COM_QUIT
-/// alone frees it only once the server has ended the session, after close
-/// returns, so a Host reopening the Store at once could find it locked.
+/// Releases the Store's GET_LOCK held by this session. COM_QUIT alone frees
+/// it only once the server has ended the session, after close returns, so a
+/// Host reopening the Store at once (including after a refused admission)
+/// could find it locked. A refusal can come mid-result, so the remaining
+/// results are read first; the server has already run those statements.
 pub fn releaseLock(conn: *wire.Connection) void {
+    while (!conn.isReady()) _ = conn.next() catch return;
+    if (conn.batchLen() != 0) return;
     conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch return;
     conn.sendBatch() catch return;
     _ = conn.next() catch {};
 }
 
+/// Closes a connection that may hold the Store's lock, releasing it first.
+pub fn closeOwned(conn: *wire.Connection) void {
+    releaseLock(conn);
+    conn.close();
+}
+
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
 
 pub fn reclaim(conn: *wire.Connection, database: []const u8, store_id: *const [2 * schema.store_id_bytes]u8, epoch: u64, old_connection_id: u64) !Reclaimed {
-    errdefer conn.disconnect();
+    errdefer {
+        releaseLock(conn);
+        conn.disconnect();
+    }
     conn.useSettings(session_settings, schema.mysql_session.len);
     var w = conn.batch();
     try w.writeAll(facts_sql ++ ";SELECT IS_USED_LOCK(");
