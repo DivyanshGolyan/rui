@@ -228,7 +228,8 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	/**
 	 * The one classification of a failed attempt against `host`, shared by `call` and the line. A canonical Store failure
 	 * latches. A dispatch_fenced reply is classified only once the Host has exited, since stop and cleanup phases also send it.
-	 * A lost connection or a host_stopping reply settles the Host, then allows one retry. Returns when the attempt may be
+	 * A lost connection or a host_stopping reply settles the Host, then allows one retry; only the line (GET /v1/line) receives a
+	 * host_stopping reply. Returns when the attempt may be
 	 * retried; otherwise throws the error the caller reports.
 	 */
 	async #retryAfter(host: Host, error: unknown, retried: boolean): Promise<void> {

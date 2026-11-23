@@ -60,6 +60,7 @@ const instance = ${JSON.stringify(INSTANCE)};
 const store = ${JSON.stringify(STORE)};
 const fenceLine = ${JSON.stringify(fenceLine)};
 let bytes = Buffer.alloc(0), server;
+const sockets = new Set();
 const held = [];
 const fenceAndExit = () => process.stdout.write(fenceLine, () => process.exit(1));
 const respond = (socket, status, body, done) => {
@@ -75,6 +76,8 @@ process.stdin.on("data", chunk => {
   const socketPath = path.join(frame.interface.dir, "rui.sock");
   fs.rmSync(socketPath, { force: true });
   server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
     let input = "";
     let upgraded = false;
     socket.on("data", chunk => {
@@ -129,7 +132,7 @@ process.stdin.on("data", chunk => {
     process.stdout.write("ready instance=" + instance + " store=" + store + "\n");
   });
 });
-process.stdin.on("end", () => { if (!server) return process.exit(0); server.close(() => process.exit(0)); server.closeAllConnections(); });
+process.stdin.on("end", () => { if (!server) return process.exit(0); for (const socket of sockets) socket.destroy(); server.close(() => process.exit(0)); });
 `;
 }
 

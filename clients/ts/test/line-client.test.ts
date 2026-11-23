@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Rui } from "../src/index.ts";
+import { RuiRequestError, type Rui } from "../src/index.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import { nextKeys } from "./scripted-line.ts";
-import { emptyPage, openScriptedLine } from "./scripted-host.ts";
+import { emptyPage, failureOf, info, openScriptedLine } from "./scripted-host.ts";
 
 // TS-14 at the client: how the line's frames become feed reads. The scripted Host's line queue holds the frames of each
 // attempt; `wait` holds the queue until the test sends SIGUSR1, so each frame arrives when the test releases it.
@@ -107,6 +107,22 @@ test("TS-14 the line's frames drive the reads of the watchers", { timeout: 60_00
 			const before = rui.pid;
 			assert.deepEqual(await releaseAndRead(rui, watch, 1, "restart", 10_000), ["h2"]);
 			assert.notEqual(rui.pid, before, "the rows come from the restarted Host");
+		} finally {
+			controller.abort();
+			await close();
+		}
+	});
+
+	await t.test("a line refused with 503 line_capacity_exhausted ends its watchers with RuiRequestError, and later calls still succeed", async () => {
+		const busy = JSON.stringify({ version: WIRE_VERSION, type: "busy", code: "line_capacity_exhausted" });
+		const { rui, close } = await openScriptedLine([[{ refuse: { status: 503, body: busy } }]], []);
+		const controller = new AbortController();
+		try {
+			const watch = rui.getSession(SESSION).watch({ signal: controller.signal });
+			const failure = await failureOf(watch.next());
+			assert.ok(failure instanceof RuiRequestError, `expected RuiRequestError, got ${String(failure)}`);
+			assert.equal(failure.code, "line_capacity_exhausted");
+			assert.ok(Buffer.isBuffer(await info(rui)), "a later call still reaches the Host");
 		} finally {
 			controller.abort();
 			await close();
