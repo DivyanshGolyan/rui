@@ -29,6 +29,7 @@ const skills_domain = @import("domain/skills.zig");
 const content_domain = @import("domain/content.zig");
 const content_parts = @import("domain/content_parts.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
+const tool_offer_domain = @import("domain/tool_offer.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
 const tool_record = @import("../tool_record.zig");
@@ -371,7 +372,8 @@ pub const Store = struct {
             try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            const app = (try tool_set_domain.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms)) orelse tool_record.AppPolicy{};
+            out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema, .app = app };
             digest.* = tool_record.recordDigest(out);
         }
         if (!saved.toolSet().valid()) return error.CorruptStore;
@@ -405,6 +407,21 @@ pub const Store = struct {
         var access: Access(.read, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, tool_set_domain.hostToolRecordsOf(&access, set, ordinal, rows));
+    }
+
+    /// Test seam: the digests the offer and the saved selection rebuild from set `set`'s rows, read in one
+    /// Store entry so both see the same rows.
+    pub fn readToolDigestsForTesting(self: *Store, set: u64, names: *const command_input.ToolsField, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
+        selection.names = names;
+        return self.queue().run(readToolDigestsForTestingHeld, .{ self, set, offer, selection });
+    }
+
+    fn readToolDigestsForTestingHeld(self: *Store, set: u64, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_offer_domain.roundTripDigestsOf(&access, set, offer, selection));
     }
 
     pub fn readHostToolSetText(self: *Store, content_id: u64, destination: []u8) !void {
@@ -1329,7 +1346,8 @@ pub const Store = struct {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
             .read_image => self.queue().run(readImageExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
-            .core, .provider => @compileError("only Action runners have execution input"),
+            // An app call runs in its app; the Host hands it no execution input.
+            .core, .provider, .app => @compileError("only Action runners have execution input"),
         };
     }
 
@@ -1608,7 +1626,8 @@ pub const Store = struct {
             .bash => action_domain.nextAction(&access, .bash, capacity),
             .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .read_image => action_domain.nextAction(&access, .read_image, capacity),
-            .core, .provider => unreachable,
+            // App calls are claimed by their app (a later unit); execution never selects them.
+            .core, .provider, .app => unreachable,
         });
     }
     pub fn resolveAction(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
@@ -2005,7 +2024,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15880 or scratch_bytes != 19048)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15896 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

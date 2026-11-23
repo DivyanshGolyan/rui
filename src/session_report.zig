@@ -21,7 +21,7 @@ pub const Current = struct {
     workspace: []const u8,
     provider: provider_name.Provider,
     model: []const u8,
-    compaction_trigger: u64,
+    compaction_trigger: ?u64,
     context_estimate: ?u64,
     output_reservation: u64,
     compaction_trigger_override: ?u64,

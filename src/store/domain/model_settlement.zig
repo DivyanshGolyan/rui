@@ -14,6 +14,7 @@ const tool_set = @import("tool_set.zig");
 const output_format = @import("../../output_format.zig");
 const retry_policy = @import("../../retry_policy.zig");
 const turn_policy = @import("../../turn_policy.zig");
+const codecs = @import("../../codecs.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const rsql = @import("../rsql.zig");
@@ -445,7 +446,7 @@ pub const SettleFailure = struct {
                 if (try t.reads.floor.next(r)) return .{ .round = .floor_page };
                 return t.settle(r, t.reads.floor.room() != null);
             },
-            .context => return t.settle(r, turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&t.reads.context))),
+            .context => return t.settle(r, turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&t.reads.context), codecs.compacts(t.reads.context.codec))),
         }
     }
 

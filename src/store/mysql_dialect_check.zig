@@ -741,7 +741,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer refusal.deinit();
     try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = names.migrated }, &refusal.writer);
-    defer probe.close();
+    defer @import("engine/mysql_open.zig").closeOwned(probe);
     var found: u32 = 0;
     const opened = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = names.migrated, .found_schema_version = &found }, selector);
     try std.testing.expectEqual(schema.schema_version, found);
@@ -1136,7 +1136,7 @@ test "schema 74 MySQL migration deletes the saved wire label, and the Store open
     var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer refusal.deinit();
     try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = names.migrated }, &refusal.writer);
-    defer probe.close();
+    defer @import("engine/mysql_open.zig").closeOwned(probe);
     var found: u32 = 0;
     _ = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = names.migrated, .found_schema_version = &found }, selector);
     try std.testing.expectEqual(schema.schema_version, found);

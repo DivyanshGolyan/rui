@@ -8,6 +8,8 @@ thread: ?std.Thread = null,
 reply: []const u8,
 more: []const []const u8 = &.{},
 hold_reply: bool = false,
+/// Answers `subscriptions/listen` requests. Without it those requests take the ordinary replies.
+listening: ?*Listening = null,
 request_received: std.atomic.Value(bool) = .init(false),
 /// Requests answered so far, counted before the reply is sent.
 requests: std.atomic.Value(usize) = .init(0),
@@ -15,6 +17,105 @@ connection_closed: std.atomic.Value(bool) = .init(false),
 stopping: std.atomic.Value(bool) = .init(false),
 seen: [4096]u8 = undefined,
 seen_len: usize = 0,
+
+/// A `subscriptions/listen` stream the test holds open. On accept the serve loop writes the opening
+/// (an acknowledgment, or an HTTP refusal) and keeps the socket; the test then pushes, finishes or
+/// drops the stream from its own thread while ordinary requests are still answered.
+pub const Listening = struct {
+    pub const Opening = union(enum) {
+        /// Acknowledges the subscription, its filter keeping `toolsListChanged` when `tools` is set,
+        /// then holds the stream open.
+        acknowledge: struct { tools: bool },
+        /// Answers the subscribe request with this HTTP status and no stream.
+        status: u16,
+    };
+
+    opening: Opening = .{ .acknowledge = .{ .tools = true } },
+    /// Accepted subscribes so far: an acknowledged one counts, a refused one does not.
+    opens: std.atomic.Value(u64) = .init(0),
+    /// The held subscription's id, which is its request's JSON-RPC id. Written before `fd` is published.
+    id: u64 = 0,
+    /// The held socket, or -1. Published only after the opening was sent, so a refused opening owns no fd.
+    fd: std.atomic.Value(std.posix.fd_t) = .init(-1),
+    /// False while the serve loop decides a subscribe; `held` waits for it, so a test never misses the stream.
+    settled: std.atomic.Value(bool) = .init(true),
+
+    /// Called by the serve loop with the accepted socket. Returns true when the stream is held.
+    fn open(self: *Listening, socket: std.posix.fd_t, id: u64) bool {
+        self.settled.store(false, .release);
+        defer self.settled.store(true, .release);
+        switch (self.opening) {
+            .acknowledge => |ack| {
+                var event: [1024]u8 = undefined;
+                const text = std.fmt.bufPrint(&event, "data: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\"," ++
+                    "\"params\":{{\"_meta\":{{\"io.modelcontextprotocol/subscriptionId\":{d}}}," ++
+                    "\"notifications\":{s}}}}}\n\n", .{ id, if (ack.tools) "{\"toolsListChanged\":true}" else "{}" }) catch unreachable;
+                if (!sendAll(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")) return false;
+                if (!sendChunk(socket, text)) return false;
+                // Only an acknowledged subscribe holds the stream: publish it, and close the one it supersedes.
+                self.id = id;
+                const previous = self.fd.swap(socket, .acq_rel);
+                if (previous >= 0) _ = std.c.close(previous);
+                _ = self.opens.fetchAdd(1, .acq_rel);
+                return true;
+            },
+            .status => |status| {
+                var head: [128]u8 = undefined;
+                const text = std.fmt.bufPrint(&head, "HTTP/1.1 {d} Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{status}) catch unreachable;
+                _ = sendAll(socket, text);
+                return false;
+            },
+        }
+    }
+
+    /// The held socket once the serve loop has decided the latest subscribe; -1 when no stream is held.
+    fn held(self: *Listening) std.posix.fd_t {
+        while (!self.settled.load(.acquire)) std.atomic.spinLoopHint();
+        return self.fd.load(.acquire);
+    }
+
+    /// Pushes one SSE event (its text, `data: ...` and its blank line) on the held stream.
+    pub fn push(self: *Listening, event: []const u8) void {
+        const socket = self.held();
+        if (socket < 0) return;
+        _ = sendChunk(socket, event);
+    }
+
+    /// Ends the stream the way a server does on purpose: the completion result, then the chunked end.
+    pub fn finish(self: *Listening) void {
+        const socket = self.held();
+        if (socket < 0) return;
+        var event: [256]u8 = undefined;
+        const text = std.fmt.bufPrint(&event, "data: {{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"resultType\":\"complete\"," ++
+            "\"_meta\":{{\"io.modelcontextprotocol/subscriptionId\":{d}}}}}}}\n\n", .{ self.id, self.id }) catch unreachable;
+        _ = sendChunk(socket, text);
+        _ = sendAll(socket, "0\r\n\r\n");
+        self.release(socket);
+    }
+
+    /// Drops the connection with no result and no chunked end: an abrupt close.
+    pub fn drop(self: *Listening) void {
+        const socket = self.held();
+        if (socket >= 0) self.release(socket);
+    }
+
+    /// Accepted subscribes once the serve loop has decided the latest one.
+    pub fn accepted(self: *Listening) u64 {
+        _ = self.held();
+        return self.opens.load(.acquire);
+    }
+
+    /// Closes `socket` only while it is still the held one, so a stream that superseded it stays open.
+    fn release(self: *Listening, socket: std.posix.fd_t) void {
+        if (self.fd.cmpxchgStrong(socket, -1, .acq_rel, .acquire) == null) _ = std.c.close(socket);
+    }
+
+    /// Closes whatever stream is held, when the server stops.
+    fn close(self: *Listening) void {
+        const socket = self.fd.swap(-1, .acq_rel);
+        if (socket >= 0) _ = std.c.close(socket);
+    }
+};
 
 pub fn start(self: *Script) !void {
     // std's backlog is ample: Darwin refuses a connect beyond a full
@@ -25,38 +126,76 @@ pub fn start(self: *Script) !void {
     self.thread = try std.Thread.spawn(.{}, serveAll, .{self});
 }
 
+/// Serves connections in order. Each ordinary request takes the next scripted reply; a held
+/// subscription takes none, so ordinary requests are still answered while it stays open.
 fn serveAll(self: *Script) void {
-    self.serve(self.reply);
-    for (self.more) |reply| {
-        if (self.stopping.load(.acquire)) return;
-        self.serve(reply);
+    var answered: usize = 0;
+    while (answered <= self.more.len) {
+        if (answered > 0 and self.stopping.load(.acquire)) return;
+        const reply = if (answered == 0) self.reply else self.more[answered - 1];
+        if (self.serve(reply)) answered += 1;
     }
 }
 
-fn serve(self: *Script, reply: []const u8) void {
+/// Serves one connection. Returns false when it was a subscription that the listening stream holds.
+fn serve(self: *Script, reply: []const u8) bool {
     const fd_ = std.c.accept(self.listener, null, null);
-    if (fd_ < 0) return;
-    defer _ = std.c.close(fd_);
+    if (fd_ < 0) return true;
+    var held = false;
+    defer if (!held) {
+        _ = std.c.close(fd_);
+    };
     self.seen_len = 0;
     while (!self.requestIn()) {
         const read = std.c.recv(fd_, self.seen[self.seen_len..].ptr, self.seen.len - self.seen_len, 0);
-        if (read <= 0) return;
+        if (read <= 0) return true;
         self.seen_len += @intCast(read);
     }
     self.request_received.store(true, .release);
     _ = self.requests.fetchAdd(1, .acq_rel);
+    if (self.listening) |listening| if (isSubscribe(self.seen[0..self.seen_len])) {
+        held = listening.open(fd_, subscribeId(self.seen[0..self.seen_len]));
+        return false;
+    };
     if (self.hold_reply) {
         var byte: [1]u8 = undefined;
         const received = std.c.recv(fd_, &byte, byte.len, 0);
         self.connection_closed.store(received == 0, .release);
-        return;
+        return true;
     }
+    _ = sendAll(fd_, reply);
+    return true;
+}
+
+fn isSubscribe(seen: []const u8) bool {
+    return std.mem.indexOf(u8, seen, "\r\nMcp-Method: subscriptions/listen\r\n") != null;
+}
+
+/// The JSON-RPC id of the request in `seen`, which the subscription is named by.
+fn subscribeId(seen: []const u8) u64 {
+    const key = "\"id\":";
+    const at = (std.mem.indexOf(u8, seen, key) orelse return 0) + key.len;
+    var end = at;
+    while (end < seen.len and std.ascii.isDigit(seen[end])) end += 1;
+    return std.fmt.parseInt(u64, seen[at..end], 10) catch 0;
+}
+
+fn sendAll(socket: std.posix.fd_t, bytes: []const u8) bool {
     var written: usize = 0;
-    while (written < reply.len) {
-        const sent = std.c.send(fd_, reply[written..].ptr, reply.len - written, 0);
-        if (sent <= 0) return;
+    while (written < bytes.len) {
+        const sent = std.c.send(socket, bytes[written..].ptr, bytes.len - written, 0);
+        if (sent <= 0) return false;
         written += @intCast(sent);
     }
+    return true;
+}
+
+/// Writes one whole chunk with a single send. The serve thread writes the acknowledgment while the test thread
+/// pushes, so a chunk written in pieces could have another chunk land between its data and its closing CRLF.
+fn sendChunk(socket: std.posix.fd_t, bytes: []const u8) bool {
+    var chunk: [2048]u8 = undefined;
+    const text = std.fmt.bufPrint(&chunk, "{x}\r\n{s}\r\n", .{ bytes.len, bytes }) catch unreachable;
+    return sendAll(socket, text);
 }
 
 fn requestIn(self: *const Script) bool {
@@ -77,6 +216,7 @@ pub fn stop(self: *Script) void {
     address.setPort(self.port);
     if (address.connect(std.testing.io, .{ .mode = .stream })) |stream| stream.close(std.testing.io) else |_| {}
     if (self.thread) |thread| thread.join();
+    if (self.listening) |listening| listening.close();
     _ = std.c.close(self.listener);
 }
 

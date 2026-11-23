@@ -23,15 +23,23 @@ const renderTestingEntry = shared_fixtures.renderTestingEntry;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const settleMessagesForTesting = shared_fixtures.settleMessagesForTesting;
 
+fn saveFrozenFacts(storage: *Store, model: []const u8, window: ?u32, output: ?u32) !void {
+    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .output_limit = output, .efforts = .initOne(.low), .openai_listed = true }}, null);
+}
+
 fn saveFrozenContextWindow(storage: *Store, model: []const u8, window: ?u32) !void {
-    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .initOne(.low), .openai_listed = true }}, null);
+    try saveFrozenFacts(storage, model, window, null);
 }
 
 fn expectFrozenContextWindow(storage: *Store, binding: AttemptBinding, expected: u64) !void {
     try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
 }
 
-test "frozen context window selects the whole saved-or-shipped domain and survives retry reopen" {
+fn expectFrozenOutputLimit(storage: *Store, binding: AttemptBinding, expected: u64) !void {
+    try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT output_limit FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+}
+
+test "frozen context window and output limit select the whole saved-or-shipped domain and survive retry reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Variant = enum { shipped, unknown, saved, only, missing, empty, null_window, zero, maximum };
@@ -52,26 +60,37 @@ test "frozen context window selects the whole saved-or-shipped domain and surviv
                     .zero => 0,
                     .maximum => std.math.maxInt(u32),
                 };
+                // The output limit follows the same domain; a saved row that lists the model states 4321 (window 321 is its own).
+                const expected_output: u32 = switch (variant) {
+                    .shipped, .unknown => model_capability.outputLimit(@import("../../model_catalog.zig").shipped, model),
+                    .saved, .only => 4321,
+                    .missing, .empty, .null_window => product_defaults.unlisted_output_limit,
+                    .zero => 0,
+                    .maximum => std.math.maxInt(u32),
+                };
                 switch (variant) {
                     .shipped, .unknown => {},
-                    .missing => try saveFrozenContextWindow(&storage, "unrelated", 321),
+                    .missing => try saveFrozenFacts(&storage, "unrelated", 321, 4321),
                     .empty => try storage.saveModelFacts(&.{}, null),
-                    .null_window => try saveFrozenContextWindow(&storage, model, null),
-                    else => try saveFrozenContextWindow(&storage, model, @intCast(expected)),
+                    .null_window => try saveFrozenFacts(&storage, model, null, null),
+                    else => try saveFrozenFacts(&storage, model, @intCast(expected), expected_output),
                 }
                 try submitTestMessage(&storage, &tmp, "window-one", "window-one", session.slice(), "first");
                 const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
                 try expectFrozenContextWindow(&storage, first, expected);
-                try saveFrozenContextWindow(&storage, model, 500);
+                try expectFrozenOutputLimit(&storage, first, expected_output);
+                try saveFrozenFacts(&storage, model, 500, 5000);
                 try storage.close();
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
                 try std.testing.expectEqual(first.operation_id, retry.operation_id);
                 try expectFrozenContextWindow(&storage, retry, expected);
+                try expectFrozenOutputLimit(&storage, retry, expected_output);
                 try settleMessagesForTesting(&storage, &tmp, retry, 1, false, null);
                 try submitTestMessage(&storage, &tmp, "window-next", "window-next", session.slice(), "next");
                 const next = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
                 try expectFrozenContextWindow(&storage, next, 500);
+                try expectFrozenOutputLimit(&storage, next, 5000);
             }
         }
     }.run);

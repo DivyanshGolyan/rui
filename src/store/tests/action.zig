@@ -202,6 +202,7 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
             return switch (entry.owner) {
                 .mcp => .mcp,
                 .provider => .provider,
+                .app => .app,
                 .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
             };
         }
@@ -225,6 +226,8 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
                 const name = "'" ++ entry.name ++ "'";
                 try expectSql(&storage, "(" ++ records.sql.runnerOf(owner, name) ++ ")='" ++ @tagName(expected) ++ "'", 1);
                 try expectSql(&storage, "CASE WHEN " ++ records.sql.notDefaultTest(owner, name) ++ " THEN 1 ELSE 0 END", @intFromBool(expected != records.default_runner));
+                // Uncertain-action recovery keeps exactly the attempts whose runner is not app (`uncertain_actions`).
+                try expectSql(&storage, "CASE WHEN (" ++ records.sql.runnerOf(owner, name) ++ ")<>'" ++ @tagName(Runner.app) ++ "' THEN 1 ELSE 0 END", @intFromBool(expected != .app));
                 inline for (comptime std.enums.values(Runner)) |runner| {
                     try expectSql(&storage, "CASE WHEN " ++ records.sql.runnerTest(owner, name, runner) ++ " THEN 1 ELSE 0 END", @intFromBool(expected == runner));
                 }

@@ -192,6 +192,7 @@ pub const EventData = struct {
         self.* = .{ .io = io, .file = file, .budget = budget };
     }
 
+    /// Writes at `length`, not at the file's offset, so a truncation leaves the next append in place.
     pub fn append(self: *EventData, newline: bool, bytes: []const u8) !void {
         const separator: []const u8 = if (newline) "\n" else "";
         const total = separator.len + bytes.len;
@@ -201,9 +202,38 @@ pub const EventData = struct {
         while (written < total) {
             const header = separator[@min(written, separator.len)..];
             const rest = bytes[written - (separator.len - header.len) ..];
-            written += self.file.writeStreaming(self.io, header, &.{rest}, 1) catch return error.EventDataWriteFailed;
+            written += self.file.writePositional(self.io, &.{ header, rest }, self.length + written) catch return error.EventDataWriteFailed;
         }
         self.length += total;
+    }
+
+    /// Drops the bytes from `start` on. The file, its charge and `length` shrink together, and
+    /// the map of the file stays valid below `start`, which is all a reader names afterwards.
+    pub fn truncate(self: *EventData, start: u64) !void {
+        std.debug.assert(start <= self.length);
+        self.file.setLength(self.io, start) catch return error.EventDataWriteFailed;
+        const dropped = self.length - start;
+        self.budget.release(dropped);
+        self.charged -= dropped;
+        self.length = start;
+    }
+
+    /// Moves the bytes from `from` on down to `start`, then drops what the move leaves after
+    /// them, so `start` begins the same bytes. Chunks run forward: each write ends before the
+    /// next read starts, because `start` is not past `from`.
+    pub fn shiftDown(self: *EventData, start: u64, from: u64) !void {
+        std.debug.assert(start <= from and from <= self.length);
+        const count = self.length - from;
+        var chunk: [4096]u8 = undefined;
+        var moved: u64 = 0;
+        while (moved < count) {
+            const size: usize = @intCast(@min(chunk.len, count - moved));
+            const got = self.file.readPositionalAll(self.io, chunk[0..size], from + moved) catch return error.EventDataMoveFailed;
+            if (got != size) return error.EventDataMoveFailed;
+            self.file.writePositionalAll(self.io, chunk[0..size], start + moved) catch return error.EventDataMoveFailed;
+            moved += size;
+        }
+        try self.truncate(start + count);
     }
 
     pub fn seal(self: *EventData) !void {
@@ -258,6 +288,8 @@ pub const AnswerSelection = struct {
 pub const Interpret = struct {
     scratch: codecs.InterpretScratch,
     grammar: Grammar,
+    /// The pinned codec's stream state lives at its owner's address, not in `read`'s frame.
+    stream: codecs.Stream,
 };
 
 pub const Interpretation = union(enum) {
@@ -353,13 +385,20 @@ fn read(
     defer pages.unmapReadOnly(events);
     const grammar = &storage.grammar;
     grammar.begin(codec, metadata, operation, rejection, provider_failure, &validated.evidence);
-    var stream = codecs.begin(codec, switch (operation) {
+    const stream = &storage.stream;
+    codecs.begin(stream, codec, switch (operation) {
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
     var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
-    var data: ?u64 = null;
+    // The current SSE event: 0 lines, 1 line (kept in the capture), or 2+ lines staged in event_data.
+    var lines: u8 = 0;
+    var first_line: []const u8 = "";
+    var staged_start: u64 = 0;
     var raw_start: u64 = 0;
+    // Where the normalized event being accumulated began in event_data.
+    var whole_start: u64 = 0;
+    const limit = events.len;
     while (position < capture.len) {
         rejection.* = .{ .byte_offset = position };
         const line_start = position;
@@ -371,26 +410,63 @@ fn read(
         }
         const line = capture[line_start..line_end];
         if (line.len == 0) {
-            if (data) |start| {
-                if (event_data.length == start) return error.EmptySseData;
-                try grammar.event(&stream, &storage.scratch, events[@intCast(start)..@intCast(event_data.length)], start, raw_start);
-                data = null;
+            if (lines == 0) continue;
+            var normalized: codec_abi.Normalized = .{};
+            if (lines == 1) {
+                if (first_line.len == 0) return error.EmptySseData;
+                codecs.normalize(stream, first_line, &normalized);
+                // The copies read the capture, which a discard leaves alone.
+                if (normalized.discard) try event_data.truncate(whole_start);
+                try appendFragments(event_data, limit, first_line, &normalized);
+            } else {
+                const staged = events[@intCast(staged_start)..@intCast(event_data.length)];
+                codecs.normalize(stream, staged, &normalized);
+                if (normalized.discard) {
+                    // The open event's bytes go, and the staged data goes with them unless it is
+                    // the whole event, which then moves to the event's start.
+                    if (wholeVerbatim(&normalized, staged.len)) {
+                        try event_data.shiftDown(whole_start, staged_start);
+                    } else {
+                        if (copiesStaged(&normalized)) return error.UnsupportedNormalizedLayout;
+                        try event_data.truncate(whole_start);
+                        try appendFragments(event_data, limit, staged, &normalized);
+                    }
+                } else if (!wholeVerbatim(&normalized, staged.len)) {
+                    // Verbatim whole data is already in place. Otherwise the staged bytes stay behind
+                    // and the event starts after them, so only that layout can be read contiguously.
+                    if (whole_start != staged_start) return error.UnsupportedNormalizedLayout;
+                    whole_start = event_data.length;
+                    try appendFragments(event_data, limit, staged, &normalized);
+                }
             }
+            if (normalized.whole) {
+                try grammar.event(stream, &storage.scratch, events[@intCast(whole_start)..@intCast(event_data.length)], whole_start, raw_start);
+                whole_start = event_data.length;
+            }
+            lines = 0;
             continue;
         }
         if (std.mem.eql(u8, line, "data") or std.mem.startsWith(u8, line, "data:")) {
             var skip: usize = @min(line.len, "data:".len);
             if (line.len > skip and line[skip] == ' ') skip += 1;
-            const continued = data != null;
-            if (!continued) {
-                data = event_data.length;
+            if (lines == 0) {
+                first_line = line[skip..];
                 raw_start = line_start + skip;
+            } else {
+                if (lines == 1) {
+                    staged_start = event_data.length;
+                    if (first_line.len != 0) try event_data.append(false, first_line);
+                }
+                try event_data.append(true, line[skip..]);
             }
-            if (continued or line.len > skip) try event_data.append(continued, line[skip..]);
+            lines = @min(lines + 1, 2);
         }
     }
-    if (data != null) return error.IncompleteSseEvent;
-    if (codecs.finish(&stream)) |reason| return reasonError(reason);
+    // An open raw event is an unterminated SSE line group. Otherwise the codec decides what an
+    // open normalized event means at the end of the stream.
+    if (lines != 0) return error.IncompleteSseEvent;
+    if (codecs.finish(stream)) |reason| return reasonError(reason);
+    if (whole_start != event_data.length) return error.IncompleteSseEvent;
     try event_data.seal();
     validated.source_length = event_data.length;
     validated.item_count = grammar.item_count;
@@ -400,13 +476,44 @@ fn read(
     validated.answer_digest = grammar.answer.digest;
 }
 
+/// Appends what a normalized SSE event adds. Copies are read from `source`, the data the
+/// codec normalized. The map of event data is `limit` bytes long, so growth past it fails.
+fn appendFragments(event_data: *EventData, limit: u64, source: []const u8, normalized: *const codec_abi.Normalized) !void {
+    for (normalized.slice()) |fragment| {
+        const bytes = switch (fragment) {
+            .literal => |literal| literal,
+            .copy => |range| source[@intCast(range.start)..][0..@intCast(range.length)],
+        };
+        if (event_data.length + bytes.len > limit) return error.EventDataScratchExhausted;
+        try event_data.append(false, bytes);
+    }
+}
+
+/// True when the codec copies any of its source. A copy names bytes that a discard may drop.
+fn copiesStaged(normalized: *const codec_abi.Normalized) bool {
+    for (normalized.slice()) |fragment| switch (fragment) {
+        .copy => return true,
+        .literal => {},
+    };
+    return false;
+}
+
+/// True when the codec answered exactly the whole of `length` source bytes, verbatim.
+fn wholeVerbatim(normalized: *const codec_abi.Normalized, length: usize) bool {
+    if (normalized.len != 1) return false;
+    return switch (normalized.items[0]) {
+        .copy => |range| range.start == 0 and range.length == length,
+        .literal => false,
+    };
+}
+
 pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.ContextOverflow => "provider_context_overflow",
         error.TemporaryProviderFailure => "provider_temporary_error",
         error.ProviderConnectionClosed => "provider_transport_failure",
         error.EventDataScratchExhausted => "response_data_exhausted",
-        error.EventDataWriteFailed, error.EventDataSealFailed, error.EventDataMapFailed => "response_data_failed",
+        error.EventDataWriteFailed, error.EventDataMoveFailed, error.EventDataSealFailed, error.EventDataMapFailed => "response_data_failed",
         error.UnsupportedProviderOutput,
         error.UnsupportedItemStatus,
         error.UnsupportedAsyncCall,
@@ -880,7 +987,8 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     var evidence: Evidence = .{ .response_id = .{ .len = 0 }, .served_model = .{ .len = 0 } };
     grammar.begin(pinned, &records, operation, &rejection, testingProviderFailure(), &evidence);
     grammar.item_count = ordinal;
-    var stream = codecs.begin(pinned, switch (operation) {
+    var stream: codecs.Stream = undefined;
+    codecs.begin(&stream, pinned, switch (operation) {
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
@@ -908,7 +1016,8 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
     defer pages.unmapReadOnly(bytes);
     const data = try std.mem.concat(std.testing.allocator, u8, &.{ "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":", bytes[@intCast(start)..], "}}" });
     defer std.testing.allocator.free(data);
-    var stream = codecs.begin(pinned, .assistant_response);
+    var stream: codecs.Stream = undefined;
+    codecs.begin(&stream, pinned, .assistant_response);
     const answer = codecs.interpretEvent(&stream, &testing_interpret.scratch, data);
     return switch (answer.what) {
         .completed => |completed| switch (completed.usage) {
@@ -923,8 +1032,8 @@ pub fn readUsageForTesting(io: std.Io, file: std.Io.File, start: u64, length: u6
 
 var testing_interpretation: Interpretation = undefined;
 
-fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, operation: output_format.ModelOperationKind) anyerror!Validated {
-    interpret(&testing_interpret, pinned, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
+fn validate(source: std.Io.File, source_length: u64, metadata: *output_format.OutputMetadataWriter, event_data: *EventData, codec: protocol.Codec, operation: output_format.ModelOperationKind) anyerror!Validated {
+    interpret(&testing_interpret, codec, std.testing.io, source, source_length, metadata, event_data, operation, .{}, testingProviderFailure(), &testing_interpretation);
     return switch (testing_interpretation) {
         .accepted => |*accepted| accepted.output,
         .rejected => |*rejected| rejected.reason,
@@ -1137,6 +1246,14 @@ const TestingValidation = struct {
     first_part: ?output_format.OutputMetadataRecord,
     records: [24]output_format.OutputMetadataRecord,
     record_count: usize,
+    usage: ?output_format.Usage,
+    /// One line per item, `item <kind> <whole item bytes>`, in stream order.
+    item_text: [4096]u8,
+    item_text_len: usize,
+
+    fn items(self: *const TestingValidation) []const u8 {
+        return self.item_text[0..self.item_text_len];
+    }
 };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
@@ -1144,6 +1261,10 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
 }
 
 fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
+    return validateTestingWire(tmp, pinned, bytes, metadata_limit, operation);
+}
+
+fn validateTestingWire(tmp: *std.testing.TmpDir, codec: protocol.Codec, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1165,7 +1286,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var event_data: EventData = undefined;
     try event_data.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
     defer event_data.deinit();
-    const validated = try validate(source, bytes.len, &metadata, &event_data, operation);
+    const validated = try validate(source, bytes.len, &metadata, &event_data, codec, operation);
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
     var result: TestingValidation = undefined;
@@ -1181,6 +1302,24 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
         if (record.tag == .item) break record;
         if (record.tag == .part and result.first_part == null) result.first_part = record;
     } else unreachable;
+    result.usage = null;
+    while (try reader.next()) |record| {
+        if (record.tag == .usage) result.usage = record.usage;
+    }
+    // Items past the buffer's room are left out; the tests that read the text stay small.
+    result.item_text_len = 0;
+    var items = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
+    while (try items.next()) |record| {
+        if (record.tag != .item) continue;
+        const length: usize = @intCast(record.length);
+        const line = std.fmt.bufPrint(result.item_text[result.item_text_len..], "item {s} ", .{@tagName(record.kind)}) catch break;
+        const start = result.item_text_len + line.len;
+        if (start + length + 1 > result.item_text.len) break;
+        if (try event_data.file.readPositionalAll(std.testing.io, result.item_text[start..][0..length], record.start) != length) return error.ShortSealedRead;
+        result.item_text_len = start + length;
+        result.item_text[result.item_text_len] = '\n';
+        result.item_text_len += 1;
+    }
     metadata.deinit();
     source.close(std.testing.io);
     return result;
@@ -1362,6 +1501,42 @@ test "a later compaction item supersedes everything before it, and a first one n
     }
 }
 
+test "SSE staging gives the grammar the same whole events under every line framing" {
+    const item = "{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}";
+    const completed = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}";
+    const done_a = "{\"type\":\"response.output_item.done\",";
+    const done_b = "\"output_index\":0,\"item\":" ++ item ++ "}";
+    const completed_a = "{\"type\":\"response.completed\",";
+    const completed_b = "\"response\":{\"id\":\"r\",\"status\":\"completed\",";
+    const completed_c = "\"output\":[" ++ item ++ "]}}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const reference = try validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n", 4096);
+    const framings = [_][]const u8{
+        // single line, CRLF, CR
+        "data: " ++ done ++ "\r\n\r\ndata: " ++ completed ++ "\r\n\r\n",
+        "data: " ++ done ++ "\r\rdata: " ++ completed ++ "\r\r",
+        // two and three lines, joined by LF and CRLF
+        "data: " ++ done_a ++ "\ndata: " ++ done_b ++ "\n\ndata: " ++ completed ++ "\n\n",
+        "data: " ++ done_a ++ "\r\ndata: " ++ done_b ++ "\r\n\r\ndata: " ++ completed_a ++ "\r\ndata: " ++ completed_b ++ "\r\ndata: " ++ completed_c ++ "\r\n\r\n",
+        "data: " ++ done ++ "\n\ndata: " ++ completed_a ++ "\rdata: " ++ completed_b ++ "\rdata: " ++ completed_c ++ "\r\r",
+        // an empty first data line joins as a leading newline
+        "data: " ++ done ++ "\n\ndata:\ndata: " ++ completed ++ "\n\n",
+    };
+    for (framings) |framing| {
+        const result = try validateTestingSse(&tmp, framing, 4096);
+        try std.testing.expectEqual(reference.output.item_count, result.output.item_count);
+        try std.testing.expectEqual(reference.output.answer_length, result.output.answer_length);
+        try std.testing.expectEqual(reference.output.answer_digest, result.output.answer_digest);
+        try std.testing.expectEqual(reference.first_item.content_digest, result.first_item.content_digest);
+    }
+    // A trailing open event, single or staged, is incomplete; so is an empty single-line event.
+    try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed_a ++ "\ndata: " ++ completed_b ++ "\n", 4096));
+    try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n", 4096));
+    try std.testing.expectError(error.EmptySseData, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata:\n\n", 4096));
+}
+
 test "SSE line framing accepts spec fields and line endings without losing validation" {
     const item = "{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
     const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}";
@@ -1444,13 +1619,13 @@ test "SSE decoded data shares scratch charges and retains failed unlink ownershi
         try std.testing.expectEqual(baseline + 2, (try descriptors.observe(std.testing.io)).open_descriptors);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
         if (shortfall == 0) {
-            const result = try validate(source, raw.len, &metadata, &data, .assistant_response);
+            const result = try validate(source, raw.len, &metadata, &data, pinned, .assistant_response);
             var buffer: [raw.len]u8 = undefined;
             try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
             try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
             try std.testing.expectEqual(budget.limit, used.load(.acquire));
         } else {
-            try std.testing.expectError(error.EventDataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(source, raw.len, &metadata, &data, pinned, .assistant_response));
             try std.testing.expectEqual(raw.len + done.len + 6 * output_format.output_metadata_record_bytes, used.load(.acquire));
         }
         var buffer: [raw.len]u8 = undefined;
@@ -1491,7 +1666,7 @@ test "an event's data is charged whole before its metadata from a shared budget"
     var data: EventData = undefined;
     try data.init(std.testing.io, root, "data", budget, false, &retained);
     defer data.deinit();
-    try std.testing.expectError(error.MetadataScratchExhausted, validate(source, raw.len, &metadata, &data, .assistant_response));
+    try std.testing.expectError(error.MetadataScratchExhausted, validate(source, raw.len, &metadata, &data, pinned, .assistant_response));
     try std.testing.expectEqual(@as(u64, done.len), data.length);
     try std.testing.expectEqual(.item, testing_interpretation.rejected.location.stage);
 }
@@ -1745,6 +1920,304 @@ test "context overflow requires exact valid provider code over SSE" {
     }
 }
 
+const messages_codec: protocol.Codec = .@"anthropic-messages/1";
+
+fn messagesData(comptime event: []const u8) []const u8 {
+    return "data: " ++ event ++ "\n\n";
+}
+
+const messages_stop = "{\"type\":\"message_stop\"}";
+const messages_recorded = messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}") ++
+    messagesData("{\"type\":\"ping\"}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan.\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":0}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":1}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}") ++
+    messagesData("{\"type\":\"content_block_stop\",\"index\":2}") ++
+    messagesData("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":42}}") ++
+    messagesData(messages_stop);
+
+// Ends after the text block's content_block_delta: a closed connection inside an open block.
+const messages_cut_in_block = messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}") ++
+    messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+    messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}");
+
+const messages_start = "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}";
+const messages_text_start = "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}";
+const messages_text_stop = "{\"type\":\"content_block_stop\",\"index\":0}";
+
+/// The SSE bytes of raw Messages events, one data event each.
+fn messagesStream(comptime events: []const []const u8) []const u8 {
+    return comptime blk: {
+        var stream: []const u8 = "";
+        for (events) |event| stream = stream ++ "data: " ++ event ++ "\n\n";
+        break :blk stream;
+    };
+}
+
+test "anthropic-messages/1 interprets the recorded stream to its items, call, answer and usage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingWire(&tmp, messages_codec, messages_recorded, 64 * 1024, .assistant_response);
+    try std.testing.expectEqual(@as(u64, 3), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, "Hi".len), accepted.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("Hi"), accepted.output.answer_digest);
+    try std.testing.expectEqualStrings("msg_01", accepted.output.evidence.response_id.slice());
+    try std.testing.expectEqualStrings("claude-x", accepted.output.evidence.served_model.slice());
+    const usage = accepted.usage orelse return error.MissingUsage;
+    try std.testing.expectEqual(@as(u64, 42), usage.output);
+    try std.testing.expectEqual(@as(u64, 3), usage.cache_read);
+    try std.testing.expectEqual(@as(u64, 2), usage.cache_write);
+    try std.testing.expect(std.mem.indexOf(u8, accepted.items(), "item reasoning ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, accepted.items(), "item message ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, accepted.items(), "item function_call ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, accepted.items(), "\"input_json\":\"{\\\"q\\\":1}\"") != null);
+}
+
+test "MSG-1 a text stream assembles one message item and one completed answer with its counts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"ping\"}",
+        messages_text_start,
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo \\\"\\u00e9\\\"\\n\"}}",
+        messages_text_stop,
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":7}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response);
+    try std.testing.expectEqualStrings("item message {\"type\":\"text\",\"text\":\"Hello \\\"\\u00e9\\\"\\n\"}\n", accepted.items());
+    try std.testing.expectEqualStrings("msg_1", accepted.output.evidence.response_id.slice());
+    try std.testing.expectEqualStrings("claude-x", accepted.output.evidence.served_model.slice());
+    const usage = accepted.usage orelse return error.MissingUsage;
+    try std.testing.expectEqual(@as(u64, 10), usage.uncached);
+    try std.testing.expectEqual(@as(u64, 3), usage.cache_read);
+    try std.testing.expectEqual(@as(u64, 2), usage.cache_write);
+    try std.testing.expectEqual(@as(u64, 7), usage.output);
+}
+
+test "MSG-2 thinking keeps its text and signature, and tool calls keep id, name and argument JSON" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"pl\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"an\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig==\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":0}",
+        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input\":{}}}",
+        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ls\\\"}\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":1}",
+        "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"read\",\"input\":{}}}",
+        "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":2}",
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response);
+    try std.testing.expectEqualStrings(
+        "item reasoning {\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig==\"}\n" ++
+            "item function_call {\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash\",\"input_json\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n" ++
+            "item function_call {\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"read\",\"input_json\":\"{}\"}\n",
+        accepted.items(),
+    );
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, 9), (accepted.usage orelse return error.MissingUsage).output);
+}
+
+test "MSG-3 a redacted thinking block is copied whole, and a refusal names its category and explanation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":0}",
+        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":1}",
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response);
+    try std.testing.expectEqualStrings("item reasoning {\"type\":\"redacted_thinking\",\"data\":\"opaque\"}\nitem message {\"type\":\"text\",\"text\":\"ok\"}\n", accepted.items());
+    try std.testing.expectError(error.PermanentProviderFailure, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}",
+        "{\"type\":\"content_block_stop\",\"index\":0}",
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\",\"category\":\"cyber\",\"explanation\":\"no\"}},\"usage\":{\"output_tokens\":1}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response));
+    try std.testing.expectEqual(@as(?transport_policy.Refusal, .policy), testingProviderFailure().refusal);
+    try std.testing.expectEqualStrings("cyber: no", testingProviderFailure().report.slice());
+}
+
+test "MSG-4 the stop reasons that end without an answer name their failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response));
+    try std.testing.expectError(error.ContextOverflow, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"model_context_window_exceeded\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}",
+        "{\"type\":\"message_stop\"}",
+    }), 64 * 1024, .assistant_response));
+    for ([_][]const u8{ "pause_turn", "stop_sequence" }) |stop_reason| {
+        var delta_buffer: [256]u8 = undefined;
+        const delta = try std.fmt.bufPrint(&delta_buffer, "{{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{s}\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":1}}}}", .{stop_reason});
+        const stream = try std.fmt.allocPrint(std.testing.allocator, "data: {s}\n\ndata: {s}\n\ndata: {{\"type\":\"message_stop\"}}\n\n", .{ messages_start, delta });
+        defer std.testing.allocator.free(stream);
+        try std.testing.expectError(error.UnsupportedResponseStatus, validateTestingWire(&tmp, messages_codec, stream, 64 * 1024, .assistant_response));
+    }
+}
+
+test "MSG-5 an error event between blocks is one whole failure, classified by its error type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+    }), 64 * 1024, .assistant_response));
+    try std.testing.expectError(error.ContextOverflow, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 200000 tokens\"}}",
+    }), 64 * 1024, .assistant_response));
+}
+
+test "MSG-6 ping and an unknown event type add nothing, and a block delta without its block is a contradiction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"ping\"}",
+        "{\"type\":\"future_event\",\"x\":[1,{\"y\":null}]}",
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"early\"}}",
+    }), 64 * 1024, .assistant_response));
+}
+
+test "MSG-7 an order violation, an unknown block and a citation each keep their reason, inside a block or not" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // An out-of-order block index inside an open block discards the block and names its reason.
+    try std.testing.expectError(error.InvalidProviderIndex, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        messages_text_start,
+        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}",
+        messages_text_stop,
+    }), 64 * 1024, .assistant_response));
+    // An unknown block type between blocks is a standalone failure.
+    try std.testing.expectError(error.UnsupportedContentBlock, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"s\",\"name\":\"web_search\"}}",
+    }), 64 * 1024, .assistant_response));
+    // A citations delta inside a text block is an unsupported annotation, and it keeps that reason.
+    try std.testing.expectError(error.UnsupportedAnnotation, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        messages_text_start,
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{}}}",
+    }), 64 * 1024, .assistant_response));
+}
+
+test "MSG-8 a message id longer than the Stream keeps is a provider value fault" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const long_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expectError(error.ProviderValueTooLong, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        "{\"type\":\"message_start\",\"message\":{\"id\":\"" ++ long_id ++ "\",\"model\":\"m\",\"usage\":{}}}",
+    }), 64 * 1024, .assistant_response));
+}
+
+test "MSG-9 a stream ends incomplete before message_stop, and a cut inside a block is a closed connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, messagesStream(&.{messages_start}), 64 * 1024, .assistant_response));
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}",
+    }), 64 * 1024, .assistant_response));
+    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingWire(&tmp, messages_codec, messagesStream(&.{
+        messages_start,
+        messages_text_start,
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut\"}}",
+    }), 64 * 1024, .assistant_response));
+}
+
+test "anthropic-messages/1 names each broken stream by its reason" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingWire(&tmp, messages_codec, messages_cut_in_block, 64 * 1024, .assistant_response));
+    const before_stop = messages_recorded[0 .. messages_recorded.len - messagesData(messages_stop).len];
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingWire(&tmp, messages_codec, before_stop, 64 * 1024, .assistant_response));
+    const multi_line = comptime messagesData("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}") ++
+        messagesData("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}") ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\n" ++
+        "data: \"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
+    try std.testing.expectError(error.UnsupportedNormalizedLayout, validateTestingWire(&tmp, messages_codec, multi_line, 64 * 1024, .assistant_response));
+}
+
+test "anthropic-messages/1 overloaded_error is a temporary provider failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const overloaded = messagesData("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
+    try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, overloaded, 64 * 1024, .assistant_response));
+}
+
+test "anthropic-messages/1 an error inside an open block is classified as between blocks, and its data moves whole" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Single-line and multi-line data: the multi-line error is staged, then moved to the event's start.
+    const open_block = comptime messagesData(messages_start) ++ messagesData(messages_text_start) ++ messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}");
+    const single = comptime open_block ++ messagesData("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
+    try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, single, 64 * 1024, .assistant_response));
+    try std.testing.expectEqualStrings("overloaded_error: Overloaded", testingProviderFailure().report.slice());
+    const multi = comptime open_block ++ "data: {\"type\":\"error\",\n" ++ "data: \"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+    try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, multi, 64 * 1024, .assistant_response));
+    try std.testing.expectEqualStrings("overloaded_error: Overloaded", testingProviderFailure().report.slice());
+    // A multi-line order violation inside the block drops the staged data with the block, and keeps its reason.
+    const staged_violation = comptime open_block ++ "data: {\"type\":\"content_block_delta\",\"index\":1,\n" ++ "data: \"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n";
+    try std.testing.expectError(error.InvalidProviderIndex, validateTestingWire(&tmp, messages_codec, staged_violation, 64 * 1024, .assistant_response));
+}
+
+test "a stream that ends or fails inside an open event names its outcome on each codec" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
+    const completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n";
+    const added = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[]}}\n\n";
+    const error_event = "data: {\"type\":\"error\",\"code\":null,\"message\":\"Something failed.\"}\n\n";
+    // Responses never holds an event open: its open state is an output item not yet done.
+    const cases = [_]struct { name: []const u8, codec: protocol.Codec, stream: []const u8, outcome: ?anyerror }{
+        .{ .name = "responses ends cleanly", .codec = pinned, .stream = done ++ completed, .outcome = null },
+        .{ .name = "responses ends with a raw partial line", .codec = pinned, .stream = done ++ completed[0 .. completed.len - 3], .outcome = error.IncompleteSseEvent },
+        .{ .name = "responses ends inside an open item", .codec = pinned, .stream = added, .outcome = error.ProviderConnectionClosed },
+        .{ .name = "responses errors inside an open item", .codec = pinned, .stream = added ++ error_event, .outcome = error.TemporaryProviderFailure },
+        .{ .name = "messages ends cleanly", .codec = messages_codec, .stream = messages_recorded, .outcome = null },
+        .{ .name = "messages ends with a raw partial line", .codec = messages_codec, .stream = messages_recorded[0 .. messages_recorded.len - 5], .outcome = error.IncompleteSseEvent },
+        .{ .name = "messages ends inside an open block", .codec = messages_codec, .stream = messages_cut_in_block, .outcome = error.ProviderConnectionClosed },
+        .{ .name = "messages errors inside an open block", .codec = messages_codec, .stream = comptime messages_cut_in_block ++ messagesData("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"), .outcome = error.TemporaryProviderFailure },
+    };
+    for (cases) |case| {
+        if (case.outcome) |expected| {
+            try std.testing.expectError(expected, validateTestingWire(&tmp, case.codec, case.stream, 64 * 1024, .assistant_response));
+        } else {
+            _ = validateTestingWire(&tmp, case.codec, case.stream, 64 * 1024, .assistant_response) catch |err| {
+                std.debug.print("{s}: unexpected {t}\n", .{ case.name, err });
+                return err;
+            };
+        }
+    }
+}
+
 fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![]u8 {
     const answer = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
     return std.testing.allocator.print(
@@ -1794,7 +2267,7 @@ test "provider reasoning strings preserve raw items" {
         var data: EventData = undefined;
         try data.init(std.testing.io, path, "data", budget, false, &retained);
         defer data.deinit();
-        const accepted = try validate(source.file, sse.len, &metadata, &data, .assistant_response);
+        const accepted = try validate(source.file, sse.len, &metadata, &data, pinned, .assistant_response);
         try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);

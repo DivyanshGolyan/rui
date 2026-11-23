@@ -1,5 +1,7 @@
 const std = @import("std");
 const transport_policy = @import("transport_policy.zig");
+const model_capability = @import("model_capability.zig");
+const product_defaults = @import("product_defaults.zig");
 const model_catalog = @import("model_catalog.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -1145,7 +1147,7 @@ pub const Preparation = struct {
                     if (try self.page.nextProviderTool(&self.tool)) return self.loadProviderTool();
                 } else if (try self.page.nextTool(&self.tool)) {
                     switch (self.tool.owner) {
-                        .rui, .mcp => {
+                        .rui, .mcp, .app => {
                             self.handles[0] = .{ .text = self.tool.name.slice() };
                             self.handles[1] = .{ .content = self.tool.description };
                             self.handles[2] = .{ .content = self.tool.input_schema };
@@ -1205,6 +1207,7 @@ pub const Preparation = struct {
             .effort = effortOf(self.settings.reasoning_effort),
             .starting_effort = effortOf(self.settings.starting_effort),
             .session_affinity = self.settings.session_affinity,
+            .output_limit = self.settings.output_limit,
             .model_length = @intCast(model.len),
         } };
         const settings = &header.item.settings;
@@ -2783,6 +2786,36 @@ test "request preparation freezes settings at admission" {
     try std.testing.expectEqualStrings(full_expected, result.bytes);
     try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "a retry of an Operation prepares the output limit it froze after the catalog changes" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("prep-output-limit-config");
+    try setup.submit("prep-output-limit-file", "prep-output-limit-message", session.slice(), "hi");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var first: Preparation = undefined;
+    first.page.open(binding);
+    try first.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    const first_result = try drainPreparation(&first, &setup.storage, 3, 2, 8192);
+    defer std.testing.allocator.free(first_result.bytes);
+    try std.testing.expectEqual(product_defaults.unlisted_output_limit, first.settings.output_limit);
+    // A listed output limit saved after admission: the Operation keeps the value it froze.
+    try setup.storage.saveModelFacts(&.{.{ .id = "model-a", .context_window = null, .output_limit = 4321, .efforts = .{}, .openai_listed = true }}, null);
+    var retry_used: std.atomic.Value(u64) = .init(0);
+    var retry_retained: ?named_scratch.Owner = null;
+    var retry: Preparation = undefined;
+    retry.page.open(binding);
+    try retry.init(std.testing.io, setup.root, .{ .used = &retry_used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retry_retained);
+    const retry_result = try drainPreparation(&retry, &setup.storage, 3, 2, 8192);
+    defer std.testing.allocator.free(retry_result.bytes);
+    try std.testing.expectEqual(first.settings.output_limit, retry.settings.output_limit);
+    try std.testing.expectEqualStrings(first_result.bytes, retry_result.bytes);
+    try std.testing.expectEqual(@as(u64, 0), retry_used.load(.acquire));
 }
 
 test "preparation integrity follows live readers and rejects a foreign binding" {
@@ -6159,6 +6192,9 @@ fn expectOrderedPartsForTesting(actual: []const std.json.Value, expected: []cons
     };
 }
 
+/// The codecs that lower image parts. A codec that declines images (anthropic-messages/1 here) is not in these image tests.
+const responses_image_codecs = [_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" };
+
 test "canonical ordered Message lowers original PNG JPEG and Text parts on every Responses codec" {
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
     const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
@@ -6172,7 +6208,7 @@ test "canonical ordered Message lowers original PNG JPEG and Text parts on every
     };
     const image_only = [_]OrderedTestPart{.{ .bytes = progressive, .kind = .{ .image = .{} } }};
     const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
@@ -6535,7 +6571,7 @@ test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on e
     };
     const image_only = [_]OrderedTestPart{.{ .bytes = @embedFile("testing/fixtures/input-progressive.jpg"), .kind = .{ .image = .{} } }};
     const text_only = [_]OrderedTestPart{ .{ .bytes = "first" }, .{ .bytes = "" }, .{ .bytes = "last" } };
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         for ([_][]const OrderedTestPart{ &mixed, &image_only, &text_only }) |parts| {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
@@ -6725,7 +6761,7 @@ test "canonical ordered Action Resolution cancellation releases readers and reop
 }
 
 test "canonical ordered Action Resolution background final prefixes the same parts as user input" {
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -6854,9 +6890,9 @@ test "image model policy rechecks retained inputs after model switch" {
     }
 }
 
-test "old text request retries unchanged across later image message and final action on every codec" {
+test "old text request retries unchanged across later image message and final action on every Responses codec" {
     const saved_mcp_json = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}";
-    for (std.enums.values(protocol.Codec)) |codec| {
+    for (responses_image_codecs) |codec| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();

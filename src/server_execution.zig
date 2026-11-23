@@ -479,18 +479,6 @@ const ListingWork = struct {
     auth: enum { none, waiting, requested } = .none,
 };
 
-const observed_codec = blk: {
-    const codec = std.enums.values(protocol.Provider)[0].codec();
-    const observed = codecs.manifest(codec).observe;
-    for (std.enums.values(protocol.Codec)) |served| {
-        const other = codecs.manifest(served).observe;
-        for (std.meta.fieldNames(@TypeOf(observed))) |name| {
-            if (!std.mem.eql(u8, @field(observed, name), @field(other, name))) @compileError("the Reactor observes one codec's headers; observe per Transfer before serving a codec that reads others");
-        }
-    }
-    break :blk codec;
-};
-
 pub fn executionMain(host: *Host) void {
     const mapped_workspace = pages.Mapped(Workspace).map() catch |err| {
         fenceDispatch(host, "execution workspace allocation", err);
@@ -583,10 +571,7 @@ pub fn executionMain(host: *Host) void {
             .ca_file = host.providers.ca_file,
             .capacity = slots.len,
             .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
-            .observation = .{
-                .names = codecs.manifest(observed_codec).observe,
-                .turn_state = host.turn_states.sink(),
-            },
+            .observation = .{ .turn_state = host.turn_states.sink() },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
             .listing_urls = listing_urls,
@@ -6106,7 +6091,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
             .inactivity_seconds = 1,
             .scratch_path = fixture.path(),
             .budget = fixture.budget(),
-            .observation = .{ .names = .{ .request_id = "x-request-id" } },
+            .observation = .{},
         });
         defer reactor.deinit();
         // Cleanup must precede the reactor even when an assertion leaves a

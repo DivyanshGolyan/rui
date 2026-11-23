@@ -1444,6 +1444,13 @@ pub const InterpretScratch = struct {
     }
 };
 
+/// Responses events are whole in one SSE event: the data passes through unchanged.
+pub fn normalize(stream: *Stream, data: []const u8, out: *codec_abi.Normalized) void {
+    _ = stream;
+    out.* = .{ .whole = true };
+    out.copy(.{ .start = 0, .length = data.len });
+}
+
 pub fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {
     var at: codec_abi.At = .{ .stage = .stream, .output_index = null };
     const what = verdict(stream, scratch, data, &at) catch |err| return .{ .at = at, .what = .{ .failed = failedOf(scratch, err) } };

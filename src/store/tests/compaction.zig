@@ -387,7 +387,7 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
                 }
                 const compacts = index == 1 or index >= 7;
                 const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
-                const trigger: u64 = if (index == 7) model_capability.compactionPolicy("model-a", null, null).compaction_trigger else 1000;
+                const trigger: u64 = if (index == 7) model_capability.compactionPolicy("model-a", true, null, null).compaction_trigger.? else 1000;
                 try std.testing.expectEqual(compacts, estimate >= trigger);
                 if (index == 0) try std.testing.expectEqual(@as(u64, 999), estimate);
                 if (index == 7) try std.testing.expectEqual(@as(u64, 1000000), estimate);
@@ -1099,7 +1099,7 @@ fn compoundPressureReadForTesting(storage: *Store, session: []const u8, parts: *
     var access: @import("../access.zig").Access(.read, error{}) = .open(&entry);
     defer access.deinit();
     const domain = @import("../domain/model_admission.zig");
-    var read = domain.CompactionRead.init(session, std.math.maxInt(i64), .codex, "model-a", model_capability.compactionPolicy("model-a", 1000, 0));
+    var read = domain.CompactionRead.init(session, std.math.maxInt(i64), .codex, .@"openai-responses/2", "model-a", model_capability.compactionPolicy("model-a", true, 1000, 0));
     read.pressure = if (parts.ready) parts else null;
     while (read.queue(&access)) {
         try @import("../access.zig").runAs(&access, error.CorruptStore);

@@ -101,6 +101,8 @@ pub const Efforts = std.enums.EnumSet(ReasoningEffort);
 pub const Entry = struct {
     id: []const u8,
     context_window: ?u32,
+    /// The most output tokens the model takes (models.dev `limit.output`); null when unknown.
+    output_limit: ?u32 = null,
     efforts: Efforts,
     openai_listed: bool,
 };

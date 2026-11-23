@@ -71,8 +71,8 @@ pub const TurnStateKey = struct {
     epoch: u64,
 };
 
+/// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
-    names: codec_abi.ObservedHeaders = .{},
     turn_state: ?TurnStateSink = null,
 };
 
@@ -442,7 +442,7 @@ pub const Reactor = struct {
                 transfer.headers.block(head.kind, head.status);
                 const now_seconds = std.Io.Clock.real.now(self.io).toSeconds();
                 for (head.fields) |field| {
-                    transfer.headers.field(&self.observation, field.name, field.value, now_seconds) catch |err| {
+                    transfer.headers.field(transfer.observe, self.observation.turn_state, field.name, field.value, now_seconds) catch |err| {
                         if (err == error.OutOfMemory) transfer.headers.local_failure = true;
                         return .refuse;
                     };
@@ -592,7 +592,7 @@ const HeaderContext = struct {
         self.successful_block = kind == .final and status >= 200 and status < 300;
     }
 
-    fn field(self: *HeaderContext, observation: *const HeaderObservation, name: []const u8, raw: []const u8, now_seconds: i64) error{ InvalidValue, OutOfMemory }!void {
+    fn field(self: *HeaderContext, names: *const codec_abi.ObservedHeaders, turn_state_sink: ?TurnStateSink, name: []const u8, raw: []const u8, now_seconds: i64) error{ InvalidValue, OutOfMemory }!void {
         const value = std.mem.trim(u8, raw, " \t");
         // h2 delivers field names lowercase (RFC 9113 8.2.1, enforced by nghttp2).
         if (std.mem.eql(u8, name, "retry-after")) {
@@ -608,13 +608,12 @@ const HeaderContext = struct {
             };
             return;
         }
-        const names = &observation.names;
         if (names.turn_state.len != 0 and std.mem.eql(u8, name, names.turn_state)) {
             if (!self.successful_block or self.turn_state_seen) return;
             self.turn_state_seen = true;
             if (value.len == 0 or value.len > max_turn_state_bytes) return;
             for (value) |byte| if (byte < 0x20 or byte > 0x7e) return;
-            if (observation.turn_state) |sink| if (self.turn_state) |key| sink.capture(sink.context, key, value);
+            if (turn_state_sink) |sink| if (self.turn_state) |key| sink.capture(sink.context, key, value);
             return;
         }
         const observed: Observed.Name = if (names.request_id.len != 0 and std.mem.eql(u8, name, names.request_id))
@@ -668,6 +667,9 @@ pub const Transfer = struct {
     timing: ?*AttemptTiming = null,
     stream: h2.Stream,
     reactor: *Reactor,
+    /// The observed header names of the codec this Transfer was prepared with: a pointer
+    /// into the codec's static manifest, not a copy.
+    observe: *const codec_abi.ObservedHeaders,
     request: RetainedRequest,
     request_open: bool = true,
     response: ResponseCapture,
@@ -720,6 +722,7 @@ pub const Transfer = struct {
         self.* = .{
             .stream = .idle,
             .reactor = reactor,
+            .observe = &codecs.manifest(request.codec).observe,
             .request = .{ .file = request.file, .charged = request.charged, .structured_output = request.structured_output, .codec = request.codec },
             .response = response,
             .headers = .{},
@@ -735,7 +738,7 @@ pub const Transfer = struct {
         if (options.routing) |routing| if (reactor.observation.turn_state) |table| {
             const replay = table.replay(table.context, request.provider, routing.turn_id, routing.owner);
             self.headers.turn_state = .{ .provider = request.provider, .turn_id = routing.turn_id, .epoch = replay.epoch };
-            const name = reactor.observation.names.turn_state;
+            const name = self.observe.turn_state;
             if (name.len != 0 and replay.value.len != 0) {
                 fields[count] = .{ .name = name, .value = replay.value };
                 count += 1;
@@ -1009,7 +1012,7 @@ test "scratch reservation is bounded and releases exact charge" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-fn observeLines(context: *HeaderContext, observation: *const HeaderObservation, lines: []const []const u8) !void {
+fn observeLines(context: *HeaderContext, names: *const codec_abi.ObservedHeaders, sink: ?TurnStateSink, lines: []const []const u8) !void {
     for (lines) |line| {
         if (std.mem.startsWith(u8, line, ":status ")) {
             const status = try std.fmt.parseInt(u16, line[":status ".len..], 10);
@@ -1017,13 +1020,13 @@ fn observeLines(context: *HeaderContext, observation: *const HeaderObservation, 
             continue;
         }
         const colon = std.mem.indexOfScalar(u8, line, ':').?;
-        try context.field(observation, line[0..colon], line[colon + 1 ..], 1_700_000_000);
+        try context.field(names, sink, line[0..colon], line[colon + 1 ..], 1_700_000_000);
     }
 }
 
 test "duplicate Retry-After headers retain both independent constraints" {
     var context: HeaderContext = .{};
-    try observeLines(&context, &.{}, &.{
+    try observeLines(&context, &.{}, null, &.{
         "retry-after: 12",
         "retry-after: Tue, 14 Nov 2023 22:13:21 GMT",
         "retry-after: 3",
@@ -1036,28 +1039,28 @@ test "duplicate Retry-After headers retain both independent constraints" {
 }
 
 test "response observations use caller-selected names and reject contradictions" {
-    const observation: HeaderObservation = .{ .names = .{
+    const names: codec_abi.ObservedHeaders = .{
         .request_id = "correlation",
         .model = "served-model",
         .alternate_model = "other-model",
-    } };
+    };
     var context: HeaderContext = .{};
     defer context.observed.deinit();
-    try observeLines(&context, &observation, &.{ "openai-model: unrelated", "served-model: alpha", "other-model: beta", "correlation: ref-1" });
+    try observeLines(&context, &names, null, &.{ "openai-model: unrelated", "served-model: alpha", "other-model: beta", "correlation: ref-1" });
     try std.testing.expectEqualStrings("alpha", context.observed.get(.model));
     try std.testing.expectEqualStrings("beta", context.observed.get(.alternate_model));
     try std.testing.expectEqualStrings("ref-1", context.observed.get(.request_id));
-    try observeLines(&context, &observation, &.{"served-model: alpha"});
-    try std.testing.expectError(error.InvalidValue, observeLines(&context, &observation, &.{"served-model: gamma"}));
+    try observeLines(&context, &names, null, &.{"served-model: alpha"});
+    try std.testing.expectError(error.InvalidValue, observeLines(&context, &names, null, &.{"served-model: gamma"}));
 }
 
 test "response observations keep their real length and reject empty, invalid UTF-8 or oversized values" {
-    const observation: HeaderObservation = .{ .names = .{ .request_id = "correlation", .model = "served-model" } };
+    const names: codec_abi.ObservedHeaders = .{ .request_id = "correlation", .model = "served-model" };
     var context: HeaderContext = .{};
     defer context.observed.deinit();
-    try observeLines(&context, &observation, &.{":status 200"});
+    try observeLines(&context, &names, null, &.{":status 200"});
     try std.testing.expectEqual(@as(usize, 0), context.observed.bytes.len);
-    try observeLines(&context, &observation, &.{ "served-model: m", "correlation: " ++ @as([256]u8, @splat('r')), "served-model: m" });
+    try observeLines(&context, &names, null, &.{ "served-model: m", "correlation: " ++ @as([256]u8, @splat('r')), "served-model: m" });
     try std.testing.expectEqual(@as(usize, 257), context.observed.bytes.len);
     try std.testing.expectEqualStrings("m", context.observed.get(.model));
     try std.testing.expectEqualStrings(&@as([256]u8, @splat('r')), context.observed.get(.request_id));
@@ -1065,7 +1068,7 @@ test "response observations keep their real length and reject empty, invalid UTF
     for ([_][]const u8{ "served-model: ", "served-model: caf\xc3", "served-model: " ++ @as([protocol.max_model_bytes + 1]u8, @splat('m')) }) |line| {
         var rejected: HeaderContext = .{};
         defer rejected.observed.deinit();
-        try std.testing.expectError(error.InvalidValue, observeLines(&rejected, &observation, &.{line}));
+        try std.testing.expectError(error.InvalidValue, observeLines(&rejected, &names, null, &.{line}));
         try std.testing.expectEqual(@as(usize, 0), rejected.observed.bytes.len);
     }
 }
@@ -1088,27 +1091,27 @@ test "turn state observation keeps only the first value of a successful final bl
     };
     for (cases) |case| {
         var record: TurnStateRecord = .{};
-        const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
+        const names: codec_abi.ObservedHeaders = .{ .turn_state = name };
         var context: HeaderContext = .{ .turn_state = .{ .provider = .openai, .turn_id = 7, .epoch = 3 } };
-        try observeLines(&context, &observation, case.lines);
+        try observeLines(&context, &names, record.sink(), case.lines);
         try std.testing.expectEqualStrings(case.expected, record.value.slice());
         try std.testing.expectEqual(@intFromBool(case.expected.len != 0), record.captures);
         if (record.captures != 0) try std.testing.expectEqual(TurnStateKey{ .provider = .openai, .turn_id = 7, .epoch = 3 }, record.key.?);
     }
     var record: TurnStateRecord = .{};
-    const observation: HeaderObservation = .{ .names = .{ .turn_state = name }, .turn_state = record.sink() };
+    const names: codec_abi.ObservedHeaders = .{ .turn_state = name };
     const key: TurnStateKey = .{ .provider = .codex, .turn_id = 1, .epoch = 1 };
     var trailers: HeaderContext = .{ .turn_state = key };
     trailers.block(.final, 200);
     trailers.block(.trailers, 0);
-    try trailers.field(&observation, name, "late", 0);
+    try trailers.field(&names, record.sink(), name, "late", 0);
     try std.testing.expectEqual(@as(usize, 0), record.captures);
-    const unnamed_observation: HeaderObservation = .{ .turn_state = record.sink() };
-    var unnamed: HeaderContext = .{ .turn_state = key };
-    try observeLines(&unnamed, &unnamed_observation, &.{ ":status 200", "x-codex-turn-state: value" });
+    const unnamed: codec_abi.ObservedHeaders = .{};
+    var unnamed_context: HeaderContext = .{ .turn_state = key };
+    try observeLines(&unnamed_context, &unnamed, record.sink(), &.{ ":status 200", "x-codex-turn-state: value" });
     try std.testing.expectEqual(@as(usize, 0), record.captures);
     var unkeyed: HeaderContext = .{};
-    try observeLines(&unkeyed, &observation, &.{ ":status 200", "x-codex-turn-state: value" });
+    try observeLines(&unkeyed, &names, record.sink(), &.{ ":status 200", "x-codex-turn-state: value" });
     try std.testing.expectEqual(@as(usize, 0), record.captures);
 }
 
@@ -1271,7 +1274,7 @@ test "response continuation reservation accounts for bodies below and above its 
         reactor.io = std.testing.io;
         reactor.budget = budget;
         reactor.listings = .initFill(null);
-        var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .request = undefined, .response = capture, .headers = .{}, .credential = null };
+        var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .observe = &.{}, .request = undefined, .response = capture, .headers = .{}, .credential = null };
         var owned = true;
         defer if (owned) transfer.response.deinit(std.testing.io, budget);
         try std.testing.expectEqual(@as(u64, 17 + reserve), used.load(.acquire));
@@ -1345,7 +1348,7 @@ test "response continuation reservation rejects a mismatched semantic body lengt
     reactor.io = std.testing.io;
     reactor.budget = budget;
     reactor.listings = .initFill(null);
-    var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .request = undefined, .response = capture, .headers = .{}, .credential = null };
+    var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .observe = &.{}, .request = undefined, .response = capture, .headers = .{}, .credential = null };
     defer transfer.response.deinit(std.testing.io, budget);
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .body = 3 }));
     try transfer.response.file.writePositionalAll(std.testing.io, "abc", 0);
