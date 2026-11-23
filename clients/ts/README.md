@@ -56,18 +56,7 @@ const session = await rui.sessions.create({ preset: "drift" });
 The client defaults omitted or null `interface.dir` to its private temporary directory and omitted `interface.lifetime` to `"stdin"`; an explicit non-null directory or `"stdin"`/`"detached"` lifetime wins.
 It sends the document to `rui host serve --settings -` using a four-byte big-endian byte length followed by UTF-8 JSON, not argv or environment flags.
 
-Before:
-
-```ts
-await Rui.connect({
-	database: "/data/store",
-	provider: { baseUrl: "https://api.openai.com/v1", key: "secret", caFile: "/trust.pem" },
-	tools: [{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: "token", callTimeoutMs: 30000 }],
-	activeCapacity: 2, paused: true, presets: {}, binary: "/path/to/rui", lockWaitMs: 5000,
-});
-```
-
-After:
+Client options such as the binary path and lock wait go in a separate second argument:
 
 ```ts
 await Rui.connect({
@@ -79,24 +68,7 @@ await Rui.connect({
 }, { binary: "/path/to/rui", lockWaitMs: 5000 });
 ```
 
-Every former `ConnectOptions` field moves as follows:
-
-| Before | After |
-| --- | --- |
-| `database` (directory) | `settings.store.sqlite.dir` |
-| `database` (MySQL URL) | `settings.store.mysql.url` (a secret source or pipe-only string) |
-| `provider.baseUrl` | `settings.providers.openai.endpoint`: append `/responses` to the former base URL (trim trailing `/` first) |
-| `provider.key` | `settings.providers.openai.key` (a secret source or pipe-only string) |
-| `provider.caFile` | `settings.network.caFile` (Host-wide, for all providers) |
-| `tools[].name` | The key in `settings.tools.mcp[name]` |
-| `tools[].url` | `settings.tools.mcp[name].url` |
-| `tools[].bearerToken` | `settings.tools.mcp[name].bearerToken` (a secret source or pipe-only string) |
-| `tools[].callTimeoutMs` | `settings.tools.mcp[name].callTimeoutMs` |
-| `activeCapacity` | `settings.execution.activeCapacity` |
-| `paused` | `settings.execution.paused` |
-| `presets` | `settings.presets`, using the existing `AgentSpec` writer |
-| `binary` | `options.binary` |
-| `lockWaitMs` | `options.lockWaitMs` (still defaults to 120000 ms) |
+`options.lockWaitMs` defaults to 120000 ms.
 
 Secret strings are a TypeScript input convenience: the pipe serializer wraps each as `{ value: "secret" }`.
 Explicit `{ value: "secret" }`, `{ file: "/private/key" }`, `{ env: "NAME" }`, and the generated owner/default forms are also accepted where the schema allows them.
