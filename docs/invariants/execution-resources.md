@@ -92,6 +92,7 @@
 | EXR-84 | Module | A subscribe the server refuses with an HTTP status gets that status and holds no stream, and is not counted as accepted. | Test server fixture read through the real client transport | `EXR-84 a subscribe the server refuses with 405 gets that status and holds no stream` in `src/mcp/test_server_listen_test.zig`. | src/mcp/test_server.zig |
 | EXR-85 | Module | An acknowledgment whose filter drops `toolsListChanged` reaches the client without it. | Test server fixture read through the real client transport | `EXR-85 an acknowledgment whose filter drops toolsListChanged says so on the wire` in `src/mcp/test_server_listen_test.zig`. | src/mcp/test_server.zig |
 | EXR-86 | Module | A second listen subscribe closes the first held stream, pushes reach only the second, and the fixture counts each accepted subscribe. | Test server fixture read through the real client transport | `EXR-86 a second listen subscribe closes the first stream and the pushes reach only the second` in `src/mcp/test_server_listen_test.zig`. | src/mcp/test_server.zig |
+| EXR-87 | Module | A closed or unsupported listen line ignores every event, so events that arrive after the one that ended a stream (in the same read, or a deadline after a drop) change nothing. | Listen core step over the non-holding states and every event | `EXR-87 a line holding no stream ignores every late event and keeps its state` in `src/mcp/listen.zig`. | src/mcp/listen.zig |
 
 Owned elsewhere: SH-3 (storage failure fencing).
 

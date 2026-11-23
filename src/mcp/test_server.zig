@@ -90,16 +90,28 @@ pub const Listening = struct {
             "\"_meta\":{{\"io.modelcontextprotocol/subscriptionId\":{d}}}}}}}\n\n", .{ self.id, self.id }) catch unreachable;
         _ = sendChunk(socket, text);
         _ = sendAll(socket, "0\r\n\r\n");
-        self.close();
+        self.release(socket);
     }
 
     /// Drops the connection with no result and no chunked end: an abrupt close.
     pub fn drop(self: *Listening) void {
-        self.close();
+        const socket = self.held();
+        if (socket >= 0) self.release(socket);
     }
 
-    /// Closes the held socket if it is still open.
-    pub fn close(self: *Listening) void {
+    /// Accepted subscribes once the serve loop has decided the latest one.
+    pub fn accepted(self: *Listening) u64 {
+        _ = self.held();
+        return self.opens.load(.acquire);
+    }
+
+    /// Closes `socket` only while it is still the held one, so a stream that superseded it stays open.
+    fn release(self: *Listening, socket: std.posix.fd_t) void {
+        if (self.fd.cmpxchgStrong(socket, -1, .acq_rel, .acquire) == null) _ = std.c.close(socket);
+    }
+
+    /// Closes whatever stream is held, when the server stops.
+    fn close(self: *Listening) void {
         const socket = self.fd.swap(-1, .acq_rel);
         if (socket >= 0) _ = std.c.close(socket);
     }

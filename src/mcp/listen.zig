@@ -70,10 +70,11 @@ pub const Line = struct {
         return self.state == .opening or self.state == .open;
     }
 
-    /// Applies one event to a line that holds a stream and returns whether the shell must list the server
-    /// again. Events for a closed or unsupported line are a shell bug: the shell holds no stream then.
+    /// Applies one event and returns whether the shell must list the server again. A line that holds no
+    /// stream (closed or unsupported) ignores every event: one read can carry events after the one that
+    /// ended the stream, and a deadline can fire after a drop, so late events are ordinary.
     pub fn step(self: *Line, event: Event, now_ms: u64, seed: u64) bool {
-        std.debug.assert(self.holdsStream());
+        if (!self.holdsStream()) return false;
         switch (event) {
             .ignored => return false,
             .acknowledged => |ack| {
@@ -113,7 +114,8 @@ pub const Line = struct {
                 return false;
             },
             .timed_out => {
-                if (self.state == .opening) self.backoff(now_ms, seed);
+                // Only an unacknowledged line past its deadline times out; an early or stale wake changes nothing.
+                if (self.state == .opening and now_ms >= self.ack_due_ms) self.backoff(now_ms, seed);
                 return false;
             },
         }
@@ -273,6 +275,20 @@ test "EXR-71 a listen stream moves through every holding state x event as its ru
     }
 }
 
+test "EXR-87 a line holding no stream ignores every late event and keeps its state" {
+    for ([_]State{ .closed, .unsupported }) |state| {
+        for (events, 0..) |event, column| {
+            var line = lineIn(state);
+            line.failures = 2;
+            line.retry_at_ms = 900;
+            const before = line;
+            errdefer std.debug.print("state {s} event {d}\n", .{ @tagName(state), column });
+            try std.testing.expect(!line.step(event, 1_000, 7));
+            try std.testing.expectEqualDeep(before, line);
+        }
+    }
+}
+
 test "EXR-72 a reconnect is delayed by backoff with jitter, never zero, and a stable stream restarts at one second" {
     var seed: u64 = 0x9E37;
     var line: Line = .{};
@@ -396,6 +412,10 @@ test "EXR-80 an opening line times out at its ack deadline and backs off, and wa
     _ = line.begin(1_000);
     try std.testing.expectEqual(@as(?u64, 1_000 + ack_deadline_ms), line.wakeAt());
     try std.testing.expect(!line.due(1_000 + ack_deadline_ms));
+
+    // A wake before the deadline changes nothing.
+    try std.testing.expect(!line.step(.timed_out, 1_000 + ack_deadline_ms - 1, 3));
+    try std.testing.expectEqual(State.opening, line.state);
 
     // The shell calls step(.timed_out) at the deadline; an unacknowledged line backs off like a drop.
     try std.testing.expect(!line.step(.timed_out, 1_000 + ack_deadline_ms, 3));

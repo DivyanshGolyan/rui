@@ -181,7 +181,7 @@ test "EXR-84 a subscribe the server refuses with 405 gets that status and holds 
         }
     }
     try std.testing.expectEqual(@as(u16, 405), status);
-    try std.testing.expectEqual(@as(u64, 0), listening.opens.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), listening.accepted());
 }
 
 test "EXR-85 an acknowledgment whose filter drops toolsListChanged says so on the wire" {
@@ -201,7 +201,7 @@ test "EXR-85 an acknowledgment whose filter drops toolsListChanged says so on th
     try readUntil(&stream, "subscriptions/acknowledged", &got, &length);
     try std.testing.expect(std.mem.indexOf(u8, got[0..length], "toolsListChanged") == null);
     try std.testing.expect(std.mem.indexOf(u8, got[0..length], "\"notifications\":{}") != null);
-    try std.testing.expectEqual(@as(u64, 1), listening.opens.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), listening.accepted());
 }
 
 test "EXR-86 a second listen subscribe closes the first stream and the pushes reach only the second" {
@@ -231,5 +231,5 @@ test "EXR-86 a second listen subscribe closes the first stream and the pushes re
     try expectConnectionEnd(&first);
     listening.push("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n");
     try readUntil(&second, "notifications/tools/list_changed", &second_got, &second_length);
-    try std.testing.expectEqual(@as(u64, 2), listening.opens.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), listening.accepted());
 }
