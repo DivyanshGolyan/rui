@@ -262,30 +262,11 @@ def trusted_allowance(root=ROOT):
     paths = git(root, 'ls-tree', '--name-only', base, '--', ALLOWANCE).strip()
     data = json.loads(git(root, 'show', f'{base}:{ALLOWANCE}')) if paths else {}
     if paths:
-        legacy = isinstance(data, dict) and any(
-            isinstance(rules, dict) and type(rules.get('fixed_sleep')) is int
-            for rules in data.values())
-        if not legacy:
-            return validate(data)
-        stripped = {}
-        for path, rules in data.items():
-            if not isinstance(rules, dict):
-                raise ValueError(f'invalid allowance rules: {path!r}')
-            rules = dict(rules)
-            if type(rules.get('fixed_sleep')) is int:
-                if rules['fixed_sleep'] <= 0:
-                    raise ValueError(f'invalid legacy fixed sleep count: {path}')
-                del rules['fixed_sleep']
-            if rules:
-                stripped[path] = rules
-        validate(stripped)
+        return validate(data)
     sources = trusted_sources(root, base)
     inventory = inventory_sources(sources)
-    if paths:
-        inventory = stripped
-    else:
-        for rules in inventory.values():
-            rules.pop('fixed_sleep', None)
+    for rules in inventory.values():
+        rules.pop('fixed_sleep', None)
     old = {}
     harness = sources.get('tests/ci/test_harness_contracts.py')
     if harness:
