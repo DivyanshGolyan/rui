@@ -19,6 +19,8 @@ test "each saved outcome names one feed ending" {
         .{ turn_domain.TurnOutcome{ .resource_exceeded = 2 }, false, protocol.TurnEnding.context_full },
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_policy", .report = 3 } }, false, protocol.TurnEnding.provider_refused },
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_http_400", .report = null } }, false, protocol.TurnEnding.provider_refused },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_quota", .report = 4 } }, false, protocol.TurnEnding.out_of_quota },
+        .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_plan", .report = null } }, false, protocol.TurnEnding.provider_refused },
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_api_key_rejected", .report = null } }, false, protocol.TurnEnding.provider_refused },
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "provider_tls_verification_failed", .report = null } }, false, protocol.TurnEnding.provider_unavailable },
         .{ turn_domain.TurnOutcome{ .failed = .{ .code = "malformed_provider_output", .report = null } }, true, protocol.TurnEnding.failed },

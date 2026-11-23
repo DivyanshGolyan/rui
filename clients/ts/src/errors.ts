@@ -58,6 +58,20 @@ export class RuiUnavailableError extends Error {
 	}
 }
 
+/**
+ * The Store was fenced under this client: the Host answered `canonical_store_failure`, or a MySQL Host wrote `store_fenced`
+ * before it exited. The client latches it once, so every pending and later call rejects with this same error, and it does
+ * not restart the Host. Close the client and connect again to use a new Host.
+ */
+export class RuiStoreFailedError extends Error {
+	override readonly name = "RuiStoreFailedError";
+	readonly code = "store_failed" as const;
+
+	constructor(options?: { cause?: unknown }) {
+		super("The Rui Store failed, so this client rejects every call. Close it and connect again.", options);
+	}
+}
+
 /** The entry contains parts; read an individual part instead. */
 export class ContentIsPartsError extends Error {
 	override readonly name = "ContentIsPartsError";

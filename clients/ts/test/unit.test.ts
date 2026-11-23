@@ -486,7 +486,7 @@ test("the refusal line becomes a RuiStartError", () => {
 	assert.equal(startError(""), undefined);
 	assert.equal(startError("not json\n"), undefined);
 	assert.equal(startError("null\n{}\n"), undefined);
-	for (const code of ["runtime_dir_unusable", "tool_name_collision", "invalid_preset"] satisfies RuiStartError["code"][]) {
+	for (const code of ["runtime_dir_unusable", "proxy_unusable", "invalid_preset"] satisfies RuiStartError["code"][]) {
 		assert.equal(startError(JSON.stringify({ rui_start_error: { code, message: "refused" } }))?.code, code);
 	}
 });

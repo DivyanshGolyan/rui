@@ -866,23 +866,13 @@ fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     requirement.total = try std.math.add(usize, requirement.total, sockets);
 }
 
-noinline fn offerMcpTools(io: std.Io, scratch: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
+noinline fn offerMcpTools(io: std.Io, scratch: std.mem.Allocator, storage: *store_module.Store, relist_owner: *server_mcp_relist.Relist, stop: ?std.posix.fd_t) !void {
     var arena: std.heap.ArenaAllocator = .init(scratch);
     defer arena.deinit();
     var saved = try storage.readHostToolSet(arena.allocator());
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     relist_owner.startup(io, storage, if (kept) |*value| value else null, stop) catch |err| switch (err) {
         error.Stopped => return error.EffectAwareShutdown,
-        error.ToolNameCollision => {
-            const refusal = &relist_owner.refusal.?;
-            var message: [start_report.max_refusal_message_bytes]u8 = undefined;
-            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ refusal.tool(), refusal.collision.first, refusal.collision.second }) catch "a tool name is offered twice");
-            return err;
-        },
-        error.TooManyTools => {
-            failure.* = .init(.settings_invalid, "tools.mcp: servers list more tools than a Host offers");
-            return err;
-        },
         else => |other| return other,
     };
 }
@@ -1028,7 +1018,6 @@ pub noinline fn serve(
         &diagnostics,
         diagnostic_open_error,
         &readiness_owned,
-        failure,
     ));
 }
 
@@ -1055,9 +1044,8 @@ fn serveOpened(
     diagnostics: *?HostDiagnostics,
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
-    failure: *?start_report.Failure,
 ) !void {
-    if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null, failure);
+    if (mcp_relist) |owner| try offerMcpTools(io, allocator, storage, owner, if (settings.interface.lifetime.value == .stdin) 0 else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -5172,8 +5160,9 @@ test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
     try std.testing.expectEqual(null, lines.next());
 }
 
-test "Host startup reports MCP tool collision and excess tools as owned failures" {
+test "Host startup offers a clashing MCP tool under its prefix and leaves excess tools out" {
     const Script = @import("mcp/test_server.zig");
+    const built_ins = tools.built_in_tool_set.records.len;
     for ([_]bool{ false, true }) |too_many| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -5201,19 +5190,20 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        var failure: ?start_report.Failure = null;
-        {
-            const servers = [_]server_mcp_settings.Server{server};
-            var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
-            defer owner.deinit();
-            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure));
+        const servers = [_]server_mcp_settings.Server{server};
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        defer owner.deinit();
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
+        const offered = storage.hostTools().host_tool_set;
+        if (too_many) {
+            try std.testing.expectEqual(tools.max_host_tool_records, offered.records.len);
+            try std.testing.expectEqual(@as(u32, built_ins), owner.status(0).left_out);
+            try std.testing.expectEqual(@as(u32, tools.max_host_tool_records - built_ins), owner.status(0).tools);
+        } else {
+            try std.testing.expectEqual(tools.Owner.rui, offered.records[offered.find("bash").?].owner);
+            try std.testing.expectEqualStrings("bash", offered.records[offered.find("docs__bash").?].remote_name);
+            try std.testing.expectEqual(@as(u32, 0), owner.status(0).left_out);
         }
-        try std.testing.expect(failure != null);
-        var buffer: [start_report.max_line_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(if (too_many)
-            "{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"tools.mcp: servers list more tools than a Host offers\"}}\n"
-        else
-            "{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", start_report.line(&failure.?, &buffer));
     }
 }
 
@@ -5240,12 +5230,10 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        var failure: ?start_report.Failure = null;
         const servers = [_]server_mcp_settings.Server{server};
         var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
         defer owner.deinit();
-        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-        try std.testing.expect(failure == null);
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
             var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -5296,9 +5284,7 @@ test "startup publishes every first list in one merge, so a tool moving between 
         }
         var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
         defer owner.deinit();
-        var failure: ?start_report.Failure = null;
-        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-        try std.testing.expect(failure == null);
+        try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         const set = storage.hostTools().host_tool_set;
         try std.testing.expectEqualStrings(search_owner, set.records[set.find("search").?].server);
     }
@@ -5325,9 +5311,7 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     try servers[0].url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{down.port}));
     var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
     defer owner.deinit();
-    var failure: ?start_report.Failure = null;
-    try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null, &failure);
-    try std.testing.expect(failure == null);
+    try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("remote_lookup") == null);
     try std.testing.expectEqual(relist.Last.failed, owner.slots[0].last);
 
@@ -5429,7 +5413,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
         var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
         defer reply.deinit();
         try replyToolsStatus(&host, &reply);
-        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"}]}", reply.body.json);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\",\"left_out\":\"0\"}]}", reply.body.json);
     }
 
     // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.

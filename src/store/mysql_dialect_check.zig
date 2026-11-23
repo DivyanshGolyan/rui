@@ -1271,6 +1271,8 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                 defer std.testing.allocator.free(text);
                 try load(migrated_database_sql, text, false);
             }
+            // Today's core_command carries format 89's missing_settings, which step 89 adds in place.
+            try load(migrated_database_sql, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, DROP COLUMN missing_settings') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0);PREPARE rui_missing FROM @rui_missing_ddl;EXECUTE rui_missing;DEALLOCATE PREPARE rui_missing;SET @rui_missing_ddl=NULL", false);
             // The expected fixture describes the current schema, while this Store is at format 74.
             const format_74_rows = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
@@ -1296,17 +1298,18 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         }
         try expectCatalog(migrated_database_sql);
         try expectSameResults(&.{
-            "SELECT * FROM core_command ORDER BY command_seq",
+            "SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command ORDER BY command_seq",
             "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
             "SELECT count(*) FROM session_pin",
             "SELECT count(*) FROM session_pin_command",
         }, &.{
-            "SELECT * FROM original_pin_commands ORDER BY command_seq",
+            "SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM original_pin_commands ORDER BY command_seq",
             "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM original_pin_stops ORDER BY command_key",
             "SELECT 0",
             "SELECT 0",
         });
-        try expectSameResults(&.{"SELECT count(*) FROM session_stop WHERE action_cutoff<>0"}, &.{"SELECT 0"});
+        // Format 89 adds missing_settings after this step; no pre-89 command has one.
+        try expectSameResults(&.{ "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", "SELECT count(*) FROM core_command WHERE missing_settings IS NOT NULL" }, &.{ "SELECT 0", "SELECT 0" });
         try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",

@@ -21,7 +21,6 @@ pub const StartError = enum {
     mysql_login,
     store_fenced,
     runtime_dir_unusable,
-    tool_name_collision,
     proxy_unusable,
 };
 
@@ -214,13 +213,13 @@ test "start report renders every StartError as the exact JSON line" {
 
 test "start report owns formatted bytes across source and value mutation" {
     var source: [max_refusal_message_bytes]u8 = undefined;
-    const message = try std.fmt.bufPrint(&source, "tool name {s} is offered by {s} and by {s}", .{ "bash", "Rui", "docs" });
-    var original: Failure = .init(.tool_name_collision, message);
+    const message = try std.fmt.bufPrint(&source, "runtime directory {s} is unusable", .{"/run/docs"});
+    var original: Failure = .init(.runtime_dir_unusable, message);
     const copied = original;
     @memset(&source, 'x');
     original = .init(.settings_invalid, "changed");
     var buffer: [max_line_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", line(&copied, &buffer));
+    try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"runtime_dir_unusable\",\"message\":\"runtime directory /run/docs is unusable\"}}\n", line(&copied, &buffer));
 }
 
 test "start report preserves JSON escaping and the maximum message" {

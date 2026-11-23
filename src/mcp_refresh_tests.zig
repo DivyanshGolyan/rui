@@ -93,7 +93,10 @@ test "MCP offer projection covers identity changes removals additions and name n
                         after_rows[a].owner = .rui;
                         after_rows[a].server = "";
                     },
-                    .name => after_rows[a].name = "fetch_new",
+                    .name => {
+                        after_rows[a].name = "fetch_new";
+                        after_rows[a].remote_name = "fetch_new";
+                    },
                     .removed => remove = a,
                     .mixed => {
                         after_rows[a].description = "new a";

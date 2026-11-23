@@ -2988,17 +2988,17 @@ fn quotaCode(code: []const u8) bool {
     };
 }
 
+/// A failure is current until its provider and model answer again: a visible row on both whose answered state (a finished turn, or a tool call it proposed) began at or after it.
+/// Rows on another provider or model say nothing about this one's quota or sign-in.
 pub fn band(state: *const State) ?Band {
-    var finished: u64 = 0;
-    var newest: [band_rules.len]?struct { failed: WorkState.Failed, provider: Provider } = @splat(null);
+    var newest: [band_rules.len]?struct { failed: WorkState.Failed, row: *const Row } = @splat(null);
     var retrying: [band_rules.len]u32 = @splat(0);
     for (state.rows.items) |*row| {
         if (!visible(state, row)) continue;
         const work = (&row.state).asOf(state.now_ms);
         switch (work) {
-            .finished => |value| finished = @max(finished, value.since),
             .failed => |failed| for (band_rules, &newest) |rule, *held| {
-                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .provider = row.provider.? };
+                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .row = row };
             },
             .retrying => |retry| for (band_rules, &retrying) |rule, *count| {
                 if (rule.kind == .retrying and rule.matches(retry.cause.slice())) count.* += 1;
@@ -3012,12 +3012,25 @@ pub fn band(state: *const State) ?Band {
             continue;
         }
         const failed = (held orelse continue).failed;
-        if (failed.since <= finished) continue;
+        if (reachedSince(state, held.?.row, failed.since)) continue;
         if (rule.after_login) if (state.login_at) |at| if (failed.since <= at) continue;
         if (rule.until_reset) if (failed.resets_at) |at| if (at <= state.now_ms / 1000) continue;
-        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at, .provider = held.?.provider };
+        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at, .provider = held.?.row.provider.? };
     }
     return null;
+}
+
+fn reachedSince(state: *const State, failed: *const Row, since: u64) bool {
+    for (state.rows.items) |*row| {
+        if (!visible(state, row) or row.provider != failed.provider.? or !std.mem.eql(u8, row.model.slice(), failed.model.slice())) continue;
+        const work = (&row.state).asOf(state.now_ms);
+        const answered = switch (work) {
+            .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
+            .bash, .approval, .finished => true,
+        };
+        if (answered and work.since() >= since) return true;
+    }
+    return false;
 }
 
 pub const Rgb = @import("theme.zig").Rgb;
@@ -5664,6 +5677,43 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(@as(?Band, null), band(&state));
     try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
     try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
+}
+
+test "a failure band clears only when its own provider and model are reached after it" {
+    const Other = struct { provider: Provider, model: []const u8 };
+    const others = [_]Other{
+        .{ .provider = .codex, .model = "gpt-6-luna" },
+        .{ .provider = .codex, .model = "gpt-6-sol" },
+        .{ .provider = .chatgpt, .model = "gpt-6-luna" },
+    };
+    const code = bounded(session_work.max_code_bytes, "provider_temporary_http_503");
+    for ([_][]const u8{ "provider_quota", "provider_http_401" }) |failure| for (others) |other| for (std.enums.values(session_work.Kind)) |kind| for ([_]u64{ 90, 60, 30 }) |seconds_ago| {
+        const since = test_now_s - seconds_ago;
+        const work: WorkState = switch (kind) {
+            .idle => .{ .idle = .{ .since = since } },
+            .pending => .{ .pending = .{ .since = since } },
+            .working => .{ .working = .{ .since = since } },
+            .retrying => .{ .retrying = .{ .since = since, .due_at_ms = (test_now_s + 60) * 1000, .cause = code, .attempt = 1 } },
+            .bash => .{ .bash = .{ .since = since, .call = 1, .description = null, .running = 1, .approvals = 0 } },
+            .approval => .{ .approval = .{ .since = since } },
+            .stopping => .{ .stopping = .{ .since = since } },
+            .finished => .{ .finished = .{ .since = since } },
+            .failed => .{ .failed = .{ .since = since, .code = code, .resets_at = null } },
+            .stopped => .{ .stopped = .{ .since = since, .cause = .stop } },
+        };
+        const answered = switch (kind) {
+            .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
+            .bash, .approval, .finished => true,
+        };
+        const cleared = other.provider == .codex and std.mem.eql(u8, other.model, "gpt-6-luna") and answered and seconds_ago <= 60;
+        const shown = try bandOf(&.{ session("ffffff", work, .{ .label = "Other", .provider = other.provider, .model = other.model }), failedRow("aaaaaa", 60, failure, null) }, null);
+        if (cleared) {
+            try std.testing.expectEqual(@as(?Band, null), shown);
+        } else {
+            try std.testing.expectEqual(Provider.codex, shown.?.provider.?);
+            try std.testing.expectEqual(failure_class.of(failure) == .quota, shown.?.trouble == .quota);
+        }
+    };
 }
 
 test "a quota reset far in the future still draws its band" {
