@@ -261,13 +261,13 @@ pub const Relist = struct {
         return progress;
     }
 
-    /// Settles a list that landed: its ttl and this list's jitter seed set when it goes stale. Reads the
+    /// Settles a list that landed at `now_ms`: its ttl and this list's jitter seed set when it goes stale. Reads the
     /// ttl before `settle` frees the pending list.
     fn settleListed(self: *Relist, index: usize, now_ms: u64) void {
         const pending = self.pending[index].?;
         const outcome: relist.Outcome = .{ .listed = .{
             .ttl_ms = pending.ttlMs(),
-            .seed = relist.mix(self.seed, index, self.slots[index].started),
+            .seed = relist.mix(self.seed, index, self.slots[index].started, now_ms),
         } };
         self.settle(index, outcome, now_ms);
     }
@@ -660,4 +660,101 @@ test "EXR-70 a list without a ttlMs never re-lists by time" {
     try std.testing.expectEqual(@as(?u64, null), owner.wakeAt());
     try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, std.math.maxInt(u64)));
     try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+}
+
+test "EXR-70 startup sets the deadline of a list that lands before the Host serves" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    try owner.startup(io, &storage, null, null);
+    try std.testing.expectEqual(@as(usize, 1), script.requests.load(.acquire));
+    try std.testing.expect(owner.wakeAt() != null);
+    try std.testing.expect(storage.hostTools().host_tool_set.find("search") != null);
+}
+
+test "EXR-70 each ttl cycle of one list draws its own jitter" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{ timed, timed } };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    // No ask folds into the re-lists, so every cycle shares one generation; only the landing time differs.
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    const first_deadline = owner.wakeAt().?;
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, first_deadline));
+    const second_deadline = owner.wakeAt().?;
+    try std.testing.expectEqual(@as(usize, 2), script.requests.load(.acquire));
+    try std.testing.expect(second_deadline - first_deadline >= 120_000);
+    try std.testing.expect(second_deadline - first_deadline - 120_000 != first_deadline - 120_000);
+}
+
+test "EXR-70 a publish that fails clears the deadline and leaves the retry to backoff" {
+    const Script = @import("mcp/test_server.zig");
+    const store_module_testing = @import("store.zig").testing;
+    const io = std.testing.io;
+    const timed = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ttlMs\":120000,\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}");
+    var script: Script = .{ .reply = timed, .more = &.{timed} };
+    try script.start();
+    defer script.stop();
+    const servers = [_]server_mcp_settings.Server{try oneServer("docs", script.port)};
+    var owner = Relist.init(std.testing.allocator, &servers, 1);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module_testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expect(owner.slots[0].stale_at_ms != null);
+
+    // The deadline's re-list begins with the real allocator; the publish that follows its landing is made to fail.
+    const deadline = owner.wakeAt().?;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failure: ?anyerror = null;
+    _ = owner.service(&storage, deadline, &failure);
+    try std.testing.expect(owner.listing());
+    owner.allocator = failing.allocator();
+    var attempts: usize = 0;
+    while (failure == null) : (attempts += 1) {
+        if (attempts == 1000) return error.ListDidNotFinish;
+        if (owner.pending[0]) |pending| {
+            var poll_fd = [_]std.c.pollfd{.{ .fd = pending.fd(), .events = pending.events(), .revents = 0 }};
+            _ = std.c.poll(&poll_fd, 1, 100);
+        }
+        _ = owner.service(&storage, deadline, &failure);
+    }
+    owner.allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), failure);
+
+    // The failed publish clears the deadline; backoff owns the retry.
+    try std.testing.expectEqual(@as(?u64, null), owner.slots[0].stale_at_ms);
+    try std.testing.expectEqual(relist.State.waiting, owner.slots[0].state);
+    try std.testing.expectEqual(owner.slots[0].retry_at_ms, owner.wakeAt().?);
 }

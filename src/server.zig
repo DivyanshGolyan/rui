@@ -1043,10 +1043,10 @@ pub noinline fn serve(
     // chain the main-thread stack ceiling bounds.
     const mcp_relist = try allocator.create(server_mcp_relist.Relist);
     defer allocator.destroy(mcp_relist);
-    // Each Host draws its own jitter seed, so Hosts' ttl re-lists do not fall in step.
-    var relist_seed: [8]u8 = undefined;
-    try std.Io.randomSecure(io, &relist_seed);
-    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers, std.mem.readInt(u64, &relist_seed, .little));
+    // The Host's instance id is drawn once, here, and seeds the ttl re-list jitter, so Hosts' re-lists do not fall in step.
+    var instance: protocol.InstanceId = undefined;
+    try std.Io.randomSecure(io, &instance);
+    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers, std.mem.readInt(u64, instance[0..8], .little));
     defer mcp_relist.deinit();
     const storage = &serving.storage;
     openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
@@ -1069,6 +1069,7 @@ pub noinline fn serve(
         settings,
         if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
+        instance,
         intake_capacity,
         descriptor_requirement.total,
         descriptor_observation.soft_limit,
@@ -1095,6 +1096,7 @@ fn serveOpened(
     settings: *const host_settings.Settings,
     mcp_relist: ?*server_mcp_relist.Relist,
     mcp_servers: []const server_mcp_settings.Server,
+    instance: protocol.InstanceId,
     intake_capacity: usize,
     descriptor_requirement: usize,
     descriptor_soft_limit: ?usize,
@@ -1199,7 +1201,7 @@ fn serveOpened(
         };
         try provider.checkLibraries();
     }
-    try std.Io.randomSecure(io, &host.instance);
+    host.instance = instance;
     storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
