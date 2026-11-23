@@ -1128,7 +1128,7 @@ test "SH-118 a tool record read back from the Store through the offer, the selec
             try std.testing.expectEqualSlices(u8, &saved_digest, &saved.digests[index]);
 
             // The offer and the saved selection rebuild it from the same rows.
-            const head = try storage.readHostToolSetSet();
+            const head = (try storage.readHostToolSetSet()).?;
             const names = try command_input.ToolsField.of(&.{"ask"});
             var offer: tool_offer_domain.Freeze = .{};
             var selection: tool_set_domain.SavedSelection = .{ .names = &names };

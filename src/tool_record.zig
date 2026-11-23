@@ -770,6 +770,8 @@ test "EXR-65 tool identities survive matching, stale and missing digest snapshot
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
     const old = recordDigest(&before);
     try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
+
+    try expectAppPolicyDigests();
 }
 
 test "a remote name joins a digest only when it differs from the offered name" {
@@ -787,7 +789,7 @@ test "a remote name joins a digest only when it differs from the offered name" {
     try std.testing.expect(!validRemoteName(&.{ .name = "docs__search", .remote_name = "search", .owner = .rui, .input_schema = "{}" }));
 }
 
-test "EXR-65 each app policy field joins an app record's digest, and no other owner's digest reads the policy" {
+fn expectAppPolicyDigests() !void {
     const base: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{} };
     const base_digest = recordDigest(&base);
     const variants = [_]AppPolicy{

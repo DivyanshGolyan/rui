@@ -1637,7 +1637,7 @@ test "legacy creation receipts resolve null compaction and replay creating Messa
                 try std.testing.expect(configured == .accepted and submitted == .accepted);
                 configured_session = configured.accepted.session;
                 message_session = submitted.accepted.session;
-                const expected = @import("../../model_capability.zig").compactionPolicy("model-a", null, null).compaction_trigger;
+                const expected = @import("../../model_capability.zig").compactionPolicy("model-a", true, null, null).compaction_trigger.?;
                 try std.testing.expect(configured.accepted.configuration != null and submitted.accepted.configuration != null);
                 try std.testing.expectEqual(@as(?u64, expected), configured.accepted.configuration.?.compaction_trigger);
                 try std.testing.expectEqual(@as(?u64, expected), submitted.accepted.configuration.?.compaction_trigger);

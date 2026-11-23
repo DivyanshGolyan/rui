@@ -372,7 +372,7 @@ pub const Store = struct {
             try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            const app = (try tool_set_domain.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms)) orelse .{};
+            const app = (try tool_set_domain.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms)) orelse tool_record.AppPolicy{};
             out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema, .app = app };
             digest.* = tool_record.recordDigest(out);
         }
@@ -2024,7 +2024,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15880 or scratch_bytes != 19048)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15896 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

@@ -62,7 +62,7 @@ pub const Facts = struct {
     pub const ModelList = enum { catalog, live };
 };
 
-pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3" };
+pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3", @"anthropic-messages/1" };
 
 test "every OpenAI provider runs web_search, and none runs bash" {
     for (std.enums.values(Provider)) |provider| {

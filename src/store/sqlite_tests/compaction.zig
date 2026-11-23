@@ -302,7 +302,7 @@ fn expectMalformedPressurePreparationForTesting(storage: *Store, session: []cons
     var access: @import("../access.zig").Access(.read, error{}) = .open(&entry);
     defer access.deinit();
     const admission = @import("../domain/model_admission.zig");
-    var read = admission.CompactionRead.init(session, std.math.maxInt(i64), .codex, "model-a", @import("../../model_capability.zig").compactionPolicy("model-a", 1000, 0));
+    var read = admission.CompactionRead.init(session, std.math.maxInt(i64), .codex, .@"openai-responses/2", "model-a", @import("../../model_capability.zig").compactionPolicy("model-a", true, 1000, 0));
     while (read.queue(&access)) {
         try @import("../access.zig").runAs(&access, error.CorruptStore);
         read.advance(&access) catch |err| {

@@ -23,6 +23,7 @@ const session_work = @import("../../session_work.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
 const model_capability = @import("../../model_capability.zig");
+const codecs = @import("../../codecs.zig");
 const model_evidence = @import("../../model_evidence.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -374,7 +375,7 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
         return;
     }
     try configuration_domain.checkSaved(&current);
-    const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
+    const policy = model_capability.compactionPolicy(current.model.slice(), codecs.compacts(current.codec), current.compaction_trigger, current.output_reservation);
     observation.* = .{
         .found = true,
         .revision = current.revision,
