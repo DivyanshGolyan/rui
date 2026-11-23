@@ -369,10 +369,10 @@ pub const creation_hint = rsql.Read(.{
 });
 
 const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
+    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode,session.app_lane FROM session WHERE session_ref=?1 " ++
         "AND session.archive_seq IS NULL",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8, app_lane: *Bounded(session_id.bytes) },
     .cardinality = .optional,
 });
 
@@ -400,7 +400,7 @@ pub const ParentFailure = struct {
 
 fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) void {
     reads.inherits_parent = true;
-    reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined };
+    reads.inherited = .{ .workspace = &reads.next.workspace, .provider = undefined, .tools = &reads.saved_tools.names, .permission_mode = undefined, .app_lane = &reads.parent_lane };
     a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
 }
 
@@ -500,6 +500,8 @@ pub const ConfigurationReads = struct {
     inherits_parent: bool = false,
     attach_parent: bool = true,
     inherited: parent_settings.Row = undefined,
+    /// The parent's lane, read with `inherited`; a child's new lane.
+    parent_lane: Bounded(session_id.bytes) = .{},
     parent_found: store_access.Found = .missing,
     parent_checked: bool = false,
     parent_failure: ?ParentFailure = null,
@@ -530,8 +532,8 @@ const creation_facts = rsql.Read(.{
 
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id,creator_ref,app_lane) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18,?19,COALESCE(?20,@session(?1)))",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -552,11 +554,13 @@ const insert_session = rsql.Write(.{
         parent: ?Bounded(session_id.bytes),
         loaded_tool_set_id: ?u64,
         creator: ?Bounded(session_id.bytes),
+        /// The parent's lane for a child; null makes the new Session its own lane root.
+        lane: ?Bounded(session_id.bytes),
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8) void {
+pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentConfiguration, workspace_digest: *const [32]u8, created_seq: u64, parent: ?*const [session_id.bytes]u8, creator: ?*const [session_id.bytes]u8, lane: ?Bounded(session_id.bytes)) void {
     var parent_ref: ?Bounded(session_id.bytes) = null;
     if (parent) |reference| {
         parent_ref = .{};
@@ -582,6 +586,7 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .parent = parent_ref,
         .loaded_tool_set_id = next.loaded_tool_set_id,
         .creator = if (creator) |reference| Bounded(session_id.bytes).from(reference) catch unreachable else null,
+        .lane = lane,
     });
 }
 
@@ -1089,7 +1094,8 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
         .next_position = .of(1),
     };
     const creator = if (reads.creator) |*reference| reference else null;
-    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator);
+    const lane: ?Bounded(session_id.bytes) = if (reads.attach_parent and reads.inherits_parent) reads.parent_lane else null;
+    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator, lane);
     try accept(reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
         reads.step.applying.catalog = appending;

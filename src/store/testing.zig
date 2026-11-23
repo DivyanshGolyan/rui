@@ -721,6 +721,7 @@ fn dropPinOrganization(storage: *Store) !void {
     };
     try dropBackgroundUpgradeShape(storage);
     // After dropBackgroundUpgradeShape's refusals, so a refused rewind leaves a usable Store.
+    try dropFormat92SessionLanes(storage);
     try dropFormat92AppPolicy(storage);
     try dropFormat91OutputLimit(storage);
     try dropFormat89And90Columns(storage);
@@ -755,6 +756,22 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
         for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
     }
+}
+
+/// Undoes format 92 on MySQL: the session declaration and lane columns, added in place with their foreign keys
+/// and checks. A column that a key or check names cannot be dropped, so those go first, in one statement.
+/// SQLite's step adds the columns at the end of the table, so it replays unchanged.
+fn dropFormat92SessionLanes(storage: *Store) !void {
+    if (storage.engine != .mysql) return;
+    try mysql_testing.rawExec(storage, "SET @rui_lane_ddl=(SELECT CONCAT('ALTER TABLE session ',GROUP_CONCAT(ddl SEPARATOR ', ')) FROM (" ++
+        "SELECT CONCAT('DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') AS ddl FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME IN ('app_tool_set_id','app_lane') AND REFERENCED_TABLE_NAME IS NOT NULL " ++
+        "UNION ALL SELECT CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME " ++
+        "WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND (LOCATE('app_tool_set_id',cc.CHECK_CLAUSE)>0 OR LOCATE('app_lane',cc.CHECK_CLAUSE)>0)) keys)");
+    try mysql_testing.rawExec(storage, "PREPARE rui_lane FROM @rui_lane_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_lane");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_lane");
+    try mysql_testing.rawExec(storage, "SET @rui_lane_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE session DROP COLUMN app_tool_set_id, DROP COLUMN app_lane");
 }
 
 /// Undoes format 92 on MySQL: the app owner's policy columns, added in place. Newest first, so the
