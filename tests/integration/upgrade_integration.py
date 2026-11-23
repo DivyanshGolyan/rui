@@ -23,7 +23,6 @@ import time
 from urllib.parse import quote
 
 import live_engines
-import runtime_leftovers
 import settings_fixture
 from terminal_screen import split_pane_row
 
@@ -1146,28 +1145,18 @@ def restart_all_cases(root, binary, releases):
 
     # This suite runs under an isolated non-root fixture user: --all intentionally
     # discovers every Host of that uid, not just the defaults-selected Store.
-    # Earlier lifecycle cases intentionally crash Hosts. Leave one explicitly
-    # here too: discovery must prove its lease free without deleting its socket.
+    # SH-11: a SIGKILLed Host whose Store is gone leaves an endpoint that one
+    # census proves dead and removes, socket and interface directory alike.
     with case(root, binary, releases, "restart-all-crashed") as c:
         from model_fixture import crash_host
         process, _ = c.start_host("restart-all-crashed")
         socket_path = pathlib.Path(c.ready["socket"])
         crash_host(process, c.root, "restart-all-crashed")
         assert socket_path.exists(), socket_path
+        shutil.rmtree(c.store)
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
-        assert socket_path.exists(), "Discovery must not reclaim sockets"
-        # The harness's leftover reader agrees with platform's layout on a real
-        # crashed Host: not a leftover while its Store exists, one once it is gone.
-        hinted = pathlib.Path(socket_path.with_suffix(".store").read_text())
-        assert socket_path not in [path for path, _ in runtime_leftovers.leftovers()]
-        moved = hinted.with_name(hinted.name + ".moved")
-        hinted.rename(moved)
-        try:
-            assert (socket_path, str(hinted)) in runtime_leftovers.leftovers()
-        finally:
-            moved.rename(hinted)
-        runtime_leftovers.remove([(socket_path, str(hinted))])
-        assert not socket_path.exists()
+        assert not socket_path.exists(), "a census removes the endpoint of a killed Host"
+        assert not socket_path.parent.exists(), "and the interface directory derived for it"
 
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
