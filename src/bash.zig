@@ -79,6 +79,7 @@ extern fn rui_bash_observe(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_reap(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_pipe_queued_bytes(fd: c_int, bytes: *u64) c_int;
 extern fn rui_bash_group_absent(pgid: c_int) c_int;
+extern fn rui_bash_group_holds_only(pgid: c_int, leader: c_int) c_int;
 extern fn rui_bash_spawn(
     path: [*:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
@@ -204,6 +205,14 @@ const OwnedFile = struct {
         self.readonly = null;
         if (self.file) |file| file.close(io);
         self.file = null;
+    }
+
+    /// A capture is sealed when the file holds every byte charged to it. Scratch
+    /// never outlives the Host, so sealing checks length and never syncs: a sync
+    /// adds no durability and stalls every agent on the execution loop.
+    fn sealed(self: *const OwnedFile, io: std.Io) bool {
+        const length = self.file.?.length(io) catch return false;
+        return length == self.charged;
     }
 
     fn injectedCleanupFault(self: *const OwnedFile, scratch: Scratch) bool {
@@ -513,8 +522,8 @@ pub const Execution = struct {
     }
 
     pub fn resultCode(self: *Execution, scratch: Scratch) store.ActionResolutionCode {
-        self.stdout_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
-        self.stderr_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
+        if (!self.stdout_capture.sealed(scratch.io)) self.lifecycle.recordSealFailure();
+        if (!self.stderr_capture.sealed(scratch.io)) self.lifecycle.recordSealFailure();
         if (self.faults.seal) self.lifecycle.recordSealFailure();
         return switch (self.lifecycle.resolution()) {
             inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
@@ -691,6 +700,11 @@ pub const Execution = struct {
             },
         };
         self.sendSignal(self.lifecycle.observeLeader(term, now));
+        // Only a live observation has a real group behind it. A probe that
+        // cannot list the group keeps the grace.
+        if (source == .live and self.lifecycle.awaitsGroup() and rui_bash_group_holds_only(self.pgid, self.leader.?) == 1) {
+            self.sendSignal(self.lifecycle.groupHoldsOnlyLeader());
+        }
         return true;
     }
 
@@ -988,6 +1002,55 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
         .timeout_ms = timeout_ms,
         .faults = .{ .lifecycle = .signal },
     };
+}
+
+test "the group probe sees a lone exited leader and any member it left behind" {
+    const Probe = struct {
+        extern "c" fn pause() c_int;
+
+        leader: c_int,
+        observation: BashObservation = undefined,
+
+        fn exited(self: *@This()) !bool {
+            const result = rui_bash_observe(self.leader, &self.observation);
+            try std.testing.expect(result >= 0);
+            return result == 1;
+        }
+
+        fn alone(self: *@This()) !bool {
+            const result = rui_bash_group_holds_only(self.leader, self.leader);
+            try std.testing.expect(result >= 0);
+            return result == 1;
+        }
+    };
+    const Shape = enum { lone, member };
+    for (std.enums.values(Shape)) |shape| {
+        const leader = std.c.fork();
+        if (leader < 0) return error.TestForkFailed;
+        if (leader == 0) {
+            _ = std.c.setpgid(0, 0);
+            if (shape == .member and std.c.fork() == 0) while (true) {
+                _ = Probe.pause();
+            };
+            std.c._exit(0);
+        }
+        _ = std.c.setpgid(leader, leader);
+        var reaped = false;
+        defer if (!reaped) {
+            _ = @import("os/process.zig").signalGroup(leader, .KILL);
+            _ = std.c.waitpid(leader, null, 0);
+        };
+        var probe: Probe = .{ .leader = leader };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromMilliseconds(1500)), &probe, Probe.exited);
+        if (shape == .member) {
+            try std.testing.expectEqual(@as(c_int, 0), rui_bash_group_holds_only(leader, leader));
+            _ = @import("os/process.zig").signalGroup(leader, .KILL);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromMilliseconds(5000)), &probe, Probe.alone);
+        }
+        try std.testing.expectEqual(@as(c_int, 1), rui_bash_group_holds_only(leader, leader));
+        try std.testing.expectEqual(@as(c_int, 1), rui_bash_reap(leader, &probe.observation));
+        reaped = true;
+    }
 }
 
 test "service acts on its service-time observation rather than an earlier one" {
@@ -1540,6 +1603,30 @@ test "an owned file closes its descriptor before reporting removal failure" {
     try file.cleanup(scratch);
     try std.testing.expect(file.published);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "a capture is sealed exactly when its file holds the bytes charged to it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 64 };
+    const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
+    const Case = struct { written: []const u8, charged: u64, sealed: bool };
+    for ([_]Case{
+        .{ .written = "", .charged = 0, .sealed = true },
+        .{ .written = "abc", .charged = 3, .sealed = true },
+        .{ .written = "ab", .charged = 3, .sealed = false },
+        .{ .written = "abcd", .charged = 3, .sealed = false },
+    }, 1..) |case, ordinal| {
+        var file = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
+        defer file.cleanup(scratch) catch {};
+        try file.file.?.writeStreamingAll(std.testing.io, case.written);
+        file.charged = case.charged;
+        try std.testing.expect(budget.charge(case.charged));
+        try std.testing.expectEqual(case.sealed, file.sealed(std.testing.io));
+    }
 }
 
 test "retired execution is independent of outstanding capture reclamation" {

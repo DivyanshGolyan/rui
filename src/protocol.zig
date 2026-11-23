@@ -149,6 +149,8 @@ pub const Kind = enum {
     public_part_content,
     skill_suggestions,
     model_list,
+    tools_reload,
+    tools_status,
 };
 
 pub const SkillsReloadStatus = mutation_answer.SkillsReloadStatus;
@@ -722,13 +724,16 @@ fn RequestOf(comptime Custody: type) type {
         public_part_content: PublicPartContent,
         skill_suggestions: ReadSkillSuggestions,
         model_list: struct { store: Bounded(max_store_bytes) = .{} },
+        /// `server` names one configured MCP server; null asks every server.
+        tools_reload: struct { store: Bounded(max_store_bytes) = .{}, server: ?Bounded(@import("tool_record.zig").max_server_bytes) = null },
+        tools_status: struct { store: Bounded(max_store_bytes) = .{} },
 
         pub fn removeTemporaryContent(self: *Request, io: Custody.Io) !void {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
                 .action_publish => |*command| try command.text.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list, .tools_reload, .tools_status => {},
             }
         }
 
@@ -811,6 +816,14 @@ fn ParserOf(comptime Custody: type) type {
                 },
                 .model_list => {
                     out.* = .{ .model_list = .{ .store = store } };
+                    try self.endCommand(&members);
+                },
+                .tools_reload => {
+                    out.* = .{ .tools_reload = .{ .store = store } };
+                    try self.parseToolsReload(&out.tools_reload, &members);
+                },
+                .tools_status => {
+                    out.* = .{ .tools_status = .{ .store = store } };
                     try self.endCommand(&members);
                 },
                 .configure => {
@@ -1142,6 +1155,18 @@ fn ParserOf(comptime Custody: type) type {
                     const seconds = std.math.cast(u32, try self.readCanonicalU64()) orelse return error.InvalidDrainSeconds;
                     _ = @import("host_drain.zig").Bound.seconds(seconds) catch |err| return err;
                     out.drain_seconds = seconds;
+                },
+            };
+        }
+
+        fn parseToolsReload(self: *Parser, out: *@FieldType(Request, "tools_reload"), members: *Members) !void {
+            const Field = enum { server };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .server => {
+                    var name: Bounded(@import("tool_record.zig").max_server_bytes) = .{};
+                    try self.readSmallString(&name);
+                    out.server = name;
                 },
             };
         }
@@ -2196,6 +2221,15 @@ pub const skill_suggestions_reply = struct {
     pub const max_bytes = shapeBytes(head) + jsonListBytes(24, shapeBytes(entry)) + tail.len;
 };
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
+pub const tools_reload_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_reload\",\"store\":", store_hole };
+    pub const server = .{ ",\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes } };
+    pub const tail = .{"}"};
+    pub const all = head ++ tail;
+    pub const named = head ++ server ++ tail;
+    pub const max_bytes = maxShapeBytes(.{ all, named });
+};
+pub const tools_status_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_status\",\"store\":", store_hole, "}" };
 pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
 pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, "}" };
 pub const host_drain_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_stop\",\"store\":", store_hole, ",\"drain_seconds\":\"", Hole.decimal, "\"}" };
@@ -2411,6 +2445,8 @@ pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = @max(shapeBytes(host_stop_request), shapeBytes(host_drain_request));
 pub const max_host_pause_request_bytes = shapeBytes(host_pause_request);
 pub const max_model_list_request_bytes = shapeBytes(model_list_request);
+pub const max_tools_reload_request_bytes = tools_reload_request.max_bytes;
+pub const max_tools_status_request_bytes = shapeBytes(tools_status_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
 pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request.all);
@@ -2428,7 +2464,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_action_call_id_request,       conversation_content_request.all,    conversation_page_request,
     activity_search_request.all,       activity_page_request.all,           activity_content_request,
     skill_suggestions_session_request, skill_suggestions_workspace_request, model_list_request,
-    public_parts_request,              public_part_content_request.all,
+    public_parts_request,              public_part_content_request.all,     tools_reload_request.all,
+    tools_reload_request.named,        tools_status_request,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2665,6 +2702,26 @@ pub const model_list_reply = struct {
         return head.len + model_list.providersBytes(facts) + tail.len;
     }
 };
+/// `instance` names the Host that took the ask; `asked` lists the configured servers a reload asked, in configured order.
+pub const tools_reload_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"asked\":[" };
+    pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"generation\":\"", Hole.decimal, "\"}" };
+    pub const tail = "]}";
+    /// The bound for `servers` configured servers, each one entry.
+    pub fn maxBytes(comptime servers: usize) usize {
+        return shapeBytes(head) + jsonListBytes(servers, shapeBytes(entry)) + tail.len;
+    }
+};
+/// `instance` names the Host that replied; `servers` lists every configured server in configured order. `tools` counts the server's MCP tools in the set.
+pub const tools_status_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"servers\":[" };
+    pub const entry = .{ "{\"server\":", Hole{ .string = @import("tool_record.zig").max_server_bytes }, ",\"state\":\"", Hole{ .tag = @import("mcp/relist.zig").State }, "\",\"last\":\"", Hole{ .tag = @import("mcp/relist.zig").Last }, "\",\"finished\":\"", Hole.decimal, "\",\"tools\":\"", Hole.decimal, "\"}" };
+    pub const tail = "]}";
+    /// The bound for `servers` configured servers, each one entry.
+    pub fn maxBytes(comptime servers: usize) usize {
+        return shapeBytes(head) + jsonListBytes(servers, shapeBytes(entry)) + tail.len;
+    }
+};
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 /// A draining pause in force: the Host stops once its running work ends, or
 /// at `until_unix_ms` at the latest.
@@ -2780,6 +2837,7 @@ const TestCustody = struct {
     pub fn release(_: ?File, _: ?Budget, _: u64, _: Io) void {}
 };
 const Tested = Requests(TestCustody);
+const relist = @import("mcp/relist.zig");
 
 fn parseForTest(parser: *Tested.Parser) !Tested.Request {
     var request: Tested.Request = undefined;
@@ -3955,4 +4013,72 @@ fn publicPartSelectorGrammar() !void {
     var parser = Tested.Parser{ .source = &source };
     const written = (try parseForTest(&parser)).public_part_content;
     try std.testing.expect(std.meta.eql(Owner{ .action = 42 }, written.owner) and written.part == 7 and written.stream);
+}
+
+test "MCP tool reload and status requests round-trip, with an optional server name" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_reload\",\"store\":\"s\"";
+    {
+        var source: MetadataSource = .{ .input = head ++ "}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).tools_reload;
+        try std.testing.expectEqualStrings("s", request.store.slice());
+        try std.testing.expect(request.server == null);
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"server\":\"docs\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).tools_reload;
+        try std.testing.expectEqualStrings("docs", request.server.?.slice());
+    }
+    {
+        var source: MetadataSource = .{ .input = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_reload\",\"store\":\"s\",\"server\":\"docs\",\"server\":\"x\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.UnexpectedField, parseForTest(&parser));
+    }
+    {
+        var source: MetadataSource = .{ .input = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_status\",\"store\":\"s\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).tools_status;
+        try std.testing.expectEqualStrings("s", request.store.slice());
+    }
+    {
+        var source: MetadataSource = .{ .input = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"tools_status\",\"store\":\"s\",\"server\":\"docs\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.UnexpectedField, parseForTest(&parser));
+    }
+    // The shapes write what the parser reads, at their bounds.
+    var named: FixedJsonBuffer(tools_reload_request.max_bytes) = .{};
+    try named.appendShape(tools_reload_request.named, .{ "s", "docs" });
+    try std.testing.expect(try std.json.validate(std.testing.allocator, named.slice()));
+    var all: FixedJsonBuffer(tools_reload_request.max_bytes) = .{};
+    try all.appendShape(tools_reload_request.all, .{"s"});
+    try std.testing.expect(try std.json.validate(std.testing.allocator, all.slice()));
+    var status: FixedJsonBuffer(max_tools_status_request_bytes) = .{};
+    try status.appendShape(tools_status_request, .{"s"});
+    try std.testing.expect(try std.json.validate(std.testing.allocator, status.slice()));
+    try std.testing.expect(max_tools_reload_request_bytes >= named.len and max_tools_reload_request_bytes >= all.len);
+}
+
+test "MCP tool reload and status replies bound one entry per configured server" {
+    const servers = 2;
+    const name_bytes: [@import("tool_record.zig").max_server_bytes]u8 = @splat('s');
+    const longest_name: []const u8 = &name_bytes;
+    var reply: FixedJsonBuffer(tools_reload_reply.maxBytes(servers)) = .{};
+    try reply.appendShape(tools_reload_reply.head, .{@as(InstanceId, @splat(0xab))});
+    for (0..servers) |index| {
+        if (index != 0) try reply.append(",");
+        try reply.appendShape(tools_reload_reply.entry, .{ longest_name, std.math.maxInt(u64) });
+    }
+    try reply.append(tools_reload_reply.tail);
+    try std.testing.expect(try std.json.validate(std.testing.allocator, reply.slice()));
+
+    var status: FixedJsonBuffer(tools_status_reply.maxBytes(servers)) = .{};
+    try status.appendShape(tools_status_reply.head, .{@as(InstanceId, @splat(0xab))});
+    for (0..servers) |index| {
+        if (index != 0) try status.append(",");
+        try status.appendShape(tools_status_reply.entry, .{ longest_name, relist.State.waiting, relist.Last.collision, std.math.maxInt(u64), std.math.maxInt(u32) });
+    }
+    try status.append(tools_status_reply.tail);
+    try std.testing.expect(try std.json.validate(std.testing.allocator, status.slice()));
+    try std.testing.expect(tools_status_reply.maxBytes(2) > tools_status_reply.maxBytes(1));
 }

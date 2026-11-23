@@ -204,8 +204,9 @@ A launcher error can occur after the Host executes, so the CLI leaves execution 
 The launcher normally reaps its helper and restores inherited SIGCHLD disposition, including when SIGCHLD was ignored.
 A disconnected readiness pipe records startup failure instead of terminating on SIGPIPE; only the writing thread masks that signal.
 
-Host startup establishes default SIGCHLD handling with `SA_NOCLDWAIT` cleared before Store ownership or child launch, including for direct `host serve`.
+Host startup replaces any inherited SIGCHLD disposition, including ignore, with a handler that has `SA_NOCLDWAIT` cleared, before Store ownership or child launch, including for direct `host serve`.
 This preserves waitable child identities until their signaling owners retire.
+The handler never reaps; it only wakes the execution loop, so Bash retirement starts when a command exits rather than at the loop's next timeout.
 It also catches SIGINT, SIGTERM and SIGHUP before Store ownership: each one is the same asked stop as `host-stop`, applied on the intake loop, which the handler only wakes; a second one while stopping changes nothing. Bash children start with every signal at its default.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.

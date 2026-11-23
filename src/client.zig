@@ -3,6 +3,7 @@ const utf8_validation = @import("utf8_validation.zig");
 const socket_os = @import("os").socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const Bounded = @import("bounded.zig").Bounded;
 const content_value = @import("content_value.zig");
 pub const activity_reply = @import("activity_reply.zig");
 const configure_input = @import("configure_input.zig");
@@ -326,6 +327,37 @@ pub const Requests = struct {
             .report => .{ .page = try protocol_reply.ActivityPage.parse(sink.buffer.slice(), cursor) },
             .command => |reply| .{ .failure = try protocol_reply.decodeReadFailure(reply, false) },
         };
+    }
+
+    /// Asks the Host to list `server` (or every configured server when null) again. The reply
+    /// names each asked server and the generation it was given; `toolsStatus` reports when it lands.
+    pub fn reloadTools(self: Requests, gpa: std.mem.Allocator, store_path: []const u8, server: ?[]const u8) !ToolsAsked {
+        try self.check();
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        if (server) |name| {
+            try body.appendShape(protocol.tools_reload_request.named, .{ paths.store_identity.slice(), name });
+        } else {
+            try body.appendShape(protocol.tools_reload_request.all, .{paths.store_identity.slice()});
+        }
+        const fd = try openRead(self, &paths, "/v1/control/tools-reload", body.slice());
+        defer closeSocket(self.io, fd);
+        const reply = try readReportBody(self, fd, gpa, toolsRefusal);
+        defer gpa.free(reply);
+        return parseToolsAsked(gpa, reply);
+    }
+
+    /// Reads every configured server's list status: its state, last outcome, finished generation and tool count.
+    pub fn toolsStatus(self: Requests, gpa: std.mem.Allocator, store_path: []const u8) !ToolsStatus {
+        try self.check();
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.tools_status_request, .{paths.store_identity.slice()});
+        const fd = try openRead(self, &paths, "/v1/tools-status", body.slice());
+        defer closeSocket(self.io, fd);
+        const reply = try readReportBody(self, fd, gpa, toolsRefusal);
+        defer gpa.free(reply);
+        return parseToolsStatus(gpa, reply);
     }
 
     pub fn modelList(self: Requests, store_path: []const u8, gpa: std.mem.Allocator) ![]u8 {
@@ -3487,7 +3519,148 @@ fn readResultResponseSink(
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
-fn readModelListResponse(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator) ![]u8 {
+/// One server the reload asked, with the generation it was given.
+pub const ToolsAsked = struct {
+    pub const Ask = struct { server: Bounded(@import("tool_record.zig").max_server_bytes) = .{}, generation: u64 = 0 };
+    /// The Host that took the ask. Its generations restart at 0 when a new Host starts.
+    instance: protocol.InstanceId = @splat(0),
+    len: usize = 0,
+    items: [@import("host_settings.zig").max_mcp_servers]Ask = @splat(.{}),
+
+    pub fn slice(self: *const ToolsAsked) []const Ask {
+        return self.items[0..self.len];
+    }
+};
+
+/// One configured server's list status, as `tools_status` reports it.
+pub const ToolServerStatus = struct {
+    server: Bounded(@import("tool_record.zig").max_server_bytes) = .{},
+    state: @import("mcp/relist.zig").State = .idle,
+    last: @import("mcp/relist.zig").Last = .never,
+    finished: u64 = 0,
+    tools: u64 = 0,
+};
+
+pub const ToolsStatus = struct {
+    /// The Host that replied.
+    instance: protocol.InstanceId = @splat(0),
+    len: usize = 0,
+    items: [@import("host_settings.zig").max_mcp_servers]ToolServerStatus = @splat(.{}),
+
+    pub fn slice(self: *const ToolsStatus) []const ToolServerStatus {
+        return self.items[0..self.len];
+    }
+};
+
+/// How an asked list ended, once it has landed.
+pub const ToolOutcome = enum { listed, failed, collision };
+
+/// One asked server's latest outcome and tool count, in asked order.
+pub const ToolsOutcomes = struct {
+    pub const Row = struct { server: Bounded(@import("tool_record.zig").max_server_bytes) = .{}, outcome: ToolOutcome = .listed, tools: u64 = 0 };
+    len: usize = 0,
+    items: [@import("host_settings.zig").max_mcp_servers]Row = @splat(.{}),
+
+    pub fn slice(self: *const ToolsOutcomes) []const Row {
+        return self.items[0..self.len];
+    }
+};
+
+pub const ToolsProgress = enum { waiting, landed };
+
+/// The one owner of whether asked lists have landed and what they reported. `status` is null until a status reply
+/// has been read. An empty ask has landed at once, with no status read. Otherwise every asked server must have landed
+/// (see `serverLanded`) before `outcomes` is filled with each server's latest outcome, in asked order.
+pub fn toolsProgress(asked: *const ToolsAsked, status: ?*const ToolsStatus, outcomes: *ToolsOutcomes) error{InvalidResponse}!ToolsProgress {
+    outcomes.len = 0;
+    if (asked.len == 0) return .landed;
+    const read = status orelse return .waiting;
+    var waiting = false;
+    for (asked.slice()) |ask| {
+        if (!try serverLanded(asked, read, ask)) waiting = true;
+    }
+    if (waiting) return .waiting;
+    for (asked.slice(), 0..) |ask, index| {
+        const row = try statusRow(read, ask.server.slice());
+        outcomes.items[index] = .{ .server = ask.server, .outcome = toolOutcome(row.last) orelse return error.InvalidResponse, .tools = row.tools };
+    }
+    outcomes.len = asked.len;
+    return .landed;
+}
+
+/// True once `ask` has landed in the Host that replied. The same Host landed it once its finished generation reaches
+/// the ask's. A different Host (its instance differs) has restarted its generations, so its startup list counts once
+/// any list has finished. A row with no server, or one that reports `never` once landed, is an invalid reply.
+pub fn serverLanded(asked: *const ToolsAsked, status: *const ToolsStatus, ask: ToolsAsked.Ask) error{InvalidResponse}!bool {
+    const row = try statusRow(status, ask.server.slice());
+    const landed = if (std.mem.eql(u8, &asked.instance, &status.instance))
+        row.finished >= ask.generation
+    else
+        row.finished >= 1;
+    if (landed and row.last == .never) return error.InvalidResponse;
+    return landed;
+}
+
+fn statusRow(status: *const ToolsStatus, name: []const u8) error{InvalidResponse}!ToolServerStatus {
+    for (status.slice()) |row| if (std.mem.eql(u8, row.server.slice(), name)) return row;
+    return error.InvalidResponse;
+}
+
+fn toolOutcome(last: @import("mcp/relist.zig").Last) ?ToolOutcome {
+    return switch (last) {
+        .never => null,
+        .listed => .listed,
+        .failed => .failed,
+        .collision => .collision,
+    };
+}
+
+fn parseToolsAsked(gpa: std.mem.Allocator, reply: []const u8) !ToolsAsked {
+    const Wire = struct {
+        version: []const u8,
+        type: []const u8,
+        instance: []const u8,
+        asked: []const struct { server: []const u8, generation: []const u8 },
+    };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), reply, .{}) catch return error.InvalidResponse;
+    if (!std.mem.eql(u8, wire.version, protocol.wire_version) or !std.mem.eql(u8, wire.type, "tools_reload_reply")) return error.InvalidResponse;
+    if (wire.asked.len > @import("host_settings.zig").max_mcp_servers) return error.InvalidResponse;
+    var out: ToolsAsked = .{ .instance = protocol.parseInstanceId(wire.instance) catch return error.InvalidResponse, .len = wire.asked.len };
+    for (wire.asked, out.items[0..wire.asked.len]) |entry, *ask| {
+        ask.server.set(entry.server) catch return error.InvalidResponse;
+        ask.generation = std.fmt.parseInt(u64, entry.generation, 10) catch return error.InvalidResponse;
+    }
+    return out;
+}
+
+fn parseToolsStatus(gpa: std.mem.Allocator, reply: []const u8) !ToolsStatus {
+    const relist = @import("mcp/relist.zig");
+    const Wire = struct {
+        version: []const u8,
+        type: []const u8,
+        instance: []const u8,
+        servers: []const struct { server: []const u8, state: []const u8, last: []const u8, finished: []const u8, tools: []const u8 },
+    };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), reply, .{}) catch return error.InvalidResponse;
+    if (!std.mem.eql(u8, wire.version, protocol.wire_version) or !std.mem.eql(u8, wire.type, "tools_status")) return error.InvalidResponse;
+    if (wire.servers.len > @import("host_settings.zig").max_mcp_servers) return error.InvalidResponse;
+    var out: ToolsStatus = .{ .instance = protocol.parseInstanceId(wire.instance) catch return error.InvalidResponse, .len = wire.servers.len };
+    for (wire.servers, out.items[0..wire.servers.len]) |entry, *row| {
+        row.server.set(entry.server) catch return error.InvalidResponse;
+        row.state = std.meta.stringToEnum(relist.State, entry.state) orelse return error.InvalidResponse;
+        row.last = std.meta.stringToEnum(relist.Last, entry.last) orelse return error.InvalidResponse;
+        row.finished = std.fmt.parseInt(u64, entry.finished, 10) catch return error.InvalidResponse;
+        row.tools = std.fmt.parseInt(u64, entry.tools, 10) catch return error.InvalidResponse;
+    }
+    return out;
+}
+
+/// The reply body of a report request. `refusal` maps a command reply (a refusal, not a report) to its typed error.
+fn readReportBody(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator, comptime refusal: anytype) ![]u8 {
     const Sink = struct {
         bytes: std.ArrayList(u8) = .empty,
         gpa: std.mem.Allocator,
@@ -3500,8 +3673,32 @@ fn readModelListResponse(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Al
     var buffer: ReplyBuffer = .{};
     return switch (try readReportResponse(requests, fd, &sink, &buffer)) {
         .report => try sink.bytes.toOwnedSlice(gpa),
-        .command => error.InvalidResponse,
+        .command => |reply| return refusal(reply),
     };
+}
+
+/// A tools refusal. A 503 that a control command reads as an unavailable Host (`hostStatus`, the same
+/// `validHostUnavailable` test) is not a protocol error: a Host out of connection capacity is busy and worth
+/// asking again, and a fenced Host is stopping.
+fn toolsRefusal(reply: protocol_reply.CommandReply) error{ UnknownMcpServer, HostStopped, HostBusy, InvalidResponse } {
+    const Refusal = struct { type: []const u8 = "", code: []const u8 = "" };
+    var storage: [protocol.max_control_error_response_bytes * 2]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&storage);
+    const refusal = std.json.parseFromSliceLeaky(Refusal, arena.allocator(), reply.body, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    if (reply.status == 503 and protocol_reply.validHostUnavailable(reply.body))
+        return if (std.mem.eql(u8, refusal.type, "busy")) error.HostBusy else error.HostStopped;
+    if (std.mem.eql(u8, refusal.code, "unknown_mcp_server")) return error.UnknownMcpServer;
+    return error.InvalidResponse;
+}
+
+/// A model-list refusal is always a protocol error.
+fn modelListRefusal(reply: protocol_reply.CommandReply) error{InvalidResponse} {
+    _ = reply;
+    return error.InvalidResponse;
+}
+
+fn readModelListResponse(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator) ![]u8 {
+    return readReportBody(requests, fd, gpa, modelListRefusal);
 }
 
 fn readReportResponse(
@@ -7216,5 +7413,103 @@ test "ADM-26 image capture write failures do not publish a request" {
         try std.testing.expectError(error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .operands = &operands, .operand_stdin = empty_stdin }, .{ .explicit = .{ .record = path, .key = "key" } }).get());
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".record.capture.tmp", .{}));
+    }
+}
+
+test "tools reload and status replies parse into typed rows with the Host instance" {
+    const allocator = std.testing.allocator;
+    const relist_state = struct {
+        const idle = @import("mcp/relist.zig").State.idle;
+        const waiting = @import("mcp/relist.zig").State.waiting;
+        const failed = @import("mcp/relist.zig").Last.failed;
+    };
+    const instance = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+    const asked = try parseToolsAsked(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance ++ "\",\"asked\":[{\"server\":\"docs\",\"generation\":\"3\"},{\"server\":\"wiki\",\"generation\":\"1\"}]}");
+    try std.testing.expectEqual(@as(usize, 2), asked.slice().len);
+    try std.testing.expectEqual(@as(u8, 0x7e), asked.instance[0]);
+    try std.testing.expectEqualStrings("docs", asked.slice()[0].server.slice());
+    try std.testing.expectEqual(@as(u64, 3), asked.slice()[0].generation);
+    try std.testing.expectEqualStrings("wiki", asked.slice()[1].server.slice());
+    const none = try parseToolsAsked(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance ++ "\",\"asked\":[]}");
+    try std.testing.expectEqual(@as(usize, 0), none.slice().len);
+    try std.testing.expectError(error.InvalidResponse, parseToolsAsked(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"xyz\",\"asked\":[]}"));
+
+    const status = try parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"waiting\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\"}]}");
+    try std.testing.expectEqual(@as(u8, 0x7e), status.instance[15]);
+    try std.testing.expectEqual(relist_state.waiting, status.slice()[0].state);
+    try std.testing.expectEqual(relist_state.failed, status.slice()[0].last);
+    try std.testing.expectEqual(@as(u64, 3), status.slice()[0].finished);
+    try std.testing.expectEqual(@as(u64, 12), status.slice()[0].tools);
+    try std.testing.expectError(error.InvalidResponse, parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"paused\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\"}]}"));
+}
+
+test "tools refusals map an unknown server, a fenced Host and a busy Host to their own errors, and any other refusal to a protocol error" {
+    try std.testing.expectEqual(error.UnknownMcpServer, toolsRefusal(.{ .status = 400, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"unknown_mcp_server\"}" }));
+    // The same 503 a control command reads as unavailable is not a protocol error: fenced is stopping, capacity is busy.
+    try std.testing.expectEqual(error.HostStopped, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_unavailable\",\"code\":\"dispatch_fenced\"}" }));
+    try std.testing.expectEqual(error.HostBusy, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"ordinary_capacity_exhausted\"}" }));
+    try std.testing.expectEqual(error.InvalidResponse, toolsRefusal(.{ .status = 400, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"dispatch_fenced\"}" }));
+    try std.testing.expectEqual(error.InvalidResponse, toolsRefusal(.{ .status = 503, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"WrongWireVersion\"}" }));
+}
+
+test "MCP tool list landing: empty, pending, landed, missing, never and restarted asks reach one outcome each" {
+    const same: protocol.InstanceId = @splat(1);
+    const restarted: protocol.InstanceId = @splat(2);
+    const Expected = struct { server: []const u8, outcome: ToolOutcome, tools: u64 };
+    const Result = union(enum) { waiting, invalid, landed: []const Expected };
+    const Row = struct { name: []const u8, last: @import("mcp/relist.zig").Last, finished: u64, tools: u64 = 0 };
+    const Ask = struct { name: []const u8, generation: u64 };
+    const Case = struct {
+        name: []const u8,
+        asked_instance: protocol.InstanceId,
+        asks: []const Ask,
+        status_instance: ?protocol.InstanceId,
+        rows: []const Row,
+        expect: Result,
+    };
+    const docs_then_notes = [_]Ask{ .{ .name = "docs", .generation = 2 }, .{ .name = "notes", .generation = 2 } };
+    const cases = [_]Case{
+        .{ .name = "empty ask lands at once with no status read", .asked_instance = same, .asks = &.{}, .status_instance = null, .rows = &.{}, .expect = .{ .landed = &.{} } },
+        .{ .name = "one server pending", .asked_instance = same, .asks = &docs_then_notes, .status_instance = same, .rows = &.{ .{ .name = "docs", .last = .listed, .finished = 2, .tools = 12 }, .{ .name = "notes", .last = .listed, .finished = 1, .tools = 1 } }, .expect = .waiting },
+        .{ .name = "landed listed and failed", .asked_instance = same, .asks = &docs_then_notes, .status_instance = same, .rows = &.{ .{ .name = "docs", .last = .listed, .finished = 2, .tools = 12 }, .{ .name = "notes", .last = .failed, .finished = 3, .tools = 0 } }, .expect = .{ .landed = &.{ .{ .server = "docs", .outcome = .listed, .tools = 12 }, .{ .server = "notes", .outcome = .failed, .tools = 0 } } } },
+        .{ .name = "collision lands", .asked_instance = same, .asks = &.{.{ .name = "docs", .generation = 1 }}, .status_instance = same, .rows = &.{.{ .name = "docs", .last = .collision, .finished = 1 }}, .expect = .{ .landed = &.{.{ .server = "docs", .outcome = .collision, .tools = 0 }} } },
+        .{ .name = "missing row", .asked_instance = same, .asks = &docs_then_notes, .status_instance = same, .rows = &.{.{ .name = "docs", .last = .listed, .finished = 2, .tools = 12 }}, .expect = .invalid },
+        .{ .name = "never once finished reaches the generation", .asked_instance = same, .asks = &.{.{ .name = "docs", .generation = 2 }}, .status_instance = same, .rows = &.{.{ .name = "docs", .last = .never, .finished = 2 }}, .expect = .invalid },
+        .{ .name = "restarted Host with finished 0 is still waiting", .asked_instance = same, .asks = &docs_then_notes, .status_instance = restarted, .rows = &.{ .{ .name = "docs", .last = .never, .finished = 0 }, .{ .name = "notes", .last = .listed, .finished = 0 } }, .expect = .waiting },
+        .{ .name = "restarted Host with finished 1 has landed", .asked_instance = same, .asks = &docs_then_notes, .status_instance = restarted, .rows = &.{ .{ .name = "docs", .last = .listed, .finished = 1, .tools = 3 }, .{ .name = "notes", .last = .failed, .finished = 1 } }, .expect = .{ .landed = &.{ .{ .server = "docs", .outcome = .listed, .tools = 3 }, .{ .server = "notes", .outcome = .failed, .tools = 0 } } } },
+        .{ .name = "restarted Host reporting never once landed is invalid", .asked_instance = same, .asks = &.{.{ .name = "docs", .generation = 2 }}, .status_instance = restarted, .rows = &.{.{ .name = "docs", .last = .never, .finished = 1 }}, .expect = .invalid },
+    };
+    for (cases) |case| {
+        var asked: ToolsAsked = .{ .instance = case.asked_instance, .len = case.asks.len };
+        for (case.asks, asked.items[0..case.asks.len]) |ask, *slot| {
+            try slot.server.set(ask.name);
+            slot.generation = ask.generation;
+        }
+        var status: ToolsStatus = .{ .instance = case.status_instance orelse same, .len = case.rows.len };
+        for (case.rows, status.items[0..case.rows.len]) |row, *slot| {
+            try slot.server.set(row.name);
+            slot.last = row.last;
+            slot.finished = row.finished;
+            slot.tools = row.tools;
+        }
+        var outcomes: ToolsOutcomes = .{};
+        const read: ?*const ToolsStatus = if (case.status_instance == null) null else &status;
+        const result = toolsProgress(&asked, read, &outcomes);
+        switch (case.expect) {
+            .waiting => {
+                try std.testing.expectEqual(ToolsProgress.waiting, try result);
+                try std.testing.expectEqual(@as(usize, 0), outcomes.slice().len);
+            },
+            .invalid => try std.testing.expectError(error.InvalidResponse, result),
+            .landed => |expected| {
+                try std.testing.expectEqual(ToolsProgress.landed, try result);
+                try std.testing.expectEqual(expected.len, outcomes.slice().len);
+                for (expected, outcomes.slice()) |want, got| {
+                    try std.testing.expectEqualStrings(want.server, got.server.slice());
+                    try std.testing.expectEqual(want.outcome, got.outcome);
+                    try std.testing.expectEqual(want.tools, got.tools);
+                }
+            },
+        }
     }
 }

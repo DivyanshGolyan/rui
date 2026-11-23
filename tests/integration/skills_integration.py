@@ -276,7 +276,7 @@ def main():
                 request["configuration"] = json.loads(create_capture)["configuration"]
             expected = {"status": "rejected", "replayed": False, "session": target,
                         "code": "invalid_session_reference" if index < len(targets) - 2 else "unknown_session",
-                        "message": None}
+                        "message": None, "missing": None}
             answer = post(request)["answer"]
             assert answer == expected, (request, answer, expected)
             assert post(request)["answer"] == {**expected, "replayed": True}
@@ -446,7 +446,7 @@ def main():
             except TimeoutError as error:
                 raise AssertionError("writerless FIFO invocation did not reach typed refusal within the socket deadline") from error
             assert fifo_answer == {"status": "rejected", "replayed": False, "session": parent,
-                                   "code": "skill_file_unavailable", "message": None}, fifo_answer
+                                   "code": "skill_file_unavailable", "message": None, "missing": None}, fifo_answer
             fifo_result = fixture.read_result(store, "fifo-file")
             assert b"InvalidSkillFile" in fifo_result, fifo_result
             assert conversation(parent) == fifo_before

@@ -44,6 +44,7 @@ const relist = @import("mcp/relist.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
+const child_exit_wake = @import("child_exit_wake.zig");
 const signal_stack = @import("signal_stack.zig");
 const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
@@ -401,6 +402,7 @@ const Intake = struct {
                         .host_info => protocol.max_host_info_request_bytes,
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
+                        .tools_reload => protocol.max_tools_reload_request_bytes,
                         .action_publish => protocol.shapeBytes(protocol.action_publish_request),
                         inline else => |route| if (comptime route.commandKind()) |kind|
                             if (command_spec.spec(kind).is_control) command_spec.spec(kind).Request.maxBytes(protocol).? else std.math.maxInt(u64)
@@ -902,12 +904,8 @@ pub noinline fn serve(
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();
     const mcp_servers = connections.servers;
-    const child_action: std.posix.Sigaction = .{
-        .handler = .{ .handler = std.posix.SIG.DFL },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(.CHLD, &child_action, null);
+    child_exit_wake.install();
+    defer child_exit_wake.restore();
     StopSignals.install();
     defer StopSignals.restore();
     var descriptor_observation = try descriptor_limit.observe(io);
@@ -995,7 +993,11 @@ pub noinline fn serve(
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     var startup_failure: []const u8 = "startup_error";
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
-    var mcp_relist = server_mcp_relist.Relist.init(allocator, mcp_servers);
+    // On the heap: each server's published view would otherwise sit in the serve frame, whose
+    // chain the main-thread stack ceiling bounds.
+    const mcp_relist = try allocator.create(server_mcp_relist.Relist);
+    defer allocator.destroy(mcp_relist);
+    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers);
     defer mcp_relist.deinit();
     const storage = &serving.storage;
     openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
@@ -1016,7 +1018,7 @@ pub noinline fn serve(
         settings.tools.bash.timeout_ms.value,
         tuning.home,
         settings,
-        if (mcp_servers.len != 0) &mcp_relist else null,
+        if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
         intake_capacity,
         descriptor_requirement.total,
@@ -1524,6 +1526,8 @@ const Route = enum {
     public_part_content,
     skill_suggestions,
     model_list,
+    tools_reload,
+    tools_status,
     unsupported_control,
 
     fn commandKind(comptime self: Route) ?protocol.CommandKind {
@@ -1535,7 +1539,7 @@ const Route = enum {
 
     fn isControl(self: Route) bool {
         return switch (self) {
-            .host_stop, .host_pause, .unsupported_control => true,
+            .host_stop, .host_pause, .tools_reload, .unsupported_control => true,
             inline else => |route| if (comptime route.commandKind()) |command_kind|
                 command_spec.spec(command_kind).is_control
             else
@@ -1544,7 +1548,7 @@ const Route = enum {
     }
 
     fn atomicOnly(self: Route) bool {
-        return self == .host_info or self == .host_stop or self == .host_pause;
+        return self == .host_info or self == .host_stop or self == .host_pause or self == .tools_reload;
     }
 
     fn kind(self: Route) protocol.Kind {
@@ -1572,7 +1576,7 @@ test "command route projection preserves control classification" {
         };
         try std.testing.expectEqual(expected, comptime route.commandKind());
         const expected_control = switch (route) {
-            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
+            .host_stop, .host_pause, .tools_reload, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
             else => false,
         };
         try std.testing.expectEqual(expected_control, route.isControl());
@@ -1826,6 +1830,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .activity_content => |*command| try replyActivityContent(host, fd, command),
         .skill_suggestions => |*command| try replySkillSuggestions(host, fd, command),
         .model_list => try replyModelList(host, fd),
+        .tools_reload => |*reload| try replyToolsReload(host, fd, reload),
+        .tools_status => try replyToolsStatus(host, fd),
     }
 }
 
@@ -2072,6 +2078,37 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
     };
 }
 
+/// Asks the execution owner to list one server, or every configured server. Asking only records a
+/// request, so the reply needs no wait: the caller polls tools_status for each asked generation.
+noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType(wire_request.Request, "tools_reload")) !void {
+    if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
+    const owner = host.mcp_relist;
+    const servers: []const server_mcp_settings.Server = if (owner) |relist_owner| relist_owner.servers else &.{};
+    var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
+    var count: usize = 0;
+    for (servers, 0..) |*server, index| {
+        if (request.server) |name| if (!std.mem.eql(u8, name.slice(), server.name.slice())) continue;
+        asked[count] = .{ .server = server.name.slice(), .generation = owner.?.ask(index) };
+        count += 1;
+    }
+    if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
+    if (count != 0) host.dispatch_wake.set(host.io);
+    try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{ host.instance, asked[0..count] });
+}
+
+/// Reads every configured server's published list status. Lock-free: it never waits for the owner.
+noinline fn replyToolsStatus(host: *Host, fd: *Reply) !void {
+    var rows: [host_settings.max_mcp_servers]host_reply.ToolServerStatus = undefined;
+    var count: usize = 0;
+    if (host.mcp_relist) |owner| {
+        for (owner.servers, 0..) |*server, index| {
+            rows[count] = .{ .server = server.name.slice(), .status = owner.status(index) };
+            count += 1;
+        }
+    }
+    try fd.json(200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ host.instance, rows[0..count] });
+}
+
 fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
     host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
@@ -2289,6 +2326,10 @@ const HeaderReader = struct {
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
+        else if (std.mem.eql(u8, path, "/v1/control/tools-reload"))
+            .tools_reload
+        else if (std.mem.eql(u8, path, "/v1/tools-status"))
+            .tools_status
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -3454,6 +3495,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .host_info => "host-info",
                 .host_stop => "control/host-stop",
                 .host_pause => "control/host-pause",
+                .tools_reload => "control/tools-reload",
                 .session_stop => "control/session-stop",
                 .session_archive => "control/session-archive",
                 .session_pin => "control/session-pin",
@@ -5316,6 +5358,95 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     const offered_digest = protocol.contentDigest(description);
     try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation m JOIN tool_set_member tm ON tm.tool_set_id=m.tool_set_id JOIN tool_record t ON t.tool_record_id=tm.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE m.operation_id=?1 AND c.digest=?2", .{ binding.operation_id, testing.Blob{ .bytes = &offered_digest } }));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "MCP list routes ask one named server or every server, refuse unknown or fenced asks, and report the Host instance" {
+    const io = std.testing.io;
+    const instance_hex = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+    var docs: server_mcp_settings.Server = .{};
+    try docs.name.set("docs");
+    var notes: server_mcp_settings.Server = .{};
+    try notes.name.set("notes");
+    const servers = [_]server_mcp_settings.Server{ docs, notes };
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    defer owner.deinit();
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .mcp_relist = &owner, .instance = @splat(0x7e) };
+
+    // An unknown server is refused, and no list is asked.
+    var request: @FieldType(wire_request.Request, "tools_reload") = .{};
+    request.server = .{};
+    try request.server.?.set("missing");
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 400 "));
+        try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"code\":\"unknown_mcp_server\"") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire) + owner.asks[1].load(.acquire));
+    try std.testing.expect(!host.dispatch_wake.isSet());
+
+    // A fenced Host refuses the ask before recording it.
+    host.phase.store(.stopping, .release);
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        request.server = null;
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 503 "));
+        try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "dispatch_fenced") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire) + owner.asks[1].load(.acquire));
+    host.phase.store(.open, .release);
+
+    // A named server asks only its own list, and the reply carries the Host instance.
+    request.server = .{};
+    try request.server.?.set("notes");
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expect(std.mem.startsWith(u8, reply.header[0..reply.header_length], "HTTP/1.1 200 "));
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[{\"server\":\"notes\",\"generation\":\"1\"}]}", reply.body.json);
+    }
+    try std.testing.expectEqual(@as(u64, 0), owner.asks[0].load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), owner.asks[1].load(.acquire));
+    try std.testing.expect(host.dispatch_wake.isSet());
+
+    // Without a server name every configured server is asked, in configured order.
+    host.dispatch_wake.reset();
+    request.server = null;
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&host, &reply, &request);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[{\"server\":\"docs\",\"generation\":\"1\"},{\"server\":\"notes\",\"generation\":\"2\"}]}", reply.body.json);
+    }
+    try std.testing.expect(host.dispatch_wake.isSet());
+
+    // The status reply lists every configured server, lock-free, with the same instance.
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsStatus(&host, &reply);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"},{\"server\":\"notes\",\"state\":\"idle\",\"last\":\"never\",\"finished\":\"0\",\"tools\":\"0\"}]}", reply.body.json);
+    }
+
+    // A Host with no MCP servers answers empty lists, and an unnamed ask asks nothing.
+    var bare = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .instance = @splat(0x7e) };
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsReload(&bare, &reply, &.{});
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"" ++ instance_hex ++ "\",\"asked\":[]}", reply.body.json);
+    }
+    {
+        var reply: Reply = .{ .io = io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        try replyToolsStatus(&bare, &reply);
+        try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance_hex ++ "\",\"servers\":[]}", reply.body.json);
+    }
+    try std.testing.expect(!bare.dispatch_wake.isSet());
 }
 
 test "configure parent inherits the Host environment only after a fresh creation" {

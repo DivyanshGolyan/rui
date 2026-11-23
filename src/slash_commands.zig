@@ -75,6 +75,7 @@ const ConversationName = enum {
     pin,
     recover,
     @"reload-skills",
+    @"reload-tools",
     rename,
     requests,
     result,
@@ -94,6 +95,7 @@ pub const conversation = Commands(ConversationName, .{
     .pin = .{ .description = "" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
     .@"reload-skills" = .{ .description = "" },
+    .@"reload-tools" = .{ .description = "" },
     .rename = .{ .description = "", .argument = .{ .required = "NAME" } },
     .requests = .{ .description = "recover a lost request" },
     .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
@@ -564,7 +566,7 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 }
 
 test "a draft is a command line, one unfinished slash word, or a Message, by the whole grammar" {
-    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     try std.testing.expectEqual(std.enums.values(conversation.Name).len, names.len);
     const Draft = conversation.Draft;
     for (names) |name| {
@@ -665,6 +667,7 @@ test "a command's list names the choices its word starts, and Tab puts the highl
         .{ .draft = "/copy file ", .shown = null },
         .{ .draft = "/rename ", .shown = null },
         .{ .draft = "/reload-skills ", .shown = null },
+        .{ .draft = "/reload-tools ", .shown = null },
         .{ .draft = "/status ", .shown = null },
         .{ .draft = "/nope ", .shown = null },
         .{ .draft = "/c\n", .shown = null },
@@ -687,12 +690,15 @@ test "a command's list names the choices its word starts, and Tab puts the highl
 
 test "listed commands are every listed name in order, and reload runs immediately" {
     const listed = conversation.listed();
-    const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
+    const expected = [_][]const u8{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "reload-tools", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" };
     try std.testing.expectEqual(expected.len, listed.count);
     for (expected, listed.shown()) |word, entry| try std.testing.expectEqualStrings(word, entry.word);
     const reload = listed.shown()[7];
     try std.testing.expectEqualStrings("reload-skills", reload.word);
     try std.testing.expect(reload.runs);
+    const tools = listed.shown()[8];
+    try std.testing.expectEqualStrings("reload-tools", tools.word);
+    try std.testing.expect(tools.runs);
 }
 
 test "/effort offers every grammar value for an unlisted model" {
@@ -748,6 +754,7 @@ test "the list order is the names' order and usage retains argument shapes" {
     try std.testing.expectEqualStrings("/rename NAME", conversation.usage.get(.rename));
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
     try std.testing.expectEqualStrings("/reload-skills", conversation.usage.get(.@"reload-skills"));
+    try std.testing.expectEqualStrings("/reload-tools", conversation.usage.get(.@"reload-tools"));
 }
 
 test "/copy takes each Copy's name but the answer's, which it copies alone" {

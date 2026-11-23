@@ -63,3 +63,13 @@ export class ContentIsPartsError extends Error {
 	override readonly name = "ContentIsPartsError";
 	constructor() { super("Content contains parts; use session.readPart(entry, ordinal)"); }
 }
+
+/** A wait ended before its condition held. `code` is `wait_timed_out`, the same code the CLI's wait reports. */
+export class RuiWaitTimeoutError extends Error {
+	override readonly name = "RuiWaitTimeoutError";
+	readonly code = "wait_timed_out" as const;
+
+	constructor(message: string) {
+		super(message);
+	}
+}

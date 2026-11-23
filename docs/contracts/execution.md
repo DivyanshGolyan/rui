@@ -545,6 +545,10 @@ Deterministic owner tests supply time directly and never consult a global clock.
 #### Retiring the original process group
 
 Observe a launched direct child without reaping; TERM the anchored original process group, wait 100 ms, KILL that group and any still-live direct child, retire nonzero signaling authority, reap the direct child exactly once, then establish original-group absence with read-only probes.
+The 100 ms grace exists for group members to act on TERM.
+When the direct child is observed exited and one listing of the group finds no other member, the grace ends at once and KILL follows ([#2085](https://github.com/DivyanshGolyan/rui/issues/2085)).
+A listing can miss a member that forks during it; that only shortens the graceful window, because KILL and the absence probes still retire the group.
+A listing that fails keeps the grace.
 
 #### Finishing output capture
 

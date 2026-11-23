@@ -984,11 +984,7 @@ def secret_entry_restore_case(state, library):
         caller = spawn([str(fixture.RUI), "auth", "login", "openai"], stdin=slave, stdout=slave,
             stderr=subprocess.PIPE, env={**env, "HOME": str(home), os_semantics.PRELOAD: str(library),
                                          "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "restore"})
-        shown, deadline = b"", time.monotonic() + 10
-        while b"(it is not shown): " not in shown:
-            assert time.monotonic() < deadline and caller.poll() is None, shown
-            if select.select([master], [], [], 0.1)[0]:
-                shown += os.read(master, 4096)
+        read_until(master, b"(it is not shown): ", timeout=10)
         os.write(master, b"sk-refused\r")
         assert caller.wait(timeout=10) == 1, "a key was accepted with the terminal unrestored"
         errors = caller.stderr.read().decode()
@@ -1078,6 +1074,18 @@ def consent_boundary_cases(state):
             )
 
 
+def read_until(master, marker, timeout):
+    """PTY bytes up to and including `marker`. A PTY hands over a child's output in chunks even after the
+    child exits, so one ready read can hold only the first of them."""
+    shown, deadline = b"", time.monotonic() + timeout
+    while marker not in shown:
+        left = deadline - time.monotonic()
+        assert left > 0, shown
+        if select.select([master], [], [], min(left, 0.1))[0]:
+            shown += os.read(master, 65536)
+    return shown
+
+
 def unread_input(slave):
     return struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0" * 4))[0]
 
@@ -1118,8 +1126,7 @@ def fatal_reporting_cases(state):
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
-                    assert select.select([error_master], [], [], 1)[0]
-                    assert error in os.read(error_master, 65536)
+                    read_until(error_master, error, timeout=3)
                 print(f"fatal reporting: {error.decode()} stopped stderr={stopped} passed", flush=True)
             finally:
                 dispose_all(

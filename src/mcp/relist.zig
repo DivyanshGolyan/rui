@@ -7,6 +7,16 @@ pub const Outcome = enum { listed, failed, collision };
 pub const Last = enum { never, listed, failed, collision };
 pub const State = enum { idle, listing, waiting };
 
+/// One server's status as intake threads read it (published by the owner, see server_mcp_relist.zig).
+pub const Status = struct {
+    state: State,
+    last: Last,
+    /// Generation of the latest list that has landed (see `Slot.finished`).
+    finished: u64,
+    /// MCP tool records this server owns in the set last published.
+    tools: u32,
+};
+
 pub const Slot = struct {
     state: State = .idle,
     /// Generation of the latest ask. A caller that asked generation g knows its list has landed once `finished >= g`.

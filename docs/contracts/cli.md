@@ -344,6 +344,10 @@ Host Session configuration admission uses operation-scoped selected facts for ef
 Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
 Historical compaction escalation reads only that frozen value, so a refresh between admission, overflow settlement and successor admission cannot change the failed Operation's deeper floor or make the two decisions disagree.
 Host admission uses its selected facts for omitted settings and validates explicit choices against them.
+`rui host reload-tools [--store PATH] [--server NAME]` asks the running Host to list one configured MCP server, or every configured server without `--server`, again (D110).
+It prints one JSON line, `host_reload_tools`, with the latest `outcome` (`listed`, `failed` or `collision`) and the `tools` count in the Host tool set of each asked server, and it polls [`tools_status`](inspection.md#public-session-activity) every 250 ms until each asked generation has landed.
+It gives up after 60 seconds with the usual wait timeout and names the servers still listing; with no MCP server configured it succeeds with an empty `servers` list.
+An unknown `--server` is refused as `unknown_mcp_server`, and the Host is not asked.
 There is no model-list command.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.

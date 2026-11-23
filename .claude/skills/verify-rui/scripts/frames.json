@@ -3751,6 +3751,44 @@
       ]
     },
     {
+      "name": "reload-tools-none",
+      "note": "/reload-tools on a Host with no MCP servers reports it in one footer line",
+      "open": "Reload tools",
+      "cast": [
+        {
+          "label": "Reload tools",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "text": "/reload-tools"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "No MCP servers to reload"
+        }
+      ],
+      "expect": [
+        "No MCP servers to reload"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
+      ]
+    },
+    {
       "name": "chat-queued",
       "note": "13d-queued-message: owns its slow Turn instead of borrowing chat-working work",
       "open": "Queue a follow-up",

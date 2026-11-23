@@ -296,9 +296,9 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
 
 test "Palette renders every chat command and description in the same normal style" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/reload-tools", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
     };
-    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
+    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     inline for (cases) |case| {
         var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, case[0].listed()) };
         const shown = &menu.shown.?;
@@ -514,7 +514,7 @@ test "Palette full-width rows activate and overflow consumes clicks" {
                 try std.testing.expectEqual(@as(u64, 7), selected.pick.?.revision);
             } else try std.testing.expectEqual(null, selected.pick);
         };
-        const label = "10 more";
+        const label = "11 more";
         for (label, 0..) |byte, col| {
             const cell = surface.readCell(@intCast(col + 2), 4);
             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
