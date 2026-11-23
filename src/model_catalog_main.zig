@@ -31,6 +31,8 @@ fn writeSnapshot(scratch: std.mem.Allocator, out: *std.Io.Writer, source_name: [
         const entry = record.model;
         try out.print("        .{{ .id = \"{f}\", .context_window = ", .{std.zig.fmtString(entry.id)});
         if (entry.context_window) |context| try out.print("{d}", .{context}) else try out.writeAll("null");
+        try out.writeAll(", .output_limit = ");
+        if (entry.output_limit) |limit| try out.print("{d}", .{limit}) else try out.writeAll("null");
         try out.writeAll(", .efforts = .init(.{");
         var first = true;
         for (std.enums.values(model_capability.ReasoningEffort)) |effort| {
@@ -146,7 +148,7 @@ test "model catalog generator emits chat projection without excluding a chat sib
         \\
     , generated[start.?..]);
     try std.testing.expect(std.mem.indexOf(u8, generated, "// Generated projection of api.json; same ID precedence as models_dev.zig.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, generated, ".id = \"gpt-image-next\", .context_window = null, .efforts = .init(.{}), .openai_listed = false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated, ".id = \"gpt-image-next\", .context_window = null, .output_limit = null, .efforts = .init(.{}), .openai_listed = false") != null);
 }
 
 test "model catalog generator emits empty projection declarations" {

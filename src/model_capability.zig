@@ -78,6 +78,12 @@ pub fn contextWindow(facts: []const catalog.Entry, model: []const u8) u64 {
     return row.context_window orelse product_defaults.unlisted_context_window;
 }
 
+/// The most output tokens a model may take: the catalog's `limit.output`, or the product default when unstated.
+pub fn outputLimit(facts: []const catalog.Entry, model: []const u8) u32 {
+    const row = catalog.find(facts, model) orelse return product_defaults.unlisted_output_limit;
+    return row.output_limit orelse product_defaults.unlisted_output_limit;
+}
+
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
     _ = model;
     return .{

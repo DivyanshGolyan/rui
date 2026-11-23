@@ -1,5 +1,6 @@
 const std = @import("std");
 const transport_policy = @import("transport_policy.zig");
+const model_capability = @import("model_capability.zig");
 const model_catalog = @import("model_catalog.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -1205,6 +1206,7 @@ pub const Preparation = struct {
             .effort = effortOf(self.settings.reasoning_effort),
             .starting_effort = effortOf(self.settings.starting_effort),
             .session_affinity = self.settings.session_affinity,
+            .output_limit = model_capability.outputLimit(model_catalog.shipped, model),
             .model_length = @intCast(model.len),
         } };
         const settings = &header.item.settings;
