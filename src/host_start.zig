@@ -663,18 +663,19 @@ fn resolutionFailure(failure: *start_report.Failure, path: []const u8, source: a
 }
 
 /// Why a named secret source gave no usable value, naming the variable or file a caller must fix.
-/// `resolve` reports an unset variable or an absent file as ApiKeyMissing and a malformed key as
-/// InvalidApiKey; every other error is the private file reader's, named as it is.
+/// `resolve` reports an unset variable or an absent file as ApiKeyMissing and a malformed key or
+/// MySQL URL as InvalidApiKey or InvalidSecretValue; every other error is the private file reader's,
+/// named as it is.
 fn sourceRefusal(buffer: *[start_report.max_refusal_message_bytes]u8, path: []const u8, source: anytype, err: anyerror) []const u8 {
     const named = switch (source) {
         .env => |*name| switch (err) {
             error.ApiKeyMissing => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is not set", .{ path, name.slice() }),
-            error.InvalidApiKey => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is empty or not a valid key (printable ASCII, no spaces)", .{ path, name.slice() }),
+            error.InvalidApiKey, error.SettingsInvalid => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is empty or not a valid value for this setting", .{ path, name.slice() }),
             else => std.fmt.bufPrint(buffer, "{s}: environment variable {s} is unusable ({s})", .{ path, name.slice(), @errorName(err) }),
         },
         .file => |*file| switch (err) {
             error.ApiKeyMissing => std.fmt.bufPrint(buffer, "{s}: file {s} does not exist", .{ path, file.slice() }),
-            error.InvalidApiKey => std.fmt.bufPrint(buffer, "{s}: file {s} is empty or not a valid key (printable ASCII, no spaces)", .{ path, file.slice() }),
+            error.InvalidApiKey, error.SettingsInvalid => std.fmt.bufPrint(buffer, "{s}: file {s} is empty or not a valid value for this setting", .{ path, file.slice() }),
             else => std.fmt.bufPrint(buffer, "{s}: file {s} is unreadable or not private ({s})", .{ path, file.slice(), @errorName(err) }),
         },
         .default, .literal => std.fmt.bufPrint(buffer, "{s}: credential source is unusable ({s})", .{ path, @errorName(err) }),
@@ -693,9 +694,11 @@ test "a secret source refusal names the variable or file and why it gave no usab
     try long.file.text.set("/" ++ &@as([300]u8, @splat('d')));
     const cases = [_]struct { source: Source, err: anyerror, text: []const u8 }{
         .{ .source = env, .err = error.ApiKeyMissing, .text = "providers.openai.key: environment variable OPENAI_API_KEY is not set" },
-        .{ .source = env, .err = error.InvalidApiKey, .text = "providers.openai.key: environment variable OPENAI_API_KEY is empty or not a valid key (printable ASCII, no spaces)" },
+        .{ .source = env, .err = error.InvalidApiKey, .text = "providers.openai.key: environment variable OPENAI_API_KEY is empty or not a valid value for this setting" },
+        .{ .source = env, .err = error.SettingsInvalid, .text = "providers.openai.key: environment variable OPENAI_API_KEY is empty or not a valid value for this setting" },
         .{ .source = file, .err = error.ApiKeyMissing, .text = "providers.openai.key: file /home/me/.config/rui/openai.key does not exist" },
-        .{ .source = file, .err = error.InvalidApiKey, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is empty or not a valid key (printable ASCII, no spaces)" },
+        .{ .source = file, .err = error.InvalidApiKey, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is empty or not a valid value for this setting" },
+        .{ .source = file, .err = error.SettingsInvalid, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is empty or not a valid value for this setting" },
         .{ .source = file, .err = error.InsecureCredentialFile, .text = "providers.openai.key: file /home/me/.config/rui/openai.key is unreadable or not private (InsecureCredentialFile)" },
         .{ .source = long, .err = error.ApiKeyMissing, .text = "providers.openai.key: credential source is unusable (ApiKeyMissing)" },
         .{ .source = .default, .err = error.HomeUnavailable, .text = "providers.openai.key: credential source is unusable (HomeUnavailable)" },

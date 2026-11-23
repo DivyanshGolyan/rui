@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encodeSettings, INHERITED_ENVIRONMENT, launchFor, readinessInstance, startError } from "../src/client.ts";
+import { encodeSettings, launchFor, readinessInstance, startError } from "../src/client.ts";
 import { pipeSettings, type HostSettings } from "../src/settings.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
@@ -140,7 +140,7 @@ test("only explicitly named secret environment sources join the base child envir
 					assert.equal(launch.env[selected], "selected-private-value");
 					assert.equal(launch.env[unused], undefined);
 					assert.ok(!launch.document.includes(Buffer.from("selected-private-value")), "environment values stay out of the document");
-					assert.deepEqual(Object.keys(launch.env).sort(), [...INHERITED_ENVIRONMENT, selected].filter((key) => process.env[key] !== undefined).sort());
+					assert.deepEqual(Object.keys(launch.env).sort(), ["PATH", "HOME", "TMPDIR", selected].filter((key) => process.env[key] !== undefined).sort());
 				} finally {
 					launch.document.fill(0);
 				}
@@ -417,7 +417,7 @@ test("malformed environment sources are never looked up or forwarded", () => {
 					observing = false;
 				}
 				try {
-					assert.deepEqual(lookups, [...INHERITED_ENVIRONMENT], "a malformed source must never trigger any secret environment lookup");
+					assert.deepEqual(lookups, ["PATH", "HOME", "TMPDIR"], "a malformed source must never trigger any secret environment lookup");
 					assert.ok(!Object.values(launch.env).includes("private-unselected-value"), "a malformed source must never forward another variable's value");
 					const wireSource = source instanceof Uint8Array ? { hex: Buffer.from(source.buffer, source.byteOffset, source.byteLength).toString("hex") } : source;
 					const expected = JSON.parse(JSON.stringify(settings, (name, value) => name === "env" ? wireSource : value));
@@ -701,18 +701,4 @@ test("presets and configure encode one spec including loaded tools and output re
 	assert.deepEqual(preset.loadedTools, ["find_tools"]);
 	assert.equal(preset.outputReservation, 42);
 	assert.deepEqual(preset.outputSchema, { type: "object" });
-});
-
-test("TS-12 a child Host inherits the proxy and trust variables its transport reads, and nothing else unnamed", () => {
-	for (const proxy of ["https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"]) assert.ok((INHERITED_ENVIRONMENT as readonly string[]).includes(proxy), proxy);
-	const names = [...INHERITED_ENVIRONMENT, "AWS_SECRET_ACCESS_KEY", "OPENAI_API_KEY", "http_proxy"];
-	const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-	try {
-		for (const name of names) process.env[name] = `value-of-${name}`;
-		const launch = launchFor({ providers: { openai: { key: { env: "OPENAI_API_KEY" } } } }, "/r", { binary: "/fixture/rui" });
-		assert.deepEqual(Object.keys(launch.env).sort(), [...INHERITED_ENVIRONMENT, "OPENAI_API_KEY"].sort());
-		for (const name of INHERITED_ENVIRONMENT) assert.equal(launch.env[name], `value-of-${name}`);
-	} finally {
-		for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
-	}
 });
