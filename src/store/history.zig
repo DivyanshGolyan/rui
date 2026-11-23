@@ -2,9 +2,9 @@
 //! written in format N's shape, and build() makes that Store the way the
 //! shipped migrations did: the format-51 baseline, the baseline rows, and the
 //! shipped steps below N. Test code never rewinds a current Store.
-//! upgrade() then runs the product's own migration path (schema.openExisting).
-//! Design: #2114 (candidate 2). This file holds the SQLite path only; MySQL is
-//! not implemented here.
+//! upgrade() then runs the product's own migration path: schema.openExisting on
+//! SQLite, and the operator's migration DDL on MySQL.
+//! Design: #2114.
 
 const std = @import("std");
 const platform = @import("../store_path.zig");
@@ -12,6 +12,8 @@ const protocol = @import("../protocol.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const store_testing = @import("testing.zig");
+const mysql_testing = @import("mysql_testing.zig");
+const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const c = sqlite.c;
 const Engine = store_testing.Engine;
 
@@ -83,15 +85,29 @@ pub const Built = struct {
 
     /// Raw statement against the format-N (before upgrade) or current (after) database.
     pub fn exec(self: *Built, sql: [:0]const u8) !void {
+        if (self.engine == .mysql) return mysql_dialect_check.historyLoad(sql, false);
         try sqlite.exec(self.raw orelse return error.HistoryClosed, sql);
+    }
+
+    /// The stored format, read the way the engine stores it.
+    pub fn storedFormat(self: *const Built) !u32 {
+        if (self.engine == .mysql) return mysql_dialect_check.historyFormat();
+        return @intCast(try sqlite.pragmaInt(self.raw orelse return error.HistoryClosed, "PRAGMA user_version"));
     }
 
     /// The operator's upgrade, exactly once. SQLite: schema.openExisting on the raw handle
     /// (backup, foreign keys off, shipped steps from N, foreign_key_check, validateCurrent).
+    /// MySQL: schema.mysqlMigrationFrom(N) as DDL, then the catalog and the rows compared with a fresh Store.
     pub fn upgrade(self: *Built) !void {
         if (self.upgraded) return;
-        if (self.engine == .mysql) return error.HistoryMysqlNotImplemented;
-        try schema.openExisting(self.io, self.raw orelse return error.HistoryClosed, self.root(), null, null);
+        switch (self.engine) {
+            .sqlite => try schema.openExisting(self.io, self.raw orelse return error.HistoryClosed, self.root(), null, null),
+            .mysql => {
+                const migration = schema.mysqlMigrationFrom(self.format) orelse return error.StartFormatOutOfRange;
+                if (migration.len > 0) try mysql_dialect_check.historyLoad(migration, false);
+                try mysql_dialect_check.historyExpectUpgraded(self.root());
+            },
+        }
         self.upgraded = true;
     }
 
@@ -108,9 +124,8 @@ fn stepsBelow(format: u32) []const schema.Migration {
     return schema.migrations[0 .. format - schema.migration_baseline];
 }
 
-/// Build a raw Store at `start.format` in `tmp`. SQLite only for now.
+/// Build a raw Store at `start.format` in `tmp`. MySQL builds in the history database, reset first.
 pub fn build(io: std.Io, engine: Engine, tmp: *std.testing.TmpDir, start: *const Start) !Built {
-    if (engine == .mysql) return error.HistoryMysqlNotImplemented;
     if (start.format < schema.migration_baseline or start.format > schema.schema_version) return error.StartFormatOutOfRange;
     var built: Built = .{
         .io = io,
@@ -124,7 +139,14 @@ pub fn build(io: std.Io, engine: Engine, tmp: *std.testing.TmpDir, start: *const
     };
     built.root_len = try tmp.dir.realPath(io, &built.root_storage);
     built.path_len = (try std.fmt.bufPrint(&built.path_storage, "{s}/store.sqlite3", .{built.root()})).len;
+    switch (engine) {
+        .sqlite => try buildSqlite(&built, start),
+        .mysql => try buildMysql(&built, start),
+    }
+    return built;
+}
 
+fn buildSqlite(built: *Built, start: *const Start) !void {
     var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
     var raw: ?*c.sqlite3 = null;
     if (c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{built.path()}, 0), &raw) != c.SQLITE_OK) {
@@ -146,9 +168,26 @@ pub fn build(io: std.Io, engine: Engine, tmp: *std.testing.TmpDir, start: *const
     var format_buffer: [256]u8 = undefined;
     try sqlite.exec(database, try std.fmt.bufPrintSentinel(&format_buffer, "PRAGMA user_version={d};UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{ start.format, start.format }, 0));
 
-    try sqlite.exec(database, start.sql.text(engine));
+    try sqlite.exec(database, start.sql.text(.sqlite));
     try expectNoForeignKeyViolations(database);
-    return built;
+}
+
+/// The MySQL build mirrors buildSqlite: the baseline DDL, the baseline meta, the baseline rows and the shipped
+/// steps below N with foreign key checks off, then format N, then the Start's rows with checks on. MySQL has no
+/// foreign_key_check statement, so the baseline rows and steps are not verified beyond their own statements.
+fn buildMysql(built: *Built, start: *const Start) !void {
+    try mysql_dialect_check.historyReset();
+    try mysql_dialect_check.historyLoad(store_testing.baseline_mysql_ddl, false);
+
+    var meta_buffer: [protocol.max_store_bytes + 256]u8 = undefined;
+    try mysql_dialect_check.historyLoad(try std.fmt.bufPrint(&meta_buffer, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','7'),('store_selector','{s}'),('format','{d}')", .{ built.root(), schema.migration_baseline }), false);
+    if (start.baseline_rows) try mysql_dialect_check.historyLoad(store_testing.baseline_rows, true);
+    for (stepsBelow(start.format)) |step| for (step.mysql) |statement| try mysql_dialect_check.historyLoad(statement, true);
+
+    var format_buffer: [256]u8 = undefined;
+    try mysql_dialect_check.historyLoad(try std.fmt.bufPrint(&format_buffer, "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{start.format}), false);
+    const rows = start.sql.text(.mysql);
+    if (rows.len > 0) try mysql_dialect_check.historyLoad(rows, false);
 }
 
 /// What a 51 Store held: its selector, a wire version, and format 51 (the steps then carry it on).
@@ -170,18 +209,25 @@ fn expectNoForeignKeyViolations(database: *c.sqlite3) !void {
 }
 
 test "a Store built at every format from the baseline to the current one upgrades to a current Store" {
-    var format: u32 = schema.migration_baseline;
-    while (format <= schema.schema_version) : (format += 1) {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        const start: Start = .{ .format = format };
-        var built = try build(std.testing.io, .sqlite, &tmp, &start);
-        defer built.deinit();
-        try std.testing.expectEqual(format, try sqlite.pragmaInt(built.raw.?, "PRAGMA user_version"));
-        try built.upgrade();
-        // A current Store reopens through the same path, which validates its shape.
-        try schema.openExisting(std.testing.io, built.raw.?, built.root(), null, null);
-        try std.testing.expectEqual(schema.schema_version, try sqlite.pragmaInt(built.raw.?, "PRAGMA user_version"));
+    inline for (comptime std.enums.values(Engine)) |engine| {
+        // The same skip rule as store_testing.forEachEngine: MySQL runs only when a server is configured.
+        if (engine != .mysql or try mysql_testing.available()) {
+            var format: u32 = schema.migration_baseline;
+            while (format <= schema.schema_version) : (format += 1) {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                const start: Start = .{ .format = format };
+                var built = try build(std.testing.io, engine, &tmp, &start);
+                defer built.deinit();
+                try std.testing.expectEqual(format, try built.storedFormat());
+                try built.upgrade();
+                if (engine == .sqlite) {
+                    // A current Store reopens through the same path, which validates its shape.
+                    try schema.openExisting(std.testing.io, built.raw.?, built.root(), null, null);
+                }
+                try std.testing.expectEqual(schema.schema_version, try built.storedFormat());
+            }
+        }
     }
 }
 

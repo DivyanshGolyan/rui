@@ -21,6 +21,8 @@ const DatabaseNames = struct {
     offer: []const u8 = "rui_offer_migration",
     effort: []const u8 = "rui_effort_migration",
     projection: []const u8 = "rui_obligation_projection_parity",
+    history: []const u8 = "rui_history",
+    history_fresh: []const u8 = "rui_history_fresh",
 };
 
 var names: DatabaseNames = .{};
@@ -639,6 +641,65 @@ fn expectSameResults(comptime migrated: []const []const u8, comptime fresh: []co
             return err;
         };
     }
+}
+
+/// The history owner's databases (src/store/history.zig): the Store it builds and upgrades, and the fresh twin
+/// it is compared with. Reset for every build, so one pair serves every format in turn.
+pub const history_sql = "{[history]s}";
+pub const history_fresh_sql = "{[history_fresh]s}";
+
+/// Empties the history Store's database and selects it. Runs with the dialect driver's root login.
+pub fn historyReset() !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try setupNamed("DROP DATABASE IF EXISTS " ++ history_sql ++ ";DROP DATABASE IF EXISTS " ++ history_fresh_sql ++
+        ";CREATE DATABASE " ++ history_sql ++ ";USE " ++ history_sql);
+}
+
+/// Runs `text` in the history Store's database. `unchecked` turns foreign key checks off for the statement,
+/// as the baseline rows and the shipped steps need (SQLite's build turns them off the same way).
+pub fn historyLoad(text: []const u8, unchecked: bool) !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try load(history_sql, text, unchecked);
+}
+
+/// The history Store's stored format (store_meta 'format').
+pub fn historyFormat() !u32 {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeResultNamed("SELECT meta_value FROM " ++ history_sql ++ ".store_meta WHERE meta_key='format'", &out.writer);
+    // writeResult prints each value as " <length>:<bytes>", so the value follows the last colon.
+    const text = out.written();
+    const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return error.MysqlFormatUnreadable;
+    return std.fmt.parseInt(u32, text[colon + 1 ..], 10);
+}
+
+/// The history Store, upgraded by the operator's DDL, must match a fresh schema.ddl(.mysql) Store with the
+/// fresh rows and the same selector: the same shape, the same rows, and a catalog that is current.
+pub fn historyExpectUpgraded(selector: []const u8) !void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return error.MysqlUnavailable;
+    try setupNamed("DROP DATABASE IF EXISTS " ++ history_fresh_sql ++ ";CREATE DATABASE " ++ history_fresh_sql);
+    try load(history_fresh_sql, schema.ddl(.mysql), false);
+    try load(history_fresh_sql, store_testing.expected_mysql_rows, true);
+    const meta = try std.fmt.allocPrint(std.testing.allocator, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('store_selector','{s}')", .{ schema.schema_version, selector });
+    defer std.testing.allocator.free(meta);
+    try load(history_fresh_sql, meta, false);
+    try expectSameResults(comptime &shapeQueries(history_sql), comptime &shapeQueries(history_fresh_sql));
+    try expectSameResults(comptime rowQueries(history_sql), comptime rowQueries(history_fresh_sql));
+    try expectCatalog(history_fresh_sql);
+    try expectCatalog(history_sql);
 }
 
 test "a MySQL Store at the migration baseline with its rows takes every migration to the current schema's shape and rows" {
