@@ -1027,8 +1027,8 @@ def main():
         responses,
         "detached-timeout",
         start_detached_shell(
-            f"trap '' TERM PIPE; {publish_pid(detached_pid)}; "
-            "head -c 32768 /dev/zero; while :; do printf detached; sleep 1; done",
+            f"trap '' TERM PIPE; head -c 32768 /dev/zero; {publish_pid(detached_pid)}; "
+            "while :; do printf detached; sleep 1; done",
             detached_pid,
         ),
         timeout_ms=1000,

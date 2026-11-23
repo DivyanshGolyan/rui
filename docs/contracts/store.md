@@ -359,8 +359,8 @@ For configured Active Capacity \(C\), the supported-burst requirement is \(I + F
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 6 on Linux or 7 on macOS for the independent authentication worker. |
 
-With three inherited descriptors, a default managed Host (\(C=100\), Codex transport and authentication) needs 1028 descriptors on Linux and 1030 on macOS for full intake, and 450 fewer for ten-client intake.
-A Linux 1024/1024 session fits 99 ordinary clients without a raise. macOS's default soft limit of 256 fits after the Host raises its own soft limit, provided the hard limit and OS per-process ceiling cover the full requirement; a lower ceiling reduces intake, never Active Capacity, and a hard limit of 256 refuses startup.
+With three inherited descriptors, a default managed Host (\(C=100\), Codex transport and authentication) needs 1044 descriptors on Linux and 1046 on macOS for full intake, and 450 fewer for ten-client intake.
+A Linux 1024/1024 session fits 96 ordinary clients without a raise. macOS's default soft limit of 256 fits after the Host raises its own soft limit, provided the hard limit and OS per-process ceiling cover the full requirement; a lower ceiling reduces intake, never Active Capacity, and a hard limit of 256 refuses startup.
 
 An ordinary exchange peaks at a socket, two sealed content files, and overlapping writer/read-only handles for the third value in a creating Message.
 Absolute POSIX opens use `AT_FDCWD` without a directory descriptor.

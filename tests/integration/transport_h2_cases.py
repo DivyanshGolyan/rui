@@ -78,8 +78,21 @@ class HeldHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+SQLITE_TEMP = "SQLITE_TMPDIR"
+
+
+def place_sqlite_temp_files(root):
+    directory = root / "sqlite-temp"
+    directory.mkdir()
+    os.environ[SQLITE_TEMP] = str(directory)
+
+
 def open_descriptors(pid):
-    return sum("etilqs_" not in name for name in os_semantics.open_descriptor_names(pid))
+    """Descriptors pid holds open, less SQLite's temp files. SQLite opens one lazily when a statement first
+    spills, named etilqs_* or, since 3.54 on Linux, an unnamed O_TMPFILE '#inode (deleted)'; only the
+    directory place_sqlite_temp_files gives the Host identifies both."""
+    directory = os.path.join(os.environ[SQLITE_TEMP], "")
+    return sum(directory not in name for name in os_semantics.open_descriptor_names(pid))
 
 
 def assert_round_trip_history(streams, capacity, rounds, answers, sessions):
@@ -951,6 +964,7 @@ def main():
         raise RuntimeError("Observed-shape churn footprint qualification requires macOS")
     with tempfile.TemporaryDirectory(prefix="rui-h2-") as tmp:
         root = pathlib.Path(tmp)
+        place_sqlite_temp_files(root)
         if not observed_only and not churn and selected is None:
             held_population(root)
         subprocess.run([

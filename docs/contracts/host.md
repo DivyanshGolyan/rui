@@ -189,6 +189,7 @@ Startup raises only its own soft descriptor limit, up to the hard limit, to fit 
 It never reduces Active Capacity to fit: when even minimum intake cannot fit, startup fails before the Store lease and names the limit to raise.
 From macOS's default soft limit of 256, the default Host starts with full intake when the hard limit and OS per-process ceiling cover its full requirement.
 Between the minimum and full requirement it starts with reduced intake and unchanged Active Capacity; below the minimum it refuses.
+The requirement includes 16 descriptors for the open-line pool, outside intake, so the minimum soft limit rises by 16.
 
 | Platform | Detached launch |
 | --- | --- |

@@ -901,6 +901,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                     const length = remaining_bytes / records.len + @intFromBool(i < remaining_bytes % records.len);
                     record.* = .{
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .remote_name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
                         .description = "Read a page.",
@@ -1012,6 +1013,7 @@ test "creation receipts retain maximum configured and loaded tools" {
                     const length = bytes / records.len + @intFromBool(index < bytes % records.len);
                     record.* = .{
                         .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .remote_name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
                         .owner = .mcp,
                         .server = "docs",
                         .description = "Read a page.",

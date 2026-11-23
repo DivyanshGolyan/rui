@@ -2609,6 +2609,7 @@
                           "done",
                           "context_full",
                           "provider_refused",
+                          "out_of_quota",
                           "provider_unavailable",
                           "stopped",
                           "interrupted",
@@ -14356,7 +14357,6 @@
                   "mysql_login",
                   "store_fenced",
                   "runtime_dir_unusable",
-                  "tool_name_collision",
                   "proxy_unusable"
                 ]
               },
@@ -14563,14 +14563,16 @@
                   "enum": [
                     "never",
                     "listed",
-                    "failed",
-                    "collision"
+                    "failed"
                   ]
                 },
                 "finished": {
                   "$ref": "#/components/schemas/Decimal"
                 },
                 "tools": {
+                  "$ref": "#/components/schemas/Decimal"
+                },
+                "left_out": {
                   "$ref": "#/components/schemas/Decimal"
                 }
               },
@@ -14579,7 +14581,8 @@
                 "state",
                 "last",
                 "finished",
-                "tools"
+                "tools",
+                "left_out"
               ],
               "additionalProperties": false
             },

@@ -3,8 +3,8 @@ const std = @import("std");
 pub const first_retry_ms: u64 = 1_000;
 pub const max_retry_ms: u64 = 300_000;
 
-pub const Outcome = enum { listed, failed, collision };
-pub const Last = enum { never, listed, failed, collision };
+pub const Outcome = enum { listed, failed };
+pub const Last = enum { never, listed, failed };
 pub const State = enum { idle, listing, waiting };
 
 /// One server's status as intake threads read it (published by the owner, see server_mcp_relist.zig).
@@ -15,6 +15,8 @@ pub const Status = struct {
     finished: u64,
     /// MCP tool records this server owns in the set last published.
     tools: u32,
+    /// Tools the server listed that were left out of the offered set (see offered.zig).
+    left_out: u32,
 };
 
 pub const Slot = struct {
@@ -56,14 +58,13 @@ pub const Slot = struct {
         self.last = switch (outcome) {
             .listed => .listed,
             .failed => .failed,
-            .collision => .collision,
         };
         switch (outcome) {
             .listed => {
                 self.failures = 0;
                 self.state = .idle;
             },
-            .failed, .collision => {
+            .failed => {
                 self.failures +|= 1;
                 self.state = .waiting;
                 self.retry_at_ms = now_ms +| retryDelay(self.failures);
@@ -184,14 +185,8 @@ test "re-list slots fold asks, answer each ask once and back off failures" {
     s.end(.failed, 20_001);
     try expectSnap(&s, 20_001, .{ .state = .waiting, .asked = 8, .started = 8, .finished = 8, .failures = 2, .retry_at_ms = 22_001, .last = .failed, .due = false, .wake = 22_001 });
 
-    // A collision backs off like a failure and reports itself as the last outcome.
     s.begin();
     s.end(.listed, 22_001);
-    _ = s.want();
-    s.begin();
-    s.end(.collision, 30_000);
-    try expectSnap(&s, 30_000, .{ .state = .waiting, .asked = 9, .started = 9, .finished = 9, .failures = 1, .retry_at_ms = 31_000, .last = .collision, .due = false, .wake = 31_000 });
-    try expectSnap(&s, 31_000, .{ .state = .waiting, .asked = 9, .started = 9, .finished = 9, .failures = 1, .retry_at_ms = 31_000, .last = .collision, .due = true, .wake = 31_000 });
 
     // The failure count saturates instead of overflowing, and the delay stays at the cap.
     var saturated: Slot = .{ .failures = std.math.maxInt(u32) - 1 };
