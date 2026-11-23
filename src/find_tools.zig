@@ -34,18 +34,7 @@ pub fn writeReload(out: *std.Io.Writer, asked: []const relist.Asked) !void {
         if (index != 0) try out.writeAll(", ");
         try out.writeAll(each.server);
     }
-    if (asked.len == 1) {
-        try out.writeAll(". Its new tools can be found with find_tools once its list lands, usually within a few seconds.");
-    } else {
-        try out.writeAll(". Each server's new tools can be found with find_tools once its list lands, usually within a few seconds.");
-    }
-}
-
-/// Reads and settles a search call with no reload report. The Host settles a reload itself, with its report.
-pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, faults: storage.Faults) !void {
-    const call = try read(store, arena, input);
-    if (call.reloads()) return error.ReloadNeedsHost;
-    try settle(store, input, &call, arena, faults);
+    try out.writeAll(". New tools can be searched for with find_tools after a server answers.");
 }
 
 /// Settles the call's one Tool Result. A reload's report is already in `call.words.report`.

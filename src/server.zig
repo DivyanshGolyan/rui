@@ -2131,9 +2131,8 @@ fn readSkillSuggestions(host: *Host, allocator: std.mem.Allocator, scope: @impor
 noinline fn replyToolsReload(host: *Host, fd: *Reply, request: *const @FieldType(wire_request.Request, "tools_reload")) !void {
     if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
     var asked_by_owner: [host_settings.max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
-    const count: usize = if (host.mcp_relist) |owner| owner.askAll(if (request.server) |name| name.slice() else null, &asked_by_owner) else 0;
+    const count = server_host.askMcpLists(host, if (request.server) |name| name.slice() else null, &asked_by_owner);
     if (request.server != null and count == 0) return respondStatic(fd, 400, .invocation_error, "unknown_mcp_server");
-    if (count != 0) host.dispatch_wake.set(host.io);
     var asked: [host_settings.max_mcp_servers]host_reply.ToolAsk = undefined;
     for (asked_by_owner[0..count], asked[0..count]) |ask, *each| each.* = .{ .server = ask.server, .generation = ask.generation };
     try fd.json(200, protocol.tools_reload_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsReload, .{ host.instance, asked[0..count] });

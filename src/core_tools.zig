@@ -24,9 +24,9 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
     if (bytes.len > find_tools_max_argument_bytes) return refused(find_tools_too_long);
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return refused("words must be the only field of one well-formed JSON object"),
+        else => return refused("the arguments must be one well-formed JSON object with words, reload, or both"),
     };
-    if (root != .object) return refused("words must be the only field of one JSON object");
+    if (root != .object) return refused("the arguments must be one JSON object with words, reload, or both");
     if (unknownField(root.object, &.{ "words", "reload" })) |name| return refusedField(arena, name, "is not a words or reload field");
     out.* = .{};
     if (root.object.get("reload")) |reload| {

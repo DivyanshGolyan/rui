@@ -4558,7 +4558,8 @@ test "find_tools declares a found tool on the next request without losing the me
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const find = (try setup.storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-    try @import("find_tools.zig").run(&setup.storage, arena.allocator(), &find, .{});
+    const found = try @import("find_tools.zig").read(&setup.storage, arena.allocator(), &find);
+    try @import("find_tools.zig").settle(&setup.storage, &find, &found, arena.allocator(), .{});
     admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     binding = try admitted.permit.consume();
     try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));

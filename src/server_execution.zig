@@ -1626,8 +1626,7 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
 /// and settles in this pass: the lists land on the execution loop later, so nothing here waits.
 fn findToolsReload(host: *Host, arena: std.mem.Allocator) ![]const u8 {
     var asked: [@import("host_settings.zig").max_mcp_servers]server_mcp_relist.Relist.Asked = undefined;
-    const count: usize = if (host.mcp_relist) |owner| owner.askAll(null, &asked) else 0;
-    if (count != 0) host.dispatch_wake.set(host.io);
+    const count = server_host.askMcpLists(host, null, &asked);
     var out: std.Io.Writer.Allocating = .init(arena);
     try find_tools.writeReload(&out.writer, asked[0..count]);
     return out.written();
@@ -5498,7 +5497,7 @@ fn listOf(comptime names: []const []const u8) []const u8 {
     return Script.jsonReply(body);
 }
 
-const reload_asked_one = "Asked 1 MCP server to list its tools again: docs. Its new tools can be found with find_tools once its list lands, usually within a few seconds.";
+const reload_asked_one = "Asked 1 MCP server to list its tools again: docs. New tools can be searched for with find_tools after a server answers.";
 
 fn reloadText(storage: *store_module.Store, session: @FieldType(@import("action_read.zig").Request, "session"), action_id: u64, out: []u8) ![]const u8 {
     var read: @import("action_read.zig").Read = undefined;
@@ -5706,6 +5705,139 @@ test "a reload with no MCP server configured says so and asks nothing" {
     try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
     var text: [256]u8 = undefined;
     try std.testing.expectEqualStrings("No MCP servers are configured, so nothing was reloaded.\nNo tools matched. 0 tools are still not loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
+}
+
+test "a find_tools reload with words reports the asks, then the loaded tools, and writes one revision" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    // The Session offers alpha, which the startup list saved, but has not loaded it, so the search can load it.
+    var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try testing.completeConfiguration("reload-words-config", "", try testing.canonicalCwd(io, &cwd), "model-a");
+    configure.configuration.tools = try .of(&.{ "alpha", "find_tools" });
+    configure.configuration.loaded_tools = try .of(&.{"find_tools"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try testing.submitTestMessage(&storage, &tmp, "reload-words-message", "reload-words-message", session.slice(), "reload and search");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-words-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":\\\"alpha\\\"}",
+        .decoded_arguments = "{\"reload\":true,\"words\":\"alpha\"}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    const revisions = try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
+
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    try std.testing.expectEqual(@as(u64, 2), owner.asks[0].load(.acquire));
+    var text: [512]u8 = undefined;
+    const bytes = try reloadText(&storage, session, input.binding.action_id, &text);
+    try std.testing.expect(std.mem.startsWith(u8, bytes, reload_asked_one ++ "\nLoaded these tools; they are available on your next request:\n"));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "- alpha: ") != null);
+    try std.testing.expectEqual(revisions + 1, try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a find_tools reload with invalid words is refused and asks no server" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture: ReloadScript = undefined;
+    try fixture.start(listOf(&.{"alpha"}), &.{});
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "reload-refused-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-refused-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true,\\\"words\\\":7}",
+        .decoded_arguments = "{\"reload\":true,\"words\":7}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    try std.testing.expectEqual(execution_turn.Admission.admitted, runFindTools(&host, &input));
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Rui could not find tools: words must be a string. Nothing was loaded.", try reloadText(&storage, session, input.binding.action_id, &text));
+    // The refused call asked no server: the owner's generation is still the one the startup list left.
+    try std.testing.expectEqual(@as(u64, 1), owner.asks[0].load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "a find_tools reload under heap exhaustion retries later without fencing, and its asks fold into one more list" {
+    const testing = store_module.testing;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const same = listOf(&.{"alpha"});
+    var fixture: ReloadScript = undefined;
+    try fixture.start(same, &.{ same, same, same });
+    defer fixture.script.stop();
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    defer owner.deinit();
+    var storage: store_module.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, io, null);
+    defer storage.close() catch unreachable;
+    _ = owner.ask(0);
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+
+    const session = try reloadSession(&storage, &tmp, io, "reload-oom-config");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "reload-oom-calls", &.{.{
+        .item_id = "item-1",
+        .name = "find_tools",
+        .encoded_call_id = "call-1",
+        .decoded_call_id = "call-1",
+        .encoded_arguments = "{\\\"reload\\\":true}",
+        .decoded_arguments = "{\"reload\":true}",
+    }});
+    const input = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .mcp_relist = &owner };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        host.allocator = failing.allocator();
+        const admission = runFindTools(&host, &input);
+        host.allocator = std.testing.allocator;
+        try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(execution_turn.Admission.admitted, admission);
+            break;
+        }
+        try std.testing.expectEqual(execution_turn.Admission.retry_later, admission);
+    }
+    // Attempts that failed after asking leave their asks in place; the owner's one list covers all of them.
+    try std.testing.expect(owner.asks[0].load(.acquire) >= 3);
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(reload_asked_one, try reloadText(&storage, session, input.binding.action_id, &text));
+    try std.testing.expectEqual(@as(?anyerror, null), try owner.settleForTesting(io, &storage, 0));
+    try std.testing.expectEqual(@as(usize, 2), fixture.script.requests.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "aggregate custody reconciles MCP and slots and rejects tokens shared across populations" {
