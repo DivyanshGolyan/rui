@@ -7,6 +7,8 @@ import { test } from "node:test";
 
 import { PLATFORM_PACKAGES, resolveBinary } from "../src/binary.ts";
 import { RuiUnavailableError } from "../src/errors.ts";
+// @ts-expect-error: a plain JavaScript release script with no type declarations.
+import { PLATFORMS } from "../scripts/pack.mjs";
 
 const binary = process.env.RUI_BINARY;
 const platform = PLATFORM_PACKAGES[process.platform]?.[process.arch];
@@ -26,6 +28,9 @@ test("TS-10 binary resolution refuses without a platform package", () => {
 		assert.throws(() => resolveBinary(undefined, { platform, arch }), (error: unknown) =>
 			error instanceof RuiUnavailableError && error.message.startsWith(`Rui has no build for ${platform} on ${arch}. Rui runs on glibc Linux on x64 or arm64, and darwin on arm64.`));
 	}
+	const published = Object.values(PLATFORMS as Record<string, { name: string; os: string; cpu: string }>).map(({ name, os, cpu }) => `${os}/${cpu}=${name}`).sort();
+	const resolved = Object.entries(PLATFORM_PACKAGES).flatMap(([os, arches]) => Object.entries(arches).map(([cpu, name]) => `${os}/${cpu}=${name}`)).sort();
+	assert.deepEqual(resolved, published, "the client resolves exactly the platform packages pack.mjs publishes");
 	const empty = mkdtempSync(join(tmpdir(), "rui-ts-nopkg-"));
 	try {
 		assert.throws(() => resolveBinary(undefined, { platform: "linux", arch: "x64", from: join(empty, "x.js") }), (error: unknown) =>

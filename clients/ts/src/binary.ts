@@ -9,6 +9,7 @@ export const PLATFORM_PACKAGES: Record<string, Record<string, string>> = {
 	darwin: { arm64: "ruicode-darwin-arm64" },
 };
 
+// pack.mjs PLATFORMS publishes these packages, with glibc required on Linux; TS-10 checks the two tables agree.
 const SUPPORTED = `Rui runs on ${Object.entries(PLATFORM_PACKAGES)
 	.map(([platform, arches]) => `${platform === "linux" ? "glibc Linux" : platform} on ${Object.keys(arches).join(" or ")}`)
 	.join(", and ")}.`;
