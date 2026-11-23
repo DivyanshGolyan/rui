@@ -343,7 +343,7 @@ test "CLI-2 invalid_input_is_local" {
     try expectValidation(.session_send, &.{ "--session", "a", "--text", "f" }, false);
     try expectValidation(.session_send, &.{ "--session", "a", "hi", "again" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--session", "a", "--bogus" }, error.UnknownArgument);
-    for ([_][]const u8{ "--session", "--session-hex" }) |old|
+    for ([_][]const u8{ "--to", "--session-hex" }) |old|
         try expectValidation(.session_send, &.{ "--session", "a", old, "value", "hi" }, error.UnknownArgument);
     try expectValidation(.session_send, &.{ "--store", "path", "--session", "k7m2qx" }, false);
     try expectValidation(.session_send, &.{"--session"}, error.MissingArgumentValue);

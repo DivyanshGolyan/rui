@@ -2348,9 +2348,6 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
 fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage, step: *?client.Step) !void {
     const io = init.io;
     const destination = if (configuration != null) "" else parsed.get("session").?;
-    if (configuration == null and !protocol.validSessionId(destination)) {
-        return error.InvalidSession;
-    }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
     var iterator = parsed.ordered();
     var count: usize = 0;

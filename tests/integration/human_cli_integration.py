@@ -168,7 +168,7 @@ def help_case():
                 capture_output=True, text=True, timeout=5,
             )
             assert result.returncode == 2 and result.stdout == "", result
-            assert_caller_error(result.stderr, "rui session send: k7m2qx: ", "session_id_needs_to")
+            assert_caller_error(result.stderr, "rui session send: k7m2qx: ", "session_id_needs_session")
             assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
             assert list(home.iterdir()) == [], "invalid input created runtime state"
         finally:
