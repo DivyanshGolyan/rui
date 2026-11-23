@@ -12,6 +12,7 @@ import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
 import { environmentBytes, Sessions, type Link } from "../src/sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
+import { scriptedLink, settle } from "./scripted-line.ts";
 
 test("the wire version is the one openapi.json describes", () => {
 	const document = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
@@ -591,15 +592,19 @@ test("a reply that stops partway ends the call after the idle budget", async () 
 test("a followed feed resumes from the end of an exhausted page", async () => {
 	const bodies: string[] = [];
 	const controller = new AbortController();
-	const link: Link = {
-		exchange: async (_path, build) => {
-			bodies.push(build("/s"));
-			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "9", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } }));
-		},
-	};
-	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
-	assert.equal(bodies.length, 2);
+	const line = scriptedLink(async (_path, build) => {
+		bodies.push(build("/s"));
+		return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "9", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } }));
+	});
+	const feed = listActivity(line.link, "k7m2qx", { follow: true, kinds: ["received"], signal: controller.signal });
+	const ended = feed.next();
+	await settle();
+	assert.equal(bodies.length, 1);
+	line.changed("k7m2qx");
+	await settle();
+	controller.abort();
+	assert.equal((await ended).done, true);
+	assert.equal(bodies.length, 2, "the nudge reads from the exhausted page's end");
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
 

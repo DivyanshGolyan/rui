@@ -24,11 +24,13 @@ const INSTANCE = "f".repeat(32);
 const STORE = "0123456789abcdef0123456789abcdef";
 const canonical = JSON.stringify({ version: WIRE_VERSION, type: "invocation_error", code: "canonical_store_failure" });
 const dispatched = JSON.stringify({ version: WIRE_VERSION, type: "host_unavailable", code: "dispatch_fenced" });
+// A feed page with no rows: a watch reads it, then waits for a nudge. `work` is what the page reader requires.
+const emptyPage = JSON.stringify({ version: WIRE_VERSION, type: "activity_page", delta: "full", since: "t0", items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle", since: "1" } } });
 const unrelatedInvocation = JSON.stringify({ version: WIRE_VERSION, type: "invocation_error", code: "invalid_arguments" });
 const unrelatedBusy = JSON.stringify({ version: WIRE_VERSION, type: "busy", code: "ordinary_capacity_exhausted" });
 const fenceLine = JSON.stringify({ rui_start_error: { code: "store_fenced", message: "the MySQL Store lost ownership or its connection; restart the Host" } }) + "\n";
 
-function hostScript(plans: Step[][], attemptFile: string): string {
+function hostScript(plans: Step[][], attemptFile: string, lineFrames: object[][] = []): string {
 	return String.raw`#!/usr/bin/env node
 const net = require("node:net");
 const fs = require("node:fs");
@@ -37,6 +39,8 @@ const attemptFile = ${JSON.stringify(attemptFile)};
 const attempt = fs.existsSync(attemptFile) ? Number(fs.readFileSync(attemptFile, "utf8")) : 0;
 fs.writeFileSync(attemptFile, String(attempt + 1));
 const steps = (${JSON.stringify(plans)})[attempt] ?? [];
+const frames = (${JSON.stringify(lineFrames)})[attempt] ?? [];
+const frameOf = (value) => { const json = Buffer.from(JSON.stringify(value)); const out = Buffer.alloc(4 + json.length); out.writeUInt32BE(json.length, 0); json.copy(out, 4); return out; };
 const instance = ${JSON.stringify(INSTANCE)};
 const store = ${JSON.stringify(STORE)};
 const fenceLine = ${JSON.stringify(fenceLine)};
@@ -57,10 +61,33 @@ process.stdin.on("data", chunk => {
   fs.rmSync(socketPath, { force: true });
   server = net.createServer(socket => {
     let input = "";
+    let upgraded = false;
     socket.on("data", chunk => {
+      if (upgraded) return;
       input += chunk.toString();
       const end = input.indexOf("\r\n\r\n");
       if (end < 0) return;
+      if (input.startsWith("GET /v1/line ")) {
+        // The line: hello, the scripted frames for this attempt, then a changed nudge for each watched Session, as the Host
+        // sends after a watch frame. Frames the client sends are read in full, so each watch set is answered.
+        upgraded = true;
+        socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: rui-line/1\r\nConnection: Upgrade\r\n\r\n");
+        socket.write(frameOf({ type: "hello", line: 1, instance }));
+        // A frame with silent set is a Host that closes its line after hello, without answering a watch.
+        if (frames.some((value) => value.silent)) return socket.end();
+        for (const value of frames) socket.write(frameOf(value));
+        let pending = Buffer.alloc(0);
+        socket.on("data", bytes => {
+          pending = Buffer.concat([pending, bytes]);
+          while (pending.length >= 4 && pending.length >= 4 + pending.readUInt32BE(0)) {
+            const length = pending.readUInt32BE(0);
+            const value = JSON.parse(pending.subarray(4, 4 + length).toString());
+            pending = pending.subarray(4 + length);
+            if (value.type === "watch") for (const session of value.sessions) socket.write(frameOf({ type: "changed", session }));
+          }
+        });
+        return;
+      }
       const length = Number(/content-length: (\d+)/i.exec(input.slice(0, end))[1]);
       if (Buffer.byteLength(input.slice(end + 4)) < length) return;
       if (input.startsWith("POST /v1/host-info ")) {
@@ -79,7 +106,7 @@ process.stdin.on("data", chunk => {
     process.stdout.write("ready instance=" + instance + " store=" + store + "\n");
   });
 });
-process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : process.exit(0));
+process.stdin.on("end", () => { if (!server) return process.exit(0); server.close(() => process.exit(0)); server.closeAllConnections(); });
 `;
 }
 
@@ -92,9 +119,14 @@ function settings(directory: string): HostSettings {
 }
 
 async function openScripted(...plans: Step[][]): Promise<{ rui: Rui; close: () => Promise<void> }> {
+	return openScriptedLine([], ...plans);
+}
+
+/** As `openScripted`, and each attempt's line sends its `lineFrames` entry after `hello`. */
+async function openScriptedLine(lineFrames: object[][], ...plans: Step[][]): Promise<{ rui: Rui; close: () => Promise<void> }> {
 	const directory = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-store-failed-")));
 	const executable = join(directory, "host.cjs");
-	writeFileSync(executable, hostScript(plans, join(directory, "attempts")), { mode: 0o700 });
+	writeFileSync(executable, hostScript(plans, join(directory, "attempts"), lineFrames), { mode: 0o700 });
 	const rui = await Rui.connect(settings(directory), { binary: executable });
 	// A client's child handles are unref'd, so a test awaiting an exit needs its own live handle, as host.test.ts does.
 	const alive = setInterval(() => {}, 100);
@@ -200,13 +232,43 @@ test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and not
 
 	await t.test("activity watchers parked before the latch reject with it", async () => {
 		const { rui, close } = await openScripted([{ kind: "reply", status: 500, body: canonical }]);
+		const controller = new AbortController();
 		try {
-			const watch = rui.activity.watch("s");
-			const parked = failureOf(watch.wait(watch.revision, undefined));
+			const watch = rui.getSession("k7m2qx").watch({ signal: controller.signal });
+			const parked = failureOf(watch.next());
 			const latch = await failureOf(info(rui));
 			assert.ok(latch instanceof RuiStoreFailedError);
 			assert.equal(await parked, latch);
 		} finally {
+			controller.abort();
+			await close();
+		}
+	});
+
+	await t.test("a line that closes twice without answering a watch set ends its watchers, rather than reconnecting forever", async () => {
+		const { rui, close } = await openScriptedLine([[{ silent: true }], [{ silent: true }]], [{ kind: "reply", status: 200, body: emptyPage }]);
+		const controller = new AbortController();
+		try {
+			const watch = rui.getSession("k7m2qx").watch({ signal: controller.signal });
+			const failure = await failureOf(watch.next());
+			assert.ok(failure instanceof RuiUnavailableError, `expected the closed-line failure, got ${String(failure)}`);
+			assert.match(failure.message, /closed its line twice/);
+		} finally {
+			controller.abort();
+			await close();
+		}
+	});
+
+	await t.test("a store_failed line frame latches the watchers parked on it and every call", async () => {
+		const { rui, close } = await openScriptedLine([[{ type: "failed", code: "store_failed" }]], [{ kind: "reply", status: 200, body: emptyPage }]);
+		const controller = new AbortController();
+		try {
+			const watch = rui.getSession("k7m2qx").watch({ signal: controller.signal });
+			const parked = await failureOf(watch.next());
+			assert.ok(parked instanceof RuiStoreFailedError, "the line's fence latches the watcher");
+			assert.equal(await failureOf(info(rui)), parked);
+		} finally {
+			controller.abort();
 			await close();
 		}
 	});

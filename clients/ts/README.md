@@ -121,7 +121,7 @@ A creating Message uses the same request rule, and `start_agent` reports it as a
 
 ## Session feed
 
-`session.listActivity()` reads to the current end; `{ follow: true }` follows new entries.
+`session.listActivity()` reads to the current end. `session.watch({ after })` follows new entries; `listActivity({ follow: true })` is the same iterator.
 Feed entries are a discriminated union: `switch (entry.kind)` narrows to that wire row's fields.
 A `model_call` entry is one resolved model Operation at its admission position: `model`, nullable `servedModel`, nullable `inputTokens`, `outputTokens`, `cachedTokens`, `latencyMs`, `firstEventMs`, plus `status` and `attempts`.
 Counts and durations remain decimal strings (or null); both timings describe the **final attempt**, and `firstEventMs` measures the first HTTP response event, not the first token.
@@ -146,11 +146,12 @@ for await (const entry of session.listActivity()) {
 
 The example uses `writeFile` from `node:fs/promises`.
 
-Following polls with backoff from 250 ms to 2 s only while the Session is busy.
-An empty page in `idle`, `finished`, `failed`, or `stopped` state with nothing queued puts the iterator to sleep **without a timer**.
-It wakes after a successful `send`, `update`, `decide`, `interrupt`, `stop`, `archive`, or `unarchive` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.
-Writes from another process to the same Store are **not noticed while idle** (nor are writes through another Rui instance).
-Pass an AbortSignal as `signal` to end the iterator immediately even while it sleeps.
+Following holds one line to the Host per Rui instance, shared by every watcher. The Host nudges the client when a watched Session commits, and each nudge reads that watcher's feed from its own cursor, so each row arrives once and in order.
+An idle Session makes no requests; there is no polling timer.
+A reconnect or a Host restart re-reads every watched cursor, so nothing is lost while the line was down.
+Commits the Host makes, from this instance or any other client, reach every watcher of the Session the same way.
+A Store failure ends every watcher with `RuiStoreFailedError`, as it ends every call.
+Pass an AbortSignal as `signal` to end the iterator immediately, even while it waits.
 
 ## Development
 

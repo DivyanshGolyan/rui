@@ -21,6 +21,6 @@ export {
 	type WriteOptions,
 	type ToolReloadOutcome,
 } from "./sessions.ts";
-export { FEED_KINDS, INLINE_TEXT_BYTES, type FeedEntry, type FeedKind, type ListActivityOptions, type SearchActivityOptions, type ActivitySearchEntry } from "./feed.ts";
+export { FEED_KINDS, INLINE_TEXT_BYTES, type FeedEntry, type FeedKind, type ListActivityOptions, type WatchOptions, type SearchActivityOptions, type ActivitySearchEntry } from "./feed.ts";
 
 export type { ContentValue, PartOwner, Part } from "./parts.ts";
