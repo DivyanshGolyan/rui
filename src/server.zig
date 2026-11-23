@@ -45,6 +45,7 @@ const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
+const line_intake = @import("line_intake.zig");
 const signal_stack = @import("signal_stack.zig");
 const test_poll = @import("test_poll");
 const ExecutionSlot = server_execution.ExecutionSlot;
@@ -151,6 +152,25 @@ const Intake = struct {
     stdin: ?std.posix.fd_t = null,
     lifetime: host_settings.Interface.Lifetime = .detached,
     deadline_armed: bool = false,
+    /// Held lines, outside `intake_capacity`; served on this thread only.
+    lines: line_intake.Pool = .{},
+
+    /// Upgrades an exchange whose headers named `GET /v1/line`. Lines are refused while
+    /// the Store is fenced or the Host stops. The ring's lock is held only to read its
+    /// newest generation and open the waker, not to allocate the line.
+    fn upgradeLine(self: *Intake, exchange: *Exchange, leftover: []const u8) !void {
+        if (exchange.header.instance) |identity| {
+            if (!std.mem.eql(u8, &identity, &self.host.instance)) return error.HostInstanceChanged;
+        }
+        if (self.host.store.isFenced()) return error.CanonicalStoreFailure;
+        if (self.host.stopping()) return error.HostStopping;
+        const index = try self.lines.open(self.host.allocator, self.host.instance, exchange.fd, leftover, nowNs(self.host) / std.time.ns_per_ms);
+        self.host.store.lockChanges();
+        self.lines.admit(index, self.host.store.changes.newest);
+        self.host.store.unlockChanges();
+        exchange.fd = -1;
+        exchange.state = .closed;
+    }
 
     const Worker = struct {
         owner: *Intake,
@@ -313,7 +333,9 @@ const Intake = struct {
             };
             reply.deinit();
             const status: u16 = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => 503,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.HostStopping => 503,
+                error.HostInstanceChanged => 409,
+                error.CanonicalStoreFailure => 500,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
@@ -322,6 +344,10 @@ const Intake = struct {
             };
             const code = switch (err) {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
+                error.LinesFull => "line_capacity_exhausted",
+                error.CanonicalStoreFailure => "canonical_store_failure",
+                error.HostStopping => "host_stopping",
+                error.HostInstanceChanged => "host_instance_changed",
                 error.ControlCapacity => "control_capacity_exhausted",
                 error.DiscoveryCapacity => "discovery_capacity_exhausted",
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else if (self.route == .action_publish) "too_large" else "control_request_too_large",
@@ -335,7 +361,8 @@ const Intake = struct {
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
-                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory => .busy,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity, error.OutOfMemory, error.LinesFull, error.HostStopping => .busy,
+                error.CanonicalStoreFailure => .invocation_error,
                 error.UnsupportedControl => .unsupported,
                 else => .invocation_error,
             };
@@ -379,10 +406,10 @@ const Intake = struct {
                                         control += 1;
                                     } else if (route == .host_info) {
                                         discovery += 1;
-                                    } else ordinary += 1;
+                                    } else if (route != .line) ordinary += 1;
                                 }
                             }
-                            if (self.route.?.isControl()) {
+                            if (self.route == .line) {} else if (self.route.?.isControl()) {
                                 if (control > 2) return error.ControlCapacity;
                             } else if (self.route == .host_info) {
                                 if (discovery > 1) return error.DiscoveryCapacity;
@@ -394,6 +421,7 @@ const Intake = struct {
                     if (!std.mem.endsWith(u8, header, "\r\n\r\n")) continue;
                     self.header = try HeaderReader.parseFields(header, self.route.?);
                     if (self.route == .unsupported_control) return error.UnsupportedControl;
+                    if (self.route == .line) return self.owner.upgradeLine(self, bytes[consumed..]);
                     self.number = try nextRequestNumber(self.host);
                     switch (self.route.?) {
                         inline else => |route| traceRequest(self.host, "connection_request_" ++ @tagName(route), self.number.?, null),
@@ -566,6 +594,7 @@ const Intake = struct {
 
     fn deinit(self: *Intake) void {
         self.stopWorkers();
+        self.lines.deinit();
         for (self.exchanges.items) |exchange| {
             exchange.state = .retired;
             while (!exchange.destroy())
@@ -656,13 +685,33 @@ const Intake = struct {
         _ = std.c.alarm(product_defaults.host_shutdown_seconds);
     }
 
+    /// The lines' share of an intake pass before polling: drains the wake pipe, re-arms
+    /// the commit waker, walks the ring's copy into each line, and fails every line once
+    /// the Store is fenced or the Host stops.
+    fn serveLineWake(self: *Intake) void {
+        var bytes: [256]u8 = undefined;
+        var woke = false;
+        while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) woke = true;
+        self.lines.rearm();
+        if (self.lines.count == 0) return;
+        // A pass with no wake byte has no commit to walk: a commit that is not yet
+        // drained writes its byte after its record, so it is seen on a later pass.
+        if (woke) {
+            self.host.store.lockChanges();
+            self.lines.capture(self.host.store.changes);
+            self.host.store.unlockChanges();
+            self.lines.onWake();
+        }
+        const line_ms: u64 = nowNs(self.host) / std.time.ns_per_ms;
+        if (self.host.store.isFenced()) self.lines.failAll(.store_failed, line_ms) else if (self.host.stopping()) self.lines.failAll(.host_stopping, line_ms);
+    }
+
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
         try setNonblocking(listener.socket.handle);
         var failure: ?anyerror = null;
         var accept_retry_at: i128 = 0;
         while (true) {
-            var bytes: [256]u8 = undefined;
-            while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            self.serveLineWake();
             StopSignals.apply(self.host);
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
@@ -726,6 +775,9 @@ const Intake = struct {
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
+            const lines_base = self.polls.items.len;
+            try self.lines.appendPolls(self.host.allocator, &self.polls, nowNs(self.host) / std.time.ns_per_ms);
+            const lines_end = self.polls.items.len;
             try self.polls.append(self.host.allocator, .{ .fd = self.stdin orelse -1, .events = std.posix.POLL.IN, .revents = 0 });
             self.serviceWorkers();
             for (self.exchanges.items) |exchange| {
@@ -734,9 +786,11 @@ const Intake = struct {
                     wake_at = @min(wake_at, exchange.cleanup_retry_at);
                 } else if (exchange.state == .closed) wake_at = now;
             }
+            if (self.lines.deadline()) |at| wake_at = @min(wake_at, @as(i128, @intCast(at)) * std.time.ns_per_ms);
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
+            self.lines.service(self.polls.items[lines_base..lines_end], nowNs(self.host) / std.time.ns_per_ms);
             if (self.polls.items[self.polls.items.len - 1].revents != 0) self.readStdin();
             for (self.exchanges.items, self.polls.items[2..][0..self.exchanges.items.len]) |exchange, poll| {
                 if (poll.revents == 0) continue;
@@ -758,7 +812,8 @@ const Intake = struct {
                 }
             }
             self.retireExchanges();
-            if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
+            self.lines.reap(nowNs(self.host) / std.time.ns_per_ms);
+            if (!listener_open.* and self.exchanges.items.len == 0 and self.lines.count == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             for (0..16) |_| {
                 if (self.host.intake_capacity < product_defaults.intake_capacity and
@@ -922,7 +977,7 @@ pub noinline fn serve(
                 .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - descriptor_capacity.ordinary_exchange_descriptors * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} lines={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -933,6 +988,7 @@ pub noinline fn serve(
                     descriptor_requirement.execution,
                     descriptor_requirement.authentication,
                     descriptor_requirement.self_wake,
+                    descriptor_requirement.lines,
                 },
             );
         }
@@ -1150,6 +1206,9 @@ fn serveOpened(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
+    intake.lines.attach(intake.wake[1]);
+    storage.commitSubscriber().store(&intake.lines.subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
     intake.lifetime = settings.interface.lifetime.value;
     if (intake.lifetime == .stdin) intake.stdin = 0;
     host.intake_wake = intake.wake[1];
@@ -1516,6 +1575,7 @@ const Route = enum {
     model_list,
     tools_reload,
     tools_status,
+    line,
     unsupported_control,
 
     fn commandKind(comptime self: Route) ?protocol.CommandKind {
@@ -1543,7 +1603,7 @@ const Route = enum {
         return switch (self) {
             .observe => .observe_command,
             .inspect => .inspect_session,
-            .unsupported_control => unreachable,
+            .unsupported_control, .line => unreachable,
             inline else => |route| @field(protocol.Kind, @tagName(route)),
         };
     }
@@ -2261,6 +2321,7 @@ fn nextRequestNumber(host: *Host) !u64 {
 
 const HeaderReader = struct {
     fn parseRoute(request_line: []const u8) !Route {
+        if (std.mem.eql(u8, request_line, "GET /v1/line HTTP/1.1")) return .line;
         var request_parts = std.mem.splitScalar(u8, request_line, ' ');
         if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
             return error.InvalidMethod;
@@ -2324,7 +2385,44 @@ const HeaderReader = struct {
             error.UnknownRoute;
     }
 
+    /// The upgrade request: `Upgrade: rui-line/1`, a `Connection` token `Upgrade`, the wire
+    /// version, and an optional Host instance. A body or a framing header is refused.
+    fn parseLineFields(bytes: []const u8) !Header {
+        var fields = std.mem.splitSequence(u8, bytes, "\r\n");
+        _ = fields.next() orelse return error.InvalidRequestLine;
+        var upgrade_ok = false;
+        var connection_ok = false;
+        var wire_ok = false;
+        var instance: ?protocol.InstanceId = null;
+        while (fields.next()) |field| {
+            if (field.len == 0) break;
+            const colon = std.mem.indexOfScalar(u8, field, ':') orelse return error.InvalidHeader;
+            const name = std.mem.trim(u8, field[0..colon], " \t");
+            const value = std.mem.trim(u8, field[colon + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "Upgrade")) {
+                if (upgrade_ok or !std.mem.eql(u8, value, "rui-line/1")) return error.InvalidUpgrade;
+                upgrade_ok = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "Connection")) {
+                var tokens = std.mem.splitScalar(u8, value, ',');
+                while (tokens.next()) |token| {
+                    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, token, " \t"), "Upgrade")) connection_ok = true;
+                }
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
+                wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Host-Instance")) {
+                if (instance != null) return error.DuplicateHostInstance;
+                instance = try protocol.parseInstanceId(value);
+            } else if (std.ascii.eqlIgnoreCase(name, "Content-Length") or std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+                return error.InvalidUpgrade;
+            }
+        }
+        if (!upgrade_ok or !connection_ok) return error.InvalidUpgrade;
+        if (!wire_ok) return error.WrongWireVersion;
+        return .{ .route = .line, .content_length = 0, .instance = instance };
+    }
+
     fn parseFields(bytes: []const u8, route: Route) !Header {
+        if (route == .line) return parseLineFields(bytes);
         var lines = std.mem.splitSequence(u8, bytes, "\r\n");
         _ = lines.next() orelse return error.InvalidRequestLine;
         var content_length: ?u64 = null;
@@ -2375,6 +2473,182 @@ const HeaderReader = struct {
         };
     }
 };
+
+test "a line upgrade takes its one route and refuses malformed upgrade headers" {
+    try std.testing.expectEqual(Route.line, try HeaderReader.parseRoute("GET /v1/line HTTP/1.1"));
+    try std.testing.expectError(error.InvalidMethod, HeaderReader.parseRoute("GET /v1/host-info HTTP/1.1"));
+    const wire = "X-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n";
+    const request = "GET /v1/line HTTP/1.1\r\n";
+    const good = request ++ "Upgrade: rui-line/1\r\nConnection: keep-alive, Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: " ++ "abababababababababababababababab" ++ "\r\n\r\n";
+    const header = try HeaderReader.parseFields(good, .line);
+    try std.testing.expectEqual(Route.line, header.route);
+    try std.testing.expectEqual(@as(?protocol.InstanceId, @splat(0xab)), header.instance);
+    const refused = [_]struct { text: []const u8, err: anyerror }{
+        .{ .text = request ++ "Connection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/2\r\nConnection: Upgrade\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: close\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\nContent-Length: 0\r\n" ++ wire ++ "\r\n", .err = error.InvalidUpgrade },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n\r\n", .err = error.WrongWireVersion },
+        .{ .text = request ++ "Upgrade: rui-line/1\r\nConnection: Upgrade\r\n" ++ wire ++ "X-Rui-Host-Instance: ABC\r\n\r\n", .err = error.InvalidInstanceId },
+    };
+    for (refused) |case| try std.testing.expectError(case.err, HeaderReader.parseFields(case.text, .line));
+}
+
+const line_test_instance = "abababababababababababababababab";
+
+fn linePair() ![2]c_int {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    for (sockets) |fd| try setNonblocking(fd);
+    return sockets;
+}
+
+/// Upgrade headers, then `frame` as one length-prefixed app frame in the same write.
+fn lineRequest(buffer: []u8, instance: []const u8, frame: []const u8) ![]const u8 {
+    var length = (try std.fmt.bufPrint(buffer, "GET /v1/line HTTP/1.1\r\nUpgrade: rui-line/1\r\nConnection: Upgrade\r\nX-Rui-Wire-Version: {s}\r\nX-Rui-Host-Instance: {s}\r\n\r\n", .{ protocol.wire_version, instance })).len;
+    if (frame.len != 0) {
+        std.mem.writeInt(u32, buffer[length..][0..4], @intCast(frame.len), .big);
+        @memcpy(buffer[length + 4 ..][0..frame.len], frame);
+        length += 4 + frame.len;
+    }
+    return buffer[0..length];
+}
+
+/// Reads what the peer has queued on a nonblocking socket. Empty means nothing yet.
+fn drainPeer(fd: c_int, out: []u8) []u8 {
+    var used: usize = 0;
+    while (used < out.len) {
+        const count = std.c.read(fd, out[used..].ptr, out.len - used);
+        if (count <= 0) break;
+        used += @intCast(count);
+    }
+    return out[0..used];
+}
+
+/// Writes out a refused exchange's reply the way the loop does on POLLOUT.
+fn finishReply(exchange: *Intake.Exchange) !void {
+    const reply = exchange.reply.?;
+    var rounds: usize = 0;
+    while (!(try reply.advance(exchange.fd))) : (rounds += 1) std.debug.assert(rounds < 8);
+}
+
+/// One intake pass over the lines, as the loop runs it: the wake work, then poll and service.
+fn passLines(intake: *Intake, now_ms: u64) !void {
+    intake.serveLineWake();
+    intake.polls.clearRetainingCapacity();
+    try intake.lines.appendPolls(intake.host.allocator, &intake.polls, now_ms);
+    _ = std.c.poll(intake.polls.items.ptr, @intCast(intake.polls.items.len), 0);
+    intake.lines.service(intake.polls.items, now_ms);
+    intake.lines.reap(now_ms);
+}
+
+/// Writes one upgrade request, with `frame` as leftover app bytes, to a client peer.
+fn sendRequest(fd: c_int, buffer: []u8, instance: []const u8, frame: []const u8) !void {
+    const bytes = try lineRequest(buffer, instance, frame);
+    try std.testing.expectEqual(bytes.len, @as(usize, @intCast(std.c.write(fd, bytes.ptr, bytes.len))));
+}
+
+test "a line upgrades on the Host, takes its leftover watch, hears each commit through the Store, and fails with the Host or the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    storage.instance = @splat(0xab);
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .instance = @splat(0xab), .intake_capacity = descriptor_capacity.minimum_intake };
+    const wake = try linePair();
+    defer for (wake) |fd| {
+        _ = std.c.close(fd);
+    };
+    var intake: Intake = .{ .host = &host, .wake = wake };
+    defer intake.polls.deinit(host.allocator);
+    defer intake.exchanges.deinit(host.allocator);
+    defer for (intake.exchanges.items) |exchange| {
+        std.debug.assert(exchange.destroy());
+    };
+    intake.lines.attach(wake[1]);
+    defer intake.lines.deinit();
+    storage.commitSubscriber().store(&intake.lines.subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
+
+    // Four connections: the open line, a wrong Host instance, a stopping Host, a fenced Store.
+    const pairs = [_][2]c_int{ try linePair(), try linePair(), try linePair(), try linePair() };
+    defer for (pairs) |pair| {
+        _ = std.c.close(pair[1]);
+    };
+    var request: [512]u8 = undefined;
+    var sink: [1024]u8 = undefined;
+    var wake_bytes: [16]u8 = undefined;
+
+    var configure = try store_module.testingCompleteConfiguration("line-host-first", "", root, "model-a");
+    _ = try storage.configure(&configure, .{});
+
+    // The upgrade answers 101 and hello. The watch of every Session rides in the same write.
+    const watch_all = "{\"type\":\"watch\",\"sessions\":\"all\"}";
+    try sendRequest(pairs[0][1], &request, line_test_instance, watch_all);
+    try intake.accept(pairs[0][0]);
+    intake.exchanges.items[0].read() catch |err| intake.exchanges.items[0].fail(err);
+    try std.testing.expectEqual(@as(usize, 1), intake.lines.count);
+    try passLines(&intake, 0);
+    const opened = drainPeer(pairs[0][1], &sink);
+    try std.testing.expect(std.mem.startsWith(u8, opened, "HTTP/1.1 101 Switching Protocols"));
+    try std.testing.expect(std.mem.indexOf(u8, opened, "{\"type\":\"hello\"") != null);
+
+    // A commit writes one wake byte, and the line answers with a changed frame naming the new Session.
+    configure.key.set("line-host-second") catch unreachable;
+    const second = (try storage.configure(&configure, .{})).accepted.session;
+    try std.testing.expectEqual(@as(usize, 1), drainPeer(wake[0], &wake_bytes).len);
+    // The byte was counted above; put it back so the pass sees the wake it announces.
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(wake[1], "x", 1));
+    const walks_before_commit = intake.lines.captures;
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(walks_before_commit + 1, intake.lines.captures);
+    const changed = drainPeer(pairs[0][1], &sink);
+    try std.testing.expect(std.mem.indexOf(u8, changed, "{\"type\":\"changed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, second.slice()) != null);
+
+    // With nothing committed, a pass sends nothing and writes no wake byte.
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(@as(usize, 0), drainPeer(pairs[0][1], &sink).len);
+    try std.testing.expectEqual(@as(usize, 0), drainPeer(wake[0], &wake_bytes).len);
+    const walks = intake.lines.captures;
+    try passLines(&intake, 0);
+    try std.testing.expectEqual(walks, intake.lines.captures);
+
+    // A different Host instance is refused with 409 and leaves the open line alone.
+    try sendRequest(pairs[1][1], &request, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "");
+    try intake.accept(pairs[1][0]);
+    intake.exchanges.items[1].read() catch |err| intake.exchanges.items[1].fail(err);
+    try finishReply(intake.exchanges.items[1]);
+    try std.testing.expect(std.mem.startsWith(u8, drainPeer(pairs[1][1], &sink), "HTTP/1.1 409"));
+    try std.testing.expectEqual(@as(usize, 1), intake.lines.count);
+
+    // A stopping Host refuses a new line with 503, then fails the open line with its own frame and closes it.
+    host.phase.store(.stopping, .release);
+    try sendRequest(pairs[2][1], &request, line_test_instance, "");
+    try intake.accept(pairs[2][0]);
+    intake.exchanges.items[2].read() catch |err| intake.exchanges.items[2].fail(err);
+    try finishReply(intake.exchanges.items[2]);
+    try std.testing.expect(std.mem.startsWith(u8, drainPeer(pairs[2][1], &sink), "HTTP/1.1 503"));
+    try passLines(&intake, 0);
+    try std.testing.expect(std.mem.indexOf(u8, drainPeer(pairs[0][1], &sink), "{\"type\":\"failed\",\"code\":\"host_stopping\"}") != null);
+    try std.testing.expectEqual(@as(usize, 0), intake.lines.count);
+
+    // A fenced Store refuses an upgrade with the canonical store failure, not a busy reply.
+    host.phase.store(.open, .release);
+    storage.fenced.store(true, .release);
+    try sendRequest(pairs[3][1], &request, line_test_instance, "");
+    try intake.accept(pairs[3][0]);
+    intake.exchanges.items[3].read() catch |err| intake.exchanges.items[3].fail(err);
+    try finishReply(intake.exchanges.items[3]);
+    const refused = drainPeer(pairs[3][1], &sink);
+    try std.testing.expect(std.mem.startsWith(u8, refused, "HTTP/1.1 500"));
+    try std.testing.expect(std.mem.indexOf(u8, refused, "canonical_store_failure") != null);
+}
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");

@@ -84,6 +84,7 @@ const cores = .{
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "line.zig", @import("line.zig") },
     .{ "marks.zig", @import("marks.zig") },
     .{ "mcp/action_text.zig", @import("mcp/action_text.zig") },
     .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
