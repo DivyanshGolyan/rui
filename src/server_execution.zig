@@ -5527,7 +5527,7 @@ test "a model reload settles in the pass that asks, and a find_tools search find
     var fixture: ReloadScript = undefined;
     try fixture.start(listOf(&.{ "alpha", "gamma" }), &.{listOf(&.{ "alpha", "beta" })});
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
@@ -5594,7 +5594,7 @@ test "a reload while a list is in flight folds into the next list, one extra lis
     var fixture: ReloadScript = undefined;
     try fixture.start(same, &.{ same, same });
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
@@ -5638,7 +5638,7 @@ test "a reload does not hold back a later core Action in another Session" {
     var fixture: ReloadScript = undefined;
     try fixture.start(listOf(&.{"alpha"}), &.{});
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
@@ -5715,7 +5715,7 @@ test "a find_tools reload with words reports the asks, then the loaded tools, an
     var fixture: ReloadScript = undefined;
     try fixture.start(listOf(&.{"alpha"}), &.{});
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
@@ -5761,7 +5761,7 @@ test "a find_tools reload with invalid words is refused and asks no server" {
     var fixture: ReloadScript = undefined;
     try fixture.start(listOf(&.{"alpha"}), &.{});
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);
@@ -5798,7 +5798,7 @@ test "a find_tools reload under heap exhaustion retries later without fencing, a
     var fixture: ReloadScript = undefined;
     try fixture.start(same, &.{ same, same, same });
     defer fixture.script.stop();
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &fixture.servers, 1);
     defer owner.deinit();
     var storage: store_module.Store = undefined;
     try testing.testingStoreToolSet(&storage, &tmp, io, null);

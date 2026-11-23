@@ -1039,7 +1039,10 @@ pub noinline fn serve(
     // chain the main-thread stack ceiling bounds.
     const mcp_relist = try allocator.create(server_mcp_relist.Relist);
     defer allocator.destroy(mcp_relist);
-    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers);
+    // The Host's instance id is drawn once, here, and seeds the ttl re-list jitter, so Hosts' re-lists do not fall in step.
+    var instance: protocol.InstanceId = undefined;
+    try std.Io.randomSecure(io, &instance);
+    mcp_relist.* = server_mcp_relist.Relist.init(allocator, mcp_servers, std.mem.readInt(u64, instance[0..8], .little));
     defer mcp_relist.deinit();
     const storage = &serving.storage;
     openStore(io, storage, lease, endpoint, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
@@ -1065,6 +1068,7 @@ pub noinline fn serve(
         settings,
         if (mcp_servers.len != 0) mcp_relist else null,
         mcp_servers,
+        instance,
         intake_capacity,
         descriptor_requirement.total,
         descriptor_observation.soft_limit,
@@ -1148,6 +1152,7 @@ fn serveOpened(
     settings: *const host_settings.Settings,
     mcp_relist: ?*server_mcp_relist.Relist,
     mcp_servers: []const server_mcp_settings.Server,
+    instance: protocol.InstanceId,
     intake_capacity: usize,
     descriptor_requirement: usize,
     descriptor_soft_limit: ?usize,
@@ -1244,7 +1249,7 @@ fn serveOpened(
         };
         try provider.checkLibraries();
     }
-    try std.Io.randomSecure(io, &host.instance);
+    host.instance = instance;
     storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
@@ -5506,7 +5511,7 @@ test "Host startup offers a clashing MCP tool under its prefix and leaves excess
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
         const servers = [_]server_mcp_settings.Server{server};
-        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
         defer owner.deinit();
         try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         const offered = storage.hostTools().host_tool_set;
@@ -5546,7 +5551,7 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
         const servers = [_]server_mcp_settings.Server{server};
-        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
         defer owner.deinit();
         try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         if (round == 0) {
@@ -5597,7 +5602,7 @@ test "startup publishes every first list in one merge, so a tool moving between 
             server.bearer_token.len = 6;
             try server.url.set(try std.fmt.bufPrint(url, "http://127.0.0.1:{d}/mcp", .{port}));
         }
-        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+        var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
         defer owner.deinit();
         try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
         const set = storage.hostTools().host_tool_set;
@@ -5624,7 +5629,7 @@ test "a server that was down at startup is listed by a backoff retry and the nex
     servers[0].bearer_token.len = 6;
     var url: [128]u8 = undefined;
     try servers[0].url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{down.port}));
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     try offerMcpTools(std.testing.io, std.testing.allocator, &storage, &owner, null);
     try std.testing.expect(storage.hostTools().host_tool_set.find("remote_lookup") == null);
@@ -5667,7 +5672,7 @@ test "MCP list routes ask one named server or every server, refuse unknown or fe
     var notes: server_mcp_settings.Server = .{};
     try notes.name.set("notes");
     const servers = [_]server_mcp_settings.Server{ docs, notes };
-    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers);
+    var owner = server_mcp_relist.Relist.init(std.testing.allocator, &servers, 1);
     defer owner.deinit();
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .mcp_relist = &owner, .instance = @splat(0x7e) };
 
