@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createSecureServer } from "node:http2";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -70,7 +70,7 @@ test("TS-9 the documented TypeScript examples answer and fail loudly", { skip: b
 export const Rui = {
 	connect(settings: any, options: any = {}) {
 		const openai = { ...settings.providers.openai, endpoint: "https://127.0.0.1:${address.port}/v1/responses" };
-		return Client.connect({ ...settings, providers: { openai }, network: { caFile: ${JSON.stringify(cert)} } }, { ...options, binary: ${JSON.stringify(binary)} });
+		return Client.connect({ ...settings, providers: { openai }, network: { caFile: ${JSON.stringify(cert)} } }, { ...options, binary: ${JSON.stringify(resolve(binary as string))} });
 	},
 };
 `);

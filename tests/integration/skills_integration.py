@@ -276,7 +276,7 @@ def main():
                 request["configuration"] = json.loads(create_capture)["configuration"]
             expected = {"status": "rejected", "replayed": False, "session": target,
                         "code": "invalid_session_reference" if index < len(targets) - 2 else "unknown_session",
-                        "message": None}
+                        "message": None, "missing": None}
             answer = post(request)["answer"]
             assert answer == expected, (request, answer, expected)
             assert post(request)["answer"] == {**expected, "replayed": True}
