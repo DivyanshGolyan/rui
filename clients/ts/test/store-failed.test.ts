@@ -1,18 +1,24 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Rui, RuiRequestError, RuiStoreFailedError, type HostSettings } from "../src/index.ts";
+import { Rui, RuiRequestError, RuiStoreFailedError, RuiUnavailableError, type HostSettings } from "../src/index.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 
-// A scripted Host: it serves readiness and then answers each non-readiness request with the next step.
+// A scripted Host. Each spawn is one attempt and takes the next plan, so a restart meets its own steps. A step answers
+// one non-readiness request: a reply, a reply that then ends the Host, a fence line (with or without a later reply), a
+// plain exit, a held request released by SIGUSR2, or a fence line written long after the connection drops.
 type Step =
 	| { kind: "reply"; status: number; body: string }
+	| { kind: "reply_then_exit"; status: number; body: string }
 	| { kind: "reply_then_fence"; status: number; body: string }
-	| { kind: "fence" };
+	| { kind: "hold"; status: number; body: string }
+	| { kind: "fence" }
+	| { kind: "exit" }
+	| { kind: "late_fence" };
 
 const INSTANCE = "f".repeat(32);
 const STORE = "0123456789abcdef0123456789abcdef";
@@ -22,21 +28,26 @@ const unrelatedInvocation = JSON.stringify({ version: WIRE_VERSION, type: "invoc
 const unrelatedBusy = JSON.stringify({ version: WIRE_VERSION, type: "busy", code: "ordinary_capacity_exhausted" });
 const fenceLine = JSON.stringify({ rui_start_error: { code: "store_fenced", message: "the MySQL Store lost ownership or its connection; restart the Host" } }) + "\n";
 
-function hostScript(steps: Step[]): string {
+function hostScript(plans: Step[][], attemptFile: string): string {
 	return String.raw`#!/usr/bin/env node
 const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
-const steps = ${JSON.stringify(steps)};
+const attemptFile = ${JSON.stringify(attemptFile)};
+const attempt = fs.existsSync(attemptFile) ? Number(fs.readFileSync(attemptFile, "utf8")) : 0;
+fs.writeFileSync(attemptFile, String(attempt + 1));
+const steps = (${JSON.stringify(plans)})[attempt] ?? [];
 const instance = ${JSON.stringify(INSTANCE)};
 const store = ${JSON.stringify(STORE)};
 const fenceLine = ${JSON.stringify(fenceLine)};
 let bytes = Buffer.alloc(0), server;
+const held = [];
 const fenceAndExit = () => process.stdout.write(fenceLine, () => process.exit(1));
 const respond = (socket, status, body, done) => {
   const reason = status === 200 ? "OK" : status === 500 ? "Internal Server Error" : "Service Unavailable";
   socket.end("HTTP/1.1 " + status + " " + reason + "\r\nContent-Length: " + Buffer.byteLength(body) + "\r\nConnection: close\r\n\r\n" + body, done);
 };
+process.on("SIGUSR2", () => { for (const [socket, status, body] of held.splice(0)) respond(socket, status, body); });
 process.stdin.on("data", chunk => {
   bytes = Buffer.concat([bytes, chunk]);
   if (server || bytes.length < 4 || bytes.length < 4 + bytes.readUInt32BE()) return;
@@ -57,6 +68,10 @@ process.stdin.on("data", chunk => {
       }
       const step = steps.shift() ?? { kind: "reply", status: 200, body: "{}" };
       if (step.kind === "fence") return fenceAndExit();
+      if (step.kind === "exit") return process.exit(1);
+      if (step.kind === "late_fence") { socket.destroy(); server.close(); return setTimeout(fenceAndExit, 3000); }
+      if (step.kind === "hold") return held.push([socket, step.status, step.body]);
+      if (step.kind === "reply_then_exit") return respond(socket, step.status, step.body, () => process.exit(1));
       if (step.kind === "reply_then_fence") return respond(socket, step.status, step.body, fenceAndExit);
       return respond(socket, step.status, step.body);
     });
@@ -76,14 +91,17 @@ function settings(directory: string): HostSettings {
 	};
 }
 
-async function openScripted(steps: Step[]): Promise<{ rui: Rui; close: () => Promise<void> }> {
+async function openScripted(...plans: Step[][]): Promise<{ rui: Rui; close: () => Promise<void> }> {
 	const directory = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-store-failed-")));
 	const executable = join(directory, "host.cjs");
-	writeFileSync(executable, hostScript(steps), { mode: 0o700 });
+	writeFileSync(executable, hostScript(plans, join(directory, "attempts")), { mode: 0o700 });
 	const rui = await Rui.connect(settings(directory), { binary: executable });
+	// A client's child handles are unref'd, so a test awaiting an exit needs its own live handle, as host.test.ts does.
+	const alive = setInterval(() => {}, 100);
 	return {
 		rui,
 		close: async () => {
+			clearInterval(alive);
 			await rui.close();
 			rmSync(directory, { recursive: true, force: true });
 		},
@@ -103,7 +121,7 @@ async function failureOf(call: Promise<unknown>): Promise<unknown> {
 	}
 }
 
-test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and nothing else latches it", { timeout: 60_000 }, async (t) => {
+test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and nothing else latches it", { timeout: 90_000 }, async (t) => {
 	await t.test("a canonical_store_failure reply rejects the pending calls and every later call with one error", async () => {
 		const { rui, close } = await openScripted([
 			{ kind: "reply", status: 500, body: canonical },
@@ -112,22 +130,7 @@ test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and not
 		try {
 			const [first, second] = await Promise.all([failureOf(info(rui)), failureOf(info(rui))]);
 			assert.ok(first instanceof RuiStoreFailedError);
-			assert.equal(second, first);
-			const later = await failureOf(info(rui));
-			assert.equal(later, first);
-		} finally {
-			await close();
-		}
-	});
-
-	await t.test("a dispatch_fenced reply rejects the pending calls and every later call with one error", async () => {
-		const { rui, close } = await openScripted([
-			{ kind: "reply", status: 503, body: dispatched },
-			{ kind: "reply", status: 503, body: dispatched },
-		]);
-		try {
-			const [first, second] = await Promise.all([failureOf(info(rui)), failureOf(info(rui))]);
-			assert.ok(first instanceof RuiStoreFailedError);
+			assert.equal(first.code, "store_failed");
 			assert.equal(second, first);
 			assert.equal(await failureOf(info(rui)), first);
 		} finally {
@@ -135,8 +138,43 @@ test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and not
 		}
 	});
 
-	await t.test("a Host that exits after its store_fenced line rejects the pending call with the latch, not RuiUnavailableError", async () => {
-		const { rui, close } = await openScripted([{ kind: "fence" }]);
+	await t.test("a call queued during restart backoff is rejected by the latch its restarted Host raises", async () => {
+		const { rui, close } = await openScripted([{ kind: "exit" }], [{ kind: "fence" }]);
+		try {
+			const exited = once(rui, "exit");
+			const first = failureOf(info(rui));
+			await exited;
+			// The exit handler schedules the restart before emitting; this call waits in the restart's waiters.
+			const queued = failureOf(info(rui));
+			const [a, b] = await Promise.all([first, queued]);
+			assert.ok(a instanceof RuiStoreFailedError);
+			assert.equal(b, a);
+			assert.equal(await failureOf(info(rui)), a);
+		} finally {
+			await close();
+		}
+	});
+
+	await t.test("a call in flight when another signal latches rejects with the latch, not its own non-fence error", async () => {
+		const { rui, close } = await openScripted([
+			{ kind: "reply", status: 500, body: canonical },
+			{ kind: "hold", status: 500, body: unrelatedInvocation },
+		]);
+		try {
+			// The first request is the canonical reply; the second is held until the latch has been observed.
+			const latched = failureOf(info(rui));
+			const inFlight = failureOf(info(rui));
+			const first = await latched;
+			assert.ok(first instanceof RuiStoreFailedError);
+			process.kill(rui.pid!, "SIGUSR2");
+			assert.equal(await inFlight, first);
+		} finally {
+			await close();
+		}
+	});
+
+	await t.test("a store_fenced line written more than 2 s after the connection drops still latches the pending call", async () => {
+		const { rui, close } = await openScripted([{ kind: "late_fence" }]);
 		try {
 			const pending = await failureOf(info(rui));
 			assert.ok(pending instanceof RuiStoreFailedError);
@@ -155,6 +193,46 @@ test("TS-13 a Store fence latches RuiStoreFailedError over every signal, and not
 			assert.equal(event.restarting, false, "a fenced Host is not restarted");
 			const later = await failureOf(info(rui));
 			assert.ok(later instanceof RuiStoreFailedError);
+		} finally {
+			await close();
+		}
+	});
+
+	await t.test("activity watchers parked before the latch reject with it", async () => {
+		const { rui, close } = await openScripted([{ kind: "reply", status: 500, body: canonical }]);
+		try {
+			const watch = rui.activity.watch("s");
+			const parked = failureOf(watch.wait(watch.revision, undefined));
+			const latch = await failureOf(info(rui));
+			assert.ok(latch instanceof RuiStoreFailedError);
+			assert.equal(await parked, latch);
+		} finally {
+			await close();
+		}
+	});
+
+	await t.test("dispatch_fenced from an ordinary stop is not a signal: the call gets its own error and the Host restarts", async () => {
+		const { rui, close } = await openScripted([{ kind: "reply_then_exit", status: 503, body: dispatched }], []);
+		try {
+			const exited = once(rui, "exit");
+			const stopped = await failureOf(info(rui));
+			assert.ok(stopped instanceof RuiRequestError);
+			assert.equal(stopped.code, "dispatch_fenced");
+			const [event] = await exited;
+			assert.equal(event.restarting, true);
+			assert.ok(Buffer.isBuffer(await info(rui)));
+		} finally {
+			await close();
+		}
+	});
+
+	await t.test("an exit without the fence line restarts the Host and the call gets RuiUnavailableError, not the latch", async () => {
+		const { rui, close } = await openScripted([{ kind: "exit" }], [{ kind: "exit" }], []);
+		try {
+			const lost = await failureOf(info(rui));
+			assert.ok(lost instanceof RuiUnavailableError);
+			assert.ok(!(lost instanceof RuiStoreFailedError));
+			assert.ok(Buffer.isBuffer(await info(rui)), "the restarted Host answers later calls");
 		} finally {
 			await close();
 		}

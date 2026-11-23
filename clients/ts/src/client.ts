@@ -45,7 +45,6 @@ const MAX_RESTART_MS = 30_000;
 const CLOSE_GRACE_MS = 15_000;
 const READY_POLL_MS = 25;
 const READINESS_RECEIPT_BYTES = Buffer.byteLength("ready instance=") + 32 + 1;
-const EXIT_NOTICE_MS = 2_000;
 const OUTPUT_GRACE_MS = 1_000;
 const MAX_LINE_CHARS = 64 * 1024;
 const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked", "mysql_unreachable"]);
@@ -209,10 +208,15 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					...(limits ? { limits } : {}),
 				});
 			} catch (error) {
-				if (error instanceof RuiRequestError && isStoreFence(error)) throw this.#latchStoreFailed(error);
+				if (this.#storeFailed) throw this.#storeFailed;
+				if (error instanceof RuiRequestError && isCanonicalFailure(error)) throw this.#latchStoreFailed(error);
+				// dispatch_fenced also comes from stop and cleanup phases, so it is classified only once the Host has exited.
+				if (error instanceof RuiRequestError && isDispatchFenced(error)) {
+					await settle(host);
+					throw this.#storeFailed ?? error;
+				}
 				if (!(error instanceof ConnectionError)) throw error;
-				const gone = await Promise.race([host.exited.then(() => true), sleep(EXIT_NOTICE_MS, false)]);
-				if (gone) await drained(host);
+				const gone = await settle(host);
 				if (this.#storeFailed) throw this.#storeFailed;
 				if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
 				retried = true;
@@ -234,9 +238,10 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#ready(): Promise<Host> {
+		if (this.#closing) return Promise.reject(new RuiUnavailableError("the Rui client is closed"));
 		if (this.#storeFailed) return Promise.reject(this.#storeFailed);
 		if (this.#host) return Promise.resolve(this.#host);
-		const failed = this.#dead ?? (this.#closing ? new RuiUnavailableError("the Rui client is closed") : undefined);
+		const failed = this.#dead;
 		if (failed) return Promise.reject(failed);
 		this.#restart?.ref();
 		return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
@@ -441,15 +446,41 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	}
 }
 
-/** The Host's two replies for a fenced Store: `canonical_store_failure` (500) and `dispatch_fenced` (503). */
-function isStoreFence(error: RuiRequestError): boolean {
-	return (error.type === "invocation_error" && error.code === "canonical_store_failure")
-		|| (error.type === "host_unavailable" && error.code === "dispatch_fenced");
+/** The Host's 500 reply for a fenced Store, the stable signal the Store fence latches on. */
+function isCanonicalFailure(error: RuiRequestError): boolean {
+	return error.type === "invocation_error" && error.code === "canonical_store_failure";
+}
+
+/** The Host's 503 reply while it is not in its open phase: a stop, a cleanup fence or a Store fence. Not a signal alone. */
+function isDispatchFenced(error: RuiRequestError): boolean {
+	return error.type === "host_unavailable" && error.code === "dispatch_fenced";
+}
+
+/** Resolves with `done`, or with `fallback` once `ms` passes. The timer is cleared as soon as the wait settles. */
+async function bounded<T>(done: Promise<T>, ms: number, fallback: T): Promise<T> {
+	const cancel = new AbortController();
+	try {
+		return await Promise.race([done, sleep(ms, fallback, { signal: cancel.signal })]);
+	} catch {
+		return fallback;
+	} finally {
+		cancel.abort();
+	}
+}
+
+/**
+ * Waits for a lost or fenced child to exit, bounded by the shutdown grace (D129), then for its stdout to drain so a final
+ * `store_fenced` line has been read. Resolves whether the child exited in time.
+ */
+async function settle(host: Host): Promise<boolean> {
+	const gone = await bounded(host.exited.then(() => true), CLOSE_GRACE_MS, false);
+	if (gone) await drained(host);
+	return gone;
 }
 
 /** Lets a stopped child's stdout deliver its final lines, bounded so a grandchild holding the pipe cannot stall us. */
 async function drained(host: Host): Promise<void> {
-	await Promise.race([host.output, sleep(OUTPUT_GRACE_MS)]);
+	await bounded(host.output, OUTPUT_GRACE_MS, undefined);
 }
 
 async function createInterfaceAlias(launch: Launch): Promise<void> {
