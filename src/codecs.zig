@@ -24,6 +24,7 @@ fn Responses(comptime version: responses.Version) type {
         pub const Stream = responses.Stream;
         pub const InterpretScratch = responses.InterpretScratch;
         pub const begin = responses.begin;
+        pub const normalize = responses.normalize;
         pub const interpretEvent = responses.interpretEvent;
         pub const nextMember = responses.nextMember;
         pub const hostedCall = responses.hostedCall;
@@ -151,6 +152,12 @@ pub fn begin(codec: protocol.Codec, operation: codec_abi.Operation) Stream {
     return switch (codec) {
         inline else => |tag| @unionInit(Stream, @tagName(tag), module(tag).begin(operation)),
     };
+}
+
+pub noinline fn normalize(stream: *Stream, data: []const u8, out: *codec_abi.Normalized) void {
+    switch (stream.*) {
+        inline else => |*state, tag| module(tag).normalize(state, data, out),
+    }
 }
 
 pub noinline fn interpretEvent(stream: *Stream, scratch: *InterpretScratch, data: []const u8) codec_abi.Event {

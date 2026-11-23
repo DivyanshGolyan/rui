@@ -278,6 +278,47 @@ pub const Usage = struct { uncached: u64, cache_read: u64, cache_write: u64, out
 
 pub const Range = struct { start: u64, length: u64 };
 
+/// One piece of what a raw SSE event's data adds to event data.
+pub const Fragment = union(enum) {
+    /// Bytes owned by the codec (static) or its Stream (valid until the next normalize call).
+    literal: []const u8,
+    /// Verbatim bytes of the data passed to normalize, at this Range.
+    copy: Range,
+};
+
+pub const max_fragments = 6;
+
+/// What one raw SSE event's data adds to event data.
+///
+/// Invariant (over a whole stream): a codec's normalized bytes are never longer than the
+/// stream's SSE data bytes, so event data stays within today's scratch budget and map
+/// length (`source_length`).
+pub const Normalized = struct {
+    len: u8 = 0,
+    items: [max_fragments]Fragment = undefined,
+    /// The bytes appended since the last whole event, these included, now form one whole
+    /// event for interpretEvent. False: keep accumulating (or nothing was appended).
+    whole: bool = false,
+
+    pub fn literal(self: *Normalized, bytes: []const u8) void {
+        self.push(.{ .literal = bytes });
+    }
+
+    pub fn copy(self: *Normalized, range: Range) void {
+        self.push(.{ .copy = range });
+    }
+
+    pub fn slice(self: *const Normalized) []const Fragment {
+        return self.items[0..self.len];
+    }
+
+    fn push(self: *Normalized, fragment: Fragment) void {
+        std.debug.assert(self.len < max_fragments);
+        self.items[self.len] = fragment;
+        self.len += 1;
+    }
+};
+
 pub const At = struct { stage: Stage, output_index: ?u64 };
 
 pub const Cursor = struct {

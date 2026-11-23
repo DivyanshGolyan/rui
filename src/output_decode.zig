@@ -358,8 +358,14 @@ fn read(
         .compaction => .compaction,
     });
     var position: usize = if (std.mem.startsWith(u8, capture, "\xef\xbb\xbf")) 3 else 0;
-    var data: ?u64 = null;
+    // The current SSE event: 0 lines, 1 line (kept in the capture), or 2+ lines staged in event_data.
+    var lines: u8 = 0;
+    var first_line: []const u8 = "";
+    var staged_start: u64 = 0;
     var raw_start: u64 = 0;
+    // Where the normalized event being accumulated began in event_data.
+    var whole_start: u64 = 0;
+    const limit = events.len;
     while (position < capture.len) {
         rejection.* = .{ .byte_offset = position };
         const line_start = position;
@@ -371,25 +377,47 @@ fn read(
         }
         const line = capture[line_start..line_end];
         if (line.len == 0) {
-            if (data) |start| {
-                if (event_data.length == start) return error.EmptySseData;
-                try grammar.event(&stream, &storage.scratch, events[@intCast(start)..@intCast(event_data.length)], start, raw_start);
-                data = null;
+            if (lines == 0) continue;
+            var normalized: codec_abi.Normalized = .{};
+            if (lines == 1) {
+                if (first_line.len == 0) return error.EmptySseData;
+                codecs.normalize(&stream, first_line, &normalized);
+                try appendFragments(event_data, limit, first_line, &normalized);
+            } else {
+                const staged = events[@intCast(staged_start)..@intCast(event_data.length)];
+                codecs.normalize(&stream, staged, &normalized);
+                // Verbatim whole data is already in place. Otherwise the staged bytes stay behind
+                // and the event starts after them, so only that layout can be read contiguously.
+                if (!wholeVerbatim(&normalized, staged.len)) {
+                    if (whole_start != staged_start) return error.UnsupportedNormalizedLayout;
+                    whole_start = event_data.length;
+                    try appendFragments(event_data, limit, staged, &normalized);
+                }
             }
+            if (normalized.whole) {
+                try grammar.event(&stream, &storage.scratch, events[@intCast(whole_start)..@intCast(event_data.length)], whole_start, raw_start);
+                whole_start = event_data.length;
+            }
+            lines = 0;
             continue;
         }
         if (std.mem.eql(u8, line, "data") or std.mem.startsWith(u8, line, "data:")) {
             var skip: usize = @min(line.len, "data:".len);
             if (line.len > skip and line[skip] == ' ') skip += 1;
-            const continued = data != null;
-            if (!continued) {
-                data = event_data.length;
+            if (lines == 0) {
+                first_line = line[skip..];
                 raw_start = line_start + skip;
+            } else {
+                if (lines == 1) {
+                    staged_start = event_data.length;
+                    if (first_line.len != 0) try event_data.append(false, first_line);
+                }
+                try event_data.append(true, line[skip..]);
             }
-            if (continued or line.len > skip) try event_data.append(continued, line[skip..]);
+            lines = @min(lines + 1, 2);
         }
     }
-    if (data != null) return error.IncompleteSseEvent;
+    if (lines != 0 or whole_start != event_data.length) return error.IncompleteSseEvent;
     if (codecs.finish(&stream)) |reason| return reasonError(reason);
     try event_data.seal();
     validated.source_length = event_data.length;
@@ -398,6 +426,28 @@ fn read(
     validated.answer_item_ordinal = grammar.answer.ordinal;
     validated.answer_length = grammar.answer.length;
     validated.answer_digest = grammar.answer.digest;
+}
+
+/// Appends what a normalized SSE event adds. Copies are read from `source`, the data the
+/// codec normalized. The map of event data is `limit` bytes long, so growth past it fails.
+fn appendFragments(event_data: *EventData, limit: u64, source: []const u8, normalized: *const codec_abi.Normalized) !void {
+    for (normalized.slice()) |fragment| {
+        const bytes = switch (fragment) {
+            .literal => |literal| literal,
+            .copy => |range| source[@intCast(range.start)..][0..@intCast(range.length)],
+        };
+        if (event_data.length + bytes.len > limit) return error.EventDataScratchExhausted;
+        try event_data.append(false, bytes);
+    }
+}
+
+/// True when the codec answered exactly the whole of `length` source bytes, verbatim.
+fn wholeVerbatim(normalized: *const codec_abi.Normalized, length: usize) bool {
+    if (normalized.len != 1) return false;
+    return switch (normalized.items[0]) {
+        .copy => |range| range.start == 0 and range.length == length,
+        .literal => false,
+    };
 }
 
 pub fn failureCode(err: anyerror) []const u8 {
@@ -1360,6 +1410,42 @@ test "a later compaction item supersedes everything before it, and a first one n
             try std.testing.expectEqual(alone, result.metadata_bytes);
         }
     }
+}
+
+test "SSE staging gives the grammar the same whole events under every line framing" {
+    const item = "{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}";
+    const completed = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}";
+    const done_a = "{\"type\":\"response.output_item.done\",";
+    const done_b = "\"output_index\":0,\"item\":" ++ item ++ "}";
+    const completed_a = "{\"type\":\"response.completed\",";
+    const completed_b = "\"response\":{\"id\":\"r\",\"status\":\"completed\",";
+    const completed_c = "\"output\":[" ++ item ++ "]}}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const reference = try validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n", 4096);
+    const framings = [_][]const u8{
+        // single line, CRLF, CR
+        "data: " ++ done ++ "\r\n\r\ndata: " ++ completed ++ "\r\n\r\n",
+        "data: " ++ done ++ "\r\rdata: " ++ completed ++ "\r\r",
+        // two and three lines, joined by LF and CRLF
+        "data: " ++ done_a ++ "\ndata: " ++ done_b ++ "\n\ndata: " ++ completed ++ "\n\n",
+        "data: " ++ done_a ++ "\r\ndata: " ++ done_b ++ "\r\n\r\ndata: " ++ completed_a ++ "\r\ndata: " ++ completed_b ++ "\r\ndata: " ++ completed_c ++ "\r\n\r\n",
+        "data: " ++ done ++ "\n\ndata: " ++ completed_a ++ "\rdata: " ++ completed_b ++ "\rdata: " ++ completed_c ++ "\r\r",
+        // an empty first data line joins as a leading newline
+        "data: " ++ done ++ "\n\ndata:\ndata: " ++ completed ++ "\n\n",
+    };
+    for (framings) |framing| {
+        const result = try validateTestingSse(&tmp, framing, 4096);
+        try std.testing.expectEqual(reference.output.item_count, result.output.item_count);
+        try std.testing.expectEqual(reference.output.answer_length, result.output.answer_length);
+        try std.testing.expectEqual(reference.output.answer_digest, result.output.answer_digest);
+        try std.testing.expectEqual(reference.first_item.content_digest, result.first_item.content_digest);
+    }
+    // A trailing open event, single or staged, is incomplete; so is an empty single-line event.
+    try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed_a ++ "\ndata: " ++ completed_b ++ "\n", 4096));
+    try std.testing.expectError(error.IncompleteSseEvent, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n", 4096));
+    try std.testing.expectError(error.EmptySseData, validateTestingSse(&tmp, "data: " ++ done ++ "\n\ndata:\n\n", 4096));
 }
 
 test "SSE line framing accepts spec fields and line endings without losing validation" {
