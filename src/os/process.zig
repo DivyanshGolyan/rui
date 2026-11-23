@@ -51,9 +51,7 @@ pub fn applyHostMallocDefaults(init: std.process.Init, args: []const []const u8)
     }
     if (!changed) return;
 
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path_len = try std.process.executablePath(init.io, &path_buffer);
     const argv = try init.arena.allocator().dupe([]const u8, args);
-    argv[0] = path_buffer[0..path_len];
+    argv[0] = try @import("../self_executable.zig").path(init.io);
     return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
 }

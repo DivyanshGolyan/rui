@@ -37,6 +37,9 @@ pub const MainPresentation = struct {
 };
 main_presentation: ?MainPresentation = null,
 presentation_hold: ?struct { context: *anyopaque, held: *const fn (*anyopaque, u16) bool } = null,
+/// Told of every press, every move with no button held and every release no widget took. vxfw has no pointer
+/// grab, so only the root sees the pointer wherever it is; a held-pointer gesture ends here.
+pointer_free: ?struct { context: *anyopaque, free: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void } = null,
 
 overview: vxfw.Widget,
 overview_keys: ?Keys = null,
@@ -218,6 +221,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (routed == .mouse and (routed.mouse.type == .press or routed.mouse.type == .motion)) if (self.pointer_free) |hook| try hook.free(hook.context, ctx);
     var input: app_input.Input = switch (routed) {
         .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key), .printable = @import("keypress.zig").classify(key) == .text } },
         .paste_start => .paste_start,
@@ -249,6 +253,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
+        .mouse => |mouse| if (mouse.type == .release) if (self.pointer_free) |hook| try hook.free(hook.context, ctx),
         .init => {
             try ctx.requestFocus(self.overview);
             try self.overview.handleEvent(ctx, .init);

@@ -810,13 +810,19 @@ const foreign_status_limit = 64 * 1024;
 /// can settle it. Every failure after a connection is an error instead.
 pub const SocketObservation = union(enum) { absent, unanswered: anyerror, observed: HostControlObservation };
 
-pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !SocketObservation {
+/// A refused connect is retried until `refused_until` (default: 200 ms from
+/// now) for a Host that bound its socket but is not listening yet. A census
+/// passes one shared window for every socket, so leftover sockets cost one
+/// window in total, not one each.
+pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128, refused_until: ?i128) !SocketObservation {
     const until = hostObservationDeadline(io, deadline);
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + refused_connect_retry_ns);
+    // Retrying a refusal stops at the window; each attempt still has its own
+    // bounded connect, so a closed window leaves exactly one attempt.
+    const connect_until = @min(until, refused_until orelse refusedConnectWindow(io));
     const fd = connection: {
         while (true) {
-            const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
+            const connected = connectRequest(.{ .io = io }, address, @min(until, refusedConnectWindow(io))) catch |err| {
                 switch (err) {
                     error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
                         if (platform.socketStoreIsUnowned(io, socket_path)) return .absent;
@@ -969,10 +975,13 @@ pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellati
         for (sockets) |socket| allocator.free(socket);
         allocator.free(sockets);
     }
+    // One window for the whole census: thousands of leftover sockets from
+    // test runs once cost 200 ms each, one after another, before any restart.
+    const refused_until = refusedConnectWindow(io);
     for (sockets) |socket| {
         try requests.check();
         try candidates.ensureUnusedCapacity(allocator, 1);
-        const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null);
+        const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null, refused_until);
         const result: @FieldType(UpgradeCandidate, "result") = if (observed) |seen| switch (seen) {
             .absent => continue,
             .unanswered => |err| .{ .unanswered = err },
@@ -1108,6 +1117,11 @@ fn retirementReading(bytes: []const u8, pid: c_int, started: u64, before: ?u64, 
 /// How long socket discovery retries a refused connect to a Store whose lease
 /// is still held: a live Host's full backlog refuses until it accepts.
 const refused_connect_retry_ns = 200 * std.time.ns_per_ms;
+
+/// The end of one refused-connect retry window starting now.
+pub fn refusedConnectWindow(io: std.Io) i128 {
+    return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + refused_connect_retry_ns;
+}
 
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
@@ -6309,11 +6323,11 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
     defer tmp.cleanup();
     var buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
     const address = try tmp.address("discovery.sock", &buffer);
-    try std.testing.expectEqual(error.FileNotFound, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
+    try std.testing.expectEqual(error.FileNotFound, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null, null)).unanswered);
     {
         var listener = try address.listen(io, .{ .kernel_backlog = 1 });
         defer listener.deinit(io);
-        try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+        try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, address.path, null, null));
         const unreadable = try listener.accept(io);
         unreadable.close(io);
 
@@ -6328,14 +6342,14 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
         } else return error.TestUnexpectedResult;
         try std.testing.expectEqual(if (blocks) error.TransferInactive else error.ConnectionRefused, blocked);
         if (blocks)
-            try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, null))
+            try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, null, null))
         else
-            try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
+            try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null, null)).unanswered);
     }
     const before = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null)).unanswered);
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, address.path, null, null)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - before >= 25 * std.time.ns_per_ms);
-    try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1));
+    try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1, null));
 }
 
 test "socket upgrade discovery distinguishes stale free Store from refused held Store" {
@@ -6360,15 +6374,20 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
         lease.retireSocket() catch {};
     }
     var listener = try lease.listen(.{});
-    try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null));
     listener.deinit(io);
     const refused_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null)).unanswered);
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null)).unanswered);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - refused_at >= refused_connect_retry_ns);
+    // A census's shared window that has already closed buys no retry: a held,
+    // refused socket answers at once, so leftover sockets cost one window.
+    const shared_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    try std.testing.expectEqual(error.ConnectionRefused, (try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, shared_at)).unanswered);
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - shared_at < 25 * std.time.ns_per_ms);
     lease.release();
     held = false;
     const stale_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    try std.testing.expect(try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null) == .absent);
+    try std.testing.expect(try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null, null) == .absent);
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }
