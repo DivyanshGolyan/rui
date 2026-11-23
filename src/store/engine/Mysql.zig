@@ -158,8 +158,7 @@ pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_optio
 pub fn close(self: *Mysql) error{StoreCloseFailed}!void {
     self.state.sink.close();
     const failed = self.state.failure != null;
-    if (self.state.connection.isReady() and self.state.connection.batchLen() == 0) mysql_open.releaseLock(&self.state.connection);
-    self.state.connection.close();
+    mysql_open.closeOwned(&self.state.connection);
     allocator.free(self.state.kinds);
     std.crypto.secureZero(u8, std.mem.asBytes(&self.state.login));
     allocator.destroy(self.state);

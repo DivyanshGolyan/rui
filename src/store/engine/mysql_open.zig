@@ -41,7 +41,7 @@ const session_settings = blk: {
 };
 
 pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []const u8) !State {
-    errdefer conn.close();
+    errdefer closeOwned(conn);
     // The database name is also MySQL's connection-owned lock name.
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
@@ -149,11 +149,15 @@ fn refusal(facts: *const FactsRow) ?policy.StartError {
 
 /// Releases the Store's GET_LOCK before the connection closes. COM_QUIT
 /// alone frees it only once the server has ended the session, after close
-/// returns, so a Host reopening the Store at once could find it locked.
-pub fn releaseLock(conn: *wire.Connection) void {
-    conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch return;
-    conn.sendBatch() catch return;
-    _ = conn.next() catch {};
+/// returns, so a Host reopening the Store at once (including after a refused
+/// admission) could find it locked.
+pub fn closeOwned(conn: *wire.Connection) void {
+    if (conn.isReady() and conn.batchLen() == 0) release: {
+        conn.batch().writeAll("DO RELEASE_ALL_LOCKS()") catch break :release;
+        conn.sendBatch() catch break :release;
+        _ = conn.next() catch {};
+    }
+    conn.close();
 }
 
 pub const Reclaimed = struct { epoch: u64, commit_seq: u64, connection_id: u64 };
