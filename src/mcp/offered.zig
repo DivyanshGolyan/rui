@@ -123,7 +123,7 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
     for (sources, 0..) |_, index| {
         var own: std.ArrayList(Item) = .empty;
         for (items.items) |item| if (item.source == index) try own.append(arena, item);
-        std.mem.sort(Item, own.items, {}, byRemote);
+        std.mem.sortUnstable(Item, own.items, {}, byRemote);
         for (own.items, 0..) |item, at| {
             const twice = (at > 0 and std.mem.eql(u8, own.items[at - 1].remote, item.remote)) or
                 (at + 1 < own.items.len and std.mem.eql(u8, own.items[at + 1].remote, item.remote));
@@ -168,7 +168,8 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.HostToolSet
     }
     report.* = .{ .drops = drops.items };
 
-    std.mem.sort(Item, selected.items, {}, byName);
+    // In place: a block sort keeps a large buffer on the caller's stack, and names here are unique.
+    std.mem.sortUnstable(Item, selected.items, {}, byName);
     const records = try arena.alloc(tools.Record, selected.items.len);
     const digests = try arena.alloc([32]u8, selected.items.len);
     for (selected.items, records, digests) |item, *record, *digest| {
