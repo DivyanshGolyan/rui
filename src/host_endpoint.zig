@@ -105,8 +105,9 @@ const Held = struct {
 
 const LockResult = union(enum) {
     held: Held,
-    /// Another open file description holds the lock (a Host, a census, a
-    /// status probe), or the lock was replaced while this call took it.
+    /// Another open file description holds the lock: a Host that claimed D, or
+    /// an inspect taking it for a moment; or the lock was replaced while this
+    /// call took it.
     busy,
     /// D is gone, or it has no `rui.lock` and `create` was false.
     absent,
@@ -229,8 +230,8 @@ pub const Endpoint = struct {
     }
 };
 
-/// The window a Host start waits for a census or status probe, which holds a
-/// lock for microseconds, before it reports the directory in use.
+/// The window a Host start waits for an inspect (a census look), which holds
+/// the lock for microseconds, before it reports the directory in use.
 const claim_wait_ns = 100 * std.time.ns_per_ms;
 
 /// Host start: creates D (0700) and holds its lock. Does not touch `rui.sock`;
