@@ -831,7 +831,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
                 self.issue = if (self.state.page == .browser) "Couldn't open a browser. Copy URL to open it manually." else "Couldn't open a browser. Open the displayed URL manually.";
                 return;
             };
-            self.issue = "Browser open requested.";
+            self.issue = null;
         },
     }
 }
@@ -839,7 +839,7 @@ fn copyClipboard(self: *Self, ctx: *vxfw.EventContext, text: []const u8) !void {
     const bytes = try ctx.alloc.dupe(u8, text);
     errdefer ctx.alloc.free(bytes);
     try ctx.addCmd(.{ .copy_to_clipboard = bytes });
-    self.issue = "Copy sent; not confirmed.";
+    self.issue = "Sent to clipboard";
 }
 
 fn editAddress(self: *Self, change: Edit) void {
@@ -1076,11 +1076,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (self.form) |mapped| {
                 const form = mapped.value;
                 const field_width = Panel.valueWidth(width) -| 1;
-                try append(&rows, a, "Scope", "Selected Host. New chats here only.", null, null);
                 try appendEditor(&rows, ctx, form.label(.base), &form.base, .base, field_width, "HTTPS base URL");
                 try appendEditor(&rows, ctx, form.label(.key), &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
                 try appendEditor(&rows, ctx, form.label(.model), &form.model, .model, field_width, "Required for custom services");
-                try append(&rows, a, "API", "HTTPS Responses API. Key is not verified remotely.", null, null);
                 try button(&buttons, a, "Connect", .connect, .connect);
                 try button(&buttons, a, "Back", .back, .back);
             }
@@ -1110,9 +1108,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Change method", .switch_method, .switch_method);
             try button(&buttons, a, "Back", .back, .back);
         },
-        .stopping => try append(&rows, a, "Please wait", "Joining the cancelled sign-in attempt...", null, null),
+        .stopping => try append(&rows, a, "Please wait", "Ending the sign-in...", null, null),
         .saving => {
-            try append(&rows, a, "Please wait", "Saving and checking Host activation...", null, null);
+            try append(&rows, a, "Please wait", "Saving your sign-in...", null, null);
             try button(&buttons, a, "Back", .back, .back);
         },
         .failed => |failure| {
@@ -1129,13 +1127,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try appendWrapped(&rows, ctx, "Copy pause cmd", pause_command, .pause_command, .{ .command = pause_command }, width);
             try appendWrapped(&rows, ctx, "Copy start cmd", start_command, .start_command, .{ .command = start_command }, width);
             if (self.launchSummary()) |report| try append(&rows, a, "Host", report.words(), null, null);
-            try append(&rows, a, "Activation", "Recheck starts if absent; never restarts work", null, null);
             try button(&buttons, a, "Recheck", .recheck, .recheck);
             try button(&buttons, a, "Back", .back, .back);
             try button(&buttons, a, "Return", .close, .close);
         },
         .connected => {
-            try append(&rows, a, "Connected", "This terminal is configured for new chats.", null, null);
+            try append(&rows, a, "Connected", "New chats use this sign-in.", null, null);
             try button(&buttons, a, "Close", .close, .close);
         },
     }
