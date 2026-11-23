@@ -37,6 +37,7 @@ const cores = .{
     .{ "cli_value.zig", @import("cli_value.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
     .{ "codecs/json.zig", @import("codecs/json.zig") },
+    .{ "codecs/messages.zig", @import("codecs/messages.zig") },
     .{ "codecs/responses.zig", @import("codecs/responses.zig") },
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },

@@ -173,7 +173,9 @@ const Parser = struct {
         while (try self.key()) |member| {
             defer self.release(member);
             if (std.mem.eql(u8, text(member), "limit")) {
-                entry.context_window = try self.limit();
+                const limits = try self.limit();
+                entry.context_window = limits.context;
+                entry.output_limit = limits.output;
             } else if (std.mem.eql(u8, text(member), "reasoning_options")) {
                 entry.efforts = try self.reasoningOptions();
             } else if (generation) {
@@ -239,31 +241,37 @@ const Parser = struct {
         }
     }
 
-    fn limit(self: *Parser) Error!?u32 {
+    const Limits = struct { context: ?u32 = null, output: ?u32 = null };
+
+    fn limit(self: *Parser) Error!Limits {
         const tag = self.scanner.peekNextTokenType() catch |err| return parseError(err);
         if (tag != .object_begin) {
             try self.skip();
-            return null;
+            return .{};
         }
         try self.expect(.object_begin);
-        var context: ?u32 = null;
+        var limits: Limits = .{};
         while (try self.key()) |member| {
             defer self.release(member);
-            if (!std.mem.eql(u8, text(member), "context")) {
-                try self.skip();
-                continue;
-            }
-            const value_tag = self.scanner.peekNextTokenType() catch |err| return parseError(err);
-            if (value_tag != .number) {
-                try self.skip();
-                context = null;
-                continue;
-            }
-            const token = try self.next();
-            defer self.release(token);
-            context = std.fmt.parseInt(u32, text(token), 10) catch null;
+            if (std.mem.eql(u8, text(member), "context")) {
+                limits.context = try self.limitNumber();
+            } else if (std.mem.eql(u8, text(member), "output")) {
+                limits.output = try self.limitNumber();
+            } else try self.skip();
         }
-        return context;
+        return limits;
+    }
+
+    /// A limit's integer, or null when the value is not a number that fits a u32.
+    fn limitNumber(self: *Parser) Error!?u32 {
+        const value_tag = self.scanner.peekNextTokenType() catch |err| return parseError(err);
+        if (value_tag != .number) {
+            try self.skip();
+            return null;
+        }
+        const token = try self.next();
+        defer self.release(token);
+        return std.fmt.parseInt(u32, text(token), 10) catch null;
     }
 
     fn reasoningOptions(self: *Parser) Error!catalog.Efforts {
@@ -326,6 +334,23 @@ const Parser = struct {
 
 fn parseError(err: anyerror) Error {
     return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidCatalog;
+}
+
+test "models dev output limit parses beside context, and a value that is not a u32 is unknown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const entries = try parse(arena.allocator(),
+        \\{"openai":{"models":{"a":{"limit":{"context":10,"output":4}},
+        \\"b":{"limit":{"context":"x","output":"y"}},
+        \\"c":{"limit":{"output":4294967296,"context":1}}}}}
+    );
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+    try std.testing.expectEqual(@as(?u32, 10), entries[0].context_window);
+    try std.testing.expectEqual(@as(?u32, 4), entries[0].output_limit);
+    try std.testing.expectEqual(@as(?u32, null), entries[1].context_window);
+    try std.testing.expectEqual(@as(?u32, null), entries[1].output_limit);
+    try std.testing.expectEqual(@as(?u32, 1), entries[2].context_window);
+    try std.testing.expectEqual(@as(?u32, null), entries[2].output_limit);
 }
 
 test "models dev openai wins otherwise first provider wins and output is sorted" {

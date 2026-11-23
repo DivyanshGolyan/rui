@@ -54,6 +54,9 @@ pub const model_compaction_triggers = [_]struct { provider: []const u8, model: [
 
 pub const unlisted_context_window: u64 = 128000;
 
+/// The output limit a model the catalog does not state gets: Messages requires one.
+pub const unlisted_output_limit: u32 = 32000;
+
 pub const output_reservation: u64 = 0;
 
 test "approved product defaults" {
@@ -78,6 +81,7 @@ test "approved product defaults" {
         try std.testing.expectEqual(@as(u64, 450000), entry.tokens);
     }
     try std.testing.expectEqual(@as(u64, 128000), unlisted_context_window);
+    try std.testing.expectEqual(@as(u32, 32000), unlisted_output_limit);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }
 

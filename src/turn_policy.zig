@@ -50,8 +50,8 @@ pub fn completesTurn(output: OutputFact, pending_messages: u64) bool {
     return output == .answer and pending_messages == 0;
 }
 
-pub fn recoversOverflow(purpose: Purpose, context_changed: bool) bool {
-    return purpose == .assistant_response and context_changed;
+pub fn recoversOverflow(purpose: Purpose, context_changed: bool, compacts: bool) bool {
+    return compacts and purpose == .assistant_response and context_changed;
 }
 
 pub const Previous = struct {
@@ -64,6 +64,8 @@ pub const Previous = struct {
 pub const CompactionFacts = struct {
     previous: ?Previous = null,
     trigger: ?u64,
+    /// The Session's pinned codec compacts (codecs.compacts). A codec that does not never gets a compaction Operation.
+    compacts: bool,
     context_changed: bool,
     usage_tokens: ?u64,
     uncovered_bytes: u64,
@@ -74,7 +76,8 @@ pub const CompactionFacts = struct {
     output_reservation: u64,
 };
 
-pub fn forcedPurpose(prior: ?Previous, trigger: ?u64) ?Purpose {
+pub fn forcedPurpose(prior: ?Previous, trigger: ?u64, compacts: bool) ?Purpose {
+    if (!compacts) return .assistant_response;
     const previous = prior orelse return .assistant_response;
     if (previous.turn_active and previous.context_overflow) return .compaction;
     if (previous.purpose == .compaction and (previous.turn_active or previous.same_input_prefix)) return .assistant_response;
@@ -83,12 +86,12 @@ pub fn forcedPurpose(prior: ?Previous, trigger: ?u64) ?Purpose {
 }
 
 pub fn nextPurpose(facts: CompactionFacts) Purpose {
-    const pressure = comparedPressure(facts) orelse return forcedPurpose(facts.previous, facts.trigger) orelse .assistant_response;
+    const pressure = comparedPressure(facts) orelse return forcedPurpose(facts.previous, facts.trigger, facts.compacts) orelse .assistant_response;
     return if (pressure >= facts.trigger.?) .compaction else .assistant_response;
 }
 
 pub fn comparedPressure(facts: CompactionFacts) ?u64 {
-    if (forcedPurpose(facts.previous, facts.trigger) != null or !facts.context_changed) return null;
+    if (forcedPurpose(facts.previous, facts.trigger, facts.compacts) != null or !facts.context_changed) return null;
     return (facts.usage_tokens orelse 0) +| @as(u64, @intCast(estimatedBytes(facts) / 4)) +| facts.image_tokens +| facts.output_reservation;
 }
 
@@ -115,10 +118,10 @@ test "output facts do not encode the Turn continuation decision" {
             try std.testing.expect(!completesTurn(fact, 3));
         }
     }
-    try std.testing.expect(recoversOverflow(.assistant_response, true));
-    try std.testing.expect(!recoversOverflow(.assistant_response, false));
-    try std.testing.expect(!recoversOverflow(.compaction, true));
-    try std.testing.expect(!recoversOverflow(.compaction, false));
+    try std.testing.expect(recoversOverflow(.assistant_response, true, true));
+    try std.testing.expect(!recoversOverflow(.assistant_response, false, true));
+    try std.testing.expect(!recoversOverflow(.compaction, true, true));
+    try std.testing.expect(!recoversOverflow(.compaction, false, true));
 }
 
 test "every provider output is accepted context history" {
@@ -128,6 +131,7 @@ test "every provider output is accepted context history" {
 test "compaction purpose respects recovery prefix and both sides of pressure" {
     var facts: CompactionFacts = .{
         .trigger = 100,
+        .compacts = true,
         .context_changed = true,
         .usage_tokens = 83,
         .uncovered_bytes = 51,
@@ -163,7 +167,7 @@ test "a compared pressure decides compaction exactly when it reaches the trigger
     const previous = [_]?Previous{ null, .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .assistant_response, .context_overflow = true, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = true, .same_input_prefix = false }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = true }, .{ .purpose = .compaction, .context_overflow = false, .turn_active = false, .same_input_prefix = false } };
     const compares = [_]bool{ false, true, false, false, false, true };
     for (previous, compares) |prior, open| for ([_]?u64{ null, 1, 100 }) |trigger| for ([_]bool{ false, true }) |changed| for ([_]u64{ 0, 99, 100, 400 }) |bytes| {
-        const facts: CompactionFacts = .{ .previous = prior, .trigger = trigger, .context_changed = changed, .usage_tokens = 0, .uncovered_bytes = bytes, .output_reservation = 0 };
+        const facts: CompactionFacts = .{ .previous = prior, .trigger = trigger, .compacts = true, .context_changed = changed, .usage_tokens = 0, .uncovered_bytes = bytes, .output_reservation = 0 };
         const pressure = comparedPressure(facts);
         try std.testing.expectEqual(open and trigger != null and changed, pressure != null);
         if (pressure) |value| {
@@ -187,6 +191,7 @@ test "built-in instruction pressure preserves byte remainders thresholds and sat
                         const facts: CompactionFacts = .{
                             .previous = .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = false, .same_input_prefix = false },
                             .trigger = trigger,
+                            .compacts = true,
                             .context_changed = true,
                             .usage_tokens = usage,
                             .uncovered_bytes = bytes,
@@ -215,4 +220,28 @@ test "built-in instruction pressure preserves byte remainders thresholds and sat
             }
         }
     }
+}
+
+test "a codec that does not compact is never admitted a compaction, over the trigger or after overflow" {
+    const overflow: Previous = .{ .purpose = .assistant_response, .context_overflow = true, .turn_active = true, .same_input_prefix = false };
+    const settled: Previous = .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = false, .same_input_prefix = false };
+    const cases = [_]struct { previous: Previous, bytes: u64, pressure: bool }{
+        .{ .previous = settled, .bytes = 0, .pressure = false },
+        .{ .previous = settled, .bytes = 400, .pressure = true },
+        .{ .previous = overflow, .bytes = 0, .pressure = false },
+    };
+    for ([_]bool{ true, false }) |compacts| for ([_]?u64{ 100, null }) |trigger| for (cases) |case| {
+        const facts: CompactionFacts = .{
+            .previous = case.previous,
+            .trigger = trigger,
+            .compacts = compacts,
+            .context_changed = true,
+            .usage_tokens = 0,
+            .uncovered_bytes = case.bytes,
+            .output_reservation = 0,
+        };
+        const expected: Purpose = if (compacts and (case.previous.context_overflow or (case.pressure and trigger != null))) .compaction else .assistant_response;
+        try std.testing.expectEqual(expected, nextPurpose(facts));
+        try std.testing.expectEqual(compacts, recoversOverflow(.assistant_response, true, compacts));
+    };
 }

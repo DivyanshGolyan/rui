@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 90;
+pub const schema_version: u32 = 91;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -70,6 +70,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
+    .{ .schema_version = 91, .digest = 0xc92515d104a290dd },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -937,6 +938,25 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK(OCTET_LENGTH(remote_name)<=64 AND (NOT REGEXP_LIKE(remote_name,'[^A-Za-z0-9_-]','c')))",
         },
     },
+    // The most output tokens a model takes freezes on its Operation beside its context window: the
+    // saved-or-shipped catalog's `limit.output` (model_fact), read once at admission, so a retry sends the
+    // bytes its first Attempt did after the catalog changes. An Operation admitted before this format
+    // took the product default: the shipped catalog stated no output limit, so its request sent that
+    // value (model_capability.outputLimit), and the backfill keeps it.
+    .{
+        .from = 90,
+        .sqlite = &.{
+            "ALTER TABLE model_fact RENAME TO model_fact_90",
+            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL CHECK(efforts BETWEEN 0 AND 63),\n openai_listed INTEGER NOT NULL CHECK(openai_listed IN (0,1)),\n generation INTEGER NOT NULL,\n output_limit INTEGER CHECK(output_limit IS NULL OR output_limit BETWEEN 0 AND 4294967295)\n) STRICT",
+            "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) SELECT model_id,context_window,efforts,openai_listed,generation FROM model_fact_90",
+            "DROP TABLE model_fact_90",
+            "ALTER TABLE model_operation ADD COLUMN output_limit INTEGER NOT NULL DEFAULT 32000 CHECK(output_limit BETWEEN 0 AND 4294967295)",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_fact ADD COLUMN output_limit BIGINT AFTER generation, ADD CHECK(output_limit IS NULL OR output_limit BETWEEN 0 AND 4294967295)",
+            "ALTER TABLE model_operation ADD COLUMN output_limit BIGINT NOT NULL DEFAULT 32000 AFTER context_window, ADD CHECK(output_limit BETWEEN 0 AND 4294967295)",
+        },
+    },
 };
 
 comptime {
@@ -1320,6 +1340,7 @@ pub const tables = [_]Table{
             .{ .name = "efforts", .type = .int, .check = "efforts BETWEEN 0 AND 63" },
             .{ .name = "openai_listed", .type = .flag },
             .{ .name = "generation", .type = .int },
+            .{ .name = "output_limit", .type = .int, .nullable = true, .check = "output_limit IS NULL OR output_limit BETWEEN 0 AND 4294967295" },
         },
         .primary_key = &.{"model_id"},
     },
@@ -1682,6 +1703,7 @@ pub const tables = [_]Table{
             .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
             .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
             .{ .name = "context_window", .type = .int, .check = "context_window BETWEEN 0 AND 4294967295" },
+            .{ .name = "output_limit", .type = .int, .default = "32000", .sqlite_added = true, .check = "output_limit BETWEEN 0 AND 4294967295" },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},

@@ -92,6 +92,8 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 pub const CurrentConfiguration = struct {
     workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: provider_name.Provider = undefined,
+    /// The codec the Session pinned at creation; admission and inspection both read it, not the provider's current codec.
+    codec: provider_name.Codec = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
     tool_set_id: u64 = 0,
@@ -510,7 +512,7 @@ pub const ConfigurationReads = struct {
 };
 
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },

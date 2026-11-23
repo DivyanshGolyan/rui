@@ -474,7 +474,8 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             @setEvalBranchQuota(100 * old_model.len);
             break :blk std.mem.indexOf(u8, old_model, "\n " ++ column.name ++ " ") == null;
         };
-        if (added) try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN " ++ column.name);
+        // dropPinOrganization already undid format 91's output_limit (dropFormat91OutputLimit).
+        if (added and comptime !std.mem.eql(u8, column.name, "output_limit")) try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN " ++ column.name);
     }
     const old = schema.migrations[53 - schema.migration_baseline];
     const suppress = schema.migrations[56 - schema.migration_baseline];
@@ -721,6 +722,7 @@ fn dropPinOrganization(storage: *Store) !void {
     try dropBackgroundUpgradeShape(storage);
     // After dropBackgroundUpgradeShape's refusals, so a refused rewind leaves a usable Store.
     try dropMysqlInPlaceColumns(storage);
+    try dropFormat91OutputLimit(storage);
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='creator_ref' AND REFERENCED_TABLE_NAME='session')");
         try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
@@ -771,6 +773,20 @@ fn dropMysqlInPlaceColumns(storage: *Store) !void {
     try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_missing");
     try mysql_testing.rawExec(storage, "SET @rui_missing_ddl=NULL");
     try mysql_testing.rawExec(storage, "ALTER TABLE core_command DROP COLUMN missing_settings");
+}
+
+/// Undoes format 91's output limits. SQLite's step rebuilds model_fact from named columns, so only
+/// model_operation's added column goes; MySQL adds both columns with table CHECKs, which go first.
+fn dropFormat91OutputLimit(storage: *Store) !void {
+    if (storage.engine != .mysql) return sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE model_operation DROP COLUMN output_limit");
+    inline for (.{ "model_fact", "model_operation" }) |table| {
+        try mysql_testing.rawExec(storage, "SET @rui_output_ddl=(SELECT CONCAT('ALTER TABLE " ++ table ++ " DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='" ++ table ++ "' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('output_limit',cc.CHECK_CLAUSE)>0)");
+        try mysql_testing.rawExec(storage, "PREPARE rui_output FROM @rui_output_ddl");
+        try mysql_testing.rawExec(storage, "EXECUTE rui_output");
+        try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_output");
+        try mysql_testing.rawExec(storage, "SET @rui_output_ddl=NULL");
+        try mysql_testing.rawExec(storage, "ALTER TABLE " ++ table ++ " DROP COLUMN output_limit");
+    }
 }
 
 /// Undoes format 87's partial indexes (on MySQL, their `_lead` generated columns too). Every helper that
