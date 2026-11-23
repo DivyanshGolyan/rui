@@ -1,5 +1,6 @@
 
 import contextlib
+import os
 import pathlib
 import select
 import socket
@@ -7,7 +8,7 @@ import os_semantics
 import threading
 import time
 
-from host_process import dispose_all
+from host_process import WaitTimeout, dispose_all, wait_for
 
 HEADER_LIMIT = 16 * 1024
 BODY_LIMIT = 64 * 1024
@@ -25,18 +26,55 @@ def one_reply(path, response, *, timeout=10):
     worker = None
     bound = False
     parent_made = False
+    lock_fd = None
+    acquired = None
     errors = []
     try:
         listener = os_semantics.unix_stream()
         sockets.append(listener)
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))
-        path.unlink(missing_ok=True)
-        # A Host's endpoint lives in its interface directory, which a retired
-        # Host removes; the mock makes its own (and removes it on exit).
+        # The mock claims D the way a Host does: it holds D/rui.lock while it
+        # serves, so no census proves D dead under it.
         if not path.parent.exists():
             path.parent.mkdir(mode=0o700)
             parent_made = True
+        def claim():
+            # One attempt: the held fd, or None after closing every fd it opened.
+            nonlocal parent_made, acquired
+            try:
+                fd = os.open(path.parent / "rui.lock",
+                             os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                             0o600)
+            except FileNotFoundError:
+                try:
+                    path.parent.mkdir(mode=0o700)
+                    parent_made = True
+                except FileExistsError:
+                    pass
+                return None
+            if not os_semantics.try_lock(fd):
+                os.close(fd)
+                return None
+            try:
+                named = os.stat(path.parent / "rui.lock", follow_symlinks=False).st_ino
+            except FileNotFoundError:
+                named = None
+            if named != os.fstat(fd).st_ino:
+                os.close(fd)
+                return None
+            acquired = fd
+            return fd
+
+        try:
+            lock_fd = wait_for(claim, "one-reply interface directory lock", deadline=deadline,
+                               drain=False, ready=lambda fd: fd is not None)
+        except WaitTimeout as error:
+            # wait_for can time out just after claim() succeeded; that fd is not returned, so close it here.
+            if acquired is not None:
+                os.close(acquired)
+            raise TimeoutError("one-reply interface directory is in use") from error
+        path.unlink(missing_ok=True)
         listener.bind(str(path))
         bound = True
         listener.listen(1)
@@ -131,7 +169,9 @@ def one_reply(path, response, *, timeout=10):
 
         dispose_all(retire, *(sock.close for sock in sockets),
                     lambda: path.unlink(missing_ok=True) if bound else None,
-                    lambda: _remove_empty_directory(path.parent) if parent_made else None)
+                    lambda: (path.parent / "rui.lock").unlink(missing_ok=True) if lock_fd is not None else None,
+                    lambda: _remove_empty_directory(path.parent) if parent_made else None,
+                    lambda: os.close(lock_fd) if lock_fd is not None else None)
 
 
 def _remove_empty_directory(directory):
