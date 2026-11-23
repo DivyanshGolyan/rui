@@ -709,6 +709,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
 }
 
 fn dropPinOrganization(storage: *Store) !void {
+    try dropFormat89MissingSettings(storage);
     try dropFormat87Indexes(storage);
     try restoreSessionArchiveForTesting(storage);
     const schema = @import("schema.zig");
@@ -750,6 +751,19 @@ fn dropPinOrganization(storage: *Store) !void {
         try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
         for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
     }
+}
+
+/// Undoes format 89's core_command.missing_settings on MySQL, whose step adds the column in place, so
+/// a Store rewound below 89 replays that step on a table without it. SQLite's step rebuilds
+/// core_command from named columns, so it replays over the newer table unchanged.
+fn dropFormat89MissingSettings(storage: *Store) !void {
+    if (storage.engine != .mysql) return;
+    try mysql_testing.rawExec(storage, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0)");
+    try mysql_testing.rawExec(storage, "PREPARE rui_missing FROM @rui_missing_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_missing");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_missing");
+    try mysql_testing.rawExec(storage, "SET @rui_missing_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE core_command DROP COLUMN missing_settings");
 }
 
 /// Undoes format 87's partial indexes (on MySQL, their `_lead` generated columns too). Every helper that
