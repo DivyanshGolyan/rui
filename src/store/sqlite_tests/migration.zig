@@ -496,6 +496,7 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
         try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
             "('legacy-configure',1,'',X'e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a',0,'incomplete_initial_configuration',0,0,1000)," ++
             "('legacy-create-message',2,'',X'29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127',0,'incomplete_initial_configuration',0,0,1001)");
+        try sqlite.exec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) SELECT 'legacy-create-message',session_ref,999999,1000 FROM session ORDER BY session_ref LIMIT 1");
     }
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
@@ -505,20 +506,26 @@ test "schema 53 moves forward with loaded tools defaulting to NULL" {
         try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
     }
+    // The step to 89 deletes the saved refusals that named no missing setting and keeps every other
+    // command; their keys are fresh again and are refused with the settings they lack.
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key IN ('legacy-configure','legacy-create-message')", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key='legacy-create-message'", .{}));
+    try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{})) > 0);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE missing_settings IS NOT NULL", .{}));
     var configure: wire_request.ConfigureCommand = .{};
     try configure.key.set("legacy-configure");
     const configure_replay = try storage.configure(&configure, .{});
     try std.testing.expect(configure_replay == .rejected);
-    try std.testing.expect(configure_replay.rejected.replayed);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, configure_replay.rejected.code);
+    try std.testing.expect(!configure_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, configure_replay.rejected.code);
     var message: wire_request.MessageCommand = .{ .configuration = .{} };
     try message.key.set("legacy-create-message");
     message.text = try testingBytesContent(&tmp, "legacy-message", "go");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     const message_replay = storage.submitMessageWithModel(&message, null, .{});
     try std.testing.expect(message_replay == .rejected);
-    try std.testing.expect(message_replay.rejected.replayed);
-    try std.testing.expectEqual(protocol.MessageRejection.incomplete_initial_configuration, message_replay.rejected.code);
+    try std.testing.expect(!message_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.MessageRejection.missing_settings, message_replay.rejected.code);
     const violations = try sqlite.prepare(storage.sqliteDatabase(), "PRAGMA foreign_key_check");
     defer _ = c.sqlite3_finalize(violations);
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));

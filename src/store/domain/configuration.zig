@@ -7,6 +7,7 @@ const configuration_defaults = @import("../../configuration_defaults.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
+const required_settings = @import("../../required_settings.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -45,17 +46,6 @@ pub const ConfigureReply = command_reply.ConfigureReply;
 
 fn requestedNames(requested: anytype) *const command_input.ToolsField {
     return if (@TypeOf(requested.tools) == *const command_input.ToolsField) requested.tools else &requested.tools;
-}
-
-fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
-    var selected: ?provider_name.Provider = null;
-    inline for (std.enums.values(provider_name.Provider)) |provider| {
-        if (provider_route.of(routes, provider) != .unserved) {
-            if (selected != null) return null;
-            selected = provider;
-        }
-    }
-    return selected orelse std.meta.stringToEnum(provider_name.Provider, product_defaults.provider).?;
 }
 
 fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
@@ -174,7 +164,7 @@ pub fn configurationBeforeWorkspace(
     host_tool_set: *const tool_defs.HostToolSet,
     current: ?*const CurrentConfiguration,
     requested: anytype,
-    default_provider: ?provider_name.Provider,
+    creation_provider: ?provider_name.Provider,
 ) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -188,21 +178,13 @@ pub fn configurationBeforeWorkspace(
         std.meta.stringToEnum(provider_name.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
     else
         null;
-    if (current == null and
-        (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
-            requested.compaction_trigger.state != .value or requested.tools.state != .value or
-            requested.permission_mode.state != .value or (requested.workspace.state != .value and requested.parent.state != .value) or
-            (provider == null and default_provider == null)))
-    {
-        return .incomplete_initial_configuration;
-    }
     if (current) |existing| {
         if (provider) |value| {
             if (value != existing.provider) return .provider_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), requestedNames(requested))) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else creation_provider.?), requestedNames(requested))) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
@@ -434,7 +416,9 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
     // start_agent checks parent authority before the ordinary validation round.
     // Do not cache authority against an image profile for an absent or invalid model.
-    if (modelRejection(true, &configuration.model)) |code| return code;
+    if (modelRejection(&configuration.model)) |code| return code;
+    // A missing model is named with every other missing setting once validation reaches the check.
+    if (configuration.model.state != .value) return null;
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
@@ -517,6 +501,8 @@ pub const ConfigurationReads = struct {
     parent_found: store_access.Found = .missing,
     parent_checked: bool = false,
     parent_failure: ?ParentFailure = null,
+    /// Set with a `missing_settings` rejection: the settings the new Session lacks.
+    missing: ?required_settings.Missing = null,
 
     fn instructionsValue(reads: *ConfigurationReads, configuration: *const content_custody.Configuration) *content_domain.Import {
         return if (configuration.instructions.state == .value) &reads.instructions else &reads.empty;
@@ -797,7 +783,7 @@ pub const Validation = union(enum) {
 
 const Validating = struct {
     model: model_facts.Model,
-    default_provider: ?provider_name.Provider,
+    creation_provider: ?provider_name.Provider,
     workspace_matches: ?bool,
     tools: *const command_input.ToolsField,
     loaded: *const command_input.ToolsField,
@@ -827,25 +813,51 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
     }
 }
 
-fn modelRejection(creating: bool, model: *const command_input.OptionalBounded(model_capability.max_model_bytes)) ?configuration_admission.Rejection {
+fn modelRejection(model: *const command_input.OptionalBounded(model_capability.max_model_bytes)) ?configuration_admission.Rejection {
     return switch (model.state) {
-        .omitted => if (creating) .incomplete_initial_configuration else null,
+        .omitted => null,
         .explicit_null => .invalid_model,
         .value => if (model.value.len == 0) .invalid_model else null,
     };
 }
 
-test "configuration creation requires a model and updates preserve omitted model" {
+test "a null or empty model is invalid and an omitted one is left to the missing-settings check" {
     const Model = command_input.OptionalBounded(model_capability.max_model_bytes);
     var model: Model = .{};
-    try std.testing.expectEqual(configuration_admission.Rejection.incomplete_initial_configuration, modelRejection(true, &model).?);
-    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(false, &model));
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(&model));
     model.state = .explicit_null;
-    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(creating, &model).?);
+    try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(&model).?);
     model.state = .value;
-    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(creating, &model).?);
+    try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(&model).?);
     try model.value.set("model-a");
-    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(creating, &model));
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(&model));
+}
+
+const CreationCheck = union(enum) {
+    missing: required_settings.Missing,
+    unsupported_provider,
+    complete: struct { provider: provider_name.Provider },
+};
+
+/// The one creation check: every path that creates a Session (configure, a creating Message,
+/// start_agent) reaches it after the parent is read, so the reply names every missing setting.
+fn creationCheck(configuration: *const ConfigurationView, reads: *const ConfigurationReads, served: provider_route.Routes) CreationCheck {
+    const named: ?provider_name.Provider = if (reads.inherits_parent)
+        reads.inherited.provider
+    else if (configuration.provider.state == .value)
+        std.meta.stringToEnum(provider_name.Provider, configuration.provider.value.slice()) orelse return .unsupported_provider
+    else
+        null;
+    return switch (required_settings.check(.{
+        .model = configuration.model.state == .value,
+        .workspace = configuration.workspace.state == .value,
+        .parent = reads.inherits_parent,
+        .provider = named,
+        .served = served,
+    })) {
+        .missing => |missing| .{ .missing = missing },
+        .complete => |complete| .{ .complete = .{ .provider = complete.provider } },
+    };
 }
 
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
@@ -859,7 +871,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
-    if (modelRejection(creating, configuration.model)) |rejection| return .{ .rejected = rejection };
+    if (modelRejection(configuration.model)) |rejection| return .{ .rejected = rejection };
     if (configuration.output_schema.state == .value) {
         const valid = if (configuration.output_schema.borrowedBytes()) |bytes|
             try model_settlement_domain.validateJsonBytes(bytes)
@@ -876,9 +888,17 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     if (reads.found.get()) try checkSaved(next);
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
     if (creating) if (try inheritParent(request.tools.host_tool_set, request.configuration, reads)) |code| return .{ .rejected = code };
+    const creation_provider: ?provider_name.Provider = if (creating) switch (creationCheck(configuration, reads, request.served)) {
+        .missing => |missing| {
+            reads.missing = missing;
+            return .{ .rejected = .missing_settings };
+        },
+        .unsupported_provider => return .{ .rejected = .unsupported_provider },
+        .complete => |complete| complete.provider,
+    } else null;
     reads.step = .{ .validating = undefined };
     const v = &reads.step.validating;
-    v.default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(request.served);
+    v.creation_provider = creation_provider;
     v.model = .{};
     v.model.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
     return .{ .round = .model };
@@ -895,7 +915,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
     const provider = if (configuration.provider.state == .value)
         std.meta.stringToEnum(provider_name.Provider, configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
-    else if (current_configuration) |existing| existing.provider else v.default_provider orelse return .{ .rejected = .incomplete_initial_configuration };
+    else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
         .creating = creating,
@@ -919,13 +939,11 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     reads.configuration.permission_mode = &reads.defaults.permission_mode;
     reads.configuration.reasoning_effort = &reads.defaults.reasoning_effort;
     reads.configuration.compaction_trigger = &reads.defaults.compaction_trigger;
-    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, current_configuration, configuration, v.default_provider)) |rejection| {
+    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, current_configuration, configuration, v.creation_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    if (creating) if (v.default_provider) |default_value| {
-        next.provider = default_value;
-    };
+    if (v.creation_provider) |provider_value| next.provider = provider_value;
     v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
@@ -1094,7 +1112,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(provider_name.Provider, configuration.?.provider.value.slice()) orelse return true
     else
-        saved orelse (if (configuration != null) defaultProvider(served) orelse return true else return true);
+        saved orelse (if (configuration != null) required_settings.resolveProvider(null, served) orelse return true else return true);
     return provider_route.of(served, provider) != .unserved;
 }
 

@@ -4328,7 +4328,8 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
+                      "settings_on_reload",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -4356,6 +4357,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -4363,7 +4385,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },
@@ -7535,7 +7558,7 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -7566,6 +7589,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -7573,7 +7617,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },
@@ -7665,7 +7710,7 @@
                       "loaded_tools_not_in_tools",
                       "loaded_tools_unreachable",
                       "invalid_label",
-                      "incomplete_initial_configuration",
+                      "missing_settings",
                       "unknown_preset",
                       "preset_on_update",
                       "parent_on_update",
@@ -7696,6 +7741,27 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "missing": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "model",
+                            "workspace",
+                            "provider"
+                          ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -7703,7 +7769,8 @@
                   "replayed",
                   "session",
                   "code",
-                  "message"
+                  "message",
+                  "missing"
                 ],
                 "additionalProperties": false
               },

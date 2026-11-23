@@ -71,7 +71,7 @@ test "a configure whose instructions and output schema are the same new bytes im
     }.run);
 }
 
-test "configuration pre-Workspace decisions preserve completeness and allow model revisions" {
+test "configuration pre-Workspace decisions allow model revisions" {
     const Case = struct {
         name: []const u8,
         has_current: bool,
@@ -81,22 +81,6 @@ test "configuration pre-Workspace decisions preserve completeness and allow mode
         expected: ?protocol.ConfigurationRejection,
     };
     const cases = [_]Case{
-        .{
-            .name = "new sparse request",
-            .has_current = false,
-            .workspace_requested = false,
-            .provider_requested = null,
-            .model_requested = null,
-            .expected = .incomplete_initial_configuration,
-        },
-        .{
-            .name = "new request missing model",
-            .has_current = false,
-            .workspace_requested = true,
-            .provider_requested = "codex",
-            .model_requested = null,
-            .expected = .incomplete_initial_configuration,
-        },
         .{
             .name = "new request uses Host provider",
             .has_current = false,
@@ -228,9 +212,16 @@ test "Store configuration requires Workspace and model and, on a Host serving se
                 if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
                 } else {
+                    // Every missing setting is named at once: model 1, Workspace 2, provider 4.
+                    const expected: u3 = @as(u3, if (mask & 4 == 0) 1 else 0) | @as(u3, if (mask & 1 == 0) 2 else 0) | @as(u3, if (mask & 2 == 0) 4 else 0);
                     try std.testing.expect(reply == .rejected);
-                    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, reply.rejected.code);
+                    try std.testing.expectEqual(expected, reply.rejected.missing.?.bits);
                     try std.testing.expect(!(try storage.inspectSessionForTesting(command.session.slice())).found);
+                    const replay = try storage.configure(&command, .{});
+                    try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, replay.rejected.code);
+                    try std.testing.expectEqual(expected, replay.rejected.missing.?.bits);
                 }
             }
 
@@ -339,7 +330,8 @@ test "creation accepts omitted Host settings and preserves its supplied Workspac
             missing_model.configuration.model.state = .omitted;
             const missing_model_reply = try storage.configure(&missing_model, .{});
             try std.testing.expect(missing_model_reply == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, missing_model_reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, missing_model_reply.rejected.code);
+            try std.testing.expectEqual(@as(u3, 0b001), missing_model_reply.rejected.missing.?.bits);
             inline for (.{ "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
                 var command = try completeConfiguration("missing-" ++ field, "", workspace, "model-a");
                 @field(command.configuration, field).state = .omitted;
@@ -417,7 +409,8 @@ test "an omitted provider is refused on a Host serving several" {
             command.configuration.tools = try .of(&.{});
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, reply.rejected.code);
+            try std.testing.expectEqual(@as(u3, 0b100), reply.rejected.missing.?.bits);
             try command.key.set("several-providers-named");
             command.configuration.provider.state = .value;
             try command.configuration.provider.value.set("openai");
@@ -982,7 +975,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
     }.run);
 }
 
-test "saved incomplete initialization stays rejected after Session creation" {
+test "a saved missing_settings rejection stays rejected after Session creation" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -995,7 +988,7 @@ test "saved incomplete initialization stays rejected after Session creation" {
             try incomplete.key.set("incomplete");
             const rejected = try storage.configure(&incomplete, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, rejected.rejected.code);
 
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -1009,6 +1002,7 @@ test "saved incomplete initialization stays rejected after Session creation" {
             const replay = try storage.configure(&incomplete, .{});
             try std.testing.expect(replay == .rejected);
             try std.testing.expect(replay.rejected.replayed);
+            try std.testing.expectEqual(rejected.rejected.missing.?.bits, replay.rejected.missing.?.bits);
         }
     }.run);
 }
@@ -1192,7 +1186,7 @@ test "definite rejections retain decisions without retaining payloads for config
             defer incomplete.removeTemporaryContent(std.testing.io) catch unreachable;
             const incomplete_reply = try storage.configure(&incomplete, .{});
             try std.testing.expect(incomplete_reply == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, incomplete_reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, incomplete_reply.rejected.code);
 
             var exhausted: wire_request.ConfigureCommand = .{};
             try exhausted.key.set("exhausted");
@@ -1286,10 +1280,12 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
                     const refused = storage.submitMessageWithModel(&message, null, .{});
                     try std.testing.expect(refused == .rejected);
-                    try std.testing.expectEqual(protocol.MessageRejection.incomplete_initial_configuration, refused.rejected.code);
+                    try std.testing.expectEqual(protocol.MessageRejection.missing_settings, refused.rejected.code);
+                    try std.testing.expectEqual(@as(u3, 0b010), refused.rejected.missing.?.bits);
                     const replay = storage.submitMessageWithModel(&message, null, .{});
                     try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                     try std.testing.expectEqual(refused.rejected.code, replay.rejected.code);
+                    try std.testing.expectEqual(refused.rejected.missing.?.bits, replay.rejected.missing.?.bits);
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                     try message.key.set("supplied-workspace");
                     message.configuration.?.workspace.state = .value;
@@ -1302,10 +1298,12 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                 } else {
                     const refused = try storage.configure(&configure, .{});
                     try std.testing.expect(refused == .rejected);
-                    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, refused.rejected.code);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.missing_settings, refused.rejected.code);
+                    try std.testing.expectEqual(@as(u3, 0b010), refused.rejected.missing.?.bits);
                     const replay = try storage.configure(&configure, .{});
                     try std.testing.expect(replay == .rejected and replay.rejected.replayed);
                     try std.testing.expectEqual(refused.rejected.code, replay.rejected.code);
+                    try std.testing.expectEqual(refused.rejected.missing.?.bits, replay.rejected.missing.?.bits);
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                     try configure.key.set("supplied-workspace");
                     configure.configuration.workspace.state = .value;

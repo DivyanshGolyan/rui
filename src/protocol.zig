@@ -1200,11 +1200,6 @@ fn ParserOf(comptime Custody: type) type {
                 .reload_skills => out.reload_skills = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .configuration });
-            if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
-        }
-
-        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            if (missingCreatingSetting(configuration) != null) return error.MissingField;
         }
 
         fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
@@ -1328,7 +1323,6 @@ fn ParserOf(comptime Custody: type) type {
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
             if (seen.contains(.text) and out.text.state != .value) return error.InvalidMessage;
-            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         }
 
         fn parseAddress(self: *Parser, out: *Address) !void {
@@ -2456,7 +2450,7 @@ pub const configuration_reply = struct {
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
     pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean } ++ creation_configuration_shape ++ .{execution};
     pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
-    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, execution };
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, ",\"missing\":", Hole{ .optional_json = @import("required_settings.zig").Missing }, execution };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
     pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, accepted_skills, rejected, conflict });
 };
@@ -2467,7 +2461,7 @@ pub const message_reply = struct {
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":", Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
     pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"" } ++ creation_configuration_shape ++ .{"},\"input\":"} ++
         .{ Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    const rejection = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" };
+    const rejection = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, ",\"missing\":", Hole{ .optional_json = @import("required_settings.zig").Missing }, "},\"input\":" };
     pub const rejected = rejection ++ content_reference_shape ++ .{execution};
     pub const rejected_parts = rejection ++ parts_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
@@ -3369,10 +3363,7 @@ test "protocol sparse creation preserves all omitted settings independent of fie
                 var source: MetadataSource = .{ .input = writer.buffered() };
                 const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
                 var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
-                if (present & 1 == 0) {
-                    try std.testing.expectError(error.MissingField, parseForTest(&parser));
-                    continue;
-                }
+                // A creation without a model parses: the Host names it with every other missing setting.
                 const request = try parseForTest(&parser);
                 const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
                 inline for (fields, 0..) |field, index| {
@@ -3464,7 +3455,7 @@ test "WIR-1 wire_object_grammar" {
     try publicPartSelectorGrammar();
 }
 
-test "creation requires an explicit model while require_model and sparse updates retain their rules" {
+test "creation leaves a missing model to the Host and refuses a null model while require_model and sparse updates retain their rules" {
     inline for (.{ "configure", "message" }) |kind| {
         inline for (.{ false, true }) |require_model| {
             inline for (.{ "", "\"model\":null", "\"model\":\"\"", "\"model\":\"custom\"" }, 0..) |member, model| {
@@ -3474,8 +3465,12 @@ test "creation requires an explicit model while require_model and sparse updates
                 var source: MetadataSource = .{ .input = json };
                 const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
                 var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
-                if (model < 2) {
-                    try std.testing.expectError(if (model == 0) error.MissingField else error.InvalidFieldState, parseForTest(&parser));
+                if (model == 1) {
+                    try std.testing.expectError(error.InvalidFieldState, parseForTest(&parser));
+                } else if (model == 0) {
+                    const request = try parseForTest(&parser);
+                    const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
+                    try std.testing.expectEqual(FieldState.omitted, configuration.model.state);
                 } else {
                     const request = try parseForTest(&parser);
                     const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;

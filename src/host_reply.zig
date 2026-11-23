@@ -67,8 +67,8 @@ noinline fn renderToolRejection(response: protocol.JsonOut, session: []const u8,
         break :message writer.buffered();
     } else null;
     if (comptime @hasField(@TypeOf(value), "content")) {
-        try response.appendShape(shape, .{ value.replayed, session, value.code, message, value.content.length, value.content.digest });
-    } else try response.appendShape(shape, .{ value.replayed, session, value.code, message });
+        try response.appendShape(shape, .{ value.replayed, session, value.code, message, value.missing, value.content.length, value.content.digest });
+    } else try response.appendShape(shape, .{ value.replayed, session, value.code, message, value.missing });
 }
 
 pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_reply.PublicConversationPage) !void {
@@ -380,7 +380,8 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     for (0..127) |i| names[32 + i * 33] = ',';
     try config.tools.set(&names);
     try config.loaded_tools.set(&names);
-    const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
+    const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len +
+        @import("required_settings.zig").Missing.max_json_bytes - "null".len;
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },

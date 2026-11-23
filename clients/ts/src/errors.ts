@@ -13,17 +13,23 @@ export type RequestErrorCode = RequestRejectionCode | Schemas["ErrorReply"]["cod
 type RequestErrorType = Schemas["ErrorReply"]["type"] | Status<Extract<RequestAnswer, { code: string }>>;
 type StartErrorCode = Schemas["StartError"]["rui_start_error"]["code"];
 
+/** A setting a new Session lacked, named by a `missing_settings` rejection. */
+export type MissingSetting = NonNullable<Extract<RequestAnswer, { missing: unknown }>["missing"]>[number];
+
 /** Rui rejected one request. `code` is the Host's rejection code; `message` preserves advisory detail when provided. */
 export class RuiRequestError extends Error {
 	override readonly name = "RuiRequestError";
 	readonly code: RequestErrorCode;
 	/** The Host's error class, such as `invocation_error` or `busy`. */
 	readonly type: RequestErrorType;
+	/** Every setting a new Session lacked, set exactly when `code` is `missing_settings`. */
+	readonly missing: readonly MissingSetting[] | undefined;
 
-	constructor(type: RequestErrorType, code: RequestErrorCode, message?: string | null) {
-		super(message ?? `Rui rejected the request: ${code}`);
+	constructor(type: RequestErrorType, code: RequestErrorCode, message?: string | null, missing?: readonly MissingSetting[] | null) {
+		super(message ?? (missing ? `Rui rejected the request: ${code} (${missing.join(", ")})` : `Rui rejected the request: ${code}`));
 		this.type = type;
 		this.code = code;
+		this.missing = missing ?? undefined;
 	}
 }
 

@@ -702,6 +702,13 @@ pub const Document = struct {
     }
 
     fn typeRef(d: *Document, comptime T: type) !Value {
+        if (T == @import("required_settings.zig").Missing) return d.object(.{
+            .type = Value{ .string = "array" },
+            .items = try d.enumeration(@import("required_settings.zig").Setting, false),
+            .minItems = Value{ .integer = 1 },
+            .maxItems = Value{ .integer = @typeInfo(@import("required_settings.zig").Setting).@"enum".field_names.len },
+            .uniqueItems = Value{ .bool = true },
+        });
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);

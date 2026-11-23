@@ -1,4 +1,5 @@
 const std = @import("std");
+const required_settings = @import("required_settings.zig");
 const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
 const provider_name = @import("provider_name.zig");
@@ -88,7 +89,8 @@ pub const Code = enum {
     loaded_tools_not_in_tools,
     loaded_tools_unreachable,
     invalid_label,
-    incomplete_initial_configuration,
+    missing_settings,
+    settings_on_reload,
     unknown_preset,
     preset_on_update,
     parent_on_update,
@@ -344,7 +346,8 @@ pub const Input = enum {
     tools,
     loaded_tools,
     label,
-    initial_configuration,
+    missing_settings,
+    reload_skills,
     preset,
     workspace,
     target,
@@ -366,7 +369,8 @@ pub const Input = enum {
             .session => "--session",
             .sender_handle => "RUI_SENDER_HANDLE",
             .preset => "preset",
-            .initial_configuration => "--model, --workspace, --provider",
+            .missing_settings => "--model, --workspace, --provider",
+            .reload_skills => "--reload-skills",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
             .action => "--action",
@@ -473,7 +477,8 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_not_in_tools => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "a subset of the Session's --tools, or none" }, .says = "A loaded tool is not one of the Session's tools.", .next = "Remove it from --loaded-tools, or add it to --tools first." },
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: --loaded-tools leaves tools out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
-        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "a model, a Workspace for standalone creation and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "Supply the missing model, Workspace or provider; Workspace may come from a preset or parent." },
+        .settings_on_reload => .{ .act = .fix, .input = .reload_skills, .accepted = .{ .grammar = "--reload-skills alone, with no setting, preset or model requirement" }, .says = "A Skills reload cannot change settings.", .next = "Reload Skills alone, then configure settings in a separate request." },
+        .missing_settings => .{ .act = .fix, .input = .missing_settings, .accepted = .{ .grammar = "a model, a Workspace or parent, and a provider when the Host serves several" }, .says = "A new Session is missing a required setting.", .next = "Supply each missing setting with its option, a preset or a parent." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
         .preferences_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "preferences only on creation" }, .says = "An existing Session cannot apply creation preferences.", .next = "Omit preferences from the update." },
@@ -548,6 +553,8 @@ pub const Held = struct {
     unchanged: ?[]const u8 = null,
     store: ?[]const u8 = null,
     not_sent: bool = true,
+    /// The settings a `missing_settings` rejection named; the line spells each one.
+    missing: ?required_settings.Missing = null,
 };
 
 fn writeHeld(out: *std.Io.Writer, text: []const u8) error{WriteFailed}!void {
@@ -583,7 +590,35 @@ pub fn writeLine(out: *std.Io.Writer, code: Code, held: Held) error{WriteFailed}
 }
 
 pub fn writeSavedLine(out: *std.Io.Writer, code: Code, held: Held) error{WriteFailed}!void {
-    return renderLine(out, code, .{ .resource = held.resource, .operation = held.operation }, true);
+    return renderLine(out, code, .{ .resource = held.resource, .operation = held.operation, .missing = held.missing }, true);
+}
+
+/// `--model, --workspace: A new Session is missing a model and a Workspace.`
+fn writeMissing(out: *std.Io.Writer, missing: required_settings.Missing) error{WriteFailed}!void {
+    var flags = missing.iterator();
+    var first = true;
+    while (flags.next()) |setting| {
+        if (!first) try out.writeAll(", ");
+        first = false;
+        try out.writeAll(switch (setting) {
+            .model => comptime Input.model.spelling().?,
+            .workspace => comptime Input.workspace.spelling().?,
+            .provider => comptime Input.provider.spelling().?,
+        });
+    }
+    try out.writeAll(": A new Session is missing ");
+    var nouns = missing.iterator();
+    var index: usize = 0;
+    const count = missing.count();
+    while (nouns.next()) |setting| : (index += 1) {
+        if (index != 0) try out.writeAll(if (index + 1 == count) " and " else ", ");
+        try out.writeAll(switch (setting) {
+            .model => "a model",
+            .workspace => "a Workspace",
+            .provider => "a provider",
+        });
+    }
+    try out.writeByte('.');
 }
 
 fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{WriteFailed}!void {
@@ -612,11 +647,15 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
         }
         try out.writeAll(": ");
     }
-    if (saved) if (f.input) |input| if (input.spelling()) |spelling| {
-        try out.writeAll(spelling);
-        try out.writeAll(": ");
-    };
-    try out.writeAll(f.says);
+    if (code == .missing_settings and held.missing != null) {
+        try writeMissing(out, held.missing.?);
+    } else {
+        if (saved) if (f.input) |input| if (input.spelling()) |spelling| {
+            try out.writeAll(spelling);
+            try out.writeAll(": ");
+        };
+        try out.writeAll(f.says);
+    }
     switch (held.accepted orelse f.accepted) {
         .none => {},
         .grammar => |grammar| {
@@ -743,11 +782,26 @@ test "historical model immutability rejection explains its saved policy" {
     try std.testing.expectEqualStrings("rui session configure: --model: This saved command was rejected when a Session could not change its model. Accepted: model changes within the Session's fixed provider. Next: Submit the model change with a new idempotency key. This rejection was saved and replays as saved; a resend needs a new key. [model_is_immutable]\n", out.buffered());
 }
 
-test "saved ambiguous causes do not invent missing flags or model restrictions" {
-    const initial = facts(.incomplete_initial_configuration);
-    try std.testing.expectEqualStrings("a model, a Workspace for standalone creation and a provider when the Host serves several", initial.accepted.grammar);
-    try std.testing.expectEqualStrings("A new Session's spec is missing a required setting.", initial.says);
-    try std.testing.expectEqualStrings("Supply the missing model, Workspace or provider; Workspace may come from a preset or parent.", initial.next);
+test "a missing-settings line names each missing setting by flag and noun" {
+    const cases = [_]struct { bits: u3, expected: []const u8 }{
+        .{ .bits = 0b001, .expected = "rui session configure: --model: A new Session is missing a model." },
+        .{ .bits = 0b010, .expected = "rui session configure: --workspace: A new Session is missing a Workspace." },
+        .{ .bits = 0b100, .expected = "rui session configure: --provider: A new Session is missing a provider." },
+        .{ .bits = 0b011, .expected = "rui session configure: --model, --workspace: A new Session is missing a model and a Workspace." },
+        .{ .bits = 0b110, .expected = "rui session configure: --workspace, --provider: A new Session is missing a Workspace and a provider." },
+        .{ .bits = 0b111, .expected = "rui session configure: --model, --workspace, --provider: A new Session is missing a model, a Workspace and a provider." },
+    };
+    const tail = " Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n";
+    for (cases) |case| {
+        var bytes: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        try writeSavedLine(&out, .missing_settings, .{ .resource = "session", .operation = "configure", .missing = .{ .bits = case.bits } });
+        try std.testing.expectEqualStrings(case.expected, out.buffered()[0..case.expected.len]);
+        try std.testing.expectEqualStrings(tail, out.buffered()[case.expected.len..]);
+    }
+}
+
+test "saved ambiguous causes do not invent model restrictions" {
     try std.testing.expectEqualStrings("The model ID is empty.", facts(.invalid_model).says);
     try std.testing.expectEqual(Input.provider, facts(.model_capability_unavailable).input.?);
     try std.testing.expectEqualStrings("default or a decimal from 1 to 9223372036854775807", facts(.invalid_compaction_trigger).accepted.grammar);
