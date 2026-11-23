@@ -125,7 +125,7 @@ def format_violations(root=ROOT, writers=None):
 BASELINE_NAMES = {"baseline_sqlite_ddl", "baseline_mysql_ddl", "baseline_mysql_rows", "baseline_rows"}
 BASELINE_OWNERS = {"src/store/history.zig", "src/store/testing.zig"}
 BASELINE_REFERENCES = {
-    "src/store/mysql_dialect_check.zig": 32,
+    "src/store/mysql_dialect_check.zig": 30,
     "src/store/sqlite_tests/archive_membership.zig": 8,
     "src/store/sqlite_tests/context_window_migration.zig": 2,
     "src/store/sqlite_tests/migration.zig": 26,

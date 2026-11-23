@@ -1351,33 +1351,38 @@ const fresh_74_core_command_mysql =
 
 test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
     const io = std.testing.io;
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restoreNamed("USE " ++ database_sql);
+    defer {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        restoreNamed("USE " ++ database_sql);
+    }
     inline for (.{ false, true }) |historical| {
-        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
-        try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
-        try load(migrated_database_sql, store_testing.baseline_rows, true);
-        inline for (schema.migrations) |step| {
-            if (step.from < 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
-        }
+        // history.build builds format 74 from the baseline with its rows and takes the mutex for its own statements,
+        // so this arm locks only after the build returns.
+        const start: @import("history.zig").Start = .{ .format = 74, .baseline_rows = true };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var built = try @import("history.zig").build(io, .mysql, &tmp, &start);
+        defer built.deinit();
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
         if (!historical) {
             // Swap in the frozen format-74 shape, keeping the baseline-upgraded rows.
-            try load(migrated_database_sql, "CREATE TEMPORARY TABLE fresh_74_commands AS SELECT * FROM core_command", false);
-            defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".fresh_74_commands");
-            try load(migrated_database_sql, "DROP TABLE core_command", true);
-            try load(migrated_database_sql, fresh_74_core_command_mysql, false);
-            try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM fresh_74_commands", true);
+            try load(history_sql, "CREATE TEMPORARY TABLE fresh_74_commands AS SELECT * FROM core_command", false);
+            defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".fresh_74_commands");
+            try load(history_sql, "DROP TABLE core_command", true);
+            try load(history_sql, fresh_74_core_command_mysql, false);
+            try load(history_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM fresh_74_commands", true);
         }
-        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
-        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_commands");
-        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
-        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_stops");
+        try load(history_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".original_pin_commands");
+        try load(history_sql, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ history_sql ++ ".original_pin_stops");
         inline for (schema.migrations) |step| {
-            if (step.from >= 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
+            if (step.from >= 74) try load(history_sql, schema.mysqlMigration(step.from), false);
         }
-        try expectCatalog(migrated_database_sql);
+        try expectCatalog(history_sql);
         try expectSameResults(&.{
             "SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command ORDER BY command_seq",
             "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
@@ -1391,7 +1396,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         });
         // Format 89 adds missing_settings after this step; no pre-89 command has one.
         try expectSameResults(&.{ "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", "SELECT count(*) FROM core_command WHERE missing_settings IS NOT NULL" }, &.{ "SELECT 0", "SELECT 0" });
-        try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
+        try load(history_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
