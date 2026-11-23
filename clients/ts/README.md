@@ -150,7 +150,7 @@ Following holds one line to the Host per Rui instance, shared by every watcher. 
 An idle Session makes no requests; there is no polling timer.
 A reconnect or a Host restart re-reads every watched cursor, so nothing is lost while the line was down.
 Commits the Host makes, from this instance or any other client, reach every watcher of the Session the same way.
-A Store failure ends every watcher with `RuiStoreFailedError`, as it ends every call.
+A Store failure ends every watcher with `RuiStoreFailedError`, as it ends every call. A refused line that answers `503 line_capacity_exhausted` ends its watchers with `RuiRequestError` (code `line_capacity_exhausted`); the client does not retry it.
 Pass an AbortSignal as `signal` to end the iterator immediately, even while it waits.
 
 ## Development
@@ -243,7 +243,7 @@ New Messages are rejected with `session_archiving` during settlement, and `unarc
 A later Message to an archived Session restores it transactionally before admitting new work.
 `unarchive()` restores only organization and never resumes stopped work.
 Replaying an archive request with its original key does not archive again after a later restore.
-Both methods notify local activity followers without submitting a Message or starting work.
+Both methods submit no Message and start no work; a watcher sees the change only through the Host's nudge.
 
 ## Stop one Action
 

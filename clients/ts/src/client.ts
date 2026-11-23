@@ -219,20 +219,30 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 					...(limits ? { limits } : {}),
 				});
 			} catch (error) {
-				if (this.#storeFailed) throw this.#storeFailed;
-				if (error instanceof RuiRequestError && isCanonicalFailure(error)) throw this.#latchStoreFailed(error);
-				// dispatch_fenced also comes from stop and cleanup phases, so it is classified only once the Host has exited.
-				if (error instanceof RuiRequestError && isDispatchFenced(error)) {
-					await settle(host);
-					throw this.#storeFailed ?? error;
-				}
-				if (!(error instanceof ConnectionError)) throw error;
-				const gone = await settle(host);
-				if (this.#storeFailed) throw this.#storeFailed;
-				if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
+				await this.#retryAfter(host, error, retried);
 				retried = true;
 			}
 		}
+	}
+
+	/**
+	 * The one classification of a failed attempt against `host`, shared by `call` and the line. A canonical Store failure
+	 * latches. A dispatch_fenced reply is classified only once the Host has exited, since stop and cleanup phases also send it.
+	 * A lost connection or a host_stopping reply settles the Host, then allows one retry. Returns when the attempt may be
+	 * retried; otherwise throws the error the caller reports.
+	 */
+	async #retryAfter(host: Host, error: unknown, retried: boolean): Promise<void> {
+		if (this.#storeFailed) throw this.#storeFailed;
+		if (error instanceof RuiRequestError && isCanonicalFailure(error)) throw this.#latchStoreFailed(error);
+		if (error instanceof RuiRequestError && isDispatchFenced(error)) {
+			await settle(host);
+			throw this.#storeFailed ?? error;
+		}
+		const stopping = error instanceof RuiRequestError && error.code === "host_stopping";
+		if (!(error instanceof ConnectionError || stopping)) throw error;
+		const gone = await settle(host);
+		if (this.#storeFailed) throw this.#storeFailed;
+		if (!gone || retried) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
 	}
 
 	async exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer> {
@@ -335,11 +345,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 				return;
 			} catch (error) {
 				if (this.#storeFailed) return;
-				const stopping = error instanceof RuiRequestError && error.code === "host_stopping";
-				if (!(error instanceof ConnectionError || stopping)) throw error;
-				const gone = await settle(host);
-				if (this.#storeFailed) return;
-				if (!gone || attempt > 1) throw new RuiUnavailableError("the Rui Host did not answer", { cause: error });
+				await this.#retryAfter(host, error, attempt > 1);
 			}
 		}
 	}
@@ -373,7 +379,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		}
 		// A Host restart closes a line once and then answers its successor. A line that closes twice without answering a watch
 		// set is not a restart: the Host refuses that set, so reconnecting would repeat it.
-		if (!(error instanceof LineProtocolError) && ++this.#silentCloses > 1) {
+		if (++this.#silentCloses > 1) {
 			this.follows.fail(new RuiUnavailableError("the Rui Host closed its line twice without a frame"));
 			return;
 		}
