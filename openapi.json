@@ -14577,8 +14577,12 @@
                 },
                 "listen": {
                   "type": "string",
-                  "maxLength": 11,
-                  "x-rui-max-bytes": 11
+                  "enum": [
+                    "off",
+                    "opening",
+                    "open",
+                    "unsupported"
+                  ]
                 }
               },
               "required": [

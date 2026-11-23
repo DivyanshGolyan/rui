@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { RuiRequestError, RuiWaitTimeoutError } from "../src/errors.ts";
-import { reloadTools, type Link } from "../src/sessions.ts";
+import { readToolsStatus, reloadTools, type Link } from "../src/sessions.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 
 /** Advances mocked time one step at a time, letting each poll's replies settle before the next timer is due. */
@@ -51,7 +51,11 @@ test("tools_status rows carry each stream's listen state, and reloadTools reads 
 	const result = reloadTools(link);
 	await advance(t, 500);
 	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 3, leftOut: 0 }]);
+	// Each row's listen state is parsed from its wire value, not passed through as text.
+	const status = await readToolsStatus(link);
+	assert.deepEqual(status?.servers.map((row) => [row.server, row.listen]), [["docs", "open"], ["notes", "unsupported"], ["wiki", "off"]]);
 });
+
 
 test("reloadTools asks every server, polls tools_status until each generation lands, and reports outcomes", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
