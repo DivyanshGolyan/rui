@@ -539,8 +539,10 @@ const RELOAD_WAIT_MS = 60_000;
 export interface ToolReloadOutcome {
 	server: string;
 	/** The latest outcome of the asked list. */
-	outcome: "listed" | "failed" | "collision";
+	outcome: "listed" | "failed";
 	tools: number;
+	/** Tools the server listed that the offered set left out (a clashing name, a name too long after prefixing, or the record limit). */
+	leftOut: number;
 }
 
 type ToolsAsk = Schemas["ToolsReloadReply"]["asked"][number];
@@ -572,7 +574,7 @@ export async function reloadTools(link: Link, server?: string): Promise<ToolRelo
 		if (status !== undefined && pending.length === 0) {
 			return reply.asked.map((ask) => {
 				const row = statusRow(status, ask.server);
-				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools) };
+				return { server: ask.server, outcome: toolOutcome(row), tools: Number(row.tools), leftOut: Number(row.left_out) };
 			});
 		}
 		const remaining = deadline - Date.now();

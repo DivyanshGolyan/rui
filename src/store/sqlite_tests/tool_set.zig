@@ -105,12 +105,60 @@ fn expectHostToolSet(expected: *const tool_defs.HostToolSet, saved: *const store
     try std.testing.expectEqual(expected.records.len, saved.records.len);
     for (expected.records, saved.records, expected.digests, saved.digests) |want, got, want_digest, got_digest| {
         try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqualStrings(want.remote_name, got.remote_name);
         try std.testing.expectEqual(want.owner, got.owner);
         try std.testing.expectEqualStrings(want.server, got.server);
         try std.testing.expectEqualStrings(want.description, got.description);
         try std.testing.expectEqualStrings(want.input_schema, got.input_schema);
         try std.testing.expectEqualSlices(u8, &want_digest, &got_digest);
     }
+}
+
+test "a prefixed MCP tool keeps the name its server listed through a save and read" {
+    const prefixed = store_testing.hostToolRecordsWith(&.{.{ .name = "docs__bash", .remote_name = "bash", .owner = .mcp, .server = "docs", .description = "Run the docs bash.", .input_schema = "{\"type\":\"object\"}" }});
+    var digests: [prefixed.len][32]u8 = undefined;
+    for (&prefixed, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+    const prefixed_set: tool_defs.HostToolSet = .{ .records = &prefixed, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    try storage.saveHostToolSet(&prefixed_set);
+    try storage.close();
+
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+    var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
+    defer saved.deinit(std.testing.allocator);
+    try expectHostToolSet(&prefixed_set, &saved);
+    const at = saved.toolSet().find("docs__bash").?;
+    try std.testing.expectEqualStrings("bash", saved.toolSet().records[at].remote_name);
+    try std.testing.expectEqual(tool_defs.Owner.mcp, saved.toolSet().records[at].owner);
+}
+
+test "a saved MCP tool with no remote name keeps its digest and is found again, not duplicated" {
+    const records = store_testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+    var digests: [records.len][32]u8 = undefined;
+    for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+    // An unprefixed MCP tool keeps the digest it had before remote names existed, so a set saved then is found now.
+    const fetch_at = (tool_defs.HostToolSet{ .records = &records, .digests = &digests }).find("fetch_page").?;
+    try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(digests[fetch_at], .lower));
+    const set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    try storage.saveHostToolSet(&set);
+    try storage.close();
+
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+    const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record", .{});
+    try storage.saveHostToolSet(&set);
+    try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record", .{}));
+    var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
+    defer saved.deinit(std.testing.allocator);
+    try expectHostToolSet(&set, &saved);
 }
 
 test "a Store opened without a tool set reads back the last one saved, an MCP server's tools included" {

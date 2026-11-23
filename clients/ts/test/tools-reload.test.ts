@@ -17,7 +17,7 @@ async function advance(t: { mock: { timers: { tick(ms: number): void } } }, ms: 
 const HOST = "11".repeat(16);
 const RESTARTED_HOST = "22".repeat(16);
 
-type Row = { server: string; state: "idle" | "listing" | "waiting"; last: "never" | "listed" | "failed" | "collision"; finished: string; tools: string };
+type Row = { server: string; state: "idle" | "listing" | "waiting"; last: "never" | "listed" | "failed"; finished: string; tools: string; left_out: string };
 
 /** A Link whose tools-reload reply comes from `reloadInstance` and whose status replies come from `statusInstance`. */
 function fakeLink(asked: { server: string; generation: string }[], statuses: (Row[] | "busy")[], reloadInstance = HOST, statusInstance = HOST) {
@@ -43,12 +43,12 @@ function fakeLink(asked: { server: string; generation: string }[], statuses: (Ro
 test("reloadTools asks every server, polls tools_status until each generation lands, and reports outcomes", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const waiting: Row[] = [
-		{ server: "docs", state: "listing", last: "listed", finished: "1", tools: "10" },
-		{ server: "notes", state: "waiting", last: "failed", finished: "1", tools: "0" },
+		{ server: "docs", state: "listing", last: "listed", finished: "1", tools: "10", left_out: "0" },
+		{ server: "notes", state: "waiting", last: "failed", finished: "1", tools: "0", left_out: "0" },
 	];
 	const landed: Row[] = [
-		{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "12" },
-		{ server: "notes", state: "idle", last: "failed", finished: "2", tools: "0" },
+		{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "12", left_out: "0" },
+		{ server: "notes", state: "idle", last: "failed", finished: "2", tools: "0", left_out: "0" },
 	];
 	const { link, bodies, polls } = fakeLink(
 		[{ server: "docs", generation: "2" }, { server: "notes", generation: "2" }],
@@ -57,8 +57,8 @@ test("reloadTools asks every server, polls tools_status until each generation la
 	const result = reloadTools(link);
 	await advance(t, 500);
 	assert.deepEqual(await result, [
-		{ server: "docs", outcome: "listed", tools: 12 },
-		{ server: "notes", outcome: "failed", tools: 0 },
+		{ server: "docs", outcome: "listed", tools: 12, leftOut: 0 },
+		{ server: "notes", outcome: "failed", tools: 0, leftOut: 0 },
 	]);
 	assert.equal(polls(), 3);
 	assert.deepEqual(bodies[0], { path: "/v1/control/tools-reload", body: { version: WIRE_VERSION, kind: "tools_reload", store: 'store"\n' } });
@@ -68,9 +68,9 @@ test("reloadTools asks every server, polls tools_status until each generation la
 test("reloadTools names one server when asked and treats a finished generation above the ask as landed", async () => {
 	const { link, bodies } = fakeLink(
 		[{ server: "docs", generation: "3" }],
-		[[{ server: "docs", state: "idle", last: "collision", finished: "4", tools: "0" }]],
+		[[{ server: "docs", state: "idle", last: "failed", finished: "4", tools: "0", left_out: "0" }]],
 	);
-	assert.deepEqual(await reloadTools(link, "docs"), [{ server: "docs", outcome: "collision", tools: 0 }]);
+	assert.deepEqual(await reloadTools(link, "docs"), [{ server: "docs", outcome: "failed", tools: 0, leftOut: 0 }]);
 	assert.deepEqual(bodies[0]?.body, { version: WIRE_VERSION, kind: "tools_reload", store: 'store"\n', server: "docs" });
 });
 
@@ -83,7 +83,7 @@ test("reloadTools with no configured servers resolves to an empty list without p
 test("reloadTools rejects an invalid reply when an asked server has no status row", async () => {
 	const { link } = fakeLink(
 		[{ server: "docs", generation: "2" }, { server: "notes", generation: "2" }],
-		[[{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "1" }]],
+		[[{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "1", left_out: "0" }]],
 	);
 	await assert.rejects(reloadTools(link), (error: unknown) => error instanceof RuiRequestError && error.code === "invalid_response");
 });
@@ -91,25 +91,25 @@ test("reloadTools rejects an invalid reply when an asked server has no status ro
 test("reloadTools rejects an invalid reply when a landed server reports never", async () => {
 	const { link } = fakeLink(
 		[{ server: "docs", generation: "2" }],
-		[[{ server: "docs", state: "idle", last: "never", finished: "2", tools: "0" }]],
+		[[{ server: "docs", state: "idle", last: "never", finished: "2", tools: "0", left_out: "0" }]],
 	);
 	await assert.rejects(reloadTools(link), (error: unknown) => error instanceof RuiRequestError && error.code === "invalid_response");
 });
 
 test("reloadTools in a restarted Host waits out finished 0 and lands once its startup list has finished", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-	const startingUp: Row[] = [{ server: "docs", state: "listing", last: "never", finished: "0", tools: "0" }];
-	const startupListed: Row[] = [{ server: "docs", state: "idle", last: "listed", finished: "1", tools: "7" }];
+	const startingUp: Row[] = [{ server: "docs", state: "listing", last: "never", finished: "0", tools: "0", left_out: "0" }];
+	const startupListed: Row[] = [{ server: "docs", state: "idle", last: "listed", finished: "1", tools: "7", left_out: "0" }];
 	const { link, polls } = fakeLink([{ server: "docs", generation: "5" }], [startingUp, startupListed], HOST, RESTARTED_HOST);
 	const result = reloadTools(link, "docs");
 	await advance(t, 500);
-	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 7 }]);
+	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 7, leftOut: 0 }]);
 	assert.equal(polls(), 2);
 });
 
 test("reloadTools rejects with RuiWaitTimeoutError after 60 seconds naming the servers still listing", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-	const stuck: Row[] = [{ server: "docs", state: "listing", last: "never", finished: "0", tools: "0" }];
+	const stuck: Row[] = [{ server: "docs", state: "listing", last: "never", finished: "0", tools: "0", left_out: "0" }];
 	const { link } = fakeLink([{ server: "docs", generation: "1" }], [stuck]);
 	const result = reloadTools(link).then(
 		() => assert.fail("expected a timeout"),
@@ -124,10 +124,10 @@ test("reloadTools rejects with RuiWaitTimeoutError after 60 seconds naming the s
 
 test("reloadTools keeps polling through a busy Host until the asked list lands", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-	const landed: Row[] = [{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "12" }];
+	const landed: Row[] = [{ server: "docs", state: "idle", last: "listed", finished: "2", tools: "12", left_out: "0" }];
 	const { link, polls } = fakeLink([{ server: "docs", generation: "2" }], ["busy", "busy", landed]);
 	const result = reloadTools(link);
 	await advance(t, 500);
-	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 12 }]);
+	assert.deepEqual(await result, [{ server: "docs", outcome: "listed", tools: 12, leftOut: 0 }]);
 	assert.equal(polls(), 3);
 });

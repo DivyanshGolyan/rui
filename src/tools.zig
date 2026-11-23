@@ -11,6 +11,7 @@ pub const Record = @import("tool_record.zig").Record;
 pub const max_name_bytes = @import("tool_record.zig").max_name_bytes;
 pub const max_tools = @import("tool_record.zig").max_tools;
 pub const recordDigest = @import("tool_record.zig").recordDigest;
+pub const remoteNameOf = @import("tool_record.zig").remoteNameOf;
 pub const RecordIdentity = @import("tool_record.zig").RecordIdentity;
 pub const SetDigest = @import("tool_record.zig").SetDigest;
 pub const HostToolSet = @import("tool_record.zig").HostToolSet;

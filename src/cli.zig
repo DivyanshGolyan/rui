@@ -1111,9 +1111,11 @@ fn writeToolsNotice(writer: *std.Io.Writer, outcomes: *const client.ToolsOutcome
         if (index != 0) try writer.writeAll(", ");
         try writer.writeAll(row.server.slice());
         switch (row.outcome) {
-            .listed => try writer.print(" {d}", .{row.tools}),
+            .listed => {
+                try writer.print(" {d}", .{row.tools});
+                if (row.left_out != 0) try writer.print(" ({d} left out)", .{row.left_out});
+            },
             .failed => try writer.writeAll(" failed"),
-            .collision => try writer.writeAll(" collision"),
         }
     }
     try writer.writeAll("\n");

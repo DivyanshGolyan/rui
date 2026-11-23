@@ -106,7 +106,11 @@ pub const Owner = enum { rui, provider, mcp };
 pub const max_server_bytes = tool_name.max_bytes;
 
 pub const Record = struct {
+    /// The offered name: the model's name for the tool and the key every Session reads.
     name: []const u8,
+    /// The name the owning server listed, read through `remoteName`. Empty means the offered name,
+    /// which is every built-in and every unprefixed MCP tool; only a prefixed MCP tool differs (offered.zig).
+    remote_name: []const u8 = "",
     description: []const u8 = "",
     input_schema: []const u8 = "",
     owner: Owner,
@@ -115,7 +119,22 @@ pub const Record = struct {
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
     }
+
+    /// The one reader of the remote name: the name a server listed, which a tools/call sends.
+    pub fn remoteName(self: *const Record) []const u8 {
+        return remoteNameOf(self.name, self.remote_name);
+    }
+
+    /// The remote name as the Store keeps it: empty when it is the offered name.
+    pub fn storedRemoteName(self: *const Record) []const u8 {
+        return if (std.mem.eql(u8, self.remoteName(), self.name)) "" else self.remote_name;
+    }
 };
+
+/// The rule behind `Record.remoteName`, for a row that holds the offered name and its stored remote name.
+pub fn remoteNameOf(name: []const u8, remote_name: []const u8) []const u8 {
+    return if (remote_name.len == 0) name else remote_name;
+}
 
 pub const max_name_bytes = tool_name.max_bytes;
 
@@ -124,6 +143,7 @@ pub const max_tools = tool_name.max_tools;
 pub fn recordDigest(member: *const Record) [32]u8 {
     return (RecordIdentity{
         .name = member.name,
+        .remote_name = member.remote_name,
         .owner = member.owner,
         .server = member.server,
         .description = content_string.digest(member.description),
@@ -133,6 +153,8 @@ pub fn recordDigest(member: *const Record) [32]u8 {
 
 pub const RecordIdentity = struct {
     name: []const u8,
+    /// Empty or equal to `name` for every record but a prefixed MCP tool; see `Record.remote_name`.
+    remote_name: []const u8,
     owner: Owner,
     server: []const u8,
     description: [32]u8,
@@ -142,6 +164,12 @@ pub const RecordIdentity = struct {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hashField(&hash, "rui/tool-record/v1");
         hashField(&hash, self.name);
+        // A remote name joins the identity only when it differs from the offered name, under its own tag,
+        // so every record without one keeps the digest it had before remote names existed.
+        if (self.remote_name.len != 0 and !std.mem.eql(u8, self.remote_name, self.name)) {
+            hashField(&hash, "rui/tool-record/remote-name");
+            hashField(&hash, self.remote_name);
+        }
         hashField(&hash, @tagName(self.owner));
         hashField(&hash, self.server);
         hash.update(&self.description);
@@ -266,7 +294,7 @@ pub const HostToolSet = struct {
     pub fn valid(self: *const HostToolSet) bool {
         if (self.records.len != self.digests.len or self.records.len > max_host_tool_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
-            if (!tool_name.valid(each.name) or !validServer(each)) return false;
+            if (!tool_name.valid(each.name) or !validServer(each) or !validRemoteName(each)) return false;
             if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
             if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
         }
@@ -277,6 +305,21 @@ pub const HostToolSet = struct {
 pub fn validServer(each: *const Record) bool {
     return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0;
 }
+
+/// Empty or the offered name for a built-in. An MCP tool's remote name is the name its server listed,
+/// valid as a tool name, and its offered name is that name or `<server>__<remote name>`.
+pub fn validRemoteName(each: *const Record) bool {
+    if (each.remote_name.len == 0 or std.mem.eql(u8, each.name, each.remote_name)) return true;
+    if (each.owner != .mcp or !tool_name.valid(each.remote_name)) return false;
+    const prefix = each.server.len + prefix_separator.len;
+    return each.name.len == prefix + each.remote_name.len and
+        std.mem.startsWith(u8, each.name, each.server) and
+        std.mem.eql(u8, each.name[each.server.len..][0..prefix_separator.len], prefix_separator) and
+        std.mem.endsWith(u8, each.name, each.remote_name);
+}
+
+/// Joins a server name and a listed name into the offered name of a tool whose listed name clashes.
+pub const prefix_separator = "__";
 
 pub const max_host_tool_records = 1024;
 
@@ -575,7 +618,7 @@ pub fn selectDigests(records: []const Record, snapshots: anytype, out: [][32]u8)
 // A snapshot serves only the exact record it was generated from. A changed record is hashed
 // normally, so an out-of-date snapshot cannot change a tool's persistent identity.
 fn sameRecord(a: *const Record, b: anytype) bool {
-    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and
+    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.storedRemoteName().len == 0 and
         std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
         std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
 }
@@ -671,6 +714,21 @@ test "EXR-65 tool identities survive matching, stale and missing digest snapshot
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
     const old = recordDigest(&before);
     try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
+}
+
+test "a remote name joins a digest only when it differs from the offered name" {
+    const plain: Record = .{ .name = "search", .owner = .mcp, .server = "docs", .input_schema = "{}" };
+    var explicit = plain;
+    explicit.remote_name = "search";
+    try std.testing.expectEqualSlices(u8, &recordDigest(&plain), &recordDigest(&explicit));
+    try std.testing.expectEqualStrings("", plain.storedRemoteName());
+    try std.testing.expectEqualStrings("", explicit.storedRemoteName());
+    const prefixed: Record = .{ .name = "docs__search", .remote_name = "search", .owner = .mcp, .server = "docs", .input_schema = "{}" };
+    try std.testing.expectEqualStrings("search", prefixed.remoteName());
+    try std.testing.expectEqualStrings("search", prefixed.storedRemoteName());
+    try std.testing.expect(!std.mem.eql(u8, &recordDigest(&plain), &recordDigest(&prefixed)));
+    try std.testing.expect(validRemoteName(&prefixed));
+    try std.testing.expect(!validRemoteName(&.{ .name = "docs__search", .remote_name = "search", .owner = .rui, .input_schema = "{}" }));
 }
 
 test "MCP missing tools tool set resolution covers every empty-server combination" {
