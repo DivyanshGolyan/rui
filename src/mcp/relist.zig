@@ -8,7 +8,7 @@ pub const ttl_floor_ms: u64 = 60_000;
 pub const max_jitter_ms: u64 = 30_000;
 
 /// What a list that landed says about its freshness. `ttl_ms` is the smallest positive ttlMs over its
-/// pages, or null when no page carried one (absent, 0 or negative): no timer.
+/// pages, or null when no page carried a positive integer one (absent, 0, negative, non-integer or out of range): no timer.
 pub const Listed = struct { ttl_ms: ?u64, seed: u64 };
 pub const Outcome = union(enum) { listed: Listed, failed };
 pub const Last = enum { never, listed, failed };
@@ -114,9 +114,11 @@ pub fn jittered(delay_ms: u64, seed: u64) u64 {
     return delay_ms +| splitmix64(seed) % (spread + 1);
 }
 
-/// The per-list seed: deterministic in the Host's seed, the server's index and the list's generation.
-pub fn mix(host_seed: u64, index: usize, generation: u64) u64 {
-    return splitmix64(splitmix64(host_seed ^ splitmix64(index)) ^ generation);
+/// The seed of one list's jitter: deterministic in the Host's seed, the server's index, the list's generation
+/// (`Slot.started`) and the awake-clock ms it landed at. The generation alone repeats across ttl cycles that
+/// no ask folds into, so the landing time is what makes each cycle draw its own offset.
+pub fn mix(host_seed: u64, index: usize, generation: u64, landed_ms: u64) u64 {
+    return splitmix64(splitmix64(splitmix64(host_seed ^ splitmix64(index)) ^ generation) ^ landed_ms);
 }
 
 fn splitmix64(input: u64) u64 {
@@ -143,6 +145,7 @@ const Snap = struct {
     last: Last,
     due: bool,
     wake: ?u64,
+    stale_at_ms: ?u64 = null,
 };
 
 fn snap(slot: *const Slot, now_ms: u64) Snap {
@@ -156,6 +159,7 @@ fn snap(slot: *const Slot, now_ms: u64) Snap {
         .last = slot.last,
         .due = slot.due(now_ms),
         .wake = slot.wakeAt(),
+        .stale_at_ms = slot.stale_at_ms,
     };
 }
 
@@ -245,6 +249,54 @@ test "re-list slots fold asks, answer each ask once and back off failures" {
     saturated.begin();
     saturated.end(.failed, 0);
     try expectSnap(&saturated, 0, .{ .state = .waiting, .asked = 2, .started = 2, .finished = 2, .failures = std.math.maxInt(u32), .retry_at_ms = max_retry_ms, .last = .failed, .due = false, .wake = max_retry_ms });
+}
+
+test "re-list slots carry the ttl deadline through asks, folds, failures and successes" {
+    var s: Slot = .{};
+    _ = s.want();
+    s.begin();
+    s.end(listedWith(120_000), 0);
+    const first = s.stale_at_ms.?;
+    try std.testing.expect(first >= 120_000 and first <= 132_000);
+    // An ask while idle with a deadline set is due at once; the deadline stays until the list begins.
+    try expectSnap(&s, 0, .{ .state = .idle, .asked = 1, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 0, .last = .listed, .due = false, .wake = first, .stale_at_ms = first });
+    _ = s.want();
+    try expectSnap(&s, 0, .{ .state = .idle, .asked = 2, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 0, .last = .listed, .due = true, .wake = 0, .stale_at_ms = first });
+
+    // A fold during a list that the deadline started: beginning clears the deadline, and the ask made mid-list folds into one more list.
+    s.begin();
+    _ = s.want();
+    try expectSnap(&s, 0, .{ .state = .listing, .asked = 3, .started = 2, .finished = 1, .failures = 0, .retry_at_ms = 0, .last = .listed, .due = false, .wake = null, .stale_at_ms = null });
+    s.end(listedWith(120_000), 50_000);
+    const second = s.stale_at_ms.?;
+    try std.testing.expect(second >= 170_000 and second <= 182_000);
+    try expectSnap(&s, 50_000, .{ .state = .idle, .asked = 3, .started = 2, .finished = 2, .failures = 0, .retry_at_ms = 0, .last = .listed, .due = true, .wake = 0, .stale_at_ms = second });
+    s.begin();
+    s.end(listedWith(120_000), 60_000);
+    const third = s.stale_at_ms.?;
+    try expectSnap(&s, 60_000, .{ .state = .idle, .asked = 3, .started = 3, .finished = 3, .failures = 0, .retry_at_ms = 0, .last = .listed, .due = false, .wake = third, .stale_at_ms = third });
+    try std.testing.expect(!s.due(third - 1));
+    try std.testing.expect(s.due(third));
+
+    // A failed list clears the deadline and backoff owns the retry; the retry is due at its time and not before.
+    _ = s.want();
+    s.begin();
+    s.end(.failed, 200_000);
+    try expectSnap(&s, 200_000, .{ .state = .waiting, .asked = 4, .started = 4, .finished = 4, .failures = 1, .retry_at_ms = 201_000, .last = .failed, .due = false, .wake = 201_000, .stale_at_ms = null });
+    try expectSnap(&s, 201_000, .{ .state = .waiting, .asked = 4, .started = 4, .finished = 4, .failures = 1, .retry_at_ms = 201_000, .last = .failed, .due = true, .wake = 201_000, .stale_at_ms = null });
+
+    // The retry lands: the failure count clears and a new deadline is set from the landing time.
+    s.begin();
+    s.end(listedWith(120_000), 201_000);
+    const fourth = s.stale_at_ms.?;
+    try expectSnap(&s, 201_000, .{ .state = .idle, .asked = 4, .started = 4, .finished = 4, .failures = 0, .retry_at_ms = 201_000, .last = .listed, .due = false, .wake = fourth, .stale_at_ms = fourth });
+
+    // A begun list that ends as a failure (the shell does this when Pending.start returns null or a publish fails)
+    // leaves no deadline, so backoff owns the retry.
+    _ = s.want();
+    s.begin();
+    s.end(.failed, 300_000);
+    try expectSnap(&s, 300_000, .{ .state = .waiting, .asked = 5, .started = 5, .finished = 5, .failures = 1, .retry_at_ms = 301_000, .last = .failed, .due = false, .wake = 301_000, .stale_at_ms = null });
 }
 
 fn listedWith(ttl_ms: ?u64) Outcome {
@@ -342,10 +394,11 @@ test "EXR-70 staleAt stays within its bounds for every seed and is deterministic
 }
 
 test "EXR-70 mix and jittered are deterministic and differ across their inputs" {
-    try std.testing.expectEqual(mix(9, 2, 3), mix(9, 2, 3));
-    try std.testing.expect(mix(9, 2, 3) != mix(9, 3, 3));
-    try std.testing.expect(mix(9, 2, 3) != mix(9, 2, 4));
-    try std.testing.expect(mix(9, 2, 3) != mix(10, 2, 3));
+    try std.testing.expectEqual(mix(9, 2, 3, 40), mix(9, 2, 3, 40));
+    try std.testing.expect(mix(9, 2, 3, 40) != mix(9, 3, 3, 40));
+    try std.testing.expect(mix(9, 2, 3, 40) != mix(9, 2, 4, 40));
+    try std.testing.expect(mix(9, 2, 3, 40) != mix(10, 2, 3, 40));
+    try std.testing.expect(mix(9, 2, 3, 40) != mix(9, 2, 3, 41));
     try std.testing.expect(jittered(100_000, 5) <= 110_000);
     try std.testing.expect(jittered(100_000, 5) >= 100_000);
 }
