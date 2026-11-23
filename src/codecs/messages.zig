@@ -129,6 +129,305 @@ pub fn finish(stream: *const Stream) ?Reason {
 }
 
 // ---------------------------------------------------------------------------
+// Request encoding
+// ---------------------------------------------------------------------------
+
+/// Resumable state at every history-element boundary (the history memo's carry).
+/// The Messages wire groups blocks into alternating role messages, so the carry is
+/// "which role message is open and what separator comes next". A memo copy ends
+/// inside an open message; the next request resumes there and appends, byte-identical
+/// to a rebuild. Closing the open message "depends on being last" and happens at
+/// `tools_start`, after `history_end`.
+pub const Carry = struct {
+    messages: enum(u8) { unopened, first, comma } = .unopened,
+    open: Open = .none,
+    /// Whether the open message's content array already holds a block.
+    block: enum(u8) { first, comma } = .first,
+    /// Whether the tools array is open: `tools_start` closes the messages, then `tool` items open it.
+    tools_open: bool = false,
+    /// Inside an image group, whether a part was written, so the next one needs a comma.
+    /// An image group spans several elements, so this is carry, not a fact of one element.
+    part_comma: bool = false,
+};
+
+const Open = enum(u8) { none, user, assistant };
+
+pub fn initial(starting_effort: ?codec_abi.Effort) Carry {
+    _ = starting_effort; // effort is top-level per request on this wire
+    return .{};
+}
+
+pub const Encoder = struct {
+    carry: Carry,
+    /// The current Operation's effort, from the last `operation` or `effort_update`
+    /// item. It is not carry: it is a fact of this request, not of the span.
+    effort: ?codec_abi.Effort = null,
+    effort_seen: bool = false,
+    item: enum(u8) { none, reasoning, message, call } = .none,
+    /// Inside an output item: whether a block was written (message) or a member (reasoning).
+    member: bool = false,
+    digits: [10]u8 = undefined,
+
+    pub fn encodeItem(self: *Encoder, header: *const codec_abi.ItemHeader, out: *codec_abi.Pieces) error{Declined}!void {
+        out.len = 0;
+        switch (header.item) {
+            .settings => |*settings| {
+                // The Messages wire requires max_tokens; an unset limit cannot be sent.
+                if (settings.output_limit == 0) return error.Declined;
+                out.literal("{\"model\":\"");
+                out.content(0, .json_string_v1);
+                const digits = std.fmt.bufPrint(&self.digits, "{d}", .{settings.output_limit}) catch unreachable;
+                out.literal("\",\"max_tokens\":");
+                out.literal(digits);
+                out.literal(",\"stream\":true,\"cache_control\":{\"type\":\"ephemeral\"}");
+            },
+            .message => |author| {
+                // The Session's instructions arrive before history_start: they are the top-level system prompt.
+                if (author == .instruction and self.carry.messages == .unopened) {
+                    out.literal(",\"system\":\"");
+                    out.content(0, .json_string_v1);
+                    out.literal("\"");
+                    return;
+                }
+                // Mid-history instructions are user text: mid-conversation `role:"system"` messages are refused by some models.
+                self.ensure(.user, out);
+                out.literal("{\"type\":\"text\",\"text\":\"");
+                if (header.has(1)) {
+                    out.content(1, .json_string_v1);
+                    out.literal("\"},{\"type\":\"text\",\"text\":\"");
+                }
+                out.content(0, .json_string_v1);
+                out.literal("\"}");
+            },
+            .output_open => |output| {
+                self.member = false;
+                switch (output.kind) {
+                    // A thinking or redacted block: `type` lives in the bag and is written at close.
+                    .reasoning => {
+                        self.ensure(.assistant, out);
+                        out.literal("{");
+                        self.item = .reasoning;
+                    },
+                    // A message's block opens at its first part, so an empty message writes nothing.
+                    .message => self.item = .message,
+                    .function_call => {
+                        self.ensure(.assistant, out);
+                        out.literal("{\"type\":\"tool_use\",\"id\":\"");
+                        out.content(1, .json_string_v1);
+                        out.literal("\",\"name\":\"");
+                        out.content(0, .json_string_v1);
+                        out.literal("\",\"input\":");
+                        out.content(2, .verbatim);
+                        self.item = .call;
+                    },
+                    // Neither is produced by this family, and replay omits them across families.
+                    .compaction, .web_search_call => return error.Declined,
+                }
+            },
+            .output_part => |part| switch (self.item) {
+                .reasoning => {
+                    if (part.kind != .reasoning_text or !header.has(0)) return error.Declined;
+                    out.literal("\"thinking\":\"");
+                    out.content(0, .json_string_v1);
+                    out.literal("\"");
+                    self.member = true;
+                },
+                .message => {
+                    if (part.kind != .output_text and part.kind != .refusal) return error.Declined;
+                    if (!header.has(0)) return error.Declined; // opaque parts never reach a foreign family
+                    if (self.member) {
+                        out.literal("},{\"type\":\"text\",\"text\":\"");
+                    } else {
+                        self.ensure(.assistant, out);
+                        out.literal("{\"type\":\"text\",\"text\":\"");
+                    }
+                    out.content(0, .json_string_v1);
+                    out.literal("\"");
+                    self.member = true;
+                },
+                .call, .none => return error.Declined,
+            },
+            .output_close => {
+                switch (self.item) {
+                    // thinking: `"thinking":…` then the bag (`"type":"thinking","signature":…`);
+                    // redacted: the bag alone, which carries the whole block.
+                    .reasoning => {
+                        if (!self.member and !header.has(0)) return error.Declined;
+                        if (header.has(0)) {
+                            if (self.member) out.literal(",");
+                            out.content(0, .verbatim);
+                        }
+                        out.literal("}");
+                    },
+                    // A message with no block wrote nothing, so closing it writes nothing.
+                    .message => if (self.member) {
+                        if (header.has(0)) {
+                            out.literal(",");
+                            out.content(0, .verbatim);
+                        }
+                        out.literal("}");
+                    },
+                    .call => {
+                        if (header.has(0)) {
+                            out.literal(",");
+                            out.content(0, .verbatim);
+                        }
+                        out.literal("}");
+                    },
+                    .none => return error.Declined,
+                }
+                self.item = .none;
+                self.member = false;
+            },
+            .tool_result => {
+                self.ensure(.user, out);
+                out.literal("{\"type\":\"tool_result\",\"tool_use_id\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\",\"content\":\"");
+                out.content(1, .json_string_v1);
+                out.literal("\"}");
+            },
+            .image_message_open => |author| {
+                _ = author; // both authors are user content on this wire
+                // ensure() already wrote the separator for the first part.
+                self.ensure(.user, out);
+                self.carry.part_comma = false;
+            },
+            .image_message_close => {},
+            .image_tool_open => {
+                self.ensure(.user, out);
+                self.carry.part_comma = false;
+                out.literal("{\"type\":\"tool_result\",\"tool_use_id\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\",\"content\":[");
+            },
+            .image_tool_close => {
+                out.literal("]}");
+            },
+            .input_text => {
+                self.partSeparator(out);
+                out.literal("{\"type\":\"text\",\"text\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\"}");
+            },
+            .input_image => |mime| {
+                self.partSeparator(out);
+                out.literal(switch (mime) {
+                    .png => "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"",
+                    .jpeg => "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"",
+                });
+                out.base64(0);
+                out.literal("\"}}");
+            },
+            // Effort is top-level on this wire, so an effort change costs the cache, as on `openai-responses/3`.
+            .operation => |effort| {
+                self.effort = effort;
+                self.effort_seen = true;
+            },
+            .effort_update => |effort| {
+                self.effort = effort;
+                self.effort_seen = true;
+            },
+            .declare_open, .declared_tool, .declare_close => return error.Declined,
+            .history_start => if (self.carry.messages == .unopened) {
+                out.literal(",\"messages\":[");
+                self.carry.messages = .first;
+            },
+            .history_end => {},
+            // No provider compaction on this wire (`codecs.compacts` is false).
+            .compaction_trigger => return error.Declined,
+            .tools_start => {
+                // The history needs a message; the open message closes here, then the array.
+                if (self.carry.messages != .comma) return error.Declined;
+                out.literal(if (self.carry.open != .none) "]}]" else "]");
+                self.carry.open = .none;
+                self.carry.tools_open = false;
+            },
+            .tool => {
+                out.literal(if (self.carry.tools_open) "," else ",\"tools\":[");
+                self.carry.tools_open = true;
+                out.literal("{\"name\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\",\"description\":\"");
+                out.content(1, .json_string_v1);
+                out.literal("\",\"input_schema\":");
+                out.content(2, .verbatim);
+                out.literal("}");
+            },
+            // Hosted web search is a connection fact; no Messages connection runs it.
+            .web_search => return error.Declined,
+            .text_format => {
+                // Decline before writing anything: a declined item must leave no partial output.
+                if (!self.effort_seen) return error.Declined;
+                if (self.carry.tools_open) {
+                    out.literal("]");
+                    self.carry.tools_open = false;
+                }
+                const schema = header.has(0);
+                if (self.effort) |effort| out.literal(if (effort == .none) ",\"thinking\":{\"type\":\"disabled\"}" else ",\"thinking\":{\"type\":\"adaptive\"}");
+                const effort_config: ?codec_abi.Effort = if (self.effort) |effort| if (effort == .none) null else effort else null;
+                if (effort_config) |effort| {
+                    if (schema) {
+                        out.literal(effortWithSchema(effort));
+                        out.content(0, .verbatim);
+                        out.literal("}}");
+                    } else out.literal(effortOnly(effort));
+                } else if (schema) {
+                    out.literal(",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":");
+                    out.content(0, .verbatim);
+                    out.literal("}}");
+                }
+            },
+            .request_end => out.literal("}"),
+        }
+    }
+
+    /// Makes `role` the open message and writes the separator its next block needs.
+    /// Consecutive same-role elements (tool results then a user message, or a
+    /// reasoning item then a call) share one message, which also keeps all of one
+    /// response's tool results in one user message, as the wire requires, and a
+    /// thinking block ahead of its tool_use.
+    fn ensure(self: *Encoder, role: Open, out: *codec_abi.Pieces) void {
+        if (self.carry.open == role) {
+            if (self.carry.block == .comma) out.literal(",");
+            self.carry.block = .comma;
+            return;
+        }
+        if (self.carry.open != .none) {
+            out.literal("]},");
+        } else if (self.carry.messages == .comma) {
+            out.literal(",");
+        }
+        out.literal(switch (role) {
+            .user => "{\"role\":\"user\",\"content\":[",
+            .assistant => "{\"role\":\"assistant\",\"content\":[",
+            .none => unreachable,
+        });
+        self.carry.open = role;
+        self.carry.messages = .comma;
+        self.carry.block = .comma;
+    }
+
+    /// Separates the parts of one image group (a user message's or a tool result's content).
+    fn partSeparator(self: *Encoder, out: *codec_abi.Pieces) void {
+        if (self.carry.part_comma) out.literal(",");
+        self.carry.part_comma = true;
+    }
+};
+
+fn effortOnly(effort: codec_abi.Effort) []const u8 {
+    return switch (effort) {
+        inline else => |value| comptime ",\"output_config\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
+    };
+}
+
+fn effortWithSchema(effort: codec_abi.Effort) []const u8 {
+    return switch (effort) {
+        inline else => |value| comptime ",\"output_config\":{\"effort\":\"" ++ @tagName(value) ++ "\",\"format\":{\"type\":\"json_schema\",\"schema\":",
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Scanning one raw or whole event
 // ---------------------------------------------------------------------------
 
@@ -1140,4 +1439,178 @@ test "MSG-10 a block's fragments never exceed the raw events it came from" {
         };
     }
     try std.testing.expect(fragment_bytes <= raw_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Request encoding tests
+// ---------------------------------------------------------------------------
+
+/// One history element for the encoder: its header and the bytes of its handles, as
+/// the shell supplies them (escaped bodies for json_string_v1, raw for verbatim).
+const Step = struct {
+    header: codec_abi.ItemHeader,
+    strings: [codec_abi.max_handles][]const u8,
+};
+
+const no_strings: [codec_abi.max_handles][]const u8 = .{ "", "", "" };
+
+fn step(value: codec_abi.Item, handles: u8, strings: [codec_abi.max_handles][]const u8) Step {
+    return .{ .header = .{ .item = value, .handles = handles }, .strings = strings };
+}
+
+fn settingsItem(output_limit: u32) codec_abi.Item {
+    return .{ .settings = .{ .effort = null, .session_affinity = @splat(0), .output_limit = output_limit, .model_length = 0 } };
+}
+
+/// Writes each element's pieces, resolving handles from the step's strings.
+fn encodeSteps(encoder: *Encoder, steps: []const Step, out: *std.Io.Writer) !void {
+    for (steps) |*one| {
+        var pieces: codec_abi.Pieces = .{ .len = 0 };
+        try encoder.encodeItem(&one.header, &pieces);
+        for (pieces.slice()) |piece| switch (piece) {
+            .literal => |bytes| try out.writeAll(bytes),
+            .content => |content| try out.writeAll(one.strings[content.handle]),
+            .base64 => |handle| {
+                var buffer: [64]u8 = undefined;
+                try out.writeAll(std.base64.standard.Encoder.encode(&buffer, one.strings[handle]));
+            },
+        };
+    }
+}
+
+fn expectEncoding(steps: []const Step, expected: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var encoder: Encoder = .{ .carry = initial(null) };
+    try encodeSteps(&encoder, steps, &out);
+    try std.testing.expectEqualStrings(expected, out.buffered());
+}
+
+/// A whole request: instructions, a user turn, a thinking block and a tool call, the
+/// tool's result, a final answer, one tool, a schema at high effort, and an image.
+const request_steps = [_]Step{
+    step(settingsItem(4096), 0b1, .{ "claude-x", "", "" }),
+    step(.{ .operation = .high }, 0, no_strings),
+    step(.{ .message = .instruction }, 0b1, .{ "be brief", "", "" }),
+    step(.history_start, 0, no_strings),
+    step(.{ .message = .user }, 0b1, .{ "hi", "", "" }),
+    step(.{ .output_open = .{ .kind = .reasoning, .phase = .unphased, .omit_reasoning_text = false } }, 0, no_strings),
+    step(.{ .output_part = .{ .array = .content, .kind = .reasoning_text } }, 0b1, .{ "think", "", "" }),
+    step(.output_close, 0b1, .{ "\"type\":\"thinking\",\"signature\":\"sig\"", "", "" }),
+    step(.{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, 0b111, .{ "lookup", "toolu_1", "{\"q\":1}" }),
+    step(.output_close, 0, no_strings),
+    step(.tool_result, 0b11, .{ "toolu_1", "42", "" }),
+    step(.{ .output_open = .{ .kind = .message, .phase = .final_answer, .omit_reasoning_text = false } }, 0, no_strings),
+    step(.{ .output_part = .{ .array = .content, .kind = .output_text } }, 0b1, .{ "done", "", "" }),
+    step(.output_close, 0, no_strings),
+    step(.tools_start, 0, no_strings),
+    step(.tool, 0b111, .{ "lookup", "Look up", "{\"type\":\"object\"}" }),
+    step(.text_format, 0b1, .{ "{\"type\":\"object\"}", "", "" }),
+    step(.request_end, 0, no_strings),
+};
+
+test "MSG-11 the widest elements fit the piece budget, and each writes its expected pieces" {
+    var encoder: Encoder = .{ .carry = initial(null) };
+    var pieces: codec_abi.Pieces = .{ .len = 0 };
+    try encoder.encodeItem(&.{ .item = settingsItem(1), .handles = 0b1 }, &pieces);
+    try encoder.encodeItem(&.{ .item = .history_start, .handles = 0 }, &pieces);
+    try encoder.encodeItem(&.{ .item = .{ .message = .user }, .handles = 0b1 }, &pieces);
+    // A tool call after an assistant role switch: two separator pieces, then the block's six.
+    try encoder.encodeItem(&.{ .item = .{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, .handles = 0b111 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 8), pieces.len);
+    try encoder.encodeItem(&.{ .item = .output_close, .handles = 0 }, &pieces);
+    // A user message with two text parts after an assistant role switch: the separator, then five.
+    try encoder.encodeItem(&.{ .item = .{ .message = .user }, .handles = 0b11 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 7), pieces.len);
+}
+
+/// An image group spans several elements: its parts' separator is carry.
+const image_steps = [_]Step{
+    step(settingsItem(1), 0b1, .{ "m", "", "" }),
+    step(.history_start, 0, no_strings),
+    step(.{ .image_message_open = .user }, 0, no_strings),
+    step(.input_text, 0b1, .{ "look", "", "" }),
+    step(.{ .input_image = .png }, 0b1, .{ "ab", "", "" }),
+    step(.input_text, 0b1, .{ "again", "", "" }),
+    step(.image_message_close, 0, no_strings),
+    step(.tools_start, 0, no_strings),
+    step(.request_end, 0, no_strings),
+};
+
+/// Every element boundary that is a memo boundary resumes byte-identically.
+fn expectResumes(steps: []const Step) !void {
+    var full_buffer: [4096]u8 = undefined;
+    var full: std.Io.Writer = .fixed(&full_buffer);
+    var whole: Encoder = .{ .carry = initial(null) };
+    try encodeSteps(&whole, steps, &full);
+
+    var checked: usize = 0;
+    for (0..steps.len + 1) |cut| {
+        var first_buffer: [4096]u8 = undefined;
+        var first_out: std.Io.Writer = .fixed(&first_buffer);
+        var first: Encoder = .{ .carry = initial(null) };
+        try encodeSteps(&first, steps[0..cut], &first_out);
+        // A cut inside an output item is not a memo boundary: its open state is not carry.
+        if (first.item != .none) continue;
+        checked += 1;
+
+        var second: Encoder = .{ .carry = first.carry, .effort = first.effort, .effort_seen = first.effort_seen };
+        var rest_buffer: [4096]u8 = undefined;
+        var rest: std.Io.Writer = .fixed(&rest_buffer);
+        try encodeSteps(&second, steps[cut..], &rest);
+
+        var joined: [4096]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&joined, "{s}{s}", .{ first_out.buffered(), rest.buffered() });
+        try std.testing.expectEqualStrings(full.buffered(), bytes);
+    }
+    try std.testing.expect(checked > 4);
+}
+
+test "MSG-12 resuming at an element boundary writes what an uninterrupted encoding writes" {
+    try expectResumes(&request_steps);
+    try expectResumes(&image_steps);
+}
+
+test "MSG-13 a whole request encodes to its exact Messages body" {
+    try expectEncoding(&request_steps, "{\"model\":\"claude-x\",\"max_tokens\":4096,\"stream\":true,\"cache_control\":{\"type\":\"ephemeral\"}," ++
+        "\"system\":\"be brief\",\"messages\":[" ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}," ++
+        "{\"role\":\"assistant\",\"content\":[{\"thinking\":\"think\",\"type\":\"thinking\",\"signature\":\"sig\"}," ++
+        "{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{\"q\":1}}]}," ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"42\"}]}," ++
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}]," ++
+        "\"tools\":[{\"name\":\"lookup\",\"description\":\"Look up\",\"input_schema\":{\"type\":\"object\"}}]," ++
+        "\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}}}");
+}
+
+test "MSG-14 a redacted thinking block replays whole, ahead of its tool call in one assistant message" {
+    try expectEncoding(&.{
+        step(settingsItem(1), 0b1, .{ "m", "", "" }),
+        step(.history_start, 0, no_strings),
+        step(.{ .output_open = .{ .kind = .reasoning, .phase = .unphased, .omit_reasoning_text = false } }, 0, no_strings),
+        step(.output_close, 0b1, .{ "\"type\":\"redacted_thinking\",\"data\":\"X\"", "", "" }),
+        step(.{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, 0b111, .{ "f", "t", "{}" }),
+        step(.output_close, 0, no_strings),
+        step(.tools_start, 0, no_strings),
+        step(.request_end, 0, no_strings),
+    }, "{\"model\":\"m\",\"max_tokens\":1,\"stream\":true,\"cache_control\":{\"type\":\"ephemeral\"}," ++
+        "\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"redacted_thinking\",\"data\":\"X\"}," ++
+        "{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"f\",\"input\":{}}]}]}");
+}
+
+test "MSG-15 an empty message writes nothing, and what the wire cannot take is declined" {
+    var encoder: Encoder = .{ .carry = initial(null) };
+    var pieces: codec_abi.Pieces = .{ .len = 0 };
+    try encoder.encodeItem(&.{ .item = .{ .output_open = .{ .kind = .message, .phase = .final_answer, .omit_reasoning_text = false } }, .handles = 0 }, &pieces);
+    try encoder.encodeItem(&.{ .item = .output_close, .handles = 0 }, &pieces);
+    try std.testing.expectEqual(@as(u8, 0), pieces.len);
+
+    // No output_limit: the wire requires max_tokens, so the request cannot be sent.
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = settingsItem(0), .handles = 0b1 }, &pieces));
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .compaction_trigger, .handles = 0 }, &pieces));
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .declare_open, .handles = 0 }, &pieces));
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .web_search, .handles = 0 }, &pieces));
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .{ .output_open = .{ .kind = .compaction, .phase = .unphased, .omit_reasoning_text = false } }, .handles = 0 }, &pieces));
+    // A format with no effort operation before it has nothing to declare.
+    try std.testing.expectError(error.Declined, encoder.encodeItem(&.{ .item = .text_format, .handles = 0b1 }, &pieces));
 }

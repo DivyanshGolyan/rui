@@ -98,6 +98,9 @@ pub const Settings = struct {
     effort: ?Effort,
     starting_effort: ?Effort = null,
     session_affinity: [16]u8,
+    /// The most output tokens a response may take: the Messages wire's `max_tokens`, which
+    /// it requires. Responses ignores it. Zero is unset, and a codec that writes it declines.
+    output_limit: u32 = 0,
     model_length: u16,
     model: [max_model_bytes]u8 = undefined,
 
