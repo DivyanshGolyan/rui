@@ -1085,3 +1085,36 @@ test "creation receipts retain maximum configured and loaded tools" {
         }
     }.run);
 }
+
+// EXR-65: an app record saved in the Host tool set keeps the policy it was declared with, in the set's rows and
+// in a session's selection, on both engines.
+test "EXR-65 an app record saved in the Host tool set keeps its policy through the Store" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            const app: tool_defs.Record = .{
+                .name = "ask",
+                .owner = .app,
+                .description = "Ask the app.",
+                .input_schema = "{\"type\":\"object\"}",
+                .app = .{ .replay = .safe, .restart_limit = 2, .wait_ms = 5_000 },
+            };
+            const records = store_testing.hostToolRecordsWith(&.{app});
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE owner='app' AND name='ask' AND replay='safe' AND restart_limit=2 AND wait_ms=5000", .{}));
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var command = try store_testing.completeConfiguration("app-policy-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            command.configuration.tools = try .of(&.{"ask"});
+            const reply = try storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='ask' AND t.replay='safe' AND t.restart_limit=2 AND t.wait_ms=5000", .{reply.accepted.session.slice()}));
+        }
+    }.run);
+}

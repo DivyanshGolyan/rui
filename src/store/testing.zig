@@ -754,11 +754,27 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Undoes formats 89 and 90 on MySQL, whose steps add core_command.missing_settings and
-/// tool_record.remote_name in place, so a Store rewound below them replays ADD COLUMN on a table that
-/// has it. Newest first. SQLite's steps rebuild tables from named columns, so they replay unchanged.
+/// Undoes formats 89 through 91 on MySQL, whose steps add core_command.missing_settings,
+/// tool_record.remote_name and the app owner's policy columns in place, so a Store rewound below them
+/// replays ADD COLUMN on a table that has it. Newest first. SQLite's steps rebuild tables from named
+/// columns, so they replay unchanged.
 fn dropMysqlInPlaceColumns(storage: *Store) !void {
     if (storage.engine != .mysql) return;
+    // Format 91: every policy CHECK (one statement, so a missing CHECK fails loudly), the unique key
+    // that names the policy columns, the columns, then the three-value owner CHECK it widened.
+    try mysql_testing.rawExec(storage, "SET @rui_policy_ddl=(SELECT CONCAT('ALTER TABLE tool_record ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') SEPARATOR ', ')) FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND (LOCATE('replay',cc.CHECK_CLAUSE)>0 OR LOCATE('restart_limit',cc.CHECK_CLAUSE)>0 OR LOCATE('wait_ms',cc.CHECK_CLAUSE)>0))");
+    try mysql_testing.rawExec(storage, "PREPARE rui_policy FROM @rui_policy_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_policy");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_policy");
+    try mysql_testing.rawExec(storage, "SET @rui_policy_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,remote_name,owner,server,description_content_id,input_schema_content_id)");
+    try mysql_testing.rawExec(storage, "ALTER TABLE tool_record DROP COLUMN replay, DROP COLUMN restart_limit, DROP COLUMN wait_ms");
+    try mysql_testing.rawExec(storage, "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('provider',cc.CHECK_CLAUSE)>0)");
+    try mysql_testing.rawExec(storage, "PREPARE rui_owner FROM @rui_owner_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_owner");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_owner");
+    try mysql_testing.rawExec(storage, "SET @rui_owner_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE tool_record ADD CHECK((owner='rui' OR owner='provider' OR owner='mcp'))");
     try mysql_testing.rawExec(storage, "SET @rui_remote_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('remote_name',cc.CHECK_CLAUSE)>0)");
     try mysql_testing.rawExec(storage, "PREPARE rui_remote FROM @rui_remote_ddl");
     try mysql_testing.rawExec(storage, "EXECUTE rui_remote");

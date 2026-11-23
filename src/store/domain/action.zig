@@ -834,9 +834,12 @@ pub const SettleAttempt = struct {
     }
 };
 
+// App calls are not recovered here: their cut-off is the app_call owner (design U6). The runner comes from
+// `attemptRunnerSql`, which reads the one runner table, so this excludes exactly the rows `Runner.of` maps to app.
 const uncertain_actions = rsql.Read(.{
-    .sql = "SELECT action_id FROM action_operation @index(action_operation_unresolved_attempt) " ++
-        "WHERE resolution_code IS NULL AND " ++ action_attempted_sql ++ " ORDER BY action_id",
+    .sql = "SELECT action.action_id FROM action_operation action @index(action_operation_unresolved_attempt) " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "WHERE action.resolution_code IS NULL AND action." ++ action_attempted_sql ++ " AND (" ++ attemptRunnerSql() ++ ")<>'" ++ @tagName(tool_defs.Runner.app) ++ "' ORDER BY action.action_id",
     .Args = struct {},
     .Row = struct { action_id: rsql.Positive },
     .cardinality = .each,
@@ -858,14 +861,15 @@ const resolve_uncertain = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
 });
 
-fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
+fn recoveryContent(runner: tool_defs.Runner) error{CorruptStore}!content_domain.Import {
     return switch (runner) {
         inline .bash, .mcp, .read_image => |kind| comptime blk: {
             @setEvalBranchQuota(1_000_000);
             break :blk .ofBytes(kind.indeterminateText(), false);
         },
-        // App calls never reach recovery: their cut-off is the app_call owner (design U6).
-        .core, .provider, .app => unreachable,
+        // App calls never reach recovery (`uncertain_actions` excludes them), so one here is a corrupt Store.
+        .app => error.CorruptStore,
+        .core, .provider => unreachable,
     };
 }
 
@@ -920,7 +924,7 @@ pub const RecoverUncertain = struct {
             },
             .facts => {
                 const found = t.facts orelse return error.ActionSelectionChanged;
-                t.content = if (found.direct_stop) .ofBytes("Action was stopped.", false) else recoveryContent(found.runner);
+                t.content = if (found.direct_stop) .ofBytes("Action was stopped.", false) else try recoveryContent(found.runner);
                 content_domain.lookup(r, &t.content);
                 r.read(turn_domain.stopped_turn, .{ .turn_id = found.turn_id.get(), .resolving_action_id = action_id }, &t.completion);
                 return .{ .round = .completion };

@@ -116,17 +116,37 @@ pub const AppPolicy = struct {
     /// Milliseconds an unclaimed call waits from the moment it is ready before it fails.
     wait_ms: u32 = default_app_wait_ms,
 
-    pub const zero: AppPolicy = .{ .restart_limit = 0, .wait_ms = 0 };
-};
+    /// The policy as the Store keeps it and the digest hashes it. An unsafe call is never repeated, so
+    /// its restart limit is 0 whatever the declaration said: the digest does not depend on it.
+    pub fn canonical(self: AppPolicy) AppPolicy {
+        var policy = self;
+        if (self.replay == .unsafe) policy.restart_limit = 0;
+        return policy;
+    }
 
-/// The Store's form of `AppPolicy`: `replay` is '' for every non-app record.
-pub const StoredPolicy = struct { replay: []const u8, restart_limit: u64, wait_ms: u64 };
+    /// Whether the bounds the Store's CHECKs enforce hold for this policy.
+    pub fn valid(self: AppPolicy) bool {
+        return self.restart_limit <= max_app_restart_limit and self.wait_ms >= min_app_wait_ms and self.wait_ms <= max_app_wait_ms;
+    }
+};
 
 pub const default_app_restart_limit: u8 = 3;
 pub const default_app_wait_ms: u32 = 900_000;
 pub const max_app_restart_limit: u8 = 16;
 pub const min_app_wait_ms: u32 = 1_000;
 pub const max_app_wait_ms: u32 = 3_600_000;
+
+/// The app policy a Store row holds, or null for the zero policy every non-app owner keeps. The Store's
+/// CHECKs make `replay` one of 'unsafe' and 'safe' for an app row, so a stored value outside them is a
+/// programmer error in the row reader, not a condition to report.
+pub fn storedAppPolicy(owner: Owner, replay: []const u8, restart_limit: u64, wait_ms: u64) ?AppPolicy {
+    if (owner != .app) return null;
+    return .{
+        .replay = std.meta.stringToEnum(Replay, replay) orelse unreachable,
+        .restart_limit = @intCast(restart_limit),
+        .wait_ms = @intCast(wait_ms),
+    };
+}
 
 pub const max_server_bytes = tool_name.max_bytes;
 
@@ -141,7 +161,7 @@ pub const Record = struct {
     owner: Owner,
     server: []const u8 = "",
     /// Set only on `owner = app`; the zero policy on every other owner.
-    app: AppPolicy = AppPolicy.zero,
+    app: AppPolicy = .{},
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -150,12 +170,6 @@ pub const Record = struct {
     /// The one reader of the remote name: the name a server listed, which a tools/call sends.
     pub fn remoteName(self: *const Record) []const u8 {
         return remoteNameOf(self.name, self.remote_name);
-    }
-
-    /// The app policy as the Store keeps it: the zero policy on every other owner.
-    pub fn storedPolicy(self: *const Record) StoredPolicy {
-        if (self.owner != .app) return .{ .replay = "", .restart_limit = 0, .wait_ms = 0 };
-        return .{ .replay = @tagName(self.app.replay), .restart_limit = self.app.restart_limit, .wait_ms = self.app.wait_ms };
     }
 
     /// The remote name as the Store keeps it: empty when it is the offered name.
@@ -194,7 +208,8 @@ pub const RecordIdentity = struct {
     description: [32]u8,
     input_schema: [32]u8,
     /// Non-null exactly for `owner = app`, which joins the identity under its own tag; see `Record.app`.
-    app: ?AppPolicy = null,
+    /// Required, so every caller that rebuilds an identity from stored rows states its policy.
+    app: ?AppPolicy,
 
     pub fn digest(self: *const RecordIdentity) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -211,11 +226,12 @@ pub const RecordIdentity = struct {
         hash.update(&self.description);
         hash.update(&self.input_schema);
         if (self.app) |policy| {
+            const stored = policy.canonical();
             hashField(&hash, "rui/tool-record/app-policy");
-            hashField(&hash, @tagName(policy.replay));
-            hashField(&hash, &.{policy.restart_limit});
+            hashField(&hash, @tagName(stored.replay));
+            hashField(&hash, &.{stored.restart_limit});
             var wait: [4]u8 = undefined;
-            std.mem.writeInt(u32, &wait, policy.wait_ms, .big);
+            std.mem.writeInt(u32, &wait, stored.wait_ms, .big);
             hashField(&hash, &wait);
         }
         return hash.finalResult();
@@ -782,12 +798,12 @@ test "a remote name joins a digest only when it differs from the offered name" {
     try std.testing.expect(!validRemoteName(&.{ .name = "docs__search", .remote_name = "search", .owner = .rui, .input_schema = "{}" }));
 }
 
-test "each app policy field joins an app record's digest, and no other owner's digest reads the policy" {
+test "EXR-65 each app policy field joins an app record's digest, and no other owner's digest reads the policy" {
     const base: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{} };
     const base_digest = recordDigest(&base);
     const variants = [_]AppPolicy{
         .{ .replay = .safe, .restart_limit = 3, .wait_ms = default_app_wait_ms },
-        .{ .replay = .unsafe, .restart_limit = 4, .wait_ms = default_app_wait_ms },
+        .{ .replay = .safe, .restart_limit = 4, .wait_ms = default_app_wait_ms },
         .{ .replay = .unsafe, .restart_limit = 3, .wait_ms = default_app_wait_ms + 1 },
     };
     var digests: [variants.len][32]u8 = undefined;
@@ -809,6 +825,18 @@ test "each app policy field joins an app record's digest, and no other owner's d
         0xAC, 0x49, 0x33, 0x29, 0x30, 0x81, 0xCA, 0x0A, 0x97, 0x18, 0x68, 0x4C, 0xE9, 0xC3, 0x31, 0xFC,
     };
     try std.testing.expectEqualSlices(u8, &pinned, &plain);
+
+    // An unsafe call is never repeated, so its digest does not depend on the restart limit it declared.
+    const unsafe: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{ .replay = .unsafe, .restart_limit = 0, .wait_ms = default_app_wait_ms } };
+    const unsafe_digest = recordDigest(&unsafe);
+    for ([_]u8{ 1, default_app_restart_limit, max_app_restart_limit }) |limit| {
+        var declared = unsafe;
+        declared.app.restart_limit = limit;
+        try std.testing.expectEqualSlices(u8, &unsafe_digest, &recordDigest(&declared));
+    }
+    try std.testing.expect(!(AppPolicy{ .restart_limit = max_app_restart_limit + 1 }).valid());
+    try std.testing.expect((AppPolicy{ .restart_limit = max_app_restart_limit, .wait_ms = max_app_wait_ms }).valid());
+    try std.testing.expect(!(AppPolicy{ .wait_ms = min_app_wait_ms - 1 }).valid());
 }
 
 test "MCP missing tools tool set resolution covers every empty-server combination" {

@@ -116,7 +116,8 @@ pub const SavingRecords = struct {
             saving.existing[index] = null;
             if (both) {
                 known = true;
-                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = each.storedPolicy().replay, .restart_limit = each.storedPolicy().restart_limit, .wait_ms = each.storedPolicy().wait_ms, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+                const policy = storedPolicy(each);
+                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
             }
         }
         return known;
@@ -126,7 +127,8 @@ pub const SavingRecords = struct {
         for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
             const ids = saving.content_ids[index];
             const id = try a.identity(.tool_record_id);
-            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = each.storedPolicy().replay, .restart_limit = each.storedPolicy().restart_limit, .wait_ms = each.storedPolicy().wait_ms, .description = ids[0], .input_schema = ids[1] });
+            const policy = storedPolicy(each);
+            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] });
         };
     }
 };
@@ -278,21 +280,34 @@ pub const host_tool_record_batch = 16;
 
 pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, digest: *const [32]u8, set_id: u64) void {
     a.write(insert_set, .{ .id = set_id, .digest = digest.*, .count = tool_set.records.len });
-    for (tool_set.records, 0..) |*each, ordinal| a.write(insert_tool_set_member, .{
-        .set = set_id,
-        .ordinal = ordinal,
-        .name = each.name,
-        .owner = each.owner,
-        .server = each.server,
-        .description = content_string.digest(each.description),
-        .description_bytes = each.description.len,
-        .input_schema = content_string.digest(each.input_schema),
-        .input_schema_bytes = each.input_schema.len,
-        .remote = each.storedRemoteName(),
-        .replay = each.storedPolicy().replay,
-        .restart_limit = each.storedPolicy().restart_limit,
-        .wait_ms = each.storedPolicy().wait_ms,
-    });
+    for (tool_set.records, 0..) |*each, ordinal| {
+        const policy = storedPolicy(each);
+        a.write(insert_tool_set_member, .{
+            .set = set_id,
+            .ordinal = ordinal,
+            .name = each.name,
+            .owner = each.owner,
+            .server = each.server,
+            .description = content_string.digest(each.description),
+            .description_bytes = each.description.len,
+            .input_schema = content_string.digest(each.input_schema),
+            .input_schema_bytes = each.input_schema.len,
+            .remote = each.storedRemoteName(),
+            .replay = policy.replay,
+            .restart_limit = policy.restart_limit,
+            .wait_ms = policy.wait_ms,
+        });
+    }
+}
+
+/// The Store's form of a record's app policy: `replay` is '' for every non-app record, and an unsafe
+/// policy keeps restart_limit 0 (`AppPolicy.canonical`), the form the Store's CHECKs accept.
+pub const StoredPolicy = struct { replay: []const u8, restart_limit: u64, wait_ms: u64 };
+
+pub fn storedPolicy(record: *const tool_record.Record) StoredPolicy {
+    if (record.owner != .app) return .{ .replay = "", .restart_limit = 0, .wait_ms = 0 };
+    const policy = record.app.canonical();
+    return .{ .replay = @tagName(policy.replay), .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms };
 }
 
 pub const Selection = struct {
@@ -309,7 +324,7 @@ pub const Selection = struct {
 };
 
 const selection_records = rsql.Read(.{
-    .sql = "SELECT tool.name,tool.remote_name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema " ++
+    .sql = "SELECT tool.name,tool.remote_name,tool.owner,tool.server,tool.replay,tool.restart_limit,tool.wait_ms,description.digest AS description,input_schema.digest AS input_schema " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
@@ -319,6 +334,9 @@ const selection_records = rsql.Read(.{
         remote_name: Bounded(tool_record.max_name_bytes),
         owner: tool_record.Owner,
         server: Bounded(tool_record.max_server_bytes),
+        replay: Bounded(6),
+        restart_limit: u64,
+        wait_ms: u64,
         description: [32]u8,
         input_schema: [32]u8,
     },
@@ -349,6 +367,7 @@ pub const SavedSelection = struct {
                 .server = row.server.slice(),
                 .description = row.description,
                 .input_schema = row.input_schema,
+                .app = tool_record.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms),
             };
             self.digest.add(&identity.digest());
             self.count += 1;
