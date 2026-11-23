@@ -4,6 +4,7 @@ const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
+const codecs = @import("../../codecs.zig");
 const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
@@ -184,9 +185,10 @@ pub const CompactionRead = struct {
     compound_bytes: context_compound_bytes.Result = undefined,
     pressure: ?*const PartsPressure.Read = null,
 
-    pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
+    pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
         return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
             .trigger = policy.compaction_trigger,
+            .compacts = codecs.compacts(codec),
             .context_changed = false,
             .usage_tokens = null,
             .uncovered_bytes = 0,
@@ -243,7 +245,7 @@ pub const CompactionRead = struct {
         const latest = read.latest.?;
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
         read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, output_format.OutputItemKind.compaction.replayableTo(latest.model.slice(), read.model, .selected_base));
-        if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger) != null) return .done;
+        if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger, read.facts.compacts) != null) return .done;
         const context = if (read.context) |*row| row else return error.CorruptStore;
         read.bytes_args = try takeContext(&read.facts, context, read.model, read.session) orelse return .done;
         return .bytes;
@@ -373,6 +375,7 @@ const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON bas
 
 pub const context_changed = rsql.Read(.{
     .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
+        ",(SELECT s.codec FROM session s WHERE s.session_ref=?1) AS codec" ++
         ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
     .Args = struct { session: []const u8, boundary: u64 },
@@ -381,6 +384,7 @@ pub const context_changed = rsql.Read(.{
         base_position: ?rsql.Positive,
         base_floor: ?rsql.Positive,
         base_model: ?Bounded(model_capability.max_model_bytes),
+        codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .one,
@@ -412,7 +416,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 }
 
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
-    return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
+    return "s.revision,s.provider,s.codec,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
@@ -474,6 +478,7 @@ const SelectedRow = struct {
     session: rsql.SessionHead,
     revision: rsql.Positive,
     provider: provider_name.Provider,
+    codec: provider_name.Codec,
     model: Bounded(model_capability.max_model_bytes),
     compaction_trigger: ?rsql.Positive,
     output_reservation: ?u64,
@@ -1087,6 +1092,7 @@ pub const AdmitModel = struct {
         const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
         var compaction: turn_policy.CompactionFacts = .{
             .trigger = policy.compaction_trigger,
+            .compacts = codecs.compacts(facts.codec),
             .context_changed = false,
             .usage_tokens = null,
             .uncovered_bytes = 0,

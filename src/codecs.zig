@@ -2,6 +2,7 @@ const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const protocol = @import("protocol.zig");
 const json = @import("codecs/json.zig");
+const messages = @import("codecs/messages.zig");
 const responses = @import("codecs/responses.zig");
 
 fn module(comptime codec: protocol.Codec) type {
@@ -9,8 +10,31 @@ fn module(comptime codec: protocol.Codec) type {
         .@"openai-responses/1" => Responses(.one),
         .@"openai-responses/2" => Responses(.two),
         .@"openai-responses/3" => Responses(.three),
+        .@"anthropic-messages/1" => Messages,
     };
 }
+
+const Messages = struct {
+    pub const manifest = messages.manifest;
+    pub const RequestHeader = messages.RequestHeader;
+    pub const requestHeaders = messages.requestHeaders;
+    pub const Encoder = messages.Encoder;
+    pub const Carry = messages.Carry;
+    pub const ClassifyScratch = messages.ClassifyScratch;
+    pub const classify = messages.classify;
+    pub const Stream = messages.Stream;
+    pub const InterpretScratch = messages.InterpretScratch;
+    pub const begin = messages.begin;
+    pub const normalize = messages.normalize;
+    pub const interpretEvent = messages.interpretEvent;
+    pub const nextMember = messages.nextMember;
+    pub const hostedCall = messages.hostedCall;
+    pub const finish = messages.finish;
+    pub const compacts = messages.compacts;
+    pub const initial = messages.initial;
+    pub const declaresTools = messages.declaresTools;
+    pub const effortChangeRefused = messages.effortChangeRefused;
+};
 
 fn Responses(comptime version: responses.Version) type {
     return struct {
@@ -470,6 +494,7 @@ fn expectLegacyImageGolden(codec: protocol.Codec, compact: bool, actual: []const
         .@"openai-responses/1" => if (compact) @embedFile("codecs/fixtures/image-input/1-compaction.json") else @embedFile("codecs/fixtures/image-input/1-regular.json"),
         .@"openai-responses/2" => if (compact) @embedFile("codecs/fixtures/image-input/2-compaction.json") else @embedFile("codecs/fixtures/image-input/2-regular.json"),
         .@"openai-responses/3" => if (compact) @embedFile("codecs/fixtures/image-input/3-compaction.json") else @embedFile("codecs/fixtures/image-input/3-regular.json"),
+        .@"anthropic-messages/1" => unreachable, // Responses image goldens only
     };
     try std.testing.expectEqualStrings(expected, actual);
 }
@@ -533,6 +558,7 @@ test "additive image inputs use typed parts and preserve whole-element carry" {
             .@"openai-responses/1" => @embedFile("codecs/fixtures/image-input/1-image.json"),
             .@"openai-responses/2" => @embedFile("codecs/fixtures/image-input/2-image.json"),
             .@"openai-responses/3" => @embedFile("codecs/fixtures/image-input/3-image.json"),
+            .@"anthropic-messages/1" => unreachable, // Responses image goldens only
         };
         try std.testing.expectEqualStrings(expected, out.buffered());
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.buffered(), .{});
@@ -619,7 +645,8 @@ test "additive typed image pieces stay bounded over the new value domain" {
 
 fn fragmentCarry(codec: protocol.Codec) Carry {
     return switch (codec) {
-        inline else => |tag| @unionInit(Carry, @tagName(tag), .{ .version = module(tag).initial(null).version, .input = .first }),
+        // The fragment is a Responses carry: the Messages arm is never built for it.
+        inline else => |tag| if (comptime tag == .@"anthropic-messages/1") unreachable else @unionInit(Carry, @tagName(tag), .{ .version = module(tag).initial(null).version, .input = .first }),
     };
 }
 

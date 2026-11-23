@@ -1,11 +1,9 @@
 //! The `anthropic-messages/1` codec: Anthropic's Messages API, streamed.
 //!
 //! A functional core: imports only std, codec_abi and codecs/json.zig, and names
-//! no model and no provider. It is not yet a served codec: codecs.zig does not
-//! dispatch it, because the Reactor's compile-time check requires every served codec
-//! to observe the same response headers (see docs/contracts/model-io.md). `compacts`
-//! is false for it: this wire has no provider compaction, so a compaction Operation
-//! never reaches it.
+//! no model and no provider. It is served by codecs.zig, but no provider pins it yet.
+//! `compacts` is false for it: this wire has no provider compaction, so a compaction
+//! Operation is never admitted to it (see docs/contracts/model-io.md).
 //!
 //! Stream interpretation has two steps, using Unit 1's `normalize` hook:
 //!   normalize:      raw SSE events -> fragments that assemble whole events. A
