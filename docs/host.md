@@ -49,10 +49,10 @@ rui host restart --all
 It discovers this user's running Hosts through private runtime sockets and same-user process hints, authenticates each resolved socket peer, and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work. Process hints are not stop authority; saved DIR placement finds nested MySQL and moved interfaces without a registry.
 Each line names the Host directory (independently of its Store identity) and reports restarted, already current, left running with a reason, or failure with recovery instructions; a target build that cannot be resolved or checked fails before any stop, and the Host keeps running; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
-A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
-For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.
-A held or inaccessible lease, absent/untrusted hint (including an older Host), or connected unreadable peer is reported as unconfirmed and counted as failed, with the socket path and recovery advice. The hint is not liveness state or activation authority.
-It does not reclaim sockets or infer absence from failed transport.
+A standard SQLite Host serves from its private interface directory `/tmp/rui-<uid>/<hash>/`, which holds `rui.lock` and `rui.sock`; it holds `rui.lock` for its whole life, and no routing hint file exists.
+For an unreachable socket, discovery drops it silently only when a fresh look finds its `rui.lock` free, and removes that dead endpoint.
+A busy `rui.lock`, a socket in a directory without a lock file, or a connected unreadable peer is reported as unconfirmed and counted as failed, with the socket path and recovery advice. `rui.lock` is liveness state, not activation authority.
+It reclaims an endpoint only when its `rui.lock` is free, and never infers absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
 Success requires readiness on DIR's socket, a different instance from the stopped Host, and the answering managed executable's target release version. A concurrent starter of that version may win; it need not be our child or the selected executable path. If only the target client can read the new wire, its public status is bracketed by authenticated peer generations and the result advises using that client; incompatible transport alone is never success.

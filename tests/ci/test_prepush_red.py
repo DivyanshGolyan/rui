@@ -19,22 +19,6 @@ AVAILABLE = set(build_files.steps())
 HEAD = "a" * 40
 RUN = dict(id=42, run_attempt=1, name="Selected checks", path=".github/workflows/check.yml",
            head_sha=HEAD, head_branch="feature/red", status="completed", conclusion="failure")
-import runtime_leftovers  # noqa: E402
-
-_leftover_runtime = None
-
-
-def setUpModule():
-    # The harness sweeps for leftover Host sockets; keep it off this machine's real directory.
-    global _leftover_runtime
-    _leftover_runtime = tempfile.TemporaryDirectory()
-    os.environ[runtime_leftovers.OVERRIDE] = _leftover_runtime.name
-
-
-def tearDownModule():
-    os.environ.pop(runtime_leftovers.OVERRIDE, None)
-    _leftover_runtime.cleanup()
-
 
 
 def job(name="linux suites (test-store)", number=7, **values):

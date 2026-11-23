@@ -24,6 +24,7 @@ def one_reply(path, response, *, timeout=10):
     sockets = []
     worker = None
     bound = False
+    parent_made = False
     errors = []
     try:
         listener = os_semantics.unix_stream()
@@ -31,6 +32,11 @@ def one_reply(path, response, *, timeout=10):
         cancel, wake = socket.socketpair()
         sockets.extend((cancel, wake))
         path.unlink(missing_ok=True)
+        # A Host's endpoint lives in its interface directory, which a retired
+        # Host removes; the mock makes its own (and removes it on exit).
+        if not path.parent.exists():
+            path.parent.mkdir(mode=0o700)
+            parent_made = True
         listener.bind(str(path))
         bound = True
         listener.listen(1)
@@ -124,4 +130,10 @@ def one_reply(path, response, *, timeout=10):
                 raise errors[0]
 
         dispose_all(retire, *(sock.close for sock in sockets),
-                    lambda: path.unlink(missing_ok=True) if bound else None)
+                    lambda: path.unlink(missing_ok=True) if bound else None,
+                    lambda: _remove_empty_directory(path.parent) if parent_made else None)
+
+
+def _remove_empty_directory(directory):
+    with contextlib.suppress(OSError):
+        directory.rmdir()
