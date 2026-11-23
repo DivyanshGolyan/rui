@@ -1052,7 +1052,7 @@ def unchecked_target_case(root, binary, releases, baseline):
         retained = c.build("running-baseline")
         shutil.copy2(baseline, retained / "bin/rui")
         old_binary = retained / "bin/rui"
-        old, ready = start_ready_process([old_binary, "host", "serve", "--store", c.store, "--active-capacity", "2"],
+        old, ready = start_ready_process([old_binary, "host", "serve", "--store", c.store, "--set", "execution.activeCapacity=2"],
                                          env=c.env, isolate_settings=False)
         c.hosts.append(old)
         c.ready = ready
