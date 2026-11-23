@@ -6,6 +6,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#else
+#include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
@@ -104,6 +111,58 @@ int rui_bash_group_absent(pid_t pgid) {
         return 0;
     }
     return -errno;
+}
+
+/* Returns 1 when no process but `leader` belongs to `pgid`, 0 when another
+   member may exist and -errno when the group cannot be listed. A miss is safe:
+   it only ends the graceful TERM window early, and KILL plus the absence probe
+   still retire the group. */
+int rui_bash_group_holds_only(pid_t pgid, pid_t leader) {
+#ifdef __APPLE__
+    pid_t members[64];
+    int bytes = proc_listpids(PROC_PGRP_ONLY, (uint32_t)pgid, members, sizeof(members));
+    if (bytes < 0) return -errno;
+    if ((size_t)bytes >= sizeof(members)) return 0;
+    for (int i = 0; i < bytes / (int)sizeof(pid_t); i++) {
+        if (members[i] != 0 && members[i] != leader) return 0;
+    }
+    return 1;
+#else
+    DIR *proc = opendir("/proc");
+    if (proc == NULL) return -errno;
+    int alone = 1;
+    struct dirent *entry;
+    while (alone == 1 && (entry = readdir(proc)) != NULL) {
+        char *end;
+        long pid = strtol(entry->d_name, &end, 10);
+        if (*end != '\0' || pid <= 0 || pid == leader) continue;
+        char path[64], stat[512];
+        snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            if (errno != ENOENT && errno != ESRCH) alone = 0;
+            continue;
+        }
+        ssize_t count = read(fd, stat, sizeof(stat) - 1);
+        close(fd);
+        if (count <= 0) {
+            if (count < 0 && errno != ESRCH) alone = 0;
+            continue;
+        }
+        stat[count] = '\0';
+        /* comm may hold spaces or parentheses; fields resume after the last ')'. */
+        char *fields = strrchr(stat, ')');
+        int parent, group;
+        char state;
+        if (fields == NULL || sscanf(fields + 1, " %c %d %d", &state, &parent, &group) != 3) {
+            alone = 0;
+        } else if (group == pgid) {
+            alone = 0;
+        }
+    }
+    closedir(proc);
+    return alone;
+#endif
 }
 
 static int make_pipe(int fds[2]) {
