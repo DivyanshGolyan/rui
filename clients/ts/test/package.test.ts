@@ -24,12 +24,12 @@ test("TS-10 binary resolution refuses without a platform package", () => {
 	assert.equal(resolveBinary("/opt/rui", { platform: "win32", arch: "x64" }), "/opt/rui");
 	for (const [platform, arch] of [["darwin", "x64"], ["win32", "x64"], ["linux", "ia32"]] as const) {
 		assert.throws(() => resolveBinary(undefined, { platform, arch }), (error: unknown) =>
-			error instanceof RuiUnavailableError && error.message.startsWith(`Rui has no build for ${platform} on ${arch}.`) && /macOS on Apple Silicon/.test(error.message));
+			error instanceof RuiUnavailableError && error.message.startsWith(`Rui has no build for ${platform} on ${arch}. Rui runs on glibc Linux on x64 or arm64, and darwin on arm64.`));
 	}
 	const empty = mkdtempSync(join(tmpdir(), "rui-ts-nopkg-"));
 	try {
 		assert.throws(() => resolveBinary(undefined, { platform: "linux", arch: "x64", from: join(empty, "x.js") }), (error: unknown) =>
-			error instanceof RuiUnavailableError && /ruicode-linux-x64 package.*not installed/.test(error.message));
+			error instanceof RuiUnavailableError && /ruicode-linux-x64 package.*not installed.*musl Linux\. Rui runs on glibc Linux on x64 or arm64, and darwin on arm64\./.test(error.message));
 	} finally {
 		rmSync(empty, { recursive: true, force: true });
 	}
