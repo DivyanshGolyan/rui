@@ -8,6 +8,7 @@ Archiving removes a chat from the usual list and keeps its conversation availabl
 - **Sessions** and **Archived** sit below the separate **+ New chat** action. Archived remains available even when empty.
 - Home then Down selects the tabs. Right selects Archived; Left returns to Sessions; Enter opens the selected view.
 - Clicking **Archived** opens that list. Esc returns to the usual list.
+- Pressing a chat row and dragging it onto **Archived** archives it; dragging an archived chat onto **Chats** restores it. While carried, the target tab is shaded and the tabs line says **· drop here**. Needs the list beside a chat (100 columns or more).
 - `/unarchive` restores an open archived chat. Copy feedback can appear alongside the durable archived state.
 
 ## How to get to it (user POV)
@@ -16,9 +17,9 @@ Archive a chat, then choose **Archived** in Overview. Open a chat with Enter or 
 
 ## Driving it with verify-rui
 
-Run `$V frames FULLSHA --only archived-row-none,archive-state,archived-row,archived-row-chosen,archived-view,archived-view-click,archived-view-esc,transient-chat`.
+Run `$V frames FULLSHA --only archived-row-none,archive-state,archived-row,archived-row-chosen,archived-view,archived-view-click,archived-view-esc,transient-chat,drag-to-archive,drag-dropped`.
 
-Frame states: `archived-row-none`, `archive-state`, `archived-row`, `archived-row-chosen`, `archived-view`, `archived-view-click`, `archived-view-esc`, `transient-chat`
+Frame states: `archived-row-none`, `archive-state`, `archived-row`, `archived-row-chosen`, `archived-view`, `archived-view-click`, `archived-view-esc`, `transient-chat`, `drag-to-archive`, `drag-dropped`
 
 Check the tab with no archived chats, keyboard and mouse entry, and Esc back to Sessions. The archived list uses plain names without an extra archived marker on each row. The open chat keeps **· Archived** while **Sent to clipboard** is visible.
 
