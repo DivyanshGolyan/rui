@@ -1247,11 +1247,18 @@ def saved_settings_served(root, env):
         started = run_start(mcp_store, token_env)
         assert started.returncode == 0, started.stderr
         assert "tool_name_collision" not in started.stderr, started.stderr
-        assert {"bash", "clash__bash", "search"} <= offered_tool_names(mcp_store), sorted(offered_tool_names(mcp_store))
+        # A running Host holds the Store's lock, so its saved tool set is read once it has paused.
+        host_ok(env, "pause", "--store", mcp_store)
+        wait_for_processes(mcp_store, 0)
+        names = offered_tool_names(mcp_store)
+        assert {"bash", "clash__bash", "search"} <= names, sorted(names)
         host_ok(env, "unset", "--store", mcp_store, "tools.mcp.clash")
         started = run_start(mcp_store, token_env)
         assert started.returncode == 0, started.stderr
-        assert "clash__bash" not in offered_tool_names(mcp_store) and "bash" in offered_tool_names(mcp_store)
+        host_ok(env, "pause", "--store", mcp_store)
+        wait_for_processes(mcp_store, 0)
+        names = offered_tool_names(mcp_store)
+        assert "clash__bash" not in names and "bash" in names, sorted(names)
     finally:
         forced_crash_cleanup(mcp_store)
         for server in (docs, clash):

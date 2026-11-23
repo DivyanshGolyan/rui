@@ -883,7 +883,7 @@ fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
 
 /// Every runner, so the recovery switches over `Runner` decide each one. Core commands resolve their call in
 /// the transaction that admits it, so they never reach recovery. A call matching no offered record runs as
-/// Bash. Names are unique within a tool set (the Host refuses `ToolNameCollision` and `DuplicateToolName`),
+/// Bash. Names are unique within a tool set (a clashing MCP name is prefixed or left out; see EXR-69),
 /// so the subquery yields at most one row.
 fn attemptRunnerSql() []const u8 {
     return "COALESCE((" ++ offeredCallSelectSql("action", "operation", tool_defs.sql.runnerOf("tool.owner", "tool.name")) ++ "),'" ++ @tagName(tool_defs.default_runner) ++ "')";

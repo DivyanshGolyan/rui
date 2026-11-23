@@ -76,10 +76,11 @@ def sdk_tool_set(root, good, network, ci):
                     # The clashing name is offered under its server prefix, so the Host starts and stops cleanly.
                     host = launch(frame(dict(base, tools={"mcp": dict([entry, mcp_entry("collision", collision)])})))
                     wait_for_host(runtime / "rui.sock", base["store"]["sqlite"]["dir"], host)
-                    names = offered_tool_names(base["store"]["sqlite"]["dir"])
-                    assert f"collision__{name}" in names and name not in names, (name, sorted(names))
                     host_process.close_stdin(host)
                     assert host.wait(timeout=30) == 0, (name, output(host))
+                    # Read once the Host has exited: a running Host holds the Store's lock.
+                    names = offered_tool_names(base["store"]["sqlite"]["dir"])
+                    assert f"collision__{name}" in names and name not in names, (name, sorted(names))
                 finally:
                     if host.poll() is None:
                         host.kill()
@@ -532,10 +533,11 @@ def main(network, ci):
     # `bash` from clash clashes with the built-in: it is offered as clash__bash, so the Host starts.
     colliding = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs), mcp_entry("clash", clash)])})))
     wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], colliding)
-    names = offered_tool_names(base["store"]["sqlite"]["dir"])
-    assert {"bash", "clash__bash", "search"} <= names, sorted(names)
     host_process.close_stdin(colliding)
     assert colliding.wait(timeout=30) == 0, output(colliding)
+    # Read once the Host has exited: a running Host holds the Store's lock.
+    names = offered_tool_names(base["store"]["sqlite"]["dir"])
+    assert {"bash", "clash__bash", "search"} <= names, sorted(names)
     docs.shutdown()
     docs.server_close()
     host = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs)])})))
