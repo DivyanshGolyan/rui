@@ -736,7 +736,7 @@ test "a skills reload is refused when it carries settings or has no catalog, and
                 } else mixed.require_model = true;
                 const answer = try storage.configureWithCapturedSkills(&mixed, null, null, &empty, std.testing.allocator, .{});
                 try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
-                try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, answer.rejected.code);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.settings_on_reload, answer.rejected.code);
             }
             const invocation: skills_fixture_domain.Capture = .{ .invocation = "a model tool's capture" };
             for ([_]?*const skills_fixture_domain.Capture{ null, &invocation }, 0..) |captured, index| {

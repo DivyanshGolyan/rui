@@ -33,6 +33,8 @@ pub const RejectedConfiguration = struct {
     replayed: bool,
     code: configuration_admission.Rejection,
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
+    /// Set exactly when `code` is `missing_settings`.
+    missing: ?@import("required_settings.zig").Missing = null,
 };
 
 pub const ConfigureReply = union(enum) {
@@ -56,6 +58,8 @@ pub const RejectedMessage = struct {
     replayed: bool,
     code: message_admission.Rejection,
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
+    /// Set exactly when `code` is `missing_settings`.
+    missing: ?@import("required_settings.zig").Missing = null,
     content: ContentReference,
 };
 

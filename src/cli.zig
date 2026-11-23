@@ -3633,7 +3633,7 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .action_background => "background",
         .action_stop => "stop",
     };
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation, .missing = answer.missing });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3722,6 +3722,11 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .conflict => "idempotency_key_conflict",
     };
     if (code) |value| try writeMutationField(writer, "code: ", value);
+    if (answer.missing) |missing| {
+        try writer.writeAll("missing: ");
+        try missing.writeJson(writer);
+        try writer.writeByte('\n');
+    }
     if (answer.result == .accepted) switch (answer.result.accepted) {
         .configure => |value| {
             if (value.skills) |status| try writer.print("skills: {s}\n", .{@tagName(status)}) else try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created });
@@ -3867,6 +3872,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .rejected => |code| {
             try writer.writeAll(",\"code\":");
             try std.json.Stringify.value(code.slice(), .{}, writer);
+            if (answer.missing) |missing| {
+                try writer.writeAll(",\"missing\":");
+                try missing.writeJson(writer);
+            }
         },
         .conflict => try writer.writeAll(",\"code\":\"idempotency_key_conflict\""),
     }
@@ -3983,12 +3992,15 @@ test "ADM-30 Message mutation JSON renders accepted parts with their owner and r
     const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 12, .digest = @splat(0xaa), .form = .parts } };
     const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"receipt\",\"kind\":\"message\"}";
-    for ([_][]const u8{
-        accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue,
-        rejected ++ input ++ "}",
-    }) |expected| {
+    // The wire always carries `missing` on a rejection; the CLI JSON names it only when set.
+    const rejected_wire = rejected[0 .. rejected.len - 1] ++ ",\"missing\":null}";
+    for ([_][2][]const u8{
+        .{ accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue, accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue },
+        .{ rejected ++ input ++ "}", rejected_wire ++ input ++ "}" },
+    }) |pair| {
+        const expected = pair[0];
         var body: [1024]u8 = undefined;
-        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"execution\":{{\"status\":\"queued\"}}}}", .{ wire_prefix, expected });
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"execution\":{{\"status\":\"queued\"}}}}", .{ wire_prefix, pair[1] });
         var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", target);
         try reply.context.store.set("/store");
         try reply.context.key.set("receipt");
@@ -4811,7 +4823,7 @@ test "parser diagnostic hands off its complete line without a smaller format buf
 }
 
 test "a saved rejection code this build does not know keeps the answer and says so" {
-    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\",\"missing\":null},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure);
     try reply.context.store.set("/s");
     try reply.context.key.set("saved");
@@ -4847,14 +4859,14 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
     }
 }
 
-test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
-    const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
+test "saved CLI rejection goldens preserve JSON and explain permission and missing settings" {
+    const cases = [_]struct { code: []const u8, session: []const u8, missing: []const u8 = "null", json_missing: []const u8 = "", line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --model, --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a model, a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing model, Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "missing_settings", .session = "", .missing = "[\"workspace\",\"provider\"]", .json_missing = ",\"missing\":[\"workspace\",\"provider\"]", .line = "rui session configure: --workspace, --provider: A new Session is missing a Workspace and a provider. Accepted: a model, a Workspace or parent, and a provider when the Host serves several. Next: Supply each missing setting with its option, a preset or a parent. This rejection was saved and replays as saved; a resend needs a new key. [missing_settings]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;
-        const body = try std.fmt.bufPrint(&wire, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}},\"execution\":{{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}}}", .{ protocol.wire_version, case.session, case.code });
+        const body = try std.fmt.bufPrint(&wire, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\",\"message\":null,\"missing\":{s}}},\"execution\":{{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}}}", .{ protocol.wire_version, case.session, case.code, case.missing });
         var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, case.session, .configure);
         try reply.context.store.set("/s");
         try reply.context.key.set("saved");
@@ -4867,7 +4879,7 @@ test "saved CLI rejection goldens preserve JSON and explain permission and incom
         out = .fixed(&storage);
         try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
         var expected: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&expected, "{{\"context\":{{\"store\":\"/s\",\"session\":\"{s}\",\"key\":\"saved\",\"kind\":\"configure\"}},\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}}}}\n", .{ case.session, case.session, case.code });
+        const json = try std.fmt.bufPrint(&expected, "{{\"context\":{{\"store\":\"/s\",\"session\":\"{s}\",\"key\":\"saved\",\"kind\":\"configure\"}},\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"{s}}}}}\n", .{ case.session, case.session, case.code, case.json_missing });
         try std.testing.expectEqualStrings(json, out.buffered());
     }
 }

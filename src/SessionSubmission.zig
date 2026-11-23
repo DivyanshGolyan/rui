@@ -693,6 +693,7 @@ test "submission settles wire Admission only after join and releases only accept
             var body = std.Io.Writer.fixed(&body_buffer);
             try body.print("{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"{s}_reply\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false,\"session\":\"k7m2qx\"", .{ if (kind == 0) "message" else "permission_decision", status });
             if (!accepted) try body.print(",\"code\":\"{s}\"", .{if (conflict) "idempotency_key_conflict" else "not_allowed"});
+            if (kind == 0 and !accepted and !conflict and !invalid) try body.writeAll(",\"missing\":null");
             if (kind != 0) try body.print(",\"action\":\"19\",\"decision\":\"{s}\"", .{if (kind == 1) "allow_once" else "deny"});
             if (kind == 0 and accepted) try body.writeAll(",\"admission\":\"37\"");
             try body.writeAll("}");

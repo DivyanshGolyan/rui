@@ -1,4 +1,5 @@
 const std = @import("std");
+const required_settings = @import("../../required_settings.zig");
 const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
@@ -68,6 +69,8 @@ pub const StoredAnswer = struct {
     code: Bounded(outcome_code.max_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
+    /// Saved with, and only with, a `missing_settings` rejection.
+    missing: ?required_settings.Missing = null,
 };
 
 pub const CommandObservation = command_reply.CommandObservation;
@@ -407,6 +410,7 @@ pub const SubmitMessage = struct {
     creation: *configuration_domain.ConfigurationReads = undefined,
     sender_valid: bool = false,
     rejection: message_admission.Rejection = undefined,
+    missing: ?required_settings.Missing = null,
     answer: StoredAnswer = undefined,
     head: rsql.SessionHead = undefined,
     later: union {
@@ -489,7 +493,10 @@ pub const SubmitMessage = struct {
         switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .rejected => |code| return t.done(t.rejectedReply(code, true)),
+            .rejected => |code| {
+                t.missing = try savedMissing(&message.saved);
+                return t.done(t.rejectedReply(code, true));
+            },
             .accepted => |existing| {
                 _ = existing.primary_content_id orelse return error.CorruptStore;
                 t.later = .{ .replay = undefined };
@@ -570,7 +577,7 @@ pub const SubmitMessage = struct {
 
     fn rejectedReply(t: *const SubmitMessage, code: message_admission.Rejection, is_replay: bool) MessageReply {
         const input = t.submittedInput();
-        return .{ .rejected = .{ .form = std.meta.activeTag(input), .replayed = is_replay, .code = code, .content = input.identity() } };
+        return .{ .rejected = .{ .form = std.meta.activeTag(input), .replayed = is_replay, .code = code, .missing = t.missing, .content = input.identity() } };
     }
 
     fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
@@ -611,7 +618,10 @@ pub const SubmitMessage = struct {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
-            .rejected => |code| try t.refuse(r, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, null),
+            .rejected => |code| rejected: {
+                if (code == .missing_settings) t.missing = t.creation.missing.?;
+                break :rejected try t.refuse(r, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, null);
+            },
             .ready => null,
         };
     }
@@ -686,7 +696,7 @@ pub const SubmitMessage = struct {
     fn finishRefusal(t: *SubmitMessage, r: *transition.Round(SubmitMessage), content_id: u64) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
-        t.answer = .{ .accepted = false };
+        t.answer = .{ .accepted = false, .missing = if (t.rejection == .missing_settings) t.missing.? else null };
         try t.answer.code.set(@tagName(t.rejection));
         try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, content_id, t.refusal_diagnostic, &t.answer);
         if (command.sender != null and t.sender_valid) {
@@ -1120,7 +1130,16 @@ pub const StartAgent = struct {
             .round => |round| .{ .round = switch (round) {
                 inline else => |tag| @field(rounds.At, @tagName(tag)),
             } },
-            .rejected => |code| t.fail(r, std.fmt.bufPrint(t.input.result_buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable),
+            .rejected => |code| rejected: {
+                var writer = std.Io.Writer.fixed(t.input.result_buffer);
+                try writer.writeAll("Rui could not start the agent");
+                if (t.creation.missing) |missing| {
+                    try writer.writeAll(": its spec is missing ");
+                    try missing.writeJson(&writer);
+                }
+                try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
+                break :rejected t.fail(r, writer.buffered());
+            },
             .ready => t.apply(r, null),
         };
     }
@@ -1297,7 +1316,7 @@ pub const Configure = struct {
                 }
                 return t.finishReplay();
             },
-            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code } }),
+            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .missing = try savedMissing(saved) } }),
         }
         if (t.input.preset) |decision| if (decision.rejection) |code| switch (code) {
             inline else => |tag| return t.refuse(r, @field(configuration_admission.Rejection, @tagName(tag)), null),
@@ -1388,11 +1407,11 @@ pub const Configure = struct {
         const reads = t.reads;
         if (configuration_domain.targetRejection(command.session.slice())) |code| return t.refuse(r, code, null);
         if (command.session.len == 0 or !reads.found.get()) return t.refuse(r, .unknown_session, null);
-        var invalid = command.preset != null or command.require_model or command.configuration.preferences != null;
+        var settings = command.preset != null or command.require_model or command.configuration.preferences != null;
         inline for (@import("../../session_settings.zig").spec_entries) |entry| {
-            if (@field(command.configuration, entry.field).state != .omitted) invalid = true;
+            if (@field(command.configuration, entry.field).state != .omitted) settings = true;
         }
-        if (invalid) return t.refuse(r, .incomplete_initial_configuration, null);
+        if (settings) return t.refuse(r, .settings_on_reload, null);
         const captured = t.input.reload_capture orelse return t.refuse(r, .skills_unavailable, null);
         switch (captured.*) {
             .failed => |failure| return t.refuse(r, failure.configurationRejection(), failure.bytes),
@@ -1449,7 +1468,7 @@ pub const Configure = struct {
     fn reject(t: *Configure, r: *transition.Round(Configure), outcome_id: ?u64) !transition.Next(Configure) {
         const command = t.input.command;
         const reads = t.reads;
-        reads.command_answer = .{ .accepted = false };
+        reads.command_answer = .{ .accepted = false, .missing = if (t.rejection.? == .missing_settings) reads.missing.? else null };
         try reads.command_answer.code.set(@tagName(t.rejection.?));
         try queueCommand(r, command.key.slice(), .configure, command.session.slice(), &reads.command_digest, outcome_id, null, &reads.command_answer);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
@@ -1465,7 +1484,7 @@ pub const Configure = struct {
     pub fn committed(t: *const Configure) Result {
         const command = t.input.command;
         t.input.reply.* = if (t.rejection) |code|
-            .{ .rejected = .{ .replayed = false, .code = code } }
+            .{ .rejected = .{ .replayed = false, .code = code, .missing = if (code == .missing_settings) t.reads.missing.? else null } }
         else if (t.reloaded) |result|
             .{ .accepted = .{ .replayed = false, .revision = t.reads.next.revision, .created = false, .session = command.session, .skills = result.reload_status } }
         else
@@ -2415,7 +2434,7 @@ fn Replay(comptime Rejection: type) type {
 }
 
 pub const saved_command = rsql.Read(.{
-    .sql = "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+    .sql = "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id,missing_settings FROM core_command WHERE command_key=?1",
     .Args = struct { key: []const u8 },
     .Row = struct {
         kind: u8,
@@ -2426,9 +2445,19 @@ pub const saved_command = rsql.Read(.{
         revision: u64,
         created: bool,
         primary_content_id: ?rsql.Positive,
+        missing_settings: ?u8,
     },
     .cardinality = .optional,
 });
+
+/// The settings a saved `missing_settings` rejection named; null for every other saved answer.
+fn savedMissing(saved: *const saved_command.Result) error{CorruptStore}!?required_settings.Missing {
+    const row = if (saved.*) |*row| row else return error.CorruptStore;
+    const named = std.mem.eql(u8, row.code.slice(), "missing_settings");
+    const value = row.missing_settings orelse return if (named) error.CorruptStore else null;
+    if (!named) return error.CorruptStore;
+    return try required_settings.Missing.fromStored(value);
+}
 
 pub noinline fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Result) void {
     a.read(saved_command, .{ .key = key }, destination);
@@ -2486,8 +2515,8 @@ pub const stop_cutoff = rsql.Read(.{
 });
 
 const insert_command = rsql.Write(.{
-    .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,missing_settings) " ++
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     .Args = struct {
         key: []const u8,
         kind: u8,
@@ -2500,6 +2529,7 @@ const insert_command = rsql.Write(.{
         revision: u64,
         created: bool,
         command_seq: u64,
+        missing_settings: ?u8,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -2542,6 +2572,7 @@ pub noinline fn queueCommandWithSeq(
         .revision = answer.revision,
         .created = answer.created,
         .command_seq = seq,
+        .missing_settings = if (answer.missing) |missing| missing.stored() else null,
     });
     return seq;
 }

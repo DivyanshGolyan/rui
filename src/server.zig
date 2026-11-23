@@ -5682,8 +5682,8 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         const expected = switch (kind) {
             .action_stop => continue,
-            .configure => "23826d5d66fc13cb4c75e15593c84b4591a1baf8ddb99a9cbfabf291b3cec12e",
-            .message => "ef22fa6a7b2086a1cf11913f2670da5c11cc713f84727ca1abbdf9f3d4a4f46f",
+            .configure => "b501240e06ee15fe16fae07682f8a4897ecd3d7e33aa3e89b2ef46d717957a88",
+            .message => "797f0ff670112ac114ab31b9cc7fd07c953a6eb68edc921f2bee955895ce8204",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
             .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
             .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
