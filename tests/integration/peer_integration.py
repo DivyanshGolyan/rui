@@ -668,10 +668,9 @@ def stdin_start_contract():
             assert start_receipt["configuration"] == {"provider": "codex", "model": model,
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
             tools = DEFAULTS.tools.split(",")
-            loaded = DEFAULTS.loaded_tools.split(",")
             if not (os_semantics.PROC_FS or os_semantics.DARWIN):
                 tools.remove("read_image")
-                loaded.remove("read_image")
+            loaded = list(tools)
             creation = {"provider": "codex", "model": model, "reasoning_effort": effort,
                         "workspace": str(state.resolve()), "tools": tools, "loaded_tools": loaded,
                         "permission_mode": DEFAULTS.permission_mode,
