@@ -67,6 +67,7 @@ test {
     _ = @import("word_search.zig");
     _ = @import("server_mcp.zig");
     _ = @import("server_mcp_relist.zig");
+    _ = @import("find_tools_reloads.zig");
     _ = @import("api_key.zig");
     _ = @import("attempt.zig");
     _ = @import("chatgpt_plan_login.zig");
