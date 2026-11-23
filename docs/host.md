@@ -70,7 +70,7 @@ This does not make a selected source installation eligible for `rui upgrade`; Up
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Check, start and status receive the same captured Host environment with cwd `/` and null stdin. Snapshots, normalized source buffers, environment copies and subprocess captures are kept only in memory and wiped after the operation.
 Saved moved SQLite storage, explicit interfaces and MySQL use the shared starter. DIR is retained separately from wire Store identity; unsaved nondefault placement remains subject to the ordinary detached starter's discoverability rule.
-After exact-instance stop, upgrade waits for the old process generation to retire (an unreaped zombie is retired) and its runtime/Store lease to retire before starting. A concurrent new owner is never stopped. Released v0.75.0 is refused as a target before stop because its check admits stdin lifetime while its detached starter refuses it; older targets without `settings --check` also leave the old Host running. Intentional source builds are not labelled from version text alone.
+After exact-instance stop, upgrade waits for the old process generation to retire (an unreaped zombie is retired) and its runtime/Store lease to retire before starting. A concurrent new owner is never stopped. Targets without `settings --check` also leave the old Host running.
 
 Updates keep saved work and sign-in.
 Retained earlier builds are not an unconditional rollback after a Store migration.

@@ -366,12 +366,10 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
         .target_unusable => |step| {
             const doing: []const u8 = switch (step) {
                 .resolving => "resolving the target",
-                .inspecting => "inspecting the target",
                 .checking => "checking the target",
             };
             const done: []const u8 = switch (step) {
                 .resolving => "resolved",
-                .inspecting => "inspected",
                 .checking => "checked",
             };
             try writer.print("failed at {s}: the target build could not be {s}; Host left running; check the installation, then retry", .{ doing, done });
@@ -402,7 +400,6 @@ test "SH-50 restart all reports every activation outcome and limitation with exi
         .{ .outcome = .replacement_observed, .text = "failed at verifying: a replacement Host was observed; inspect with its owning client, then retry", .result = .failed },
         .{ .outcome = .cancelled, .text = "failed at activation: cancelled; inspect Host status, then retry", .result = .failed },
         .{ .outcome = .{ .target_unusable = .resolving }, .text = "failed at resolving the target: the target build could not be resolved; Host left running; check the installation, then retry", .result = .failed },
-        .{ .outcome = .{ .target_unusable = .inspecting }, .text = "failed at inspecting the target: the target build could not be inspected; Host left running; check the installation, then retry", .result = .failed },
         .{ .outcome = .{ .target_unusable = .checking }, .text = "failed at checking the target: the target build could not be checked; Host left running; check the installation, then retry", .result = .failed },
     };
     var covered: std.EnumSet(std.meta.Tag(HostLifecycle.ActivationOutcome)) = .empty;
