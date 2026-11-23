@@ -82,7 +82,7 @@ pub fn readNotice(bytes: []const u8, id: u64) (document.Error || Invalid)!listen
     }
     const message = try readEnvelope(object, .wholeMember(object, .@"error"), id);
     return switch (message) {
-        .result => |result| .{ .ended = try subscriptionIn(result) },
+        .result => |result| if (isComplete(result)) .{ .ended = try subscriptionIn(result) } else .dropped,
         .rpc_error => |failure| .{ .refused = .{ .status = null, .rpc_code = failure.code } },
         .notification => error.NotJsonRpc,
     };
@@ -96,6 +96,12 @@ fn notice(bytes: []const u8, method: Value) Invalid!listen.Event {
     }
     if (method.stringIs(tools_changed_method)) return .{ .tools_changed = try subscriptionIn(try paramsOf(bytes)) };
     return .ignored;
+}
+
+/// A final result ends the stream only when its resultType is "complete"; any other result cut the stream short.
+fn isComplete(result: []const u8) bool {
+    const kind_value = document.member(result, "resultType") orelse return false;
+    return document.kind(kind_value) == .string and document.keyIs(document.contents(kind_value), "complete");
 }
 
 fn paramsOf(bytes: []const u8) Invalid!?[]const u8 {
@@ -461,6 +467,9 @@ test "EXR-76 a listen stream event reads as its domain event, and a malformed on
         .{ "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":\"not read\"}", .ignored },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1}}}", .{ .ended = 1 } },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\"}}", .{ .ended = null } },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"incomplete\"}}", .dropped },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"input_required\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1}}}", .dropped },
+        .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", .dropped },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}", .{ .refused = .{ .status = null, .rpc_code = -32601 } } },
         .{ "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}", .{ .refused = .{ .status = null, .rpc_code = -32700 } } },
     };
