@@ -1895,17 +1895,15 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     @import("upgrade_process.zig").waitForTestGate(init.gpa, io, init.environ_map.get("RUI_TEST_HOST_AFTER_FREEZE_GATE"), null, .fromSeconds(300)) catch |err| return launchFailure(result, .interrupted, err, null);
     var dir = std.Io.Dir.cwd().createDirPathOpen(io, admitted_directory, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
-    var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
-    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
-    executable_buffer[length] = 0;
+    // The settings handoff is this build's private format: launch this build.
+    const executable = @import("self_executable.zig").path(io) catch |err| return launchFailure(result, .setup, err, paths.selector());
     const gpa = std.heap.c_allocator;
     const first: usize = if (request.settings_file == null) 5 else 7;
     const provenance_argc = first + 2 * request.assignments.len;
     const argc = provenance_argc + 2;
     const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(argv);
-    argv[0] = @ptrCast(&executable_buffer);
+    argv[0] = executable.ptr;
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
@@ -2006,7 +2004,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 const lost = refusal != null and refusal.?.code == .store_locked;
                 if (lost) result.startup_len = 0;
                 var facts = ready;
-                const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
+                const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable, until, &facts);
                 return launchReady(result, facts, &paths, !exact);
             },
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),

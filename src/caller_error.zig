@@ -152,7 +152,6 @@ pub const pending = .{
     "DuplicateToolName",
     "EffectAwareShutdown",
     "EndOfStream",
-    "ExecutablePathTooLong",
     "ExpectedRefusal",
     "FileNotFound",
     "FixtureCredentialPathRequired",

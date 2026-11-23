@@ -54,6 +54,15 @@ pub fn List(comptime Target: type) type {
             userdata: *anyopaque,
             pressed: *const fn (*anyopaque, *vxfw.EventContext, Target) anyerror!void,
         };
+        /// The pointer after a press, wherever that press landed: vxfw routes each mouse event to the widget under
+        /// the pointer, so a list reports a held pointer it never saw pressed, and its holder joins the gesture.
+        pub const Pointer = struct {
+            userdata: *anyopaque,
+            moved: *const fn (*anyopaque, *vxfw.EventContext, Held) anyerror!void,
+        };
+        /// `held` is a left drag, `released` the release that ends it. Presses stay `on_press` clicks, and a free
+        /// pointer anywhere on screen is the root's to report.
+        pub const Held = struct { over: ?Target, phase: enum { held, released } };
         pub const Span = struct { row: i17, height: u16, target: ?Target, alternate_target: ?Target = null, regions: []const Region = &.{} };
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
         pub const Presence = struct { userdata: *anyopaque, changed: *const fn (*anyopaque, *vxfw.EventContext, bool) anyerror!void };
@@ -77,6 +86,7 @@ pub fn List(comptime Target: type) type {
         wheel_applied: bool = false,
         edges: ?Edges = null,
         on_press: ?Press = null,
+        on_pointer: ?Pointer = null,
         base_style: vaxis.Style = .{},
         selection_style: vaxis.Style = .{ .reverse = true },
         indicator_style: ?vaxis.Style = null,
@@ -121,19 +131,23 @@ pub fn List(comptime Target: type) type {
             const mouse = input.mouse;
             if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
                 const press = self.on_press orelse return;
-                const size = self.last_size orelse return;
-                if (mouse.col < 0 or mouse.col >= size.width) return;
-                for (self.shown_at) |span| {
-                    if (mouse.row >= span.row and mouse.row < span.row + span.height) {
-                        const alternate = mouse.button == .right or mouse.mods.alt;
-                        const target = if (alternate) span.alternate_target orelse return else for (span.regions) |region| {
-                            if (mouse.col >= region.start and mouse.col < region.end) break region.target;
-                        } else span.target orelse return;
-                        ctx.consume_event = true;
-                        return press.pressed(press.userdata, ctx, target);
-                    }
+                const span = self.spanAt(mouse) orelse return;
+                const alternate = mouse.button == .right or mouse.mods.alt;
+                const target = if (alternate) span.alternate_target orelse return else targetIn(span, mouse.col) orelse return;
+                ctx.consume_event = true;
+                return press.pressed(press.userdata, ctx, target);
+            }
+            if (self.on_pointer) |pointer| {
+                const phase: ?@FieldType(Held, "phase") = switch (mouse.type) {
+                    .drag => if (mouse.button == .left) .held else null,
+                    .release => if (mouse.button == .left or mouse.button == .none) .released else null,
+                    .motion, .press => null,
+                };
+                if (phase) |held| {
+                    const over = if (self.spanAt(mouse)) |span| targetIn(span, mouse.col) else null;
+                    ctx.consume_event = true;
+                    return pointer.moved(pointer.userdata, ctx, .{ .over = over, .phase = held });
                 }
-                return;
             }
             // The wheel's shown rows are reported after the draw applies it (scrollReport), never from here:
             // the content surface's own handler consumes the wheel, and the top moves only at the next draw.
@@ -142,6 +156,20 @@ pub fn List(comptime Target: type) type {
                 self.wheel_due = true;
                 self.wheel_row = mouse.row;
             }
+        }
+
+        /// The drawn row under a pointer inside the list's width, if any.
+        fn spanAt(self: *const Self, mouse: vaxis.Mouse) ?Span {
+            const size = self.last_size orelse return null;
+            if (mouse.col < 0 or mouse.col >= size.width) return null;
+            for (self.shown_at) |span| if (mouse.row >= span.row and mouse.row < span.row + span.height) return span;
+            return null;
+        }
+
+        /// A column's target in a drawn row: the region under it, else the row's own target.
+        fn targetIn(span: Span, col: i16) ?Target {
+            for (span.regions) |region| if (col >= region.start and col < region.end) return region.target;
+            return span.target;
         }
 
         /// The shown rows after a wheel scroll, once a draw has applied it. Returns null until then, and once per scroll.
@@ -1359,4 +1387,53 @@ test "SUI-107 List anchors mixed-height rows at the nearest attainable physical 
     _ = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(u32, 4), list.shown.first);
     try std.testing.expectEqual(@as(i17, 3), list.shown_at[1].row);
+}
+
+test "List reports a held pointer and its release over the drawn target under it, and keeps presses as clicks" {
+    const rows: []const TestRow = &.{
+        .{ .lines = &.{&.{.{ .text = "first controls" }}}, .target = 10, .regions = &.{.{ .start = 4, .end = 7, .target = 20 }} },
+        .{ .lines = &.{&.{.{ .text = "second controls" }}}, .regions = &.{.{ .start = 4, .end = 30, .target = 30 }} },
+    };
+    const Seen = struct {
+        held: ?TestList.Held = null,
+        reports: usize = 0,
+        fn moved(raw: *anyopaque, _: *vxfw.EventContext, held: TestList.Held) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.held = held;
+            self.reports += 1;
+        }
+    };
+    var seen: Seen = .{};
+    var pressed: Testing.Pressed = .{};
+    var list: TestList = .{ .rows = .of(&rows), .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed }, .on_pointer = .{ .userdata = &seen, .moved = Seen.moved } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try list.widget().draw(Testing.context(arena.allocator(), 3));
+    const Phase = @FieldType(TestList.Held, "phase");
+    const Case = struct { row: i16, col: i16, button: vaxis.Mouse.Button, kind: vaxis.Mouse.Type, phase: ?Phase, over: ?u32 = null, consumed: bool = false };
+    for ([_]Case{
+        .{ .row = 0, .col = 1, .button = .left, .kind = .drag, .phase = .held, .over = 10, .consumed = true },
+        .{ .row = 0, .col = 5, .button = .left, .kind = .drag, .phase = .held, .over = 20, .consumed = true },
+        .{ .row = 1, .col = 2, .button = .left, .kind = .drag, .phase = .held, .over = null, .consumed = true },
+        .{ .row = 1, .col = 9, .button = .left, .kind = .release, .phase = .released, .over = 30, .consumed = true },
+        .{ .row = 1, .col = 9, .button = .none, .kind = .release, .phase = .released, .over = 30, .consumed = true },
+        .{ .row = 5, .col = 1, .button = .left, .kind = .release, .phase = .released, .over = null, .consumed = true },
+        .{ .row = 0, .col = 1, .button = .none, .kind = .motion, .phase = null },
+        .{ .row = 0, .col = 1, .button = .right, .kind = .drag, .phase = null },
+        .{ .row = 0, .col = 1, .button = .right, .kind = .release, .phase = null },
+        .{ .row = 0, .col = 1, .button = .left, .kind = .press, .phase = null, .consumed = true },
+        .{ .row = 0, .col = 1, .button = .wheel_down, .kind = .press, .phase = null },
+    }) |case| {
+        seen = .{};
+        pressed.target = null;
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try list.widget().handleEvent(&ctx, .{ .mouse = .{ .row = case.row, .col = case.col, .button = case.button, .mods = .{}, .type = case.kind } });
+        try std.testing.expectEqual(@as(usize, if (case.phase != null) 1 else 0), seen.reports);
+        if (case.phase) |phase| {
+            try std.testing.expectEqual(phase, seen.held.?.phase);
+            try std.testing.expectEqual(case.over, seen.held.?.over);
+        }
+        if (case.kind == .press and case.button == .left) try std.testing.expectEqual(@as(?u32, 10), pressed.target);
+        try std.testing.expectEqual(case.consumed, ctx.consume_event);
+    }
 }

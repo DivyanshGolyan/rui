@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
-    "src/upgrade.zig", "src/upgrade_process.zig",
+    "src/upgrade.zig", "src/upgrade_process.zig", "src/self_executable.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts
     # and stay off this list.
     "tests/integration/os_semantics.py",
@@ -234,6 +234,27 @@ def unlistened_binds(source):
     return found
 
 
+# On Darwin std.process.executablePath re-resolves the launch path, usually the
+# ~/.local/bin/rui symlink an upgrade repoints, on every call; Linux reads the
+# running file. Every self-launch reads src/self_executable.zig's startup pin.
+SELF_EXECUTABLE_OWNER = "src/self_executable.zig"
+# A standalone probe binary with its own main, launched by its absolute path.
+SELF_EXECUTABLE_EXEMPT = ("src/signal_stack_probe.zig",)
+
+
+def self_executable_violations(root=ROOT):
+    found = []
+    for file in sorted(root.glob("src/**/*.zig")):
+        path = file.relative_to(root).as_posix()
+        if path == SELF_EXECUTABLE_OWNER or path in SELF_EXECUTABLE_EXEMPT:
+            continue
+        tokens = [m.group() for m in ZIG_TOKEN.finditer(file.read_text()) if not m.group().startswith(("//", "\\\\", '"', "'"))]
+        if any(token in ("executablePath", "executablePathAlloc") for token in tokens):
+            found.append(f"{path}: reads std.process.executablePath, which follows a repointed symlink on Darwin; "
+                         f"launch this build through {SELF_EXECUTABLE_OWNER}")
+    return found
+
+
 def mac_path(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in MAC_PATHS)
 
@@ -374,7 +395,7 @@ def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     builds = [(path.relative_to(ROOT).as_posix(), path.read_text()) for path in build_files.files()]
     messages = ([message for name, source in builds if not mac_path(name) for message in build_violations(source, name)]
-                + violations(sites()) + bind_violations(bind_sites()) + flag_violations()
+                + violations(sites()) + bind_violations(bind_sites()) + flag_violations() + self_executable_violations()
                 + [message for folder in ("integration", "qualification")
                    for path in sorted((ROOT / "tests" / folder).rglob("*.py"))
                    for message in pty_close_violations(path.read_text(), path.relative_to(ROOT).as_posix())])

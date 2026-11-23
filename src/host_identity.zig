@@ -172,8 +172,7 @@ test "host identity native snapshot observes only a gated synthetic child" {
     var environment: std.process.Environ.Map = .init(allocator);
     defer environment.deinit();
     try environment.put("RUI_IDENTITY_FIXTURE", "synthetic-only");
-    const self_executable = try std.process.executablePathAlloc(io, allocator);
-    defer allocator.free(self_executable);
+    const self_executable = try @import("self_executable.zig").path(io);
     const argv: []const []const u8 = &.{ self_executable, "--listen=-" };
     var child = try std.process.spawn(io, .{
         .argv = argv,

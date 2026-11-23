@@ -228,7 +228,7 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
     const paths = platform.resolveClientPaths(init.io, store) catch null;
     const owned_store = try allocator.dupe(u8, if (paths) |value| value.selector() else store);
     errdefer allocator.free(owned_store);
-    const executable = try std.process.executablePathAlloc(init.io, allocator);
+    const executable = try allocator.dupeSentinel(u8, try @import("self_executable.zig").path(init.io), 0);
     errdefer allocator.free(executable);
     const path_observation = installation_path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "") catch installation_path.Observation{ .state = .unavailable };
     return .{ .candidate = candidate.?, .selected = selected.?, .hosts = hosts.?, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
@@ -419,7 +419,7 @@ test "a check frees exactly the executable path the system gave it" {
         .hosts = .{},
         .home = try allocator.dupe(u8, "/synthetic/home"),
         .store = try allocator.dupe(u8, "/synthetic/store"),
-        .running_executable = try std.process.executablePathAlloc(std.testing.io, allocator),
+        .running_executable = try allocator.dupeSentinel(u8, try @import("self_executable.zig").path(std.testing.io), 0),
     };
     checked.deinit(allocator);
 }
