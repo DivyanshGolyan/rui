@@ -800,10 +800,10 @@ test "each app policy field joins an app record's digest, and no other owner's d
     for (digests, 0..) |first, index| for (digests[index + 1 ..]) |second| try std.testing.expect(!std.mem.eql(u8, &first, &second));
 
     // Only app records read the policy: a non-app record ignores a stray policy, and its digest is pinned.
-    var rui: Record = .{ .name = "bash", .owner = .rui, .input_schema = "{}" };
-    const plain = recordDigest(&rui);
-    rui.app = .{ .replay = .safe, .restart_limit = 9, .wait_ms = 5_000 };
-    try std.testing.expectEqualSlices(u8, &plain, &recordDigest(&rui));
+    var built_in: Record = .{ .name = "bash", .owner = .rui, .input_schema = "{}" };
+    const plain = recordDigest(&built_in);
+    built_in.app = .{ .replay = .safe, .restart_limit = 9, .wait_ms = 5_000 };
+    try std.testing.expectEqualSlices(u8, &plain, &recordDigest(&built_in));
     const pinned = [32]u8{
         0x84, 0x3F, 0x40, 0x9E, 0x5E, 0x79, 0x2F, 0x28, 0xE0, 0x19, 0x6D, 0x4D, 0x23, 0x2B, 0xDD, 0x9D,
         0xAC, 0x49, 0x33, 0x29, 0x30, 0x81, 0xCA, 0x0A, 0x97, 0x18, 0x68, 0x4C, 0xE9, 0xC3, 0x31, 0xFC,
