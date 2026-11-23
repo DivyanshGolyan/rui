@@ -29,6 +29,7 @@ const skills_domain = @import("domain/skills.zig");
 const content_domain = @import("domain/content.zig");
 const content_parts = @import("domain/content_parts.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
+const tool_offer_domain = @import("domain/tool_offer.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
 const tool_record = @import("../tool_record.zig");
@@ -371,7 +372,8 @@ pub const Store = struct {
             try self.readHostToolSetText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            const app = (try tool_set_domain.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms)) orelse .{};
+            out.* = .{ .name = name, .remote_name = remote, .owner = row.owner, .server = server, .description = description, .input_schema = schema, .app = app };
             digest.* = tool_record.recordDigest(out);
         }
         if (!saved.toolSet().valid()) return error.CorruptStore;
@@ -405,6 +407,21 @@ pub const Store = struct {
         var access: Access(.read, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, tool_set_domain.hostToolRecordsOf(&access, set, ordinal, rows));
+    }
+
+    /// Test seam: the digests the offer and the saved selection rebuild from set `set`'s rows, read in one
+    /// Store entry so both see the same rows.
+    pub fn readToolDigestsForTesting(self: *Store, set: u64, names: *const command_input.ToolsField, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
+        selection.names = names;
+        return self.queue().run(readToolDigestsHeld, .{ self, set, offer, selection });
+    }
+
+    fn readToolDigestsHeld(self: *Store, set: u64, offer: *tool_offer_domain.Freeze, selection: *tool_set_domain.SavedSelection) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_offer_domain.roundTripDigestsOf(&access, set, offer, selection));
     }
 
     pub fn readHostToolSetText(self: *Store, content_id: u64, destination: []u8) !void {

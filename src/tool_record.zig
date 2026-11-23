@@ -136,18 +136,6 @@ pub const max_app_restart_limit: u8 = 16;
 pub const min_app_wait_ms: u32 = 1_000;
 pub const max_app_wait_ms: u32 = 3_600_000;
 
-/// The app policy a Store row holds, or null for the zero policy every non-app owner keeps. The Store's
-/// CHECKs make `replay` one of 'unsafe' and 'safe' for an app row, so a stored value outside them is a
-/// programmer error in the row reader, not a condition to report.
-pub fn storedAppPolicy(owner: Owner, replay: []const u8, restart_limit: u64, wait_ms: u64) ?AppPolicy {
-    if (owner != .app) return null;
-    return .{
-        .replay = std.meta.stringToEnum(Replay, replay) orelse unreachable,
-        .restart_limit = @intCast(restart_limit),
-        .wait_ms = @intCast(wait_ms),
-    };
-}
-
 pub const max_server_bytes = tool_name.max_bytes;
 
 pub const Record = struct {
@@ -355,6 +343,7 @@ pub const HostToolSet = struct {
         if (self.records.len != self.digests.len or self.records.len > max_host_tool_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
             if (!tool_name.valid(each.name) or !validServer(each) or !validRemoteName(each)) return false;
+            if (each.owner == .app and !each.app.valid()) return false;
             if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
             if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
         }

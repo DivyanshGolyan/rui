@@ -250,7 +250,7 @@ const RecordBatch = struct {
 };
 
 pub const host_tool_records = rsql.Read(.{
-    .sql = "SELECT member.ordinal,tool.name,tool.remote_name,tool.owner,tool.server,description.content_id AS description_id,description.byte_length AS description_length," ++
+    .sql = "SELECT member.ordinal,tool.name,tool.remote_name,tool.owner,tool.server,tool.replay,tool.restart_limit,tool.wait_ms,description.content_id AS description_id,description.byte_length AS description_length," ++
         "description.digest AS description_digest,description.private AS description_private,input_schema.content_id AS schema_id," ++
         "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
@@ -264,6 +264,9 @@ pub const host_tool_records = rsql.Read(.{
         remote_name: Bounded(tool_record.max_name_bytes),
         owner: tool_record.Owner,
         server: Bounded(tool_record.max_server_bytes),
+        replay: Bounded(6),
+        restart_limit: u64,
+        wait_ms: u64,
         description_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,
@@ -310,6 +313,19 @@ pub fn storedPolicy(record: *const tool_record.Record) StoredPolicy {
     return .{ .replay = @tagName(policy.replay), .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms };
 }
 
+/// The one reader of a stored app policy, the inverse of `storedPolicy`: null for the zero policy every
+/// non-app owner keeps, and `CorruptStore` for a tag or number outside the Store's CHECKs.
+pub fn storedAppPolicy(owner: tool_record.Owner, replay: []const u8, restart_limit: u64, wait_ms: u64) error{CorruptStore}!?tool_record.AppPolicy {
+    if (owner != .app) return null;
+    const policy: tool_record.AppPolicy = .{
+        .replay = std.meta.stringToEnum(tool_record.Replay, replay) orelse return error.CorruptStore,
+        .restart_limit = std.math.cast(u8, restart_limit) orelse return error.CorruptStore,
+        .wait_ms = std.math.cast(u32, wait_ms) orelse return error.CorruptStore,
+    };
+    if (!policy.valid()) return error.CorruptStore;
+    return policy;
+}
+
 pub const Selection = struct {
     names: *const command_input.ToolsField,
     digest: [32]u8,
@@ -347,19 +363,24 @@ pub const SavedSelection = struct {
     names: *const command_input.ToolsField,
     digest: tool_record.SetDigest = .init(),
     count: usize = 0,
+    invalid: bool = false,
 
     pub fn queue(self: *SavedSelection, a: anytype, source_set: u64) void {
         a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, self);
     }
 
     pub fn selection(self: *SavedSelection) !Selection {
-        if (self.count != self.names.count) return error.CorruptStore;
+        if (self.invalid or self.count != self.names.count) return error.CorruptStore;
         return .{ .names = self.names, .digest = self.digest.final() };
     }
 
     pub fn visit(self: *SavedSelection, row: *const selection_records.Row) bool {
         var names = self.names.iterator();
         while (names.next()) |name| if (std.mem.eql(u8, name, row.name.slice())) {
+            const app = storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms) catch {
+                self.invalid = true;
+                return false;
+            };
             const identity: tool_record.RecordIdentity = .{
                 .name = row.name.slice(),
                 .remote_name = row.remote_name.slice(),
@@ -367,7 +388,7 @@ pub const SavedSelection = struct {
                 .server = row.server.slice(),
                 .description = row.description,
                 .input_schema = row.input_schema,
-                .app = tool_record.storedAppPolicy(row.owner, row.replay.slice(), row.restart_limit, row.wait_ms),
+                .app = app,
             };
             self.digest.add(&identity.digest());
             self.count += 1;
