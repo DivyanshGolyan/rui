@@ -23,7 +23,8 @@ await rui.close();
 Run `npm install ruicode`.
 The `ruicode` package carries the client.
 The `rui` executable comes from the platform package beside it
-(`ruicode-linux-x64`, `ruicode-linux-arm64` or `ruicode-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
+(`ruicode-linux-x64`, `ruicode-linux-arm64` or `ruicode-darwin-arm64`, installed as optional dependencies).
+npm refuses to install `ruicode` on Windows; on other systems without a platform package, `Rui.connect` refuses with `RuiUnavailableError` and names the supported platforms.
 Pass `binary` in the second argument to `Rui.connect` to name one yourself.
 
 Bundled and custom binaries and their child Host launch are application-owned.

@@ -21,7 +21,7 @@ import { Rui } from "ruicode";
 
 const rui = await Rui.connect({
 	store: { sqlite: { dir: "./app-rui-store" } },
-	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: { value: process.env.OPENAI_API_KEY! } } },
+	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: { env: "OPENAI_API_KEY" } } },
 });
 const agent = await rui.sessions.create(
 	{ workspace: process.cwd(), model: process.env.RUI_MODEL!, tools: ["bash"] },
@@ -30,7 +30,13 @@ const agent = await rui.sessions.create(
 await agent.send("Summarize what this repository does.", { idempotencyKey: randomUUID() });
 for await (const entry of agent.listActivity({ follow: true })) {
 	if (entry.kind === "assistant") console.log(await agent.readContent(entry));
-	if (entry.kind === "turn_ended" && entry.sessionId === agent.id) break;
+	if (entry.kind === "turn_ended" && entry.sessionId === agent.id) {
+		if (entry.ending !== "done") {
+			console.error(`The turn ended ${entry.ending}: ${entry.code}`, entry.text ?? "");
+			process.exitCode = 1;
+		}
+		break;
+	}
 }
 await rui.close();
 ```
