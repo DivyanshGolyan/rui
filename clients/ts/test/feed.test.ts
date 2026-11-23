@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { getEventListeners } from "node:events";
-import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
 
 import { RuiRequestError, RuiUnavailableError } from "../src/errors.ts";
 import { decodeCursor, listActivity, type FeedEntry } from "../src/feed.ts";
-import { SessionNotifications } from "../src/notifications.ts";
 import { Session, type Link } from "../src/sessions.ts";
+import { scriptedLink } from "./scripted-line.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import type { components } from "../src/wire.ts";
 
@@ -195,272 +193,11 @@ test("failed sends retain null targets, identity and cursor continuation without
 	]);
 });
 
-function gate(): { promise: Promise<void>; resolve: () => void } {
-	let resolve = () => {};
-	const promise = new Promise<void>((done) => { resolve = done; });
-	return { promise, resolve };
-}
-
-function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = "0") {
-	let pages = 0;
-	let deliver = false;
-	const link: Link = {
-		activity: new SessionNotifications(),
-		exchange: async (path, build) => {
-			if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify({
-				session: { parent: null, label: null, model: "model-a", reasoning_effort: null, tools: [], permission_mode: "ask" },
-				pending_messages: queued,
-				work: { turn: null, operation: null, state: { kind: "idle", since: "1" }, latest_outcome: null },
-			}));
-			if (path !== "/v1/activity-page") {
-				deliver = true;
-				return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1", archived: JSON.parse(build("/s")).archived }, completion: { status: "completed" } }));
-			}
-			pages++;
-			const items = deliver ? [{ position: String(pages), ordinal: "0", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }] : [];
-			deliver = false;
-			return Buffer.from(JSON.stringify({ delta: "full", since: null, items, more: false, end: String(pages), queued: { count: queued }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: state } } }));
-		},
-	};
-	return { link, pages: () => pages };
-}
-
-for (const state of ["idle", "finished", "failed", "stopped"] as const) {
-	test(`an empty ${state} feed makes no timed requests; a send from another handle wakes it`, async (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
-		const fake = fakeSession(state);
-		const controller = new AbortController();
-		const feed = new Session(fake.link, "s").listActivity({ follow: true, signal: controller.signal });
-		t.after(() => controller.abort());
-		const pending = feed.next();
-		await turn();
-		assert.equal(fake.pages(), 1);
-		t.mock.timers.tick(60_000);
-		await turn();
-		assert.equal(fake.pages(), 1, "idle must have no polling timer");
-		fake.link.activity?.notify("other");
-		new SessionNotifications().notify("s");
-		await turn();
-		assert.equal(fake.pages(), 1);
-		await new Session(fake.link, "s").send("hello", { idempotencyKey: "send" });
-		await turn();
-		assert.equal(fake.pages(), 2, "the write must wake the follower immediately");
-		assert.equal((await pending).value?.kind, "stop");
-		const sleeping = feed.next();
-		await turn();
-		controller.abort();
-		assert.deepEqual(await sleeping, { done: true, value: undefined });
-		await feed.return(undefined);
-	});
-}
-
-for (const kind of ["send", "update", "decide", "interrupt", "stop", "archive", "unarchive"] as const) {
-	test(`${kind} wakes every sleeping follower for the same Session`, async () => {
-		const fake = fakeSession();
-		const controller = new AbortController();
-		const followers = [1, 2].map(() => new Session(fake.link, "s").listActivity({ follow: true, signal: controller.signal }));
-		const pending = followers.map((feed) => feed.next());
-		try {
-			await turn();
-			assert.equal(fake.pages(), 2);
-			const writer = new Session(fake.link, "s");
-			switch (kind) {
-				case "send": await writer.send("hello", { idempotencyKey: "k" }); break;
-				case "update": await writer.update({ label: "x" }); break;
-				case "decide": await writer.decide("1", "allow"); break;
-				case "interrupt": await writer.interrupt({ turn: "1", operation: "1" }); break;
-				case "stop": await writer.stop(); break;
-				case "archive": await writer.archive(); break;
-				case "unarchive": await writer.unarchive(); break;
-			}
-			await turn();
-			assert.ok(fake.pages() >= 4, "both followers must re-read");
-		} finally {
-			controller.abort();
-			await Promise.all(pending);
-			await Promise.all(followers.map((feed) => feed.return(undefined)));
-		}
-	});
-}
-
-test("a write racing the idle page reply is not lost", async () => {
-	const fake = fakeSession();
-	const original = fake.link.exchange;
-	const entered = gate();
-	const release = gate();
-	let first = true;
-	fake.link.exchange = async (...args) => {
-		const reply = await original(...args);
-		if (args[0] === "/v1/activity-page" && first) {
-			first = false;
-			entered.resolve();
-			await release.promise;
-		}
-		return reply;
-	};
-	const controller = new AbortController();
-	const feed = new Session(fake.link, "s").listActivity({ follow: true, signal: controller.signal });
-	const pending = feed.next();
-	try {
-		await entered.promise;
-		await new Session(fake.link, "s").send("racing", { idempotencyKey: "k" });
-		release.resolve();
-		assert.equal((await pending).value?.kind, "stop");
-		assert.equal(fake.pages(), 2);
-	} finally {
-		controller.abort();
-		release.resolve();
-		await feed.return(undefined);
-	}
-});
-
-for (const [state, queued] of [["working", "0"], ["idle", "1"]] as const) {
-	test(`${state} with ${queued} queued polls at 250 ms rising to 2 s`, async (t) => {
-		t.mock.timers.enable({ apis: ["setTimeout"] });
-		const fake = fakeSession(state, queued);
-		const controller = new AbortController();
-		const pending = listActivity(fake.link, "s", { follow: true, signal: controller.signal }).next();
-		try {
-			await turn();
-			let pages = 1;
-			for (const delay of [250, 500, 1_000, 2_000, 2_000]) {
-				t.mock.timers.tick(delay - 1);
-				await turn();
-				assert.equal(fake.pages(), pages);
-				t.mock.timers.tick(1);
-				await turn();
-				assert.equal(fake.pages(), ++pages);
-			}
-		} finally {
-			controller.abort();
-			assert.equal((await pending).done, true);
-		}
-	});
-}
-
-test("closing a notification watch releases its subscription after an aborted wait", async () => {
-	const notifications = new SessionNotifications();
-	const watch = notifications.watch("s");
-	const controller = new AbortController();
-	const sleeping = watch.wait(watch.revision, controller.signal);
-	controller.abort();
-	await sleeping;
-	watch.close();
-	notifications.notify("s");
-	assert.equal(watch.revision, 0, "closed subscriptions must no longer be retained");
-});
-
-test("a failed write does not wake an idle follower", async () => {
-	const fake = fakeSession();
-	const exchange = fake.link.exchange;
-	fake.link.exchange = async (...args) => {
-		if (args[0] === "/v1/message") throw new Error("write failed");
-		return exchange(...args);
-	};
-	const controller = new AbortController();
-	const pending = listActivity(fake.link, "s", { follow: true, signal: controller.signal }).next();
-	try {
-		await turn();
-		await assert.rejects(new Session(fake.link, "s").send("no", { idempotencyKey: "k" }), /write failed/);
-		await turn();
-		assert.equal(fake.pages(), 1);
-	} finally {
-		controller.abort();
-		assert.equal((await pending).done, true);
-	}
-});
-
-test("a lifecycle failure rejects and releases all parked watches and their abort listeners", async () => {
-	const notifications = new SessionNotifications();
-	const controller = new AbortController();
-	const watches = [notifications.watch("s"), notifications.watch("s"), notifications.watch("other")];
-	const failure = new RuiUnavailableError("the Rui Host cannot restart");
-	const pending = watches.map((watch) => assert.rejects(watch.wait(watch.revision, controller.signal), (error: unknown) => error === failure));
-	assert.equal(getEventListeners(controller.signal, "abort").length, watches.length);
-	notifications.fail(failure);
-	await Promise.all(pending);
-	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-	for (const session of ["s", "other"]) notifications.notify(session);
-	assert.deepEqual(watches.map((watch) => watch.revision), [0, 0, 0]);
-});
-
-test("failure during a page read is remembered even after a write races it", async () => {
-	const notifications = new SessionNotifications();
-	const watch = notifications.watch("s");
-	const revision = watch.revision;
-	notifications.notify("s");
-	const failure = new RuiUnavailableError("the Rui client is closed");
-	notifications.fail(failure);
-	await assert.rejects(watch.wait(revision, undefined), (error: unknown) => error === failure);
-});
-
-test("releasing a failed watch again does not unregister a new follower after restart", async () => {
-	const notifications = new SessionNotifications();
-	const old = notifications.watch("s");
-	notifications.fail(new RuiUnavailableError("the Rui Host could not restart"));
-	const fresh = notifications.watch("s");
-	old.close();
-	const controller = new AbortController();
-	const pending = fresh.wait(fresh.revision, controller.signal);
-	try {
-		notifications.notify("s");
-		assert.equal(fresh.revision, 1);
-		await pending;
-	} finally {
-		controller.abort();
-		fresh.close();
-	}
-});
-
-test("follow retains its exhausted cursor and backoff across not_modified, and clears excluded tokens", async (t) => {
-	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const requests: Schemas["ActivityPageRequest"][] = [];
-	const replies = [
-		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
-		{ version: WIRE_VERSION, type: "activity_page", delta: "not_modified", since: "token-b" },
-		{ delta: "full", since: null, items: [], more: false, end: "12", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
-		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
-	];
-	const link: Link = { exchange: async (_path, body) => {
-		requests.push(JSON.parse(body("store")) as Schemas["ActivityPageRequest"]);
-		assert.ok(replies.length > 0, "unexpected extra poll");
-		return Buffer.from(JSON.stringify(replies.shift()));
-	} };
-	const controller = new AbortController();
-	const feed = listActivity(link, "s", { follow: true, signal: controller.signal });
-	const pending = feed.next();
-	try {
-		await turn();
-		assert.equal(requests.length, 1);
-		for (const [index, delay] of [250, 500, 1_000].entries()) {
-			t.mock.timers.tick(delay - 1);
-			await turn();
-			assert.equal(requests.length, index + 1);
-			t.mock.timers.tick(1);
-			await turn();
-			assert.equal(requests.length, index + 2);
-		}
-		const result = await pending;
-		assert.equal(result.value?.position, "13");
-		assert.equal(result.value?.ordinal, "2");
-		assert.deepEqual(requests.map((request) => ({ position: request.position, ordinal: request.ordinal, end: request.end, since: "since" in request ? request.since : undefined })), [
-			{ position: "0", ordinal: null, end: null, since: undefined },
-			{ position: "9", ordinal: null, end: null, since: "token-a" },
-			{ position: "9", ordinal: null, end: null, since: "token-b" },
-			{ position: "12", ordinal: null, end: null, since: undefined },
-		]);
-	} finally {
-		controller.abort();
-		await pending;
-		await feed.return(undefined);
-	}
-});
-
 for (const follow of [false, true]) {
 	test(`${follow ? "following" : "bounded"} pagination never reuses a token while pages remain unread`, async () => {
 		const requests: Schemas["ActivityPageRequest"][] = [];
 		const controller = new AbortController();
-		const link: Link = { exchange: async (_path, body) => {
+		const exchange: Link["exchange"] = async (_path, body) => {
 			requests.push(JSON.parse(body("store")) as Schemas["ActivityPageRequest"]);
 			const first = requests.length === 1;
 			const position = first ? "2" : "3";
@@ -468,8 +205,10 @@ for (const follow of [false, true]) {
 				items: [{ position, ordinal: "1", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }],
 				queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } },
 			}));
-		} };
-		const feed = listActivity(link, "s", { follow, signal: controller.signal });
+		};
+		// A following traversal needs a line; its second page is owed by the first page's `more`, not by a nudge.
+		const link: Link = follow ? scriptedLink(exchange).link : { exchange };
+		const feed = listActivity(link, "k7m2qx", { follow, signal: controller.signal });
 		try {
 			assert.equal((await feed.next()).value?.position, "2");
 			assert.equal((await feed.next()).value?.position, "3");

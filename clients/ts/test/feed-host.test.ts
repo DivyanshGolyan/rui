@@ -24,9 +24,17 @@ function answer(text: string, index: number): string {
 	].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
 }
 
-test("follow wakes for two local sends and makes no requests between them while idle", { skip: binary ? false : "set RUI_BINARY to a built rui", timeout: 30_000 }, async (t) => {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-feed-")));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
+interface Fixture {
+	rui: Rui;
+	session: Awaited<ReturnType<Rui["sessions"]["create"]>>;
+	requests: string[];
+	paths: string[];
+	/** Stops the client and the provider, and removes the fixture's directory. */
+	close(): Promise<void>;
+}
+
+/** A local Host over a scripted provider, with one Session that answers each Message with `answer N`. */
+async function openFixture(root: string): Promise<Fixture> {
 	const cert = join(root, "cert.pem");
 	const key = join(root, "key.pem");
 	execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"], { stdio: "pipe" });
@@ -57,23 +65,38 @@ test("follow wakes for two local sends and makes no requests between them while 
 	await once(provider, "listening");
 	const address = provider.address();
 	assert.ok(address && typeof address !== "string");
+	const rui = await Rui.connect({
+		store: { sqlite: { dir: join(root, "store") } },
+		providers: { openai: { endpoint: `https://127.0.0.1:${address.port}/v1/responses`, key: "local-fixture-only" } },
+		network: { caFile: cert },
+	}, { binary: binary ?? "rui" });
+	const session = await rui.sessions.create({
+		provider: "openai", model: "model-a", effort: null, compactAt: 100000,
+		workspace: tmpdir(), tools: [], permissionMode: "ask",
+	}, { idempotencyKey: "feed:session" });
+	return {
+		rui, session, requests, paths,
+		close: async () => {
+			try {
+				await rui.close();
+			} finally {
+				provider.close();
+			}
+		},
+	};
+}
+
+test("follow wakes for two local sends and makes no requests between them while idle", { skip: binary ? false : "set RUI_BINARY to a built rui", timeout: 30_000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-feed-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const controller = new AbortController();
 	t.signal.addEventListener("abort", () => controller.abort(), { once: true });
-	let rui: Rui | undefined;
+	const fixture = await openFixture(root);
+	const { rui, session, requests, paths } = fixture;
 	let consume: Promise<void> | undefined;
 	try {
-		rui = await Rui.connect({
-			store: { sqlite: { dir: join(root, "store") } },
-			providers: { openai: { endpoint: `https://127.0.0.1:${address.port}/v1/responses`, key: "local-fixture-only" } },
-			network: { caFile: cert },
-		}, { binary: binary ?? "rui" });
-		const session = await rui.sessions.create({
-			provider: "openai", model: "model-a", effort: null, compactAt: 100000,
-			workspace: tmpdir(), tools: [], permissionMode: "ask",
-		}, { idempotencyKey: "feed:session" });
 		const events = new EventEmitter();
 		let pages = 0;
-		let idlePages = 0;
 		let idle = false;
 		const exchange = rui.exchange.bind(rui);
 		rui.exchange = async (...args) => {
@@ -84,10 +107,7 @@ test("follow wakes for two local sends and makes no requests between them while 
 				if (page.delta === "full") {
 					idle = page.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind);
 				}
-				if (idle && (page.delta === "not_modified" || page.items.length === 0)) {
-					idlePages++;
-					setImmediate(() => events.emit("idle"));
-				}
+				if (idle && (page.delta === "not_modified" || page.items.length === 0)) setImmediate(() => events.emit("idle"));
 			}
 			return reply;
 		};
@@ -99,13 +119,19 @@ test("follow wakes for two local sends and makes no requests between them while 
 					texts.push(entry.text ?? "");
 					events.emit("answer");
 				}
-				if (entry.kind === "turn_ended") assert.equal(entry.ending, "done", `unexpected turn ending: ${JSON.stringify(entry)}`);
+				if (entry.kind === "turn_ended") {
+					assert.equal(entry.ending, "done", `unexpected turn ending: ${JSON.stringify(entry)}`);
+					// The rows of a commit are their own read; the Session is idle once its turn's last row is delivered.
+					events.emit("idle");
+				}
 			}
 		})();
 		const unexpectedEnd = consume.then(() => {
 			if (!controller.signal.aborted) throw new Error("following feed ended before cancellation");
 		});
 		await Promise.race([firstIdle, unexpectedEnd]);
+		// The Host nudges once per commit around creation, and each nudge is read. Those reads settle before the idle window.
+		await sleep(600);
 		const initialPages = pages;
 		await sleep(600);
 		assert.equal(pages, initialPages, "initial idle follower must not poll");
@@ -123,7 +149,6 @@ test("follow wakes for two local sends and makes no requests between them while 
 		assert.deepEqual(texts, ["answer 1", "answer 2"]);
 		assert.equal(requests.length, 2);
 		assert.ok(paths.every((path) => path === "/v1/models" || path === "/v1/responses"));
-		assert.equal(idlePages, 3);
 		controller.abort();
 		await consume;
 	} finally {
@@ -131,9 +156,50 @@ test("follow wakes for two local sends and makes no requests between them while 
 		try {
 			await consume;
 		} finally {
-			await rui?.close();
-			provider.close();
-			rmSync(root, { recursive: true, force: true });
+			await fixture.close();
+		}
+	}
+});
+
+test("a followed feed re-watches its Session after the Host is killed and restarted", { skip: binary ? false : "set RUI_BINARY to a built rui", timeout: 90_000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-restart-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const controller = new AbortController();
+	const fixture = await openFixture(root);
+	const { rui, session, requests } = fixture;
+	let consume: Promise<void> | undefined;
+	try {
+		const events = new EventEmitter();
+		const texts: string[] = [];
+		consume = (async () => {
+			for await (const entry of session.listActivity({ follow: true, signal: controller.signal })) {
+				if (entry.kind === "assistant") texts.push(entry.text ?? "");
+				if (entry.kind === "turn_ended") events.emit("turn");
+			}
+		})();
+		const turns = () => once(events, "turn", { signal: controller.signal });
+		let turn = turns();
+		await rui.getSession(session.id).send("message 1", { idempotencyKey: "restart:1" });
+		await turn;
+		assert.deepEqual(texts, ["answer 1"]);
+
+		const exited = once(rui, "exit");
+		process.kill(rui.pid as number, "SIGKILL");
+		const [exit] = await exited;
+		assert.equal(exit?.restarting, true, "the Host is restarted, not latched");
+
+		// The new Host's line opens with the watched set, so its nudge reads the Session from the cursor and delivers the answer.
+		turn = turns();
+		await rui.getSession(session.id).send("message 2", { idempotencyKey: "restart:2" });
+		await turn;
+		assert.deepEqual(texts, ["answer 1", "answer 2"]);
+		assert.equal(requests.length, 2);
+	} finally {
+		controller.abort();
+		try {
+			await consume;
+		} finally {
+			await fixture.close();
 		}
 	}
 });
