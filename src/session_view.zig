@@ -788,7 +788,8 @@ const ArgumentSource = struct {
 pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour, unicode_script),
-        .mcp, .read_image => toolRequest(io, scratch, sink, colour, unicode_script, tool),
+        // An app call needs ask-mode approval like an MCP call, so its card shows the tool request.
+        .mcp, .read_image, .app => toolRequest(io, scratch, sink, colour, unicode_script, tool),
         .core, .provider => error.InvalidObservation,
     };
 }

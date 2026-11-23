@@ -864,7 +864,8 @@ fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
             @setEvalBranchQuota(1_000_000);
             break :blk .ofBytes(kind.indeterminateText(), false);
         },
-        .core, .provider => unreachable,
+        // App calls never reach recovery: their cut-off is the app_call owner (design U6).
+        .core, .provider, .app => unreachable,
     };
 }
 
@@ -1047,7 +1048,7 @@ fn queueReadyFacts(a: anytype, selected: ReadyAction, facts: *mcp_facts.Result) 
         .bash => a.read(bash_facts, CoreNames.of().args(.{ .action_id = selected.action_id }), facts),
         .mcp => a.read(mcp_facts, .{ .action_id = selected.action_id }, facts),
         .read_image => a.read(image_facts, .{ .action_id = selected.action_id }, facts),
-        .core, .provider => unreachable,
+        .core, .provider, .app => unreachable,
     }
 }
 

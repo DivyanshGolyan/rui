@@ -202,6 +202,7 @@ test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name
             return switch (entry.owner) {
                 .mcp => .mcp,
                 .provider => .provider,
+                .app => .app,
                 .rui => if (std.mem.eql(u8, entry.name, "bash")) .bash else if (std.mem.eql(u8, entry.name, "read_image")) .read_image else if (std.mem.eql(u8, entry.name, "web_search")) .provider else if (std.mem.eql(u8, entry.name, "not_a_built_in_tool")) .bash else .core,
             };
         }

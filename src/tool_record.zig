@@ -101,7 +101,32 @@ pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"
 pub const bash_max_command_bytes: usize = 120 * 1024;
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
-pub const Owner = enum { rui, provider, mcp };
+pub const Owner = enum { rui, provider, mcp, app };
+
+/// How the Host may repeat an app call after a restart. Only `safe` may be repeated; `unsafe` is reported
+/// as "may have run" and never re-run (design U6, cut-off).
+pub const Replay = enum { unsafe, safe };
+
+/// Policy an app record carries. Only `owner = app` uses it; every other record holds the zero policy,
+/// so no other digest or row changes. All three fields are part of the record digest.
+pub const AppPolicy = struct {
+    replay: Replay = .unsafe,
+    /// Restarts a safe call may take before it fails with `restart_limit`. Ignored unless `replay` is safe.
+    restart_limit: u8 = default_app_restart_limit,
+    /// Milliseconds an unclaimed call waits from the moment it is ready before it fails.
+    wait_ms: u32 = default_app_wait_ms,
+
+    pub const zero: AppPolicy = .{ .restart_limit = 0, .wait_ms = 0 };
+};
+
+/// The Store's form of `AppPolicy`: `replay` is '' for every non-app record.
+pub const StoredPolicy = struct { replay: []const u8, restart_limit: u64, wait_ms: u64 };
+
+pub const default_app_restart_limit: u8 = 3;
+pub const default_app_wait_ms: u32 = 900_000;
+pub const max_app_restart_limit: u8 = 16;
+pub const min_app_wait_ms: u32 = 1_000;
+pub const max_app_wait_ms: u32 = 3_600_000;
 
 pub const max_server_bytes = tool_name.max_bytes;
 
@@ -115,6 +140,8 @@ pub const Record = struct {
     input_schema: []const u8 = "",
     owner: Owner,
     server: []const u8 = "",
+    /// Set only on `owner = app`; the zero policy on every other owner.
+    app: AppPolicy = AppPolicy.zero,
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -123,6 +150,12 @@ pub const Record = struct {
     /// The one reader of the remote name: the name a server listed, which a tools/call sends.
     pub fn remoteName(self: *const Record) []const u8 {
         return remoteNameOf(self.name, self.remote_name);
+    }
+
+    /// The app policy as the Store keeps it: the zero policy on every other owner.
+    pub fn storedPolicy(self: *const Record) StoredPolicy {
+        if (self.owner != .app) return .{ .replay = "", .restart_limit = 0, .wait_ms = 0 };
+        return .{ .replay = @tagName(self.app.replay), .restart_limit = self.app.restart_limit, .wait_ms = self.app.wait_ms };
     }
 
     /// The remote name as the Store keeps it: empty when it is the offered name.
@@ -148,6 +181,7 @@ pub fn recordDigest(member: *const Record) [32]u8 {
         .server = member.server,
         .description = content_string.digest(member.description),
         .input_schema = content_string.digest(member.input_schema),
+        .app = if (member.owner == .app) member.app else null,
     }).digest();
 }
 
@@ -159,6 +193,8 @@ pub const RecordIdentity = struct {
     server: []const u8,
     description: [32]u8,
     input_schema: [32]u8,
+    /// Non-null exactly for `owner = app`, which joins the identity under its own tag; see `Record.app`.
+    app: ?AppPolicy = null,
 
     pub fn digest(self: *const RecordIdentity) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -174,6 +210,14 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
+        if (self.app) |policy| {
+            hashField(&hash, "rui/tool-record/app-policy");
+            hashField(&hash, @tagName(policy.replay));
+            hashField(&hash, &.{policy.restart_limit});
+            var wait: [4]u8 = undefined;
+            std.mem.writeInt(u32, &wait, policy.wait_ms, .big);
+            hashField(&hash, &wait);
+        }
         return hash.finalResult();
     }
 };
@@ -403,6 +447,7 @@ pub const Runner = enum {
     core,
     mcp,
     provider,
+    app,
 
     /// The offer comes from the frozen tool set of the model operation.
     pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
@@ -411,6 +456,8 @@ pub const Runner = enum {
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
             .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
+            // An app result is model-facing text from the app, shaped like an MCP result.
+            .app => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .provider => unreachable,
         };
     }
@@ -420,6 +467,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
+            .app => @import("action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
             .provider => unreachable,
         };
@@ -430,6 +478,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
             .read_image => "Stopped before this image read completed.",
             .mcp => result,
+            .app => "Stopped before the app returned a result.",
             .core, .provider => unreachable,
         };
     }
@@ -439,6 +488,7 @@ pub const Runner = enum {
             .bash => @import("bash_action_text.zig").indeterminate,
             .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
+            .app => "The Host stopped while this app call was running. The app may have run it; it was not automatically repeated.",
             .core, .provider => unreachable,
         };
     }
@@ -455,6 +505,7 @@ pub const Runner = enum {
 pub const owner_runners = [_]struct { owner: Owner, runner: Runner }{
     .{ .owner = .mcp, .runner = .mcp },
     .{ .owner = .provider, .runner = .provider },
+    .{ .owner = .app, .runner = .app },
 };
 
 pub fn ownerRunner(owner: Owner) ?Runner {
@@ -781,7 +832,7 @@ test "all result profiles fit the shared excerpt maximum" {
     inline for (std.meta.tags(Runner)) |runner| {
         switch (runner) {
             .provider => {}, // Provider calls do not use the Result route.
-            .bash, .mcp, .read_image, .core => {
+            .bash, .mcp, .app, .read_image, .core => {
                 for ([_]bool{ false, true }) |offer| {
                     try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
                 }

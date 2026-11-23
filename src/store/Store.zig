@@ -1329,7 +1329,8 @@ pub const Store = struct {
             .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
             .read_image => self.queue().run(readImageExecutionInputHeld, .{ self, binding, out }),
             .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
-            .core, .provider => @compileError("only Action runners have execution input"),
+            // An app call runs in its app; the Host hands it no execution input.
+            .core, .provider, .app => @compileError("only Action runners have execution input"),
         };
     }
 
@@ -1608,7 +1609,8 @@ pub const Store = struct {
             .bash => action_domain.nextAction(&access, .bash, capacity),
             .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .read_image => action_domain.nextAction(&access, .read_image, capacity),
-            .core, .provider => unreachable,
+            // App calls are claimed by their app (a later unit); execution never selects them.
+            .core, .provider, .app => unreachable,
         });
     }
     pub fn resolveAction(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {

@@ -17,15 +17,15 @@ const lookup_set = rsql.Read(.{
 });
 
 const lookup_record = rsql.Read(.{
-    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND remote_name=?2 AND owner=?3 AND server=?4 AND description_content_id=?5 AND input_schema_content_id=?6",
-    .Args = struct { name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND remote_name=?2 AND owner=?3 AND server=?4 AND replay=?5 AND restart_limit=?6 AND wait_ms=?7 AND description_content_id=?8 AND input_schema_content_id=?9",
+    .Args = struct { name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, replay: []const u8, restart_limit: u64, wait_ms: u64, description: u64, input_schema: u64 },
     .Row = struct { tool_record_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_record = rsql.Write(.{
-    .sql = "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-    .Args = struct { id: u64, name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+    .Args = struct { id: u64, name: []const u8, remote: []const u8, owner: tool_record.Owner, server: []const u8, replay: []const u8, restart_limit: u64, wait_ms: u64, description: u64, input_schema: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -59,7 +59,7 @@ const insert_tool_set_member = rsql.Write(.{
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
         "WHERE tool.name=?3 AND tool.owner=?4 AND tool.server=?5 AND description.digest=?6 AND description.byte_length=?7 AND description.private=0 " ++
-        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0 AND tool.remote_name=?10",
+        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0 AND tool.remote_name=?10 AND tool.replay=?11 AND tool.restart_limit=?12 AND tool.wait_ms=?13",
     .Args = struct {
         set: u64,
         ordinal: u64,
@@ -71,6 +71,9 @@ const insert_tool_set_member = rsql.Write(.{
         input_schema: [32]u8,
         input_schema_bytes: u64,
         remote: []const u8,
+        replay: []const u8,
+        restart_limit: u64,
+        wait_ms: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -113,7 +116,7 @@ pub const SavingRecords = struct {
             saving.existing[index] = null;
             if (both) {
                 known = true;
-                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = each.storedPolicy().replay, .restart_limit = each.storedPolicy().restart_limit, .wait_ms = each.storedPolicy().wait_ms, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
             }
         }
         return known;
@@ -123,7 +126,7 @@ pub const SavingRecords = struct {
         for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
             const ids = saving.content_ids[index];
             const id = try a.identity(.tool_record_id);
-            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .description = ids[0], .input_schema = ids[1] });
+            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = each.storedPolicy().replay, .restart_limit = each.storedPolicy().restart_limit, .wait_ms = each.storedPolicy().wait_ms, .description = ids[0], .input_schema = ids[1] });
         };
     }
 };
@@ -286,6 +289,9 @@ pub fn insertHostToolSet(a: anytype, tool_set: *const tool_record.HostToolSet, d
         .input_schema = content_string.digest(each.input_schema),
         .input_schema_bytes = each.input_schema.len,
         .remote = each.storedRemoteName(),
+        .replay = each.storedPolicy().replay,
+        .restart_limit = each.storedPolicy().restart_limit,
+        .wait_ms = each.storedPolicy().wait_ms,
     });
 }
 

@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 90;
+pub const schema_version: u32 = 91;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -70,6 +70,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 88, .digest = 0xce11ec9515c499fb },
     .{ .schema_version = 89, .digest = 0xe163228a5eb523f7 },
     .{ .schema_version = 90, .digest = 0x2f2d94715f2d01bc },
+    .{ .schema_version = 91, .digest = 0x4f111bd96aa613e3 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -937,6 +938,36 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK(OCTET_LENGTH(remote_name)<=64 AND (NOT REGEXP_LIKE(remote_name,'[^A-Za-z0-9_-]','c')))",
         },
     },
+    // Client tools (app owner): a Session declares app records with a replay policy and a wait limit. Every
+    // existing row takes the zero policy, so its meaning and digest are unchanged; the owner value and the
+    // policy columns are new, and the unique key includes the policy so two declarations differing only in it
+    // are two records.
+    .{
+        .from = 90,
+        .sqlite = &.{
+            "ALTER TABLE tool_record RENAME TO tool_record_90",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n remote_name TEXT NOT NULL CHECK(length(CAST(remote_name AS BLOB))<=64 AND (remote_name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(remote_name)=length(CAST(remote_name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp' OR owner='app')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n replay TEXT NOT NULL CHECK(length(CAST(replay AS BLOB))<=6 AND replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay='')),\n restart_limit INTEGER NOT NULL CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0)),\n wait_ms INTEGER NOT NULL CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0)),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id) SELECT tool_record_id,name,remote_name,owner,server,'',0,0,description_content_id,input_schema_content_id FROM tool_record_90",
+            "DROP TABLE tool_record_90",
+        },
+        .mysql = &.{
+            "SET @rui_owner_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND cc.CHECK_CLAUSE LIKE '%provider%' LIMIT 1)",
+            "PREPARE rui_owner_check FROM @rui_owner_ddl",
+            "EXECUTE rui_owner_check",
+            "DEALLOCATE PREPARE rui_owner_check",
+            "ALTER TABLE tool_record ADD CHECK(owner IN ('rui','provider','mcp','app'))",
+            "ALTER TABLE tool_record ADD COLUMN replay VARCHAR(6) NOT NULL DEFAULT '' AFTER server",
+            "ALTER TABLE tool_record ALTER COLUMN replay DROP DEFAULT",
+            "ALTER TABLE tool_record ADD COLUMN restart_limit BIGINT NOT NULL DEFAULT 0 AFTER replay",
+            "ALTER TABLE tool_record ALTER COLUMN restart_limit DROP DEFAULT",
+            "ALTER TABLE tool_record ADD COLUMN wait_ms BIGINT NOT NULL DEFAULT 0 AFTER restart_limit",
+            "ALTER TABLE tool_record ALTER COLUMN wait_ms DROP DEFAULT",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,remote_name,owner,server,replay,restart_limit,wait_ms,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record ADD CHECK(replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay=''))",
+            "ALTER TABLE tool_record ADD CHECK((owner='app' AND restart_limit BETWEEN 0 AND 16 OR owner<>'app' AND restart_limit=0))",
+            "ALTER TABLE tool_record ADD CHECK((owner='app' AND wait_ms BETWEEN 1000 AND 3600000 OR owner<>'app' AND wait_ms=0))",
+        },
+    },
 };
 
 comptime {
@@ -1261,17 +1292,33 @@ pub const tables = [_]Table{
             .{ .name = "tool_record_id", .type = .int, .check = "tool_record_id>0" },
             .{ .name = "name", .type = .{ .text = .{ .min = 1, .max = tool_defs.max_name_bytes } }, .check = "@charset(name,'A-Za-z0-9_-')" },
             .{ .name = "remote_name", .type = .{ .text = .{ .min = 0, .max = tool_defs.max_name_bytes } }, .check = "@charset(remote_name,'A-Za-z0-9_-')" },
-            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp" } } },
+            .{ .name = "owner", .type = .{ .tag = &.{ "rui", "provider", "mcp", "app" } } },
             .{
                 .name = "server",
                 .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
+            // App policy: the zero policy ('' and 0) on every other owner, so their rows and digests are unchanged.
+            .{
+                .name = "replay",
+                .type = .{ .text = .{ .min = 0, .max = 6 } },
+                .check = "replay IN ('','unsafe','safe') AND (owner='app' AND replay<>'' OR owner<>'app' AND replay='')",
+            },
+            .{
+                .name = "restart_limit",
+                .type = .int,
+                .check = std.fmt.comptimePrint("(owner='app' AND restart_limit BETWEEN 0 AND {d} OR owner<>'app' AND restart_limit=0)", .{tool_defs.max_app_restart_limit}),
+            },
+            .{
+                .name = "wait_ms",
+                .type = .int,
+                .check = std.fmt.comptimePrint("(owner='app' AND wait_ms BETWEEN {d} AND {d} OR owner<>'app' AND wait_ms=0)", .{ tool_defs.min_app_wait_ms, tool_defs.max_app_wait_ms }),
+            },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "remote_name", "owner", "server", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "remote_name", "owner", "server", "replay", "restart_limit", "wait_ms", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),

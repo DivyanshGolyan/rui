@@ -1145,7 +1145,7 @@ pub const Preparation = struct {
                     if (try self.page.nextProviderTool(&self.tool)) return self.loadProviderTool();
                 } else if (try self.page.nextTool(&self.tool)) {
                     switch (self.tool.owner) {
-                        .rui, .mcp => {
+                        .rui, .mcp, .app => {
                             self.handles[0] = .{ .text = self.tool.name.slice() };
                             self.handles[1] = .{ .content = self.tool.description };
                             self.handles[2] = .{ .content = self.tool.input_schema };
