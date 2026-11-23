@@ -653,6 +653,19 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
     ctx.redraw = true;
 }
 
+/// The pointer after a press, from whichever list it is over; only a press on a chat row makes it matter.
+fn appPointer(raw: *anyopaque, ctx: *vxfw.EventContext, held: GroupedList.Held) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.state.carry.pressed == null) return;
+    const revision = self.state.presentation_revision;
+    try self.appNext(ctx, try self.event(.{ .pointer = .{ .over = held.over, .phase = switch (held.phase) {
+        .held => .held,
+        .released => .released,
+        .free => .free,
+    } } }));
+    ctx.redraw = ctx.redraw or self.state.presentation_revision != revision or held.phase == .released;
+}
+
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => {
@@ -1156,9 +1169,10 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.paintDivider();
     self.app_screen = .{ .content = &self.app_sessions, .input = self.bottomWidget(), .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
-    self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
+    self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick, .on_pointer = .{ .userdata = self, .moved = appPointer } };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
+    self.app_sessions.on_pointer = .{ .userdata = self, .moved = appPointer };
     self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
@@ -5323,6 +5337,76 @@ test "App overview list press follows only after the open child settles and open
     try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
     try std.testing.expect(overview.follow.pending == null);
     try std.testing.expect(!ctx.quit);
+}
+
+test "a chat row pressed in the list and released on the Archived tab archives it, and a release elsewhere does not" {
+    const Find = struct {
+        fn originOf(surface: vxfw.Surface, target: vxfw.Widget, from: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return from;
+            for (surface.children) |child| {
+                if (originOf(child.surface, target, .{ .row = from.row + child.origin.row, .col = from.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        /// The screen cell of a drawn row's label column, or of the Archived tab, in a fresh frame.
+        /// `rig.shown` draws into its own arena, so it runs before the frame the event uses, never after.
+        fn cell(rig: *Rig, arena: std.mem.Allocator, width: u16, what: union(enum) { row: view.Reference, archived }) !struct { frame: vxfw.Surface, col: u16, row: u16 } {
+            var tab: ?struct { col: u16, row: u16 } = null;
+            if (what == .archived) {
+                var shown = try rig.shown(width, 30);
+                defer shown.deinit();
+                for (0..30) |row| if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Archived")) |column| {
+                    tab = .{ .col = @intCast(column + 2), .row = @intCast(row) };
+                    break;
+                };
+            }
+            const frame = try rig.overview.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+            switch (what) {
+                .row => |reference| {
+                    const list = originOf(frame, rig.overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+                    for (rig.overview.app_sessions.shown_at) |span| if (span.target) |target| {
+                        if (target == .open and std.mem.eql(u8, &target.open, &reference)) return .{ .frame = frame, .col = @intCast(list.col + 4), .row = @intCast(list.row + span.row) };
+                    };
+                    return error.RowNotDrawn;
+                },
+                .archived => {
+                    const found = tab orelse return error.ArchivedTabNotDrawn;
+                    return .{ .frame = frame, .col = found.col, .row = found.row };
+                },
+            }
+        }
+    };
+    for ([_]bool{ true, false }) |on_tab| {
+        const rig = try openListed();
+        defer rig.close();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const carried = shownRow(rig, 1);
+        const other = shownRow(rig, 3);
+        const press = try Find.cell(rig, arena.allocator(), 140, .{ .row = carried });
+        try app_events.mouse(&ctx, press.frame, .{ .col = @intCast(press.col), .row = @intCast(press.row), .button = .left, .type = .press, .mods = .{} });
+        try std.testing.expectEqualStrings(&carried, &rig.overview.state.carry.pressed.?);
+        const away = try Find.cell(rig, arena.allocator(), 140, .{ .row = other });
+        try app_events.mouse(&ctx, away.frame, .{ .col = @intCast(away.col), .row = @intCast(away.row), .button = .left, .type = .drag, .mods = .{} });
+        try std.testing.expect(rig.overview.state.carry.carrying);
+        var drawn = try rig.shown(140, 30);
+        var hint = false;
+        for (0..30) |row| hint = hint or std.mem.indexOf(u8, try drawn.line(@intCast(row)), "Archived  · drop to archive") != null;
+        drawn.deinit();
+        try std.testing.expect(hint);
+        const release = if (on_tab) try Find.cell(rig, arena.allocator(), 140, .archived) else try Find.cell(rig, arena.allocator(), 140, .{ .row = other });
+        try app_events.mouse(&ctx, release.frame, .{ .col = @intCast(release.col), .row = @intCast(release.row), .button = .left, .type = .drag, .mods = .{} });
+        try app_events.mouse(&ctx, release.frame, .{ .col = @intCast(release.col), .row = @intCast(release.row), .button = .left, .type = .release, .mods = .{} });
+        try std.testing.expect(!rig.overview.state.carry.carrying);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, if (on_tab) 1 else 0), Seen.now.archives);
+        if (on_tab) {
+            try std.testing.expectEqualStrings(&carried, &Seen.now.archive_session);
+            try std.testing.expect(Seen.now.archive_requested);
+        }
+    }
 }
 
 test "App shell divider follows overview locale across layouts and screen selection" {

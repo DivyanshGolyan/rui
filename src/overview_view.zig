@@ -395,6 +395,9 @@ pub const Event = union(enum) {
     input: InputDelivery,
     list_settled: struct { wide: bool, focused: bool },
     list_presence: struct { at_ms: u64, pointer_over: bool },
+    /// The pointer after a press, over the drawn target under it: a left drag, its release, or a move with no
+    /// button held. Lists report it wherever the press landed (see `Carry`).
+    pointer: Pointer,
     /// The lines the list shows after a wheel scroll, reported after the draw that applies it.
     viewport: Viewport,
 
@@ -452,6 +455,33 @@ pub const Click = union(enum) {
 };
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
+
+pub const Pointer = struct { over: ?Click, phase: enum { held, released, free } };
+
+/// A chat row pressed and dragged onto a tab: a live chat dropped on Archived is archived, an archived one dropped
+/// on Chats is restored, through the same requests as Alt-A and restore. The press itself opens the row as a click
+/// does; the drag starts once a held pointer leaves that row, and any release, a move with no button held, a key
+/// or another click ends it.
+pub const Carry = struct {
+    /// The row the last press opened, until that press ends.
+    pressed: ?Reference = null,
+    /// The pressed row's drag has left it.
+    carrying: bool = false,
+    /// The drawn target under the held pointer.
+    over: ?Click = null,
+
+    /// The tab that takes the carried row, if any: Archived for a live chat, Chats for an archived one.
+    pub fn dropTarget(self: Carry, state: *const State) ?Click {
+        if (!self.carrying) return null;
+        const row = state.find(self.pressed.?) orelse return null;
+        return if (row.archive_state == .archived) .sessions else .archived;
+    }
+
+    fn dropping(self: Carry, state: *const State) bool {
+        const target = self.dropTarget(state) orelse return false;
+        return self.over != null and std.meta.eql(self.over.?, target);
+    }
+};
 
 pub const max_unconfirmed_line_bytes = 80;
 
@@ -888,6 +918,7 @@ pub const State = struct {
     next_rank: u64 = 0,
     pointer_over: bool = false,
     key_until_ms: u64 = 0,
+    carry: Carry = .{},
     releasing: bool = false,
 
     pub const Options = struct {
@@ -1406,6 +1437,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
+            endCarry(state);
             if (input.list_origin and !input.pasted and !input.under and input.key != .ignored) {
                 const was_held = holding(state);
                 state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
@@ -1451,8 +1483,11 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .first_line => |result| try firstLine(state, result),
         .archived => |answer| try archivedAnswer(state, answer, &effects),
+        .pointer => |pointer| try carryPointer(state, pointer, &effects),
         .clicked => |input| {
             state.launch = .done;
+            endCarry(state);
+            if (input.target == .open) state.carry.pressed = input.target.open;
             if (!state.creating()) switch (input.target) {
                 .open => |reference| try clickOpen(state, reference, &effects),
                 .pin => |request| pinIntent(state, request, &effects),
@@ -2799,6 +2834,38 @@ fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, 
     return archiveSession(state, .{ .reference = ref }, effects);
 }
 
+fn carryPointer(state: *State, pointer: Pointer, effects: *Effects) error{OutOfMemory}!void {
+    const pressed = state.carry.pressed orelse return;
+    if (pointer.phase == .held) {
+        const before = state.carry;
+        if (!state.carry.carrying) {
+            // A drag still inside the pressed row is a click that wobbled.
+            if (pointer.over != null and pointer.over.? == .open and std.mem.eql(u8, &pointer.over.?.open, &pressed)) return;
+            state.carry.carrying = true;
+        }
+        state.carry.over = pointer.over;
+        if (!std.meta.eql(before, state.carry)) state.presentation_revision +%= 1;
+        return;
+    }
+    const dropped = pointer.phase == .released and state.carry.carrying and blk: {
+        state.carry.over = pointer.over;
+        break :blk state.carry.dropping(state);
+    };
+    const target = state.carry.dropTarget(state);
+    endCarry(state);
+    if (!dropped) return;
+    switch (target.?) {
+        .archived => archiveIntent(state, .{ .ask = .{ .reference = pressed, .work = (&state.find(pressed).?.state).asOf(state.now_ms), .archive = .active } }, effects),
+        .sessions => archiveIntent(state, .{ .restore = pressed }, effects),
+        else => unreachable,
+    }
+}
+
+fn endCarry(state: *State) void {
+    if (state.carry.carrying) state.presentation_revision +%= 1;
+    state.carry = .{};
+}
+
 fn organizationHeld(state: *State, reference: Reference) bool {
     for (state.requests[0..state.request_count]) |held| {
         if (held.kind != .archive and held.kind != .unarchive and held.kind != .pin and held.kind != .unpin) continue;
@@ -3621,13 +3688,19 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     built.begin();
     var regions: [2]Region = undefined;
     var region_count: usize = 0;
+    const drop = state.carry.dropTarget(state);
+    const dropping = state.carry.dropping(state);
     inline for (.{ .{ "Chats", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
         const start = text_column + index * ("Chats".len + 2);
         const active = state.archive == tab[2];
         const focused = state.selected == tab[1];
+        // A carried row's tab takes the hover shade, and the selection shade while the pointer holds it there.
+        const target = drop != null and std.meta.eql(drop.?, tab[3]);
+        try built.pad(start, .{});
         const cells = try built.put(start, tab[0], width -| 1 -| start, .{
-            .colour = if (active or focused) .strong else .quiet,
-            .bold = active,
+            .colour = if (active or focused or target) .strong else .quiet,
+            .bold = active or (target and dropping),
+            .background = if (!target) .ground else if (dropping) .selection else .hover,
         });
         if (cells > 0) {
             regions[region_count] = .{ .start = @intCast(start), .end = @intCast(start + cells), .target = tab[3], .selected = focused };
@@ -3635,7 +3708,10 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
         }
     }
     const held_at = text_column + "Chats".len + 2 + "Archived".len + 2;
-    if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
+    if (drop) |target| {
+        const words = if (target == .archived) "drop to archive" else "drop to restore";
+        _ = try built.put(held_at, if (caps.unicode) "· " ++ words else ". " ++ words, width -| held_at, .{ .colour = if (dropping) .strong else .quiet });
+    } else if (holding(state)) _ = try built.put(held_at, if (caps.unicode) "· order held" else ". order held", width -| held_at, .{ .colour = .quiet });
     return .{
         .{ .segments = new_session, .target = .new_session },
         .{ .segments = try segmentsOf(arena, try built.finish(), width, .{}), .regions = try arena.dupe(Region, regions[0..region_count]) },
@@ -5834,6 +5910,90 @@ test "archive views keep the roster and route a changed Session into the Archive
     _ = try refresh(&state, .changed, testToken(4), &.{b});
     try std.testing.expect(state.find(b.reference) != null);
     try std.testing.expect(state.selected == .new_session);
+}
+
+test "a pressed chat dropped on the other tab archives or restores it, and no other drop does" {
+    const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    const b = session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" });
+    const drops = [_]?Click{ null, .sessions, .archived, .new_session, .settings, .{ .open = a.reference }, .{ .open = b.reference } };
+    for ([_]bool{ false, true }) |archived_row| for (drops) |over| {
+        var state = try opened(&.{ a, b });
+        defer state.deinit();
+        if (archived_row) state.rows.items[0].archive_state = .archived;
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .open = a.reference } } });
+        // A held pointer that has not left the pressed row is still a click.
+        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .{ .open = a.reference }, .phase = .held } }));
+        try std.testing.expect(!state.carry.carrying);
+        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .{ .open = b.reference }, .phase = .held } }));
+        try std.testing.expect(state.carry.carrying);
+        // Coming back over the pressed row keeps carrying it.
+        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .{ .open = a.reference }, .phase = .held } }));
+        try std.testing.expect(state.carry.carrying);
+        const target: Click = if (archived_row) .sessions else .archived;
+        try std.testing.expectEqual(target, state.carry.dropTarget(&state).?);
+        const takes = over != null and std.meta.eql(over.?, target);
+        const effects = try step(&state, .{ .pointer = .{ .over = over, .phase = .released } });
+        if (takes)
+            try expectEffects(&.{.{ .archive = .{ .reference = a.reference, .archived = !archived_row } }}, effects)
+        else
+            try expectEffects(&.{}, effects);
+        try std.testing.expectEqual(Carry{}, state.carry);
+    };
+}
+
+test "a carry ends without a request on a free move, a key, another click or a release before any drag" {
+    const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    const b = session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" });
+    const Ending = enum { free, key, click, released_in_row, no_press };
+    for (std.enums.values(Ending)) |ending| {
+        var state = try opened(&.{ a, b });
+        defer state.deinit();
+        if (ending != .no_press) _ = try step(&state, .{ .clicked = .{ .target = .{ .open = a.reference } } });
+        if (ending != .released_in_row) _ = try step(&state, .{ .pointer = .{ .over = .archived, .phase = .held } });
+        try std.testing.expectEqual(ending != .no_press and ending != .released_in_row, state.carry.carrying);
+        switch (ending) {
+            .free => try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .archived, .phase = .free } })),
+            .key => _ = try step(&state, .{ .input = .{ .key = .{ .action = .select_next } } }),
+            .click => _ = try step(&state, .{ .clicked = .{ .target = .new_session } }),
+            .released_in_row => try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .{ .open = a.reference }, .phase = .released } })),
+            .no_press => {},
+        }
+        try std.testing.expect(!state.carry.carrying);
+        try std.testing.expect(state.carry.pressed == null);
+        // Nothing carried, so a release over Archived asks for nothing.
+        try expectEffects(&.{}, try step(&state, .{ .pointer = .{ .over = .archived, .phase = .released } }));
+        try std.testing.expect(state.find(a.reference).?.archive_state == .active);
+    }
+}
+
+test "the tab that takes a carried chat is shaded, strongly while the pointer holds it there, and the tabs line says so" {
+    const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    for ([_]bool{ false, true }) |archived_row| for ([_]bool{ false, true }) |over_target| for ([_]bool{ false, true }) |unicode_caps| {
+        var state = try opened(&.{a});
+        defer state.deinit();
+        if (archived_row) state.rows.items[0].archive_state = .archived;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const caps: Caps = .{ .unicode = unicode_caps };
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .open = a.reference } } });
+        const target: Click = if (archived_row) .sessions else .archived;
+        _ = try step(&state, .{ .pointer = .{ .over = if (over_target) target else null, .phase = .held } });
+        const tabs = (try controls(arena.allocator(), &state, 38, caps))[1].segments;
+        const text = try segmentText(arena.allocator(), tabs);
+        const words = if (archived_row) "drop to restore" else "drop to archive";
+        try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_caps) "· " ++ words else ". " ++ words) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "order held") == null);
+        const shaded = try styleOf(tabs, if (archived_row) "Chats" else "Archived");
+        try std.testing.expectEqual(if (over_target) Background.selection else Background.hover, shaded.background);
+        try std.testing.expectEqual(Colour.strong, shaded.colour);
+        const other = try styleOf(tabs, if (archived_row) "Archived" else "Chats");
+        try std.testing.expectEqual(Background.ground, other.background);
+        // Only the tab's own word is shaded, never the gap before it.
+        for (tabs) |segment| if (segment.style.background != .ground) try std.testing.expectEqualStrings(if (archived_row) "Chats" else "Archived", segment.text);
+        _ = try step(&state, .{ .pointer = .{ .over = null, .phase = .free } });
+        const after = try segmentText(arena.allocator(), (try controls(arena.allocator(), &state, 38, caps))[1].segments);
+        try std.testing.expect(std.mem.indexOf(u8, after, "drop to") == null);
+    };
 }
 
 test "archive row marker follows the whole filter and row-state domain" {

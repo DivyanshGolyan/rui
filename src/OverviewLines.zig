@@ -31,6 +31,7 @@ pub const SessionControls = struct {
     caps: overview_view.Caps = .{},
     userdata: *anyopaque,
     on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
+    on_pointer: ?@import("GroupedList.zig").Pointer = null,
     row: @import("GroupedList.zig") = .{},
 
     pub fn widget(self: *SessionControls) vxfw.Widget {
@@ -61,6 +62,7 @@ pub const SessionControls = struct {
         self.row.selected = if (self.state.selected == .new_session) 0 else null;
         self.row.caps = self.caps;
         self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
+        self.row.on_pointer = self.on_pointer;
         var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(3, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;

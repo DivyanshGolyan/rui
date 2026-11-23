@@ -41,11 +41,14 @@ pub const Press = struct {
     userdata: *anyopaque,
     pressed: *const fn (*anyopaque, *vxfw.EventContext, Target) anyerror!void,
 };
+pub const Pointer = List.Pointer;
+pub const Held = List.Held;
 
 rows: Rows = .none,
 selected: ?u32 = null,
 selection_background: @import("overview_style.zig").Background = .selection,
 on_press: ?Press = null,
+on_pointer: ?Pointer = null,
 on_presence: ?List.Presence = null,
 edges: ?List.Edges = null,
 caps: overview_view.Caps = .{},
@@ -178,6 +181,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.inner.indicator_style = widget_style.of(self.caps, .{ .colour = .quiet });
     self.inner.selected = self.selected;
     self.inner.on_press = if (self.on_press != null) .{ .userdata = self, .pressed = reportPress } else null;
+    self.inner.on_pointer = self.on_pointer;
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = self.selection_background });
     self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
