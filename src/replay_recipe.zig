@@ -1,19 +1,22 @@
 const std = @import("std");
-const Kind = @import("output_item.zig").Kind;
+const replay_binding = @import("replay_binding.zig");
 
 pub const Base = struct {
     position: u64,
     floor: u64,
-    model: []const u8,
+    /// The Binding that produced the base (its Wire and the model it ran on).
+    binding: replay_binding.Binding,
 };
 
 pub const Recipe = struct {
     frontier: u64 = 0,
     floor: u64 = 0,
 
-    pub fn select(model: []const u8, candidate: ?Base, own_floor: u64) Recipe {
+    /// `request` is the Binding the next request is built for. A base that the request cannot
+    /// replay selects nothing.
+    pub fn select(request: replay_binding.Binding, candidate: ?Base, own_floor: u64) Recipe {
         const base = candidate orelse return .{ .floor = own_floor };
-        if (!Kind.compaction.replayableTo(base.model, model, .selected_base)) return .{ .floor = own_floor };
+        if (replay_binding.decide(.compaction, base.binding, request, .selected_base) == .omit) return .{ .floor = own_floor };
         return .{ .frontier = base.position, .floor = @max(own_floor, base.floor) };
     }
 
@@ -31,13 +34,14 @@ pub const Recipe = struct {
 };
 
 test "replay recipe selects only compatible bases and compares effective floors" {
-    const base: Base = .{ .position = 10, .floor = 4, .model = "a" };
-    const selected = Recipe.select("a", base, 0);
+    const wire: replay_binding.Wire = .{ .connection = "marlin", .dialect = .openai_responses };
+    const base: Base = .{ .position = 10, .floor = 4, .binding = .{ .wire = wire, .model = "a" } };
+    const selected = Recipe.select(.{ .wire = wire, .model = "a" }, base, 0);
     try std.testing.expectEqual(Recipe{ .frontier = 10, .floor = 4 }, selected);
-    try std.testing.expectEqual(Recipe{}, Recipe.select("b", base, 0));
-    try std.testing.expectEqual(Recipe{ .floor = 6 }, Recipe.select("b", base, 6));
-    try std.testing.expect(selected.measuredBy(Recipe.select("a", base, 4)));
-    try std.testing.expect(!selected.measuredBy(Recipe.select("a", base, 6)));
-    try std.testing.expect(!selected.measuredBy(Recipe.select("a", null, 4)));
-    try std.testing.expect(Recipe.select("b", base, 0).measuredBy(.{}));
+    try std.testing.expectEqual(Recipe{}, Recipe.select(.{ .wire = wire, .model = "b" }, base, 0));
+    try std.testing.expectEqual(Recipe{ .floor = 6 }, Recipe.select(.{ .wire = wire, .model = "b" }, base, 6));
+    try std.testing.expect(selected.measuredBy(Recipe.select(.{ .wire = wire, .model = "a" }, base, 4)));
+    try std.testing.expect(!selected.measuredBy(Recipe.select(.{ .wire = wire, .model = "a" }, base, 6)));
+    try std.testing.expect(!selected.measuredBy(Recipe.select(.{ .wire = wire, .model = "a" }, null, 4)));
+    try std.testing.expect(Recipe.select(.{ .wire = wire, .model = "b" }, base, 0).measuredBy(.{}));
 }

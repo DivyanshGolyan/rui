@@ -1,5 +1,7 @@
 const std = @import("std");
 const replay_recipe = @import("../../replay_recipe.zig");
+const replay_binding = @import("../../replay_binding.zig");
+const replay_wire = @import("replay_wire.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -175,6 +177,7 @@ pub const CompactionRead = struct {
     boundary: u64,
     provider: provider_name.Provider,
     model: []const u8,
+    wire: replay_binding.Wire,
     facts: turn_policy.CompactionFacts,
     stage: enum { latest, first, bytes, compound_bytes, done } = .latest,
     latest: latest_turn.Result = undefined,
@@ -186,7 +189,7 @@ pub const CompactionRead = struct {
     pressure: ?*const PartsPressure.Read = null,
 
     pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, codec: provider_name.Codec, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
-        return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
+        return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .wire = replay_wire.wireOf(provider, codec), .facts = .{
             .trigger = policy.compaction_trigger,
             .compacts = codecs.compacts(codec),
             .context_changed = false,
@@ -244,10 +247,10 @@ pub const CompactionRead = struct {
     fn weigh(read: *CompactionRead, next_first: ?u64) !@TypeOf(read.stage) {
         const latest = read.latest.?;
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
-        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, output_format.OutputItemKind.compaction.replayableTo(latest.model.slice(), read.model, .selected_base));
+        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, replaysCompaction(replay_wire.bindingOf(read.wire, read.model), latest.model.slice()));
         if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger, read.facts.compacts) != null) return .done;
         const context = if (read.context) |*row| row else return error.CorruptStore;
-        read.bytes_args = try takeContext(&read.facts, context, read.model, read.session) orelse return .done;
+        read.bytes_args = try takeContext(&read.facts, context, replay_wire.bindingOf(read.wire, read.model), read.session) orelse return .done;
         return .bytes;
     }
 };
@@ -265,24 +268,29 @@ fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_f
     };
 }
 
-fn currentRecipe(context: anytype, model: []const u8) error{CorruptStore}!replay_recipe.Recipe {
-    return replay_recipe.Recipe.select(model, if (context.base_position) |position| .{
+/// Whether a compaction selected at `base_model` replays into `request`.
+fn replaysCompaction(request: replay_binding.Binding, base_model: []const u8) bool {
+    return replay_binding.decide(.compaction, replay_wire.producerOf(request, base_model), request, .selected_base) != .omit;
+}
+
+fn currentRecipe(context: anytype, request: replay_binding.Binding) error{CorruptStore}!replay_recipe.Recipe {
+    return replay_recipe.Recipe.select(request, if (context.base_position) |position| .{
         .position = position.get(),
         .floor = if (context.base_floor) |floor| floor.get() else 0,
-        .model = (context.base_model orelse return error.CorruptStore).slice(),
+        .binding = replay_wire.producerOf(request, (context.base_model orelse return error.CorruptStore).slice()),
     } else null, 0);
 }
 
-fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, model: []const u8, session: []const u8) !?context_bytes.Args {
-    const recipe = try currentRecipe(context, model);
+fn takeContext(compaction: *turn_policy.CompactionFacts, context: anytype, request: replay_binding.Binding, session: []const u8) !?context_bytes.Args {
+    const recipe = try currentRecipe(context, request);
     compaction.context_changed = recipe.frontier == 0 or context.changed;
     if (!compaction.context_changed) return null;
     var coverage: context_bytes.Args = .{ .session = session, .covered = 0, .frontier = recipe.frontier, .results = recipe.frontier };
     if (context.uncached) |uncached| {
-        const measured = replay_recipe.Recipe.select(model, if (context.usage_base_position) |position| .{
+        const measured = replay_recipe.Recipe.select(request, if (context.usage_base_position) |position| .{
             .position = position.get(),
             .floor = if (context.usage_base_floor) |floor| floor.get() else 0,
-            .model = (context.usage_base_model orelse return error.CorruptStore).slice(),
+            .binding = replay_wire.producerOf(request, (context.usage_base_model orelse return error.CorruptStore).slice()),
         } else null, if (context.usage_floor) |floor| floor.get() else 0);
         const counts: output_format.Usage = .{
             .uncached = uncached,
@@ -375,7 +383,7 @@ const base_revision_join_sql = " LEFT JOIN session_revision base_revision ON bas
 
 pub const context_changed = rsql.Read(.{
     .sql = "WITH context_session AS (SELECT ?1 AS session_ref,?2 AS boundary)," ++ baseCteSql("context.session_ref", "context.boundary") ++ ",since AS (SELECT " ++ changedSinceBaseSql("context.session_ref", "context.boundary") ++ " AS changed FROM context_session context) SELECT since.changed," ++ base_columns_sql ++
-        ",(SELECT s.codec FROM session s WHERE s.session_ref=?1) AS codec" ++
+        ",(SELECT s.provider FROM session s WHERE s.session_ref=?1) AS provider,(SELECT s.codec FROM session s WHERE s.session_ref=?1) AS codec" ++
         ",(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "WHERE o.session_ref=?1 AND o.admission_position=?2) AS model FROM since LEFT JOIN base ON 1" ++ base_revision_join_sql,
     .Args = struct { session: []const u8, boundary: u64 },
@@ -384,6 +392,7 @@ pub const context_changed = rsql.Read(.{
         base_position: ?rsql.Positive,
         base_floor: ?rsql.Positive,
         base_model: ?Bounded(model_capability.max_model_bytes),
+        provider: provider_name.Provider,
         codec: provider_name.Codec,
         model: Bounded(model_capability.max_model_bytes),
     },
@@ -391,7 +400,8 @@ pub const context_changed = rsql.Read(.{
 });
 
 pub fn contextChanged(context: *const context_changed.Row) error{CorruptStore}!bool {
-    return (try currentRecipe(context, context.model.slice())).frontier == 0 or context.changed;
+    const request = replay_wire.bindingOf(replay_wire.wireOf(context.provider, context.codec), context.model.slice());
+    return (try currentRecipe(context, request)).frontier == 0 or context.changed;
 }
 
 const disagreeing_continuation = rsql.Read(.{
@@ -1008,6 +1018,7 @@ pub const AdmitModel = struct {
 
     pub const Scratch = struct {
         model: @FieldType(SelectedRow, "model"),
+        wire: replay_binding.Wire,
         request: historical_domain.SettingsRead,
         read: union(enum) {
             facts: SelectedRow,
@@ -1063,7 +1074,7 @@ pub const AdmitModel = struct {
             },
             .dropped => return t.freeze(r),
             .inherited => {
-                t.floor = t.input.scratch.read.inherited.floor(t.input.scratch.model.slice());
+                t.floor = t.input.scratch.read.inherited.floor(replay_wire.bindingOf(t.input.scratch.wire, t.input.scratch.model.slice()));
                 return t.freeze(r);
             },
             .offer_project => {
@@ -1091,6 +1102,7 @@ pub const AdmitModel = struct {
         if (!t.facts_found.get()) return error.CorruptStore;
         const facts = &t.input.scratch.read.facts;
         t.input.scratch.model = facts.model;
+        t.input.scratch.wire = replay_wire.wireOf(facts.provider, facts.codec);
         if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
         const policy = model_capability.compactionPolicy(facts.model.slice(), codecs.compacts(facts.codec), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
         var compaction: turn_policy.CompactionFacts = .{
@@ -1106,11 +1118,12 @@ pub const AdmitModel = struct {
             if (facts.latest_operation == null) return error.CorruptStore;
             const latest_first = facts.latest_first orelse return error.CorruptStore;
             const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
-            compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
+            const request = replay_wire.bindingOf(replay_wire.wireOf(facts.provider, facts.codec), facts.model.slice());
+            compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, replaysCompaction(request, (facts.latest_model orelse return error.CorruptStore).slice()));
         }
         var purpose = turn_policy.nextPurpose(compaction);
         var weighed: ?PressureGuard = null;
-        if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
+        if (try takeContext(&compaction, facts, replay_wire.bindingOf(replay_wire.wireOf(facts.provider, facts.codec), facts.model.slice()), session_ref)) |coverage| {
             purpose = turn_policy.nextPurpose(compaction);
             if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (t.input.pressure) {
                 .over => purpose = .compaction,

@@ -1,5 +1,5 @@
 //! Binding-keyed replay: the one owner of "may this stored output item go into this
-//! request, and in which form". It replaces `output_item.Kind.replayableTo`.
+//! request, and in which form". It replaced `output_item.Kind.replayableTo`.
 //!
 //! A functional core: values in, a `Replay` out. The shell reads each Binding from the
 //! Store (a revision's connection, codec and model) and passes it in; this file names no
@@ -12,36 +12,34 @@
 //! the Store, and an item from another Wire replays from its neutral fields alone.
 
 const std = @import("std");
-const bounded = @import("bounded.zig");
 const codec_abi = @import("codec_abi.zig");
 const output_item = @import("output_item.zig");
-const protocol = @import("protocol.zig");
 
 /// Which wire grammar wrote a bag (codec_abi.Dialect; codecs.dialect derives it from a codec).
 pub const Dialect = codec_abi.Dialect;
 
-/// Connection name as the Store's `provider` column holds it (1-16 lowercase, #1862).
-pub const ConnectionName = bounded.Bounded(16);
-pub const ModelName = bounded.Bounded(protocol.max_model_bytes);
-
+/// A Wire and a Binding are borrowed views: the connection name and model are slices the
+/// caller's Store values own, and they outlive the decision (`decide` copies nothing).
+/// Connection names are the Store's `provider` column text (1-16 lowercase, #1862).
+///
 /// Where a bag may be read: the same connection (account-bound ids) and the same dialect
 /// (wire grammar).
 pub const Wire = struct {
-    connection: ConnectionName,
+    connection: []const u8,
     dialect: Dialect,
 
-    pub fn eql(self: *const Wire, other: *const Wire) bool {
-        return self.dialect == other.dialect and self.connection.eql(other.connection.slice());
+    pub fn eql(self: Wire, other: Wire) bool {
+        return self.dialect == other.dialect and std.mem.eql(u8, self.connection, other.connection);
     }
 };
 
 /// Where opaque continuation may be read: the same Wire and the same requested model.
 pub const Binding = struct {
     wire: Wire,
-    model: ModelName,
+    model: []const u8,
 
-    pub fn eql(self: *const Binding, other: *const Binding) bool {
-        return self.wire.eql(&other.wire) and self.model.eql(other.model.slice());
+    pub fn eql(self: Binding, other: Binding) bool {
+        return self.wire.eql(other.wire) and std.mem.eql(u8, self.model, other.model);
     }
 };
 
@@ -68,9 +66,9 @@ pub const Replay = enum {
 ///   compaction, selected_base   exact          omit (D192)              omit
 ///   compaction, history         omit           omit                     omit
 ///   web_search_call             exact          exact                    omit
-pub fn decide(kind: Kind, producer: *const Binding, request: *const Binding, use: Use) Replay {
-    const same_wire = producer.wire.eql(&request.wire);
-    const same_binding = same_wire and producer.model.eql(request.model.slice());
+pub fn decide(kind: Kind, producer: Binding, request: Binding, use: Use) Replay {
+    const same_wire = producer.wire.eql(request.wire);
+    const same_binding = same_wire and std.mem.eql(u8, producer.model, request.model);
     return switch (kind) {
         .reasoning => if (same_binding) .exact else .omit,
         .compaction => if (use == .selected_base and same_binding) .exact else .omit,
@@ -142,15 +140,14 @@ test "decide over kind x producing relation x use" {
     // Every (kind, use, relation) cell is named exactly once.
     try std.testing.expectEqual(std.meta.tags(Kind).len * 2 * relations.len, expected.len);
     for (expected) |cell| {
-        const request = relations[cell.relation].request;
         errdefer std.debug.print("{s} {s} {s}\n", .{ @tagName(cell.kind), @tagName(cell.use), relations[cell.relation].name });
-        try std.testing.expectEqual(cell.replay, decide(cell.kind, &producer, &request, cell.use));
+        try std.testing.expectEqual(cell.replay, decide(cell.kind, producer, relations[cell.relation].request, cell.use));
     }
     // Invariants over the whole domain, independent of the table.
     inline for (std.meta.tags(Kind)) |kind| for (std.meta.tags(Use)) |use| for (relations) |relation| {
-        const replay = decide(kind, &producer, &relation.request, use);
+        const replay = decide(kind, producer, relation.request, use);
         // (1) a bag never crosses a Wire.
-        if (replay == .exact) try std.testing.expect(producer.wire.eql(&relation.request.wire));
+        if (replay == .exact) try std.testing.expect(producer.wire.eql(relation.request.wire));
         // (2) opaque kinds are never neutral.
         if (kind == .reasoning or kind == .compaction) try std.testing.expect(replay != .neutral);
     };
@@ -158,16 +155,12 @@ test "decide over kind x producing relation x use" {
 
 test "a Binding is equal only on the whole of its wire and model" {
     const base = binding("marlin", .openai_responses, "model-a");
-    try std.testing.expect(base.eql(&binding("marlin", .openai_responses, "model-a")));
-    try std.testing.expect(!base.eql(&binding("marlin", .openai_responses, "model-b")));
-    try std.testing.expect(!base.eql(&binding("chatgpt", .openai_responses, "model-a")));
-    try std.testing.expect(!base.eql(&binding("marlin", .anthropic_messages, "model-a")));
+    try std.testing.expect(base.eql(binding("marlin", .openai_responses, "model-a")));
+    try std.testing.expect(!base.eql(binding("marlin", .openai_responses, "model-b")));
+    try std.testing.expect(!base.eql(binding("chatgpt", .openai_responses, "model-a")));
+    try std.testing.expect(!base.eql(binding("marlin", .anthropic_messages, "model-a")));
 }
 
 fn binding(connection: []const u8, dialect: Dialect, model: []const u8) Binding {
-    var value: Binding = undefined;
-    value.wire.connection = ConnectionName.from(connection) catch unreachable;
-    value.wire.dialect = dialect;
-    value.model = ModelName.from(model) catch unreachable;
-    return value;
+    return .{ .wire = .{ .connection = connection, .dialect = dialect }, .model = model };
 }

@@ -1,4 +1,6 @@
 const replay_recipe = @import("../../replay_recipe.zig");
+const replay_binding = @import("../../replay_binding.zig");
+const replay_wire = @import("replay_wire.zig");
 const std = @import("std");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -441,9 +443,11 @@ pub const RequestPage = struct {
         return outputAt(self, position) catch self.corrupt();
     }
 
-    pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, model: []const u8) !?HistoricalOutput {
+    pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, request: replay_binding.Binding) !?HistoricalOutput {
         const output = try self.openOutput(entry.position);
-        if (output.kind.replayableTo(entry.requested_model.?.slice(), model, if (self.anchor == entry.position) .selected_base else .history)) return output;
+        const use: replay_binding.Use = if (self.anchor == entry.position) .selected_base else .history;
+        const producer = replay_wire.producerOf(request, entry.requested_model.?.slice());
+        if (replay_binding.decide(output.kind, producer, request, use) != .omit) return output;
         self.output_parts = null;
         return null;
     }
@@ -708,6 +712,11 @@ fn providerToolOf(a: *ReadAccess, view: *RequestPage, out: *HistoricalTool) !voi
     if (!found.get()) return error.CorruptStore;
     view.next_tool = row.ordinal + 1;
     out.owner = .provider;
+}
+
+/// The Binding a request built from `settings` is for.
+pub fn requestBinding(settings: *const HistoricalSettings) replay_binding.Binding {
+    return replay_wire.bindingOf(replay_wire.wireOf(settings.provider, settings.codec), settings.model.slice());
 }
 
 fn readHistoricalSettings(self: *Store, view: *RequestPage, out: *HistoricalSettings) !void {
@@ -1125,7 +1134,7 @@ const first_message_sql = "CASE WHEN coalesce(current.history_floor,base.history
 
 const output_boundary = rsql.Read(.{
     .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
-        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.model AS current_model,base_revision.model AS base_model," ++
+        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.provider AS current_provider,session.codec AS current_codec,current_revision.model AS current_model,base_revision.model AS base_model," ++
         "(SELECT count(*) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchors," ++
         "(SELECT min(anchor.session_position) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchor_position," ++
         "(SELECT count(*) " ++ base_anchors_from ++ "JOIN content bag ON bag.content_id=anchor.extras_content_id " ++ base_anchors_where ++ ") AS anchor_bags," ++
@@ -1141,6 +1150,7 @@ const output_boundary = rsql.Read(.{
         "AND " ++ tool_fulfillment.positionSql("called", "action") ++ "<current.admission_position AND input.form<>0) AS compound_inputs " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=" ++ selected_base_sql ++ " " ++
         "JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
+        "JOIN session ON session.session_ref=current.session_ref " ++
         "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
         "WHERE current.operation_id=?1",
     .Args = struct { operation: u64 },
@@ -1150,6 +1160,8 @@ const output_boundary = rsql.Read(.{
         frontier: u64,
         own_floor: ?rsql.Positive,
         base_floor: ?rsql.Positive,
+        current_provider: provider_name.Provider,
+        current_codec: provider_name.Codec,
         current_model: Bounded(model_capability.max_model_bytes),
         base_model: ?Bounded(model_capability.max_model_bytes),
         anchors: u64,
@@ -1228,10 +1240,11 @@ fn keepOutputBoundary(view: *RequestPage, row: *const output_boundary.Row) error
     view.output_frontier = row.frontier;
     view.anchor = if (row.anchors == 1 and row.anchor_bags == 1) (row.anchor_position orelse return error.CorruptStore).get() else null;
     if (view.selected_base != 0 and view.anchor == null) return error.CorruptStore;
-    const recipe = replay_recipe.Recipe.select(row.current_model.slice(), if (row.operation_id != null) .{
+    const request = replay_wire.bindingOf(replay_wire.wireOf(row.current_provider, row.current_codec), row.current_model.slice());
+    const recipe = replay_recipe.Recipe.select(request, if (row.operation_id != null) .{
         .position = row.frontier,
         .floor = if (row.base_floor) |floor| floor.get() else 0,
-        .model = (row.base_model orelse return error.CorruptStore).slice(),
+        .binding = replay_wire.producerOf(request, (row.base_model orelse return error.CorruptStore).slice()),
     } else null, if (row.own_floor) |floor| floor.get() else 0);
     const compatible = (view.selected_base != 0) == (recipe.frontier != 0);
     if (!compatible) {

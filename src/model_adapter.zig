@@ -1016,7 +1016,7 @@ pub const Preparation = struct {
                     },
                     .provider_output => {
                         if (covered) return .pending;
-                        const output = try self.page.replayOutput(entry, self.settings.model.slice()) orelse return .pending;
+                        const output = try self.page.replayOutput(entry, store.historicalRequestBinding(&self.settings)) orelse return .pending;
                         self.output_bag = output.bag;
                         var handles: u8 = 0;
                         if (output.call) |call| {

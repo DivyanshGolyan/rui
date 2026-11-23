@@ -58,6 +58,7 @@ pub const HistoricalInput = historical_domain.HistoricalInput;
 pub const HistoricalInputPart = historical_domain.HistoricalInputPart;
 pub const HistoricalReader = historical_domain.HistoricalReader;
 pub const HistoricalSettings = historical_domain.HistoricalSettings;
+pub const historicalRequestBinding = historical_domain.requestBinding;
 pub const HistoricalStart = historical_domain.Start;
 pub const HistoricalResume = historical_domain.Resume;
 pub const ModelOperationKind = historical_domain.ModelOperationKind;

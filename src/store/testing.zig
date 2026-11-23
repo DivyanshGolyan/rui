@@ -20,6 +20,7 @@ const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
 const command_domain = @import("domain/command.zig");
 const historical_domain = @import("domain/historical.zig");
+const replay_binding = @import("../replay_binding.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const OutputItemKind = historical_domain.OutputItemKind;
@@ -135,8 +136,8 @@ pub const TestingPage = struct {
         };
     }
 
-    pub fn replayOutput(self: *TestingPage, entry: *const historical_domain.HistoricalEntry, model: []const u8) !?historical_domain.HistoricalOutput {
-        while (true) return self.page.replayOutput(entry, model) catch |err| {
+    pub fn replayOutput(self: *TestingPage, entry: *const historical_domain.HistoricalEntry, request: replay_binding.Binding) !?historical_domain.HistoricalOutput {
+        while (true) return self.page.replayOutput(entry, request) catch |err| {
             try self.answer(err);
             continue;
         };
