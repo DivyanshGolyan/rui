@@ -181,7 +181,7 @@ fresh_defaults_case() {
     contains "$created" '"status":"accepted"'
     rejected_session=$(printf '%s' "$created" | session_id)
     defaults=$($rui session inspect --store "$store" --session "$rejected_session")
-    PYTHONPATH="$root/tests/integration" python3 -c 'import json, sys; from product_defaults import DEFAULTS; session = json.load(sys.stdin)["session"]; assert session["tools"] == DEFAULTS.tools.split(","); assert session["loaded_tools"] == DEFAULTS.loaded_tools.split(",")' <<EOF
+    PYTHONPATH="$root/tests/integration" python3 -c 'import json, sys; from product_defaults import DEFAULTS; session = json.load(sys.stdin)["session"]; assert session["tools"] == DEFAULTS.tools.split(","); assert session["loaded_tools"] == DEFAULTS.tools.split(",")' <<EOF
 $defaults
 EOF
     contains "$defaults" '"permission_mode":"bypass"'

@@ -326,10 +326,10 @@ Rui does not compact unchanged input again.
 ### Loading tools on demand
 
 The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`.
-Fresh CLI and TUI Sessions allow all built-in tools and initially load `bash`, `find_tools`, `skill` and `web_search`.
+Fresh CLI and TUI Sessions allow and load every built-in tool.
 
-Set `--tools` to the tools a Session may use and `--loaded-tools` to the subset
-initially offered to its model.
+Set `--tools` to the tools a Session may use, and `--loaded-tools` to offer its model a smaller
+initial subset.
 A strict subset must include `find_tools`, so the model can discover the remaining tools.
 For example:
 

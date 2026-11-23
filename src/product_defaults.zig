@@ -14,15 +14,10 @@ pub const tools = blk: {
     break :blk names;
 };
 
-// Approved by the accepted #1469 design-review comment on 2026-11-16.
-pub const loaded_tools = "bash,find_tools,read_image,skill,web_search";
-
-pub fn creationTools(accepts_images: bool, can_read_images: bool) struct { allowed: []const u8, loaded: []const u8 } {
-    const images = accepts_images and can_read_images;
-    return .{
-        .allowed = if (images) tools else comptime withoutImages(tools),
-        .loaded = if (images) loaded_tools else comptime withoutImages(loaded_tools),
-    };
+/// A fresh Session allows and loads every built-in tool (Divyansh, 2026-11-23); only a model
+/// known not to take images, or a Host that can't read them, leaves out `read_image`.
+pub fn creationTools(accepts_images: bool, can_read_images: bool) []const u8 {
+    return if (accepts_images and can_read_images) tools else comptime withoutImages(tools);
 }
 
 fn withoutImages(comptime names: []const u8) []const u8 {
@@ -68,7 +63,6 @@ test "approved product defaults" {
     for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| try std.testing.expectEqualStrings(name, allowed.next().?);
     try std.testing.expect(allowed.next() == null);
     try std.testing.expect(std.mem.indexOf(u8, tools, "stop_action") != null);
-    try std.testing.expectEqualStrings("bash,find_tools,read_image,skill,web_search", loaded_tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("codex", provider);
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
@@ -92,13 +86,12 @@ test "creation tool profiles require model image support and an available opener
         for ([_]bool{ false, true }) |can_read_images| {
             const images = accepts_images and can_read_images;
             const profile = creationTools(accepts_images, can_read_images);
-            var allowed = std.mem.splitScalar(u8, profile.allowed, ',');
+            var allowed = std.mem.splitScalar(u8, profile, ',');
             for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| {
                 if (!images and std.mem.eql(u8, name, "read_image")) continue;
                 try std.testing.expectEqualStrings(name, allowed.next().?);
             }
             try std.testing.expect(allowed.next() == null);
-            try std.testing.expectEqualStrings(if (images) "bash,find_tools,read_image,skill,web_search" else "bash,find_tools,skill,web_search", profile.loaded);
         }
     }
 }

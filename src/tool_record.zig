@@ -7,7 +7,7 @@ const tool_presentation = @import("tool_presentation.zig");
 
 pub const message_agent_max_text_bytes = 64 * 1024;
 
-pub const message_agent_description = "Send a Message to another Rui Session by its ID. It returns once the Message is delivered, before any answer. A reply, if the receiver sends one, arrives later as a Message that starts your next turn.";
+pub const message_agent_description = "Send a Message to another Rui Session by its ID; the receiver sees your ID. It returns once the Message is delivered, before any answer. The receiver replies only if asked; a reply arrives later as a Message that starts your next turn, so end your turn instead of waiting.";
 pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"id\":{\"type\":\"string\",\"description\":\"The receiving Session's six-character ID.\"}," ++
     std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
@@ -46,7 +46,8 @@ pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
 
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
     "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
-    "The spec may only narrow your own tools and permission mode.";
+    "The spec may only narrow your own tools and permission mode. " ++
+    "An attached agent's final answer arrives as a Message that starts your next turn. A standalone agent's answer stays in its own Session, so ask it in the task to reply with message_agent. Either way, end your turn instead of waiting.";
 pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
     "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++

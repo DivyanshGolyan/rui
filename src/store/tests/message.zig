@@ -2055,8 +2055,8 @@ test "creation image defaults and parent authority match receipts on replay" {
                 }
                 stage = "receipt defaults";
                 const defaults = product.creationTools(images, can_read_images);
-                try std.testing.expectEqualStrings(if (explicit) "bash" else defaults.allowed, fresh.tools.slice());
-                try std.testing.expectEqualStrings(if (explicit) "bash" else if (loaded == .reachable) "bash,find_tools" else defaults.loaded, fresh.loaded_tools.slice());
+                try std.testing.expectEqualStrings(if (explicit) "bash" else defaults, fresh.tools.slice());
+                try std.testing.expectEqualStrings(if (explicit) "bash" else if (loaded == .reachable) "bash,find_tools" else defaults, fresh.loaded_tools.slice());
                 try expectCreationReceipt(fresh, replay);
             };
         }

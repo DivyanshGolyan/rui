@@ -7,9 +7,8 @@ const Provider = @import("provider_name.zig").Provider;
 
 const Choice = input.OptionalBounded(16);
 const Tokens = input.OptionalBounded(20);
-const ToolProfile = struct { allowed: input.ToolsField, loaded: input.ToolsField };
-const image_profile: ToolProfile = .{ .allowed = names(product.creationTools(true, true).allowed), .loaded = names(product.creationTools(true, true).loaded) };
-const text_profile: ToolProfile = .{ .allowed = names(product.creationTools(false, false).allowed), .loaded = names(product.creationTools(false, false).loaded) };
+const image_profile = names(product.creationTools(true, true));
+const text_profile = names(product.creationTools(false, false));
 const product_permission = choice(.value, product.permission_mode);
 
 fn names(comptime text: []const u8) input.ToolsField {
@@ -21,12 +20,12 @@ fn names(comptime text: []const u8) input.ToolsField {
 }
 
 /// These lists borrow the request or immutable product defaults.
-fn creationProfile(model: []const u8, can_read_images: bool) *const ToolProfile {
+fn creationProfile(model: []const u8, can_read_images: bool) *const input.ToolsField {
     return if (catalog.imageCapability(model) != .unsupported and can_read_images) &image_profile else &text_profile;
 }
 
 pub fn creationTools(requested: *const input.ToolsField, model: []const u8, can_read_images: bool) *const input.ToolsField {
-    return if (requested.state == .omitted) &creationProfile(model, can_read_images).allowed else requested;
+    return if (requested.state == .omitted) creationProfile(model, can_read_images) else requested;
 }
 
 fn creationPermission(requested: *const Choice) *const Choice {
@@ -93,10 +92,8 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
         .compaction_trigger = request.compaction_trigger.*,
     };
     if (request.creating) {
+        // An omitted loaded set stays omitted: it saves as equal to the tools, so all are loaded.
         out.tools = creationTools(request.tools, request.model, request.can_read_images);
-        if (request.tools.state == .omitted and request.loaded_tools.state == .omitted) {
-            out.loaded_tools = &creationProfile(request.model, request.can_read_images).loaded;
-        }
         out.permission_mode = creationPermission(request.permission_mode).*;
         if (request.permission_mode.state == .omitted) if (request.preferences.permission_mode) |saved| {
             if (std.meta.stringToEnum(@import("cli_value.zig").PermissionMode, saved)) |mode| {
@@ -157,7 +154,6 @@ fn checkParent(parent: Parent, tools: *const input.ToolsField, permission: *cons
 // Golden values below come from 3ebdd8b's completeCreation/client_defaults,
 // rather than the resolver or product defaults being tested.
 const golden_tools = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action web_search";
-const golden_loaded = "bash find_tools skill web_search";
 
 fn choice(state: input.FieldState, text: []const u8) Choice {
     var value: Choice = .{ .state = state };
@@ -227,10 +223,7 @@ fn creationFieldCases() !void {
                 try std.testing.expectEqual(input.FieldState.value, resolved.tools.state);
                 try std.testing.expectEqualStrings(golden_tools, resolved.tools.names.slice());
             } else try std.testing.expect(resolved.tools == &tools);
-            if (tools_state == .omitted and loaded_state == .omitted) {
-                try std.testing.expectEqual(input.FieldState.value, resolved.loaded_tools.state);
-                try std.testing.expectEqualStrings(golden_loaded, resolved.loaded_tools.names.slice());
-            } else try std.testing.expect(resolved.loaded_tools == &loaded);
+            try std.testing.expect(resolved.loaded_tools == &loaded);
             try std.testing.expectEqual(if (permission_state == .omitted) input.FieldState.value else permission_state, resolved.permission_mode.state);
             try std.testing.expectEqualStrings(if (permission_state == .omitted) "bypass" else "ask", resolved.permission_mode.value.slice());
             if (effort_state == .value) {
@@ -486,8 +479,6 @@ fn toolProfileCases() !void {
     };
     const text_allowed = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action web_search";
     const image_allowed = "bash find_tools message_agent read_action read_image read_transcript skill start_agent stop_action web_search";
-    const text_loaded = "bash find_tools skill web_search";
-    const image_loaded = "bash find_tools read_image skill web_search";
     const parent_text = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search";
     const parent_image = "bash,find_tools,message_agent,read_action,read_image,read_transcript,skill,start_agent,stop_action,web_search";
     const mode = choice(.value, "ask");
@@ -518,10 +509,7 @@ fn toolProfileCases() !void {
             if (tools_state == .omitted) {
                 try std.testing.expectEqualStrings(if (image) image_allowed else text_allowed, result.tools.names.slice());
             } else try std.testing.expect(result.tools == &tools);
-            if (tools_state == .omitted and loaded_state == .omitted) {
-                try std.testing.expectEqual(input.FieldState.value, result.loaded_tools.state);
-                try std.testing.expectEqualStrings(if (image) image_loaded else text_loaded, result.loaded_tools.names.slice());
-            } else try std.testing.expect(result.loaded_tools == &loaded);
+            try std.testing.expect(result.loaded_tools == &loaded);
             if (tools_state == .omitted and image and !parent_has_image) {
                 try std.testing.expectEqualStrings("read_image", result.parent_refusal.?.tools_not_in_parent);
             } else try std.testing.expect(result.parent_refusal == null);

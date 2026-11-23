@@ -68,7 +68,7 @@ def references(w):
 
 def fresh_callers(world, engine):
     allowed = DEFAULTS.tools.split(",")
-    loaded = DEFAULTS.loaded_tools.split(",")
+    loaded = allowed  # a fresh Session loads every tool it allows
     replies = {name: answer(name) for name in ("configured", "started", "tui-new", "tui-wide")}
     with world("fresh-tool-profile", replies) as w:
         configured = w.session()
@@ -115,10 +115,9 @@ def restrictions_and_resume(world, engine):
     replies = {f"restricted-{index}": answer(f"restricted-{index}") for index in range(len(cases))}
     replies["narrowed-fresh"] = answer("narrowed-fresh")
     with world("restricted-tool-profile", replies) as w:
-        # This tools-only update previously refused because the intersection of
-        # the fresh loaded set with these tools lacks find_tools.
+        # A fresh Session's loaded set equals its tools, so a tools-only update keeps them equal.
         narrowed = w.session()
-        original = profile(w, narrowed, DEFAULTS.tools.split(","), DEFAULTS.loaded_tools.split(","))
+        original = profile(w, narrowed, DEFAULTS.tools.split(","), DEFAULTS.tools.split(","))
         w.run("session", "configure", "--session", narrowed, "--tools", "bash,skill,start_agent")
         next_tools = ["bash", "skill", "start_agent"]
         current = profile(w, narrowed, next_tools, next_tools)
@@ -155,11 +154,11 @@ def restrictions_and_resume(world, engine):
 
 def discovery(world, engine):
     allowed = DEFAULTS.tools.split(",")
-    loaded = DEFAULTS.loaded_tools.split(",")
+    loaded = ["bash", "find_tools"]  # a fresh Session loads everything, so discovery needs an explicit subset
     with world("tool-profile-discovery") as w:
         w.endpoint.responses_by_input = None
         for name, args, words, initial, final, offered, tools in (
-            ("fresh", [], "read_action", loaded, sorted(set(loaded) | {"read_action"}), set(loaded) | {"read_action", "stop_action"}, allowed),
+            ("subset", ["--loaded-tools", ",".join(loaded)], "read_action", loaded, sorted(set(loaded) | {"read_action"}), set(loaded) | {"read_action", "stop_action"}, allowed),
             ("restricted", ["--tools", "find_tools"], "bash", ["find_tools"], ["find_tools"], {"find_tools"}, ["find_tools"]),
         ):
             session = w.session(*args)

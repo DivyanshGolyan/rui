@@ -119,7 +119,7 @@ test("the Host resolves omitted preset settings at creation and preserves explic
 		assert.equal(saved.compaction_trigger_override, "945000");
 		const imageTools = process.platform === "linux" || process.platform === "darwin" ? ["read_image"] : [];
 		assert.deepEqual(saved.tools, ["bash", "find_tools", "message_agent", "read_action", ...imageTools, "read_transcript", "skill", "start_agent", "stop_action", "web_search"]);
-		assert.deepEqual(saved.loaded_tools, ["bash", "find_tools", ...imageTools, "skill", "web_search"]);
+		assert.deepEqual(saved.loaded_tools, saved.tools);
 		const restricted = await rui.sessions.create({ preset: "restricted" }, { idempotencyKey: "preset:restricted" });
 		const explicit = await inspect(rui, restricted.id);
 		assert.deepEqual(explicit.tools, []);

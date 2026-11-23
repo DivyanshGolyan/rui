@@ -29,7 +29,7 @@ def empty_creation(binary, root, store_settings, env):
     binding = {"provider": "openai", "model": DEFAULTS.recommended_model, "workspace": str(workspace)}
     expected = {
         "tools": sorted(DEFAULTS.tools.split(",")),
-        "loaded_tools": sorted(DEFAULTS.loaded_tools.split(",")),
+        "loaded_tools": sorted(DEFAULTS.tools.split(",")),
         "permission_mode": DEFAULTS.permission_mode,
         "reasoning_effort": start_effort(binding["model"]),
         "compaction_trigger": str(compaction_trigger(binding["provider"], binding["model"])),

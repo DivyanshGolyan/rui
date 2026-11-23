@@ -48,15 +48,15 @@ The adapter derives the address from the originating Operation, including on rep
 It reconstructs this context after compaction and normal Host restart, separately from user instructions.
 The address is not a PID, execution slot, Workspace or provider continuation identifier, and grants no additional authority.
 
-The collaboration context adds only the Session's own address, a pointer to installed `rui --help`, the command that sets its own Label, and how to start and message other Sessions and get their answers back (ask for a report sent to this address, or read the saved result by its request handle).
+The collaboration context adds only the Session's own address, a pointer to installed `rui --help` and the command that sets its own Label. It does not teach how to reach other Sessions: the built-in `start_agent` and `message_agent` tools, which every fresh Session loads, carry that in their own descriptions, so a tool's description is the one place it is explained.
 Scoped help and errors describe command syntax, model selection and recovery.
 The general agent preamble, Workspace fact and caller-authored Session instructions remain unchanged.
 Shared text files own context wording; request builders and fixtures independently encode their supplied facts.
 Ordinary Bash runs in the environment of the terminal that last sent the Session work, with the running Host executable's directory first on `PATH`, `RUI_ADDRESS` (the bare Session ID) and `RUI_STORE` (the canonical Store selector); [Bash environment](execution.md#bash-environment) owns the rule.
 Bash never inherits the Host's own environment or credentials.
-No identity tool, peer tool, alternate CLI-path variable or bundled skill is required.
+No identity tool, alternate CLI-path variable or bundled skill is required.
 
-Agents compose ordinary Session configuration and Message admission through the CLI, and the Host records who sent each Message.
+Agents reach other Sessions through `start_agent` and `message_agent`; the CLI's `rui session start` and `rui session send` serve people and scripts, and also work from a Session's Bash. Either way the Host records who sent each Message.
 `rui session send --session k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
 A peer destination is in the trusted sender's Store, before HOME preferences; an explicit Store override that canonicalizes to that same Store keeps the peer identity.
@@ -83,7 +83,7 @@ A rejected send from an authenticated sender saves its position there too.
 Each Session's Activity therefore orders the Messages it sent and their refusals among its other facts.
 
 The model adapter renders a peer Message's sender as a separate leading input part.
-It contains only the sender's bare ID, marked as not instructions, and the fact that the answer is stored as this request's result and is not delivered to the sender.
+It contains only the sender's bare ID, marked as not instructions, the fact that the answer is stored as this request's result and is not delivered to the sender, and how to reply (`message_agent`, or `rui session send` for a Session without it).
 The Message's own text follows unchanged.
 Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
@@ -751,7 +751,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Model self-address, `rui --help` pointer, self-label command and peer start/report/read-result facts, unchanged preamble, Workspace and caller instructions; separate peer sender and local-result facts; explicit report delivery through Bash with its Host-recorded sender (`RUI_ADDRESS`, Action handle, capture recovery) | `peer_integration.py`, `human_cli_integration.py`, `'request preparation'`, `'recorded sender facts'` | Scripted provider proves workflow and rendered facts, not future model compliance. Fixture-observer snapshots synchronize holds and audit saved outcomes. Native Linux x86-64 and macOS arm64. Compaction and replacement Attempt identity: none located |
+| Model self-address, `rui --help` pointer and self-label command, unchanged preamble, Workspace and caller instructions; peer start and reply taught only by the `start_agent` and `message_agent` descriptions; separate peer sender, local-result and how-to-reply facts; explicit report delivery through Bash still carries its Host-recorded sender (`RUI_ADDRESS`, Action handle, capture recovery) | `peer_integration.py`, `human_cli_integration.py`, `'request preparation'`, `'recorded sender facts'` | Scripted provider proves workflow and rendered facts, not future model compliance. Fixture-observer snapshots synchronize holds and audit saved outcomes. Native Linux x86-64 and macOS arm64. Compaction and replacement Attempt identity: none located |
 | Peer self-send admitted with explicit and generated capture; canonical Store alias and bare Session ID; plain answers saved as request results without implicit delivery; parent receives literal backticks, `$()` and quotes byte-exact through Bash tool stdin and file sends without shell evaluation or login | `peer_integration.py`, `'a peer capture preserves'` | No sender is inferred for human or script sends; original-capture recovery is unchanged. Shared text owns prose; independent request encoding, structural validation, history and digest negatives remain |
 | Peer page identities and TUI labels carry the same full six-character ID; Activity decoding rejects obsolete abbreviation metadata without changing Message selection | `activity_integration.py`, `store/tests/` `'a peer sender'`, `session_view.zig` `'a peer reference'` | Conversation decoding retains its ordinary unknown-field policy. No independent label allocation or abbreviation collision machinery |
 | Bare `--session ID`; sender Store beats conflicting HOME defaults; anonymous explicit Store selection; conflicting peer Store override and malformed peer context reject before capture; JSON, prefix, UUID, NUL, uppercase and excluded alphabet variants reject without aliases | `'grammar rejects ambiguous'`, `peer_integration.py`, `sender_identity_integration.py` | Genuine no-sender external sends remain anonymous. Noncanonical references are never coerced or prefix-matched |
