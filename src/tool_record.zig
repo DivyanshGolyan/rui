@@ -184,23 +184,37 @@ pub const HostToolSet = struct {
     pub const Resolution = union(enum) { found: usize, unknown_tool, mcp_server_unavailable };
     pub const max_refusal_message_bytes = 768;
 
-    /// The refusal text is rendered when the tool is missing, so it does not
-    /// borrow the HostToolSet: a later save may free the set it came from.
+    /// A missing tool's refusal. It records which configured servers had no tools
+    /// instead of borrowing the set, because a later save may free that set;
+    /// `configured_servers` must outlive it (the Host's settings own those names).
     pub const MissingTool = struct {
-        text: Bounded(max_refusal_message_bytes) = .{},
+        name: Bounded(tool_name.max_bytes) = .{},
+        empty: std.bit_set.IntegerBitSet(max_servers) = .empty,
+        servers: []const []const u8 = &.{},
 
         pub fn write(self: *const MissingTool, out: *std.Io.Writer) !void {
-            try out.writeAll(self.text.slice());
+            try out.print("spec.tools: {s} is not a known tool", .{self.name.slice()});
+            var empty = self.empty.iterator(.{});
+            const first = empty.next() orelse return;
+            if (empty.next()) |second| {
+                try out.print("; MCP servers {s}, {s}", .{ self.servers[first], self.servers[second] });
+                while (empty.next()) |server| try out.print(", {s}", .{self.servers[server]});
+                try out.writeAll(" are unavailable and may provide it");
+            } else try out.print("; MCP server {s} is unavailable and may provide it", .{self.servers[first]});
         }
     };
 
-    /// `catch unreachable` is backed by the offered.zig test that renders the
-    /// longest tool name with the longest launch-server list into this bound.
+    /// At most this many configured servers; host settings caps MCP servers below it.
+    pub const max_servers = 16;
+
     pub fn missingTool(self: *const HostToolSet, name: []const u8) MissingTool {
-        var detail: MissingTool = .{};
-        var writer = std.Io.Writer.fixed(&detail.text.bytes);
-        self.writeMissingTool(name, &writer) catch unreachable;
-        detail.text.len = writer.buffered().len;
+        var detail: MissingTool = .{ .servers = self.configured_servers };
+        detail.name.set(name) catch unreachable;
+        for (self.configured_servers, 0..) |server, at| {
+            for (self.records) |entry| {
+                if (entry.owner == .mcp and std.mem.eql(u8, entry.server, server)) break;
+            } else detail.empty.set(at);
+        }
         return detail;
     }
 
@@ -232,14 +246,7 @@ pub const HostToolSet = struct {
     }
 
     pub fn writeMissingTool(self: *const HostToolSet, name: []const u8, out: *std.Io.Writer) !void {
-        try out.print("spec.tools: {s} is not a known tool", .{name});
-        var empty = self.emptyServers();
-        const first = empty.next() orelse return;
-        if (empty.next()) |second| {
-            try out.print("; MCP servers {s}, {s}", .{ first, second });
-            while (empty.next()) |server| try out.print(", {s}", .{server});
-            try out.writeAll(" are unavailable and may provide it");
-        } else try out.print("; MCP server {s} is unavailable and may provide it", .{first});
+        try self.missingTool(name).write(out);
     }
 
     pub fn find(self: *const HostToolSet, name: []const u8) ?usize {

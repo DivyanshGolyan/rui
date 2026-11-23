@@ -29,6 +29,10 @@ pub const Refusal = union(enum) {
     }
 };
 
+comptime {
+    std.debug.assert(hs.max_mcp_servers <= tools.HostToolSet.max_servers);
+}
+
 pub const Relist = struct {
     allocator: std.mem.Allocator,
     servers: []const server_mcp_settings.Server,
@@ -39,6 +43,9 @@ pub const Relist = struct {
     held: ?*[hs.max_mcp_servers]bool = null,
     /// Why the latest list was refused, kept for startup's report.
     refusal: ?Refusal = null,
+    /// Configured server names with the settings' lifetime; every published set's
+    /// `configured_servers` is this slice, so a missing-tool refusal can outlive the set.
+    names: [hs.max_mcp_servers][]const u8 = undefined,
     /// The arena holding the tool set this owner published. Null while the current set is startup's.
     current: ?std.heap.ArenaAllocator = null,
 
@@ -248,6 +255,8 @@ pub const Relist = struct {
         };
         const owned = try memory.create(tools.HostToolSet);
         owned.* = set;
+        for (self.servers, self.names[0..self.servers.len]) |*server, *name| name.* = server.name.slice();
+        owned.configured_servers = self.names[0..self.servers.len];
         try store.saveHostToolSet(owned);
         if (self.current) |*previous| previous.deinit();
         self.current = arena;
