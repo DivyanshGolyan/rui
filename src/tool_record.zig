@@ -782,6 +782,32 @@ test "a remote name joins a digest only when it differs from the offered name" {
     try std.testing.expect(!validRemoteName(&.{ .name = "docs__search", .remote_name = "search", .owner = .rui, .input_schema = "{}" }));
 }
 
+test "each app policy field joins an app record's digest, and no other owner's digest reads the policy" {
+    const base: Record = .{ .name = "ask", .owner = .app, .input_schema = "{}", .app = .{} };
+    const base_digest = recordDigest(&base);
+    const variants = [_]AppPolicy{
+        .{ .replay = .safe, .restart_limit = 3, .wait_ms = default_app_wait_ms },
+        .{ .replay = .unsafe, .restart_limit = 4, .wait_ms = default_app_wait_ms },
+        .{ .replay = .unsafe, .restart_limit = 3, .wait_ms = default_app_wait_ms + 1 },
+    };
+    var digests: [variants.len][32]u8 = undefined;
+    for (variants, &digests) |policy, *digest| {
+        var changed = base;
+        changed.app = policy;
+        digest.* = recordDigest(&changed);
+        try std.testing.expect(!std.mem.eql(u8, &base_digest, digest));
+    }
+    for (digests, 0..) |first, index| for (digests[index + 1 ..]) |second| try std.testing.expect(!std.mem.eql(u8, &first, &second));
+
+    // Only app records read the policy: a non-app record ignores a stray policy, and its digest is pinned.
+    var rui: Record = .{ .name = "bash", .owner = .rui, .input_schema = "{}" };
+    const plain = recordDigest(&rui);
+    rui.app = .{ .replay = .safe, .restart_limit = 9, .wait_ms = 5_000 };
+    try std.testing.expectEqualSlices(u8, &plain, &recordDigest(&rui));
+    const pinned = [_]u8{0} ** 32;
+    try std.testing.expectEqualSlices(u8, &pinned, &plain);
+}
+
 test "MCP missing tools tool set resolution covers every empty-server combination" {
     const servers = [_][]const u8{ "notes", "other" };
     for (0..4) |mask| {
