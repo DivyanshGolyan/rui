@@ -2856,6 +2856,7 @@ pub const MigrationNotice = struct {
 pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
+    std.debug.print("DBGFOUND {d}\n", .{found});
     if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
     if (notice) |told| told.notify(told.context, .{ .begin = found });
@@ -4059,9 +4060,9 @@ test "SH-120 schema 93 migration gives every Session no app declaration and its 
     }
     // A root with a child and a grandchild, so the lane walk crosses two parent links.
     try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
-        "SELECT 'child1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,2,workspace_digest,workspace_key,'d8mv7p' FROM session WHERE session_ref='d8mv7p'");
+        "SELECT 'ch0001',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,10,workspace_digest,workspace_key,'d8mv7p' FROM session WHERE session_ref='d8mv7p'");
     try sqlite.exec(database, "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
-        "SELECT 'gchld1',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,3,workspace_digest,workspace_key,'child1' FROM session WHERE session_ref='d8mv7p'");
+        "SELECT 'gc0002',workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode,revision,next_position,created_at,11,workspace_digest,workspace_key,'ch0001' FROM session WHERE session_ref='d8mv7p'");
     for (step.sqlite) |statement| try sqlite.exec(database, statement);
     // No Session declares app records, and every Session takes its root's lane.
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE app_tool_set_id IS NOT NULL"));
@@ -4070,7 +4071,7 @@ test "SH-120 schema 93 migration gives every Session no app declaration and its 
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try sqlite.exec(database, "UPDATE session SET app_tool_set_id=4 WHERE session_ref='d8mv7p'");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_tool_set_id=0 WHERE session_ref='d8mv7p'"));
-    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='child1'"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET app_lane='nope' WHERE session_ref='ch0001'"));
 }
 
 test "schema 89 migration leaves each saved tool record's remote name empty, its offered name, on SQLite" {
