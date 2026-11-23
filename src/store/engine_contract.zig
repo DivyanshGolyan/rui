@@ -1541,6 +1541,33 @@ fn sh109_an_entry_point_that_changed_rows_sets(case: *store_testing.Case) !void 
     try std.testing.expect(wake.isSet());
 }
 
+/// The Entry.release commit site: each commit notifies the commit subscriber exactly once,
+/// after it has recorded the commit, so the notices match the generations committed.
+fn sh109_each_commit_notifies_the_subscriber_once(case: *store_testing.Case) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const Counter = struct {
+        count: usize = 0,
+        fn notify(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+        }
+    };
+    var counter: Counter = .{};
+    var subscriber: store_core.CommitSubscriber = .{ .context = &counter, .notify = Counter.notify };
+    storage.commitSubscriber().store(&subscriber, .release);
+    defer storage.commitSubscriber().store(null, .release);
+    const generation = storage.commit_generation.load(.acquire);
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
+    try std.testing.expectEqual(@as(usize, 0), counter.count);
+    _ = try configureTestSession(&storage, "subscriber-config");
+    try std.testing.expect(counter.count >= 1);
+    try std.testing.expectEqual(storage.commit_generation.load(.acquire) - generation, counter.count);
+}
+
 // Moved from src/store/mysql_testing.zig: "store.mysql touch oracle observes and clears uncommitted entry writes without changing rollback"
 fn sh109_store_mysql_touch_oracle_observes_and_clears() !void {
     var tmp = std.testing.tmpDir(.{});
@@ -2855,6 +2882,7 @@ test "SH-109 every Session whose rows changed is named as touched, and only a ch
             try sh109_an_access_that_touches_a_fifth_session(case);
             try sh109_the_touch_oracle_names_a_session_whose(case);
             try sh109_an_entry_point_that_changed_rows_sets(case);
+            try sh109_each_commit_notifies_the_subscriber_once(case);
             if (case.engine == .mysql and !case.rerun) try sh109_store_mysql_touch_oracle_observes_and_clears();
         }
     }.run);

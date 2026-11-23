@@ -34,6 +34,15 @@ const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionListReport = shared_fixtures.testingSessionListReport;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
+/// Counts the commit notices a Store sends its commit subscriber.
+const CommitCounter = struct {
+    count: usize = 0,
+    fn notify(context: *anyopaque) void {
+        const self: *CommitCounter = @ptrCast(@alignCast(context));
+        self.count += 1;
+    }
+};
+
 test "Session list pages accepted creation order with exact workspace and fixed high water" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -181,11 +190,17 @@ test "SUI-58 host_retry_work_version" {
             var before_row = try testingListRow(&storage, &tmp, session.slice());
             defer before_row.deinit();
             try std.testing.expectEqualStrings("working", before_row.get(&.{ "work", "group" }).string);
+            var commits: CommitCounter = .{};
+            var counted: store_core.CommitSubscriber = .{ .context = &commits, .notify = CommitCounter.notify };
+            storage.commitSubscriber().store(&counted, .release);
+            defer storage.commitSubscriber().store(null, .release);
             const baseline = try storage.publishRetryCrossings(31_000, due - 1);
             try std.testing.expectEqual(full.since.generation, baseline.generation);
             try std.testing.expectEqual(@as(?u64, due), baseline.next);
             storage.io.vtable = &after;
+            try std.testing.expectEqual(@as(usize, 0), commits.count);
             const crossing = try storage.publishRetryCrossings(due - 1, due);
+            try std.testing.expectEqual(@as(usize, 1), commits.count);
             try std.testing.expectEqual(baseline.generation + 1, crossing.generation);
             const delta = try TestingListing.read(&storage, &tmp, .{ .since = full.since });
             try std.testing.expectEqual(protocol.ListDelta.changed, delta.delta);

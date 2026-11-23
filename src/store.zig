@@ -14,6 +14,7 @@ const store_test_fixtures = @import("store/tests.zig");
 
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
+pub const CommitSubscriber = store_core.CommitSubscriber;
 pub const readUnixMilliseconds = store_core.readUnixMilliseconds;
 pub const CapturedSkill = @import("store/domain/skills.zig").Capture;
 pub const CapturedMessageSkills = @import("store/domain/skills.zig").MessageCapture;
