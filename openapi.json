@@ -1504,6 +1504,98 @@
           }
         }
       }
+    },
+    "/v1/control/tools-reload": {
+      "post": {
+        "operationId": "toolsReload",
+        "summary": "Asks the Host to list one MCP server, or every configured server, again. Each reply names the generation asked; tools-status reports when it has landed.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolsReloadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolsReloadReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools-status": {
+      "post": {
+        "operationId": "toolsStatus",
+        "summary": "Each configured MCP server's list state, last outcome, finished generation and tool count.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolsStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolsStatusReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -14333,6 +14425,195 @@
           "description",
           "code",
           "publication_position"
+        ],
+        "additionalProperties": false
+      },
+      "ToolsReloadReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "24"
+          },
+          "type": {
+            "const": "tools_reload_reply"
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "asked": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "server": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "x-rui-max-bytes": 64
+                },
+                "generation": {
+                  "$ref": "#/components/schemas/Decimal"
+                }
+              },
+              "required": [
+                "server",
+                "generation"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 8,
+            "uniqueItems": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "instance",
+          "asked"
+        ],
+        "additionalProperties": false
+      },
+      "ToolsReloadRequest": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "24"
+              },
+              "kind": {
+                "const": "tools_reload"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "24"
+              },
+              "kind": {
+                "const": "tools_reload"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "server": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "server"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ToolsStatusReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "24"
+          },
+          "type": {
+            "const": "tools_status"
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "server": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "x-rui-max-bytes": 64
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "idle",
+                    "listing",
+                    "waiting"
+                  ]
+                },
+                "last": {
+                  "type": "string",
+                  "enum": [
+                    "never",
+                    "listed",
+                    "failed",
+                    "collision"
+                  ]
+                },
+                "finished": {
+                  "$ref": "#/components/schemas/Decimal"
+                },
+                "tools": {
+                  "$ref": "#/components/schemas/Decimal"
+                }
+              },
+              "required": [
+                "server",
+                "state",
+                "last",
+                "finished",
+                "tools"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 8,
+            "uniqueItems": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "instance",
+          "servers"
+        ],
+        "additionalProperties": false
+      },
+      "ToolsStatusRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "24"
+          },
+          "kind": {
+            "const": "tools_status"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store"
         ],
         "additionalProperties": false
       },

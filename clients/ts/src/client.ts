@@ -11,7 +11,7 @@ import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { TRANSPORT_ENVIRONMENT } from "./host-environment.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
-import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
+import { models, reloadTools, Session, Sessions, setPaused, type AgentSpec, type ModelSummary, type ToolReloadOutcome } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -147,6 +147,14 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 
 	resume(): Promise<void> {
 		return setPaused(this, false);
+	}
+
+	/**
+	 * Lists one MCP server, or every configured server when `server` is omitted, again, and resolves once each list has
+	 * landed. Rejects with RuiWaitTimeoutError after 60 s.
+	 */
+	reloadTools(server?: string): Promise<ToolReloadOutcome[]> {
+		return reloadTools(this, server);
 	}
 
 	/**

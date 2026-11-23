@@ -450,7 +450,7 @@ test "skills do not replace a command argument or invent an argument list" {
 }
 
 test "leading skill collisions use the complete grammar including hidden commands" {
-    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     var entries: [names.len]skill_suggestions.Entry = undefined;
     for (names, &entries) |name, *entry| entry.* = .{ .name = name, .description = "Colliding skill" };
     var reads: Reads = .{};
@@ -501,8 +501,8 @@ test "leading skill collisions use the complete grammar including hidden command
 
 test "chat table lists visible commands with substantive descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
-    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
-    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "reload-tools", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{
@@ -838,8 +838,9 @@ test "skill rows are the held page's, numbered by the read that made them" {
     try std.testing.expectEqualStrings("/review", shown.list.entries[1].shown);
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, .{}, null));
     const start = reads.shown(&rows, "/rel", 4, 3, .{}, null).?;
-    try std.testing.expectEqual(@as(usize, 1), start.list.count);
+    try std.testing.expectEqual(@as(usize, 2), start.list.count);
     try std.testing.expectEqualStrings("/reload-skills", start.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/reload-tools", start.list.entries[1].shown);
     try std.testing.expect(start.source != 0);
 }
 

@@ -6,6 +6,7 @@ pub const names = [_][]const u8{
     "after",
     "check",
     "paths",
+    "server",
     "set",
     "all",
     "archived",

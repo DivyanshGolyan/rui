@@ -315,6 +315,28 @@ pub fn renderSkillSuggestions(out: protocol.JsonOut, page: *const skill_suggesti
     try out.append(protocol.skill_suggestions_reply.tail);
 }
 
+pub const ToolAsk = struct { server: []const u8, generation: u64 };
+
+pub fn renderToolsReload(response: protocol.JsonOut, instance: protocol.InstanceId, asked: []const ToolAsk) error{BufferTooLarge}!void {
+    try response.appendShape(protocol.tools_reload_reply.head, .{instance});
+    for (asked, 0..) |ask, index| {
+        if (index != 0) try response.append(",");
+        try response.appendShape(protocol.tools_reload_reply.entry, .{ ask.server, ask.generation });
+    }
+    try response.append(protocol.tools_reload_reply.tail);
+}
+
+pub const ToolServerStatus = struct { server: []const u8, status: @import("mcp/relist.zig").Status };
+
+pub fn renderToolsStatus(response: protocol.JsonOut, instance: protocol.InstanceId, servers: []const ToolServerStatus) error{BufferTooLarge}!void {
+    try response.appendShape(protocol.tools_status_reply.head, .{instance});
+    for (servers, 0..) |row, index| {
+        if (index != 0) try response.append(",");
+        try response.appendShape(protocol.tools_status_reply.entry, .{ row.server, row.status.state, row.status.last, row.status.finished, row.status.tools });
+    }
+    try response.append(protocol.tools_status_reply.tail);
+}
+
 pub fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
     try response.appendShape(protocol.error_reply, .{ kind, code });
 }
