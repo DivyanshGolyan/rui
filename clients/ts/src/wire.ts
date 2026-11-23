@@ -3481,6 +3481,7 @@ export interface components {
                 finished: components["schemas"]["Decimal"];
                 tools: components["schemas"]["Decimal"];
                 left_out: components["schemas"]["Decimal"];
+                listen: string;
             }[];
         };
         ToolsStatusRequest: {

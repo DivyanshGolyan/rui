@@ -151,6 +151,15 @@ fn serve(self: *Script, reply: []const u8) bool {
         if (read <= 0) return true;
         self.seen_len += @intCast(read);
     }
+    // A subscription is not an ordinary request: with no listening stream it is refused, and it takes no scripted reply.
+    if (isSubscribe(self.seen[0..self.seen_len])) {
+        if (self.listening) |listening| {
+            held = listening.open(fd_, subscribeId(self.seen[0..self.seen_len]));
+        } else {
+            _ = sendAll(fd_, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+        return false;
+    }
     self.request_received.store(true, .release);
     _ = self.requests.fetchAdd(1, .acq_rel);
     if (self.listening) |listening| if (isSubscribe(self.seen[0..self.seen_len])) {

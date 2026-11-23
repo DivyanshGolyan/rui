@@ -14574,6 +14574,11 @@
                 },
                 "left_out": {
                   "$ref": "#/components/schemas/Decimal"
+                },
+                "listen": {
+                  "type": "string",
+                  "maxLength": 11,
+                  "x-rui-max-bytes": 11
                 }
               },
               "required": [
@@ -14582,7 +14587,8 @@
                 "last",
                 "finished",
                 "tools",
-                "left_out"
+                "left_out",
+                "listen"
               ],
               "additionalProperties": false
             },

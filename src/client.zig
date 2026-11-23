@@ -3567,7 +3567,11 @@ pub const ToolServerStatus = struct {
     finished: u64 = 0,
     tools: u64 = 0,
     left_out: u64 = 0,
+    listen: ListenState = .off,
 };
+
+/// One server's `subscriptions/listen` stream, as `tools_status` reports it.
+pub const ListenState = enum { off, opening, open, unsupported };
 
 pub const ToolsStatus = struct {
     /// The Host that replied.
@@ -3668,7 +3672,7 @@ fn parseToolsStatus(gpa: std.mem.Allocator, reply: []const u8) !ToolsStatus {
         version: []const u8,
         type: []const u8,
         instance: []const u8,
-        servers: []const struct { server: []const u8, state: []const u8, last: []const u8, finished: []const u8, tools: []const u8, left_out: []const u8 },
+        servers: []const struct { server: []const u8, state: []const u8, last: []const u8, finished: []const u8, tools: []const u8, left_out: []const u8, listen: []const u8 },
     };
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -3683,6 +3687,7 @@ fn parseToolsStatus(gpa: std.mem.Allocator, reply: []const u8) !ToolsStatus {
         row.finished = std.fmt.parseInt(u64, entry.finished, 10) catch return error.InvalidResponse;
         row.tools = std.fmt.parseInt(u64, entry.tools, 10) catch return error.InvalidResponse;
         row.left_out = std.fmt.parseInt(u64, entry.left_out, 10) catch return error.InvalidResponse;
+        row.listen = std.meta.stringToEnum(ListenState, entry.listen) orelse return error.InvalidResponse;
     }
     return out;
 }
@@ -7462,13 +7467,14 @@ test "tools reload and status replies parse into typed rows with the Host instan
     try std.testing.expectEqual(@as(usize, 0), none.slice().len);
     try std.testing.expectError(error.InvalidResponse, parseToolsAsked(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_reload_reply\",\"instance\":\"xyz\",\"asked\":[]}"));
 
-    const status = try parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"waiting\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\",\"left_out\":\"2\"}]}");
+    const status = try parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"waiting\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\",\"left_out\":\"2\",\"listen\":\"unsupported\"}]}");
     try std.testing.expectEqual(@as(u8, 0x7e), status.instance[15]);
     try std.testing.expectEqual(relist_state.waiting, status.slice()[0].state);
     try std.testing.expectEqual(relist_state.failed, status.slice()[0].last);
     try std.testing.expectEqual(@as(u64, 3), status.slice()[0].finished);
     try std.testing.expectEqual(@as(u64, 12), status.slice()[0].tools);
     try std.testing.expectEqual(@as(u64, 2), status.slice()[0].left_out);
+    try std.testing.expectEqual(ListenState.unsupported, status.slice()[0].listen);
     try std.testing.expectError(error.InvalidResponse, parseToolsStatus(allocator, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"tools_status\",\"instance\":\"" ++ instance ++ "\",\"servers\":[{\"server\":\"docs\",\"state\":\"paused\",\"last\":\"failed\",\"finished\":\"3\",\"tools\":\"12\",\"left_out\":\"2\"}]}"));
 }
 

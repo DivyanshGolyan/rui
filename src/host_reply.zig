@@ -326,19 +326,47 @@ pub fn renderToolsReload(response: protocol.JsonOut, instance: protocol.Instance
     try response.append(protocol.tools_reload_reply.tail);
 }
 
-pub const ToolServerStatus = struct { server: []const u8, status: @import("mcp/relist.zig").Status };
+pub const ToolServerStatus = struct { server: []const u8, status: @import("mcp/relist.zig").Status, listen: @import("mcp/listen.zig").State };
+
+/// The wire name of a stream state: a closed stream is `off`.
+fn listenName(state: @import("mcp/listen.zig").State) []const u8 {
+    return switch (state) {
+        .closed => "off",
+        .opening => "opening",
+        .open => "open",
+        .unsupported => "unsupported",
+    };
+}
 
 pub fn renderToolsStatus(response: protocol.JsonOut, instance: protocol.InstanceId, servers: []const ToolServerStatus) error{BufferTooLarge}!void {
     try response.appendShape(protocol.tools_status_reply.head, .{instance});
     for (servers, 0..) |row, index| {
         if (index != 0) try response.append(",");
-        try response.appendShape(protocol.tools_status_reply.entry, .{ row.server, row.status.state, row.status.last, row.status.finished, row.status.tools, row.status.left_out });
+        try response.appendShape(protocol.tools_status_reply.entry, .{ row.server, row.status.state, row.status.last, row.status.finished, row.status.tools, row.status.left_out, listenName(row.listen) });
     }
     try response.append(protocol.tools_status_reply.tail);
 }
 
 pub fn renderStatic(response: protocol.JsonOut, kind: protocol.ErrorType, code: []const u8) !void {
     try response.appendShape(protocol.error_reply, .{ kind, code });
+}
+
+test "EXR-93 tools_status reports each server's listen state" {
+    const listen = @import("mcp/listen.zig");
+    const instance: protocol.InstanceId = @splat(0xab);
+    const states = [_]listen.State{ .closed, .opening, .open, .unsupported };
+    const wire = [_][]const u8{ "off", "opening", "open", "unsupported" };
+    var rows: [states.len]ToolServerStatus = undefined;
+    for (&rows, states) |*row, state| row.* = .{ .server = "docs", .status = .{ .state = .idle, .last = .listed, .finished = 1, .tools = 2, .left_out = 0 }, .listen = state };
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try renderToolsStatus(.{ .writer = &writer }, instance, &rows);
+    for (wire) |name| {
+        var text: [64]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&text, "\"listen\":\"{s}\"", .{name});
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), needle) != null);
+    }
+    try std.testing.expect(try std.json.validate(std.testing.allocator, writer.buffered()));
 }
 
 test "a mutation's outcome decides its HTTP status" {
