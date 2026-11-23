@@ -401,12 +401,79 @@ pub const Runner = enum {
     }
 
     pub fn of(tool: *const Record) Runner {
-        if (tool.owner == .mcp) return .mcp;
-        if (tool.owner == .provider) return .provider;
-        for (built_in_rows.values) |row| {
-            if (std.mem.eql(u8, tool.name, row.record.name)) return row.runner;
+        if (ownerRunner(tool.owner)) |runner| return runner;
+        return builtInRunner(tool.name);
+    }
+};
+
+/// The one owner of runner derivation. An owner listed here fixes its runner; any other record takes
+/// the runner of its built-in name, and a name that is not built-in runs as Bash. `Runner.of` and the
+/// SQL in `sql` below both read these tables, so a runner cannot be derived one way in Zig and another in SQL.
+pub const owner_runners = [_]struct { owner: Owner, runner: Runner }{
+    .{ .owner = .mcp, .runner = .mcp },
+    .{ .owner = .provider, .runner = .provider },
+};
+
+pub fn ownerRunner(owner: Owner) ?Runner {
+    for (owner_runners) |rule| if (rule.owner == owner) return rule.runner;
+    return null;
+}
+
+pub fn builtInRunner(name: []const u8) Runner {
+    for (built_in_rows.values) |row| {
+        if (std.mem.eql(u8, name, row.record.name)) return row.runner;
+    }
+    return .bash;
+}
+
+/// SQL predicates over a tool row's `owner` and `name` expressions, generated from the tables above.
+/// A built-in name is runner-derived only on a rui-owned row, as `Runner.of` does after owner rules.
+pub const sql = struct {
+    /// True when the owner column holds the owner that fixes `runner`.
+    pub fn ownerTest(comptime owner: []const u8, comptime runner: Runner) []const u8 {
+        comptime {
+            for (owner_runners) |rule| {
+                if (rule.runner == runner) return owner ++ "='" ++ @tagName(rule.owner) ++ "'";
+            }
+            return "";
         }
-        return .bash;
+    }
+
+    /// True when the row is rui-owned and its name is a built-in whose table row derives `runner`; "" when none does.
+    pub fn builtInTest(comptime owner: []const u8, comptime name: []const u8, comptime runner: Runner) []const u8 {
+        comptime {
+            var names: []const u8 = "";
+            for (built_in_rows.values) |row| {
+                if (row.runner != runner) continue;
+                names = names ++ (if (names.len == 0) "" else " OR ") ++ name ++ "='" ++ row.record.name ++ "'";
+            }
+            if (names.len == 0) return "";
+            return owner ++ "='rui' AND (" ++ names ++ ")";
+        }
+    }
+
+    /// True exactly when `Runner.of` returns `runner` for the row. Owner tests and built-in name tests
+    /// select disjoint rows (a rui-owned row is never an owner-fixed row), so their union is exact.
+    pub fn runnerTest(comptime owner: []const u8, comptime name: []const u8, comptime runner: Runner) []const u8 {
+        comptime {
+            const by_owner = ownerTest(owner, runner);
+            const by_name = builtInTest(owner, name, runner);
+            if (by_owner.len == 0) {
+                if (by_name.len == 0) @compileError("no rule derives runner " ++ @tagName(runner));
+                return by_name;
+            }
+            if (by_name.len == 0) return by_owner;
+            return "(" ++ by_owner ++ " OR " ++ by_name ++ ")";
+        }
+    }
+
+    /// A CASE that yields each listed runner, in order, and Bash for any other row.
+    pub fn runnerCase(comptime owner: []const u8, comptime name: []const u8, comptime runners: []const Runner) []const u8 {
+        comptime {
+            var out: []const u8 = "CASE";
+            for (runners) |runner| out = out ++ " WHEN " ++ runnerTest(owner, name, runner) ++ " THEN '" ++ @tagName(runner) ++ "'";
+            return out ++ " ELSE '" ++ @tagName(Runner.bash) ++ "' END";
+        }
     }
 };
 

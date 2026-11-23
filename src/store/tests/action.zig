@@ -179,6 +179,44 @@ test "earlier Action settlement remains authoritative after Session stop" {
     }.run);
 }
 
+// EXR-68: the runner SQL derives from a tool row equals Runner.of over every owner and built-in name.
+test "EXR-68 runner SQL agrees with Runner.of over every owner and built-in name" {
+    try store_testing.forEachEngine(struct {
+        const records = @import("../../tool_record.zig");
+        const Case = struct { owner: records.Owner, name: []const u8 };
+        // Every owner against every built-in name and one unknown name, built at comptime.
+        const cases = blk: {
+            var names: []const []const u8 = &.{};
+            for (std.enums.values(records.Tool)) |tool| names = names ++ .{@tagName(tool)};
+            names = names ++ .{"not_a_built_in_tool"};
+            var out: []const Case = &.{};
+            for (std.enums.values(records.Owner)) |owner| {
+                for (names) |name| out = out ++ .{Case{ .owner = owner, .name = name }};
+            }
+            break :blk out;
+        };
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            inline for (cases) |entry| {
+                const record: records.Record = .{ .name = entry.name, .owner = entry.owner };
+                const expected = records.Runner.of(&record);
+                errdefer std.debug.print("runner SQL disagrees for owner {s} name {s}\n", .{ @tagName(entry.owner), entry.name });
+                const probe = comptime std.fmt.comptimePrint("SELECT ({s})=?1", .{records.sql.runnerCase(
+                    "'" ++ @tagName(entry.owner) ++ "'",
+                    "'" ++ entry.name ++ "'",
+                    std.meta.tags(records.Runner),
+                )});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, probe, .{@tagName(expected)}));
+            }
+        }
+    }.run);
+}
+
 test "core tool table routes every built-in and promotion excludes the full core domain" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

@@ -136,7 +136,7 @@ fn mcpOfferJoinsSql(comptime operation_alias: []const u8) []const u8 {
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id ";
 }
 
-const mcp_name_sql = "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
+const mcp_name_sql = "AND @bytes(tool.name)=@payload(name) AND " ++ tool_defs.sql.runnerTest("tool.owner", "tool.name", .mcp);
 
 fn mcpToolSelectSql(comptime operation_alias: []const u8, comptime name_content: []const u8, comptime selected: []const u8) []const u8 {
     return "SELECT " ++ selected ++ " FROM content name " ++ mcpOfferJoinsSql(operation_alias) ++
@@ -150,14 +150,22 @@ fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias:
 }
 
 fn builtinCallSql(comptime runner: tool_defs.Runner) []const u8 {
-    return "EXISTS(SELECT 1 FROM model_tool_call tool_call " ++
-        "JOIN content name ON name.content_id=tool_call.name_content_id " ++ mcpOfferJoinsSql("operation") ++
-        "WHERE tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
-        "AND @bytes(tool.name)=@payload(name) AND tool.owner='rui' AND tool.name='" ++ @tagName(runner) ++ "')";
+    return "EXISTS(" ++ offeredCallSelectSql("action", "operation", "1") ++ " AND " ++ tool_defs.sql.runnerTest("tool.owner", "tool.name", runner) ++ ")";
+}
+
+/// The call's offered tool record, selecting `selected` over it. Its derived runner is `tool_defs.sql`.
+fn offeredCallSelectSql(comptime action: []const u8, comptime operation: []const u8, comptime selected: []const u8) []const u8 {
+    return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
+        "JOIN content name ON name.content_id=tool_call.name_content_id " ++ mcpOfferJoinsSql(operation) ++
+        "WHERE tool_call.operation_id=" ++ action ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action ++ ".call_ordinal " ++
+        "AND @bytes(tool.name)=@payload(name)";
 }
 
 fn nonBashCallSql(comptime first: u8) []const u8 {
-    return "(" ++ coreCallSql(first) ++ " OR " ++ mcpCallSql("action", "operation") ++ " OR " ++ builtinCallSql(.read_image) ++ ")";
+    const non_bash = tool_defs.sql.runnerTest("tool.owner", "tool.name", .mcp) ++ " OR " ++
+        tool_defs.sql.runnerTest("tool.owner", "tool.name", .read_image) ++ " OR " ++
+        tool_defs.sql.runnerTest("tool.owner", "tool.name", .provider);
+    return "(" ++ coreCallSql(first) ++ " OR EXISTS(" ++ offeredCallSelectSql("action", "operation", "1") ++ " AND (" ++ non_bash ++ ")))";
 }
 
 pub fn actionStopKeysSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
@@ -863,7 +871,7 @@ fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
 }
 
 fn attemptRunnerSql() []const u8 {
-    return "CASE WHEN " ++ builtinCallSql(.read_image) ++ " THEN 'read_image' WHEN " ++ mcpCallSql("action", "operation") ++ " THEN 'mcp' ELSE 'bash' END";
+    return "COALESCE((" ++ offeredCallSelectSql("action", "operation", tool_defs.sql.runnerCase("tool.owner", "tool.name", &.{ .read_image, .mcp })) ++ "),'" ++ @tagName(tool_defs.Runner.bash) ++ "')";
 }
 
 const UncertainChoice = struct {
@@ -953,7 +961,7 @@ const next_mcp_action = rsql.Read(.{
         "CROSS JOIN model_operation operation ON operation.operation_id=candidate.operation_id " ++
         "CROSS JOIN turn active ON active.turn_id=operation.turn_id " ++
         "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
-        "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
+        "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND " ++ tool_defs.sql.runnerTest("tool.owner", "tool.name", .mcp) ++ " " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
         "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -1122,7 +1130,7 @@ const mcp_input = rsql.Read(.{
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND " ++ tool_defs.sql.runnerTest("tool.owner", "tool.name", .mcp) ++ " " ++
         "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
