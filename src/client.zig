@@ -1479,11 +1479,10 @@ test "upgrade Host observation reads the current wire in one exchange and refuse
             for (std.enums.values(Mode)) |mode| {
                 active_mode.* = mode;
                 phase.* = .listener;
-                var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-                defer {
-                    listener.deinit(io);
-                    std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-                }
+                var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+                defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+                var listener = try endpoint.listen(.{});
+                defer listener.deinit(io);
                 var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 phase.* = .peer_spawn;
                 const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
@@ -5908,11 +5907,10 @@ test "transport cancellation returns before silent peer release and retains pinn
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     var token: Cancellation = .{};
     var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .captured = &captured };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -6058,11 +6056,10 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         defer lease.release();
         try lease.prepareForServing(false);
         const paths = lease.paths;
-        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-        }
+        var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+        defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+        var listener = try endpoint.listen(.{});
+        defer listener.deinit(io);
         var token: Cancellation = .{};
         var worker: Worker = .{ .requests = .{ .io = io, .cancellation = &token }, .root = root, .kind = kind, .sink = .{ .fail = kind == .result } };
         const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -6877,15 +6874,16 @@ test "capture routing round trips six placements without conflating selector and
         try host.writeFile(io, .{ .sub_path = "host.json", .data = document.written(), .flags = .{ .permissions = .fromMode(0o600) } });
         var paths = try platform.resolveClientPaths(io, directory);
         if (kind == .mysql) try paths.store_identity.set("0123456789abcdef0123456789abcdef");
+        var endpoint: ?host_endpoint.Endpoint = null;
         var listener: ?std.Io.net.Server = null;
         var future: ?std.Io.Future(anyerror!void) = null;
         if (kind == .mysql) {
-            var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .permissions = .fromMode(0o700) });
-            runtime_dir.close(io);
-            listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+            listener = try endpoint.?.listen(.{});
             future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
         }
         defer if (kind == .mysql) std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("routing test runtime cleanup failed");
+        defer if (endpoint) |*held| held.retire() catch @panic("unable to retire fixture endpoint");
         defer if (listener) |*server| server.deinit(io);
         defer if (future) |*pending| {
             _ = pending.cancel(io) catch {};

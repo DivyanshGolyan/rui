@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_endpoint = @import("host_endpoint.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -678,11 +679,10 @@ test "submission settles wire Admission only after join and releases only accept
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     for (0..3) |kind| {
         for ([_][]const u8{ "accepted", "rejected", "conflict", "invalid" }) |status| {
             errdefer std.debug.print("intent {d}, Admission {s}\n", .{ kind, status });
