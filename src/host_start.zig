@@ -664,7 +664,7 @@ fn resolutionFailure(failure: *start_report.Failure, path: []const u8, source: a
 
 /// Why a named secret source gave no usable value, naming the variable or file a caller must fix.
 /// `resolve` reports an unset variable or an absent file as ApiKeyMissing and a malformed key or
-/// MySQL URL as InvalidApiKey or InvalidSecretValue; every other error is the private file reader's,
+/// MySQL URL as InvalidApiKey or SettingsInvalid; every other error is the private file reader's,
 /// named as it is.
 fn sourceRefusal(buffer: *[start_report.max_refusal_message_bytes]u8, path: []const u8, source: anytype, err: anyerror) []const u8 {
     const named = switch (source) {
