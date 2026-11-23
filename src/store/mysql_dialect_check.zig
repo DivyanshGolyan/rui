@@ -21,8 +21,9 @@ const DatabaseNames = struct {
     offer: []const u8 = "rui_offer_migration",
     effort: []const u8 = "rui_effort_migration",
     projection: []const u8 = "rui_obligation_projection_parity",
-    history: []const u8 = "rui_history",
-    history_fresh: []const u8 = "rui_history_fresh",
+    // Short: the history Store's name keeps a namespace of 31 characters under the 40-byte testing database name.
+    history: []const u8 = "rh",
+    history_fresh: []const u8 = "rh_fresh",
 };
 
 var names: DatabaseNames = .{};
@@ -107,6 +108,12 @@ fn writeResultNamed(comptime text: []const u8, out: *std.Io.Writer) !void {
     const sql = try std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names));
     defer std.testing.allocator.free(sql);
     try writeResult(sql, out);
+}
+
+test "the history Store's database name keeps the longest namespace under the 40-byte testing database name" {
+    var buffer: [64]u8 = undefined;
+    const name = try qualifiedDatabase(&buffer, (DatabaseNames{}).history, "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+    try std.testing.expect(name.len < 40);
 }
 
 test "MySQL test schema namespace preserves defaults and separates concurrent processes" {
