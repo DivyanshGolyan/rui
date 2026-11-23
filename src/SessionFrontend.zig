@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
@@ -4485,11 +4486,10 @@ test "permission resolved between the activity scan and Current keeps the fronte
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     const scratch = try held.tmp.dir.createFile(io, "scratch", .{ .read = true });
     defer scratch.close(io);
     const action = try held.tmp.dir.createFile(io, "action", .{ .read = true });
@@ -5731,11 +5731,10 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         defer if (lease) |*held| held.release();
         try lease.?.prepareForServing(false);
         const paths = lease.?.paths;
-        var listener: ?std.Io.net.Server = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer if (listener) |*server| {
-            server.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-        };
+        var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+        defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+        var listener: ?std.Io.net.Server = try endpoint.listen(.{});
+        defer if (listener) |*server| server.deinit(io);
         var peer: Peer = .{ .mode = mode, .listener = if (listener) |*server| server else undefined };
         const thread: ?std.Thread = if (listener != null) try std.Thread.spawn(.{}, Peer.run, .{&peer}) else null;
         var joined = false;
@@ -5890,11 +5889,10 @@ test "skills transport recovery retains the held page and retries the same prefi
     try std.testing.expectEqual(old.read, self.skills.held.?.read);
     try self.serviceSkills();
     try std.testing.expectEqual(first, self.skill_job.read);
-    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(lease.paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     var peer: Peer = .{ .listener = &listener };
     const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
     var joined = false;
@@ -7744,11 +7742,10 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     self.store = root;
     self.session = "k7m2qx";
     defer {
@@ -8167,11 +8164,10 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     const scratch = try held.tmp.dir.createFile(io, "message-source", .{ .read = true });
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
@@ -8237,11 +8233,10 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     var lease = try @import("platform.zig").StoreLease.acquire(io, root);
     defer lease.release();
     try lease.prepareForServing(false);
-    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(lease.paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     const scratch = try held.tmp.dir.createFile(io, "tool-source", .{ .read = true });
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
@@ -8701,11 +8696,10 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
             defer lease.release();
             try lease.prepareForServing(false);
             const paths = lease.paths;
-            var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-            defer {
-                listener.deinit(io);
-                std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-            }
+            var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+            defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+            var listener = try endpoint.listen(.{});
+            defer listener.deinit(io);
             self.store = root;
             self.session = "k7m2qx";
             self.failedRetryForTest();
@@ -8953,11 +8947,10 @@ fn paginatedReplayCount() !void {
         defer lease.release();
         try lease.prepareForServing(false);
         const paths = lease.paths;
-        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-        }
+        var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+        defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+        var listener = try endpoint.listen(.{});
+        defer listener.deinit(io);
         self.store = root;
         self.session = "k7m2qx";
         self.reading.opening = true;
@@ -9037,11 +9030,10 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     const scratch = try held.tmp.dir.createFile(io, "person-source", .{ .read = true });
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "person-answer-page", .{ .read = true });

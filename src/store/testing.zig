@@ -721,7 +721,7 @@ fn dropPinOrganization(storage: *Store) !void {
     };
     try dropBackgroundUpgradeShape(storage);
     // After dropBackgroundUpgradeShape's refusals, so a refused rewind leaves a usable Store.
-    try dropFormat89MissingSettings(storage);
+    try dropMysqlInPlaceColumns(storage);
     try dropFormat91OutputLimit(storage);
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='creator_ref' AND REFERENCED_TABLE_NAME='session')");
@@ -756,11 +756,17 @@ fn dropPinOrganization(storage: *Store) !void {
     }
 }
 
-/// Undoes format 89's core_command.missing_settings on MySQL, whose step adds the column in place, so
-/// a Store rewound below 89 replays that step on a table without it. SQLite's step rebuilds
-/// core_command from named columns, so it replays over the newer table unchanged.
-fn dropFormat89MissingSettings(storage: *Store) !void {
+/// Undoes formats 89 and 90 on MySQL, whose steps add core_command.missing_settings and
+/// tool_record.remote_name in place, so a Store rewound below them replays ADD COLUMN on a table that
+/// has it. Newest first. SQLite's steps rebuild tables from named columns, so they replay unchanged.
+fn dropMysqlInPlaceColumns(storage: *Store) !void {
     if (storage.engine != .mysql) return;
+    try mysql_testing.rawExec(storage, "SET @rui_remote_ddl=(SELECT CONCAT('ALTER TABLE tool_record DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='tool_record' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('remote_name',cc.CHECK_CLAUSE)>0)");
+    try mysql_testing.rawExec(storage, "PREPARE rui_remote FROM @rui_remote_ddl");
+    try mysql_testing.rawExec(storage, "EXECUTE rui_remote");
+    try mysql_testing.rawExec(storage, "DEALLOCATE PREPARE rui_remote");
+    try mysql_testing.rawExec(storage, "SET @rui_remote_ddl=NULL");
+    try mysql_testing.rawExec(storage, "ALTER TABLE tool_record DROP COLUMN remote_name");
     try mysql_testing.rawExec(storage, "SET @rui_missing_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('missing_settings',cc.CHECK_CLAUSE)>0)");
     try mysql_testing.rawExec(storage, "PREPARE rui_missing FROM @rui_missing_ddl");
     try mysql_testing.rawExec(storage, "EXECUTE rui_missing");

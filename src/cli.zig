@@ -1,5 +1,6 @@
 const credential_location = @import("credential_location.zig");
 const std = @import("std");
+const host_endpoint = @import("host_endpoint.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
@@ -5282,13 +5283,12 @@ test "host status and start classify a Host's reply however late it comes" {
     var lease = try platform.StoreLease.acquire(io, store);
     defer lease.release();
     try lease.prepareForServing(false);
-    var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
-    defer std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(lease.paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     var peer: Peer = .{ .listener = &listener, .replies = &.{ incompatible, incompatible, fenced } };
-    const thread = std.Thread.spawn(.{}, Peer.run, .{&peer}) catch |err| {
-        listener.deinit(io);
-        return err;
-    };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
     var joined = false;
     defer if (!joined) thread.join();
 

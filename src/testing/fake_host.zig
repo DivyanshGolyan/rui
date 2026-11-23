@@ -5,6 +5,7 @@ const std = @import("std");
 const socket_os = @import("os").socket;
 const protocol = @import("../protocol.zig");
 const platform = @import("../platform.zig");
+const host_endpoint = @import("../host_endpoint.zig");
 
 /// Serves `host.answer(fd)` on a fresh private Store socket while `action.run(host, dir, root)` runs.
 pub fn withHost(host: anytype, action: anytype) !void {
@@ -18,11 +19,10 @@ pub fn withHost(host: anytype, action: anytype) !void {
     defer lease.release();
     try lease.prepareForServing(false);
     const paths = lease.paths;
-    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-    defer {
-        listener.deinit(io);
-        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-    }
+    var endpoint = try host_endpoint.claim(io, try .init(std.fs.path.dirname(paths.socket.slice()).?));
+    defer endpoint.retire() catch @panic("unable to retire fixture endpoint");
+    var listener = try endpoint.listen(.{});
+    defer listener.deinit(io);
     const Server = Serving(@TypeOf(host));
     var server: Server = .{ .host = host, .listener = &listener };
     const thread = try std.Thread.spawn(.{}, Server.serve, .{&server});

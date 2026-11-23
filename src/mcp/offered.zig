@@ -267,6 +267,11 @@ pub const Pending = struct {
         return self.listing.entries();
     }
 
+    /// How long the listed tools stay fresh (see `Listing.ttlMs`). Valid after `.listed` until `finish`.
+    pub fn ttlMs(self: *const Pending) ?u64 {
+        return self.listing.ttlMs();
+    }
+
     pub fn fd(self: *const Pending) std.posix.fd_t {
         return self.listing.fd();
     }
