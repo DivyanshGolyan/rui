@@ -2,7 +2,8 @@
 # Usage: beside.sh -- COMMAND...
 # Runs the policy checks (checks.sh, at lower priority) as a background child of this shell
 # while COMMAND runs in the foreground, then waits for them, prints their log and reports.
-# It exits with COMMAND's status, so a policy failure never stops the steps after it; the
+# It exits with COMMAND's status, so a policy failure never stops the steps after it (except a
+# stale Store table, which build_artifact.py refuses before compiling); the
 # policy result goes to the step output `policy` (success or failure) for the job's last step.
 # `wait` returns the child's own status, including death by a signal (128 + its number).
 set -uo pipefail

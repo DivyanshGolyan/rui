@@ -43,7 +43,7 @@ def recorded(root):
     return found[1] if found else None
 
 
-def fingerprint_error(root):
+def fingerprint_error(root=ROOT):
     expected = fingerprint(root)
     if recorded(root) == expected:
         return None
