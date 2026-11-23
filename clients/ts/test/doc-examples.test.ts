@@ -94,7 +94,7 @@ export const Rui = {
 		});
 		await assert.rejects(execute({}), (error: { code?: number; stdout: string; stderr: string }) => {
 			assert.notEqual(error.code, 0, file);
-			assert.match(error.stderr, /OPENAI_API_KEY|providers\.openai\.key/, `${file}: ${error.stderr}`);
+			assert.match(error.stderr, /OPENAI_API_KEY/, `${file}: ${error.stderr}`);
 			return true;
 		});
 	}
