@@ -1,9 +1,10 @@
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
 
-from caller_errors import lex, production
+from caller_errors import TOKEN, lex, production
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,59 @@ DOMAIN_REACH = {
     ("model_settlement.zig", "Store.enter"): 1,
     ("reads.zig", "Store.fence"): 3,
 }
+
+
+FORMAT_SOURCES = "src"
+FORMAT_OWNERS = {"src/store/history.zig", "src/store/schema.zig"}
+# A generated lookup of statements the owners and tests already build (tests/ci/rsql_table.py); its text is counted where
+# it is written, so the table itself is not a writer.
+FORMAT_GENERATED = {"src/store/rsql_table.zig"}
+FORMAT_WRITE = {
+    "user_version": re.compile(r"PRAGMA\s+user_version\s*="),
+    "format update": re.compile(r"UPDATE\s+store_meta\s+SET\s+meta_value\s*=(?:(?!WHERE|;).)*?WHERE\s+meta_key\s*=\s*'format'"),
+    "drop column": re.compile(r"\bDROP\s+COLUMN\b"),
+}
+FORMAT_RULE = ("only src/store/history.zig and src/store/schema.zig write the Store format; build an old format with "
+               "history.openAt or history.build (src/store/history.zig)")
+# Shrink-only ratchet: each existing test-code writer of the format, by file and kind. A new writer, or a count that
+# grows, fails; a count that drops must be lowered here. Each entry is a format built by hand that history.zig should own.
+FORMAT_WRITERS = {
+    ("src/store/mysql_testing.zig", "format update"): 6,
+    ("src/store/sqlite_tests/archive_membership.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/context_window_migration.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/migration.zig", "format update"): 3,
+    ("src/store/sqlite_tests/migration.zig", "user_version"): 15,
+    ("src/store/sqlite_tests/schema.zig", "format update"): 3,
+    ("src/store/sqlite_tests/schema.zig", "user_version"): 2,
+    ("src/store/sqlite_tests/skills_migration.zig", "user_version"): 2,
+    ("src/store/sqlite_tests/tool_record_hint.zig", "user_version"): 1,
+    ("src/store/sqlite_tests/tool_set_migration.zig", "user_version"): 1,
+}
+
+
+def format_writes(source):
+    code = " ".join(token.text for token in lex(source))
+    return {kind: len(pattern.findall(code)) for kind, pattern in FORMAT_WRITE.items()}
+
+
+def format_violations(root=ROOT, writers=None):
+    writers = FORMAT_WRITERS if writers is None else writers
+    found = {}
+    for path in sorted((root / FORMAT_SOURCES).rglob("*.zig")):
+        name = path.relative_to(root).as_posix()
+        if name in FORMAT_OWNERS | FORMAT_GENERATED:
+            continue
+        for kind, count in format_writes(path.read_text()).items():
+            if count:
+                found[(name, kind)] = count
+    messages = []
+    for (name, kind) in sorted(set(found) | set(writers)):
+        count, listed = found.get((name, kind), 0), writers.get((name, kind), 0)
+        if count > listed:
+            messages.append(f"{name} writes the Store format ({kind}) {count} times, {listed} allowed; {FORMAT_RULE}")
+        elif count < listed:
+            messages.append(f"{name} writes the Store format ({kind}) {count} times, {listed} allowed; lower its FORMAT_WRITERS entry")
+    return messages
 
 
 def binding_sites(source):
@@ -127,6 +181,52 @@ class StoreEngineBoundaryTest(unittest.TestCase):
             shutil.copytree(ROOT / STORE, root / STORE)
             (root / STORE / "rsql.zig").write_text("const std = @import(\"std\");\n")
             self.assertEqual(violations(root), [f"{STORE}/rsql.zig no longer names the SQLite binding; remove it from ALLOWED"])
+
+
+class FormatWriteTest(unittest.TestCase):
+    def test_format_writers_match_the_shrink_only_ratchet(self):
+        self.assertEqual(format_violations(), [])
+
+    def test_scan_reads_writes_in_strings_but_not_comments_or_reads(self):
+        self.assertEqual(format_writes('const s = "PRAGMA user_version={d}";'), {"user_version": 1, "format update": 0, "drop column": 0})
+        self.assertEqual(format_writes('x("UPDATE store_meta SET meta_value=\'" ++ f ++ "\' WHERE meta_key=\'format\'");'),
+                         {"user_version": 0, "format update": 1, "drop column": 0})
+        self.assertEqual(format_writes('const s = "ALTER TABLE t DROP COLUMN c";'), {"user_version": 0, "format update": 0, "drop column": 1})
+        for source in ('// PRAGMA user_version=5', '\\\\PRAGMA user_version=5',
+                       'const s = "PRAGMA user_version";', 'try pragmaInt(db, "PRAGMA user_version");',
+                       'const s = "UPDATE store_meta SET meta_value=\'x\' WHERE meta_key=\'store_id\'";'):
+            self.assertEqual(sum(format_writes(source).values()), 0, source)
+
+    def test_a_planted_format_write_outside_the_owners_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            planted = root / "src/store/sqlite_tests/tool_set_migration.zig"
+            planted.write_text(planted.read_text() + '\nconst planted = "PRAGMA user_version=5";\n')
+            self.assertEqual(format_violations(root), [
+                "src/store/sqlite_tests/tool_set_migration.zig writes the Store format (user_version) 2 times, 1 allowed; "
+                + FORMAT_RULE])
+            self.assertEqual(format_violations(root, FORMAT_WRITERS | {("src/store/sqlite_tests/tool_set_migration.zig", "user_version"): 2}), [])
+
+    def test_a_planted_drop_column_or_format_update_in_a_new_file_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            (root / "src/store/tests/planted.zig").write_text(
+                'const a = "ALTER TABLE session DROP COLUMN obligation_since";\n'
+                'const b = "UPDATE store_meta SET meta_value=\'9\' WHERE meta_key=\'format\'";\n')
+            self.assertEqual(format_violations(root), [
+                f"src/store/tests/planted.zig writes the Store format (drop column) 1 times, 0 allowed; {FORMAT_RULE}",
+                f"src/store/tests/planted.zig writes the Store format (format update) 1 times, 0 allowed; {FORMAT_RULE}"])
+
+    def test_the_owners_may_write_the_format(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / FORMAT_SOURCES, root / FORMAT_SOURCES)
+            for owner in FORMAT_OWNERS:
+                path = root / owner
+                path.write_text(path.read_text() + '\nconst owner = "PRAGMA user_version=5; DROP COLUMN x";\n')
+            self.assertEqual(format_violations(root), [])
 
 
 class DomainReachTest(unittest.TestCase):
