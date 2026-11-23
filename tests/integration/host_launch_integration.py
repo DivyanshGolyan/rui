@@ -275,6 +275,10 @@ def assert_configure_defaults(root, store, env):
     assert settings(addressed) == ("gpt-6-sol", [], "ask")
 
 
+# Open lines: src/line.zig capacity, outside intake's exchange population.
+LINE_DESCRIPTORS = 16
+
+
 def managed_descriptor_rejection(store, env, limit):
     def limits():
         resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
@@ -293,8 +297,8 @@ def managed_descriptor_rejection(store, env, limit):
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 5 + 3
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
-                    authentication=authentication, self_wake=2,
-                    required=inherited + fixed_host + clients + execution + authentication + 2)
+                    authentication=authentication, self_wake=2, lines=LINE_DESCRIPTORS,
+                    required=inherited + fixed_host + clients + execution + authentication + 2 + LINE_DESCRIPTORS)
     assert fields == expected, (fields, expected)
     assert not (store / "host.lock").exists() and not (store / "diagnostics").exists(), store
     assert status(store, env)["status"] != "ready"
