@@ -62,12 +62,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     openapi_emitter.root_module.addImport("url", product.addUrl(b));
+    openapi_emitter.root_module.addImport("transport_environment", product.addTransportEnvironment(b));
     _ = product.useOs(b, openapi_emitter.root_module);
     const emit_openapi = b.addRunArtifact(openapi_emitter);
     const update_openapi = b.addUpdateSourceFiles();
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("rejections.ts"), "clients/ts/src/rejections.ts");
-    b.step("openapi", "Write openapi.json from the wire types and the TS client's rejection sentences; unit tests fail while either is stale").dependOn(&update_openapi.step);
+    update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("host-environment.ts"), "clients/ts/src/host-environment.ts");
+    b.step("openapi", "Write openapi.json from the wire types, and the TS client's rejection sentences and inherited transport variables; unit tests fail while any is stale").dependOn(&update_openapi.step);
 
     const catalog_emitter = b.addExecutable(.{
         .name = "model-catalog",

@@ -156,7 +156,7 @@ def source_modes(root, good):
 
 
 NO_KEY = "\nrui: no OpenAI API key; save one with `rui auth login openai`, then start the Host again.\n"
-PROXY = "\nrui: https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy. The Host did not start.\n"
+PROXY = "https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy"
 
 
 def flag_start_failures(root):
@@ -182,8 +182,6 @@ def flag_start_failures(root):
         (openai, {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"chatgpt":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
-         {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
     removed = [
         ["--active-capacity", "2"],
@@ -224,6 +222,11 @@ def flag_start_failures(root):
             assert caller == "", (flags, stderr)
         else:
             assert caller.startswith("rui host serve: ") and caller.endswith(f" [{code}]\n") and caller.count("\n") == 1, (flags, stderr)
+    proxied = start(len(unchanged) + len(leaf), ["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
+                    {"HTTPS_PROXY": "https://proxy.example:1"})
+    assert proxied.returncode == 6, proxied
+    assert proxied.stderr.decode() == f"rui: the Host did not start: {PROXY} [proxy_unusable]\n", proxied
+    assert json.loads(proxied.stdout) == {"rui_start_error": {"code": "proxy_unusable", "message": PROXY}}, proxied
     for index, (flags, changes, message) in enumerate(leaf, len(unchanged)):
         done = start(index, flags, changes)
         assert done.returncode == 2, (flags, done)

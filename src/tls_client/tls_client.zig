@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const environment = @import("transport_environment");
 const os = @import("os");
 
 pub const c = @import("openssl_c");
@@ -70,8 +71,8 @@ pub fn loadTrust(ctx: *c.SSL_CTX, trust: Trust) TrustError!void {
             if (c.SSL_CTX_load_verify_file(ctx, terminated) != 1) return error.InvalidCaFile;
         },
         .system => {
-            const file = opensslTrustVariable("SSL_CERT_FILE");
-            const dirs = opensslTrustVariable("SSL_CERT_DIR");
+            const file = opensslTrustVariable(environment.ssl_cert_file);
+            const dirs = opensslTrustVariable(environment.ssl_cert_dir);
             if (file != null or dirs != null) {
                 if (file) |path| if (c.SSL_CTX_load_verify_file(ctx, path) != 1) return error.InvalidSslCertFile;
                 if (dirs) |list| {

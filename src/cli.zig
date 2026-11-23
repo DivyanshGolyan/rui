@@ -2050,9 +2050,9 @@ fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []co
 fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
     const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
-        stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
-        recordExit(.environment);
-        return error.Reported;
+        var text: [start_report.max_refusal_message_bytes]u8 = undefined;
+        failure.* = .init(.proxy_unusable, std.fmt.bufPrint(&text, "https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason}) catch unreachable);
+        return writeAttemptRefusal(init.io, attempt, failure, .environment);
     }
     return host_start.admitSelected(init, selected, settings, failure) catch |err| {
         if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));

@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import { Rui, RuiStartError, RuiUnavailableError, type HostSettings, type ClientOptions, type ExitEvent } from "../src/index.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
+import { INHERITED_ENVIRONMENT } from "../src/client.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
@@ -62,7 +63,7 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	if (process.platform === "linux") {
 		const pid = rui.pid;
 		const environment = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
-		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), ["HOME", "PATH", "TMPDIR"].filter((name) => process.env[name] !== undefined).sort());
+		assert.deepEqual(environment.map((entry) => entry.split("=")[0]).sort(), INHERITED_ENVIRONMENT.filter((name) => process.env[name] !== undefined).sort());
 		for (const file of ["environ", "cmdline"]) assert.ok(!readFileSync(`/proc/${pid}/${file}`, "utf8").includes(key), file);
 	}
 	const created = [...runtimeDirs()].filter((name) => !before.has(name));
@@ -454,6 +455,21 @@ test("an invalid MCP server is a RuiStartError", { skip }, async () => {
 		assert.ok(!error.message.includes(token));
 		return true;
 	});
+});
+
+test("TS-12 a Host started behind the application's https:// proxy refuses with proxy_unusable", { skip }, async () => {
+	const saved = process.env.https_proxy;
+	process.env.https_proxy = "https://proxy.example:1";
+	try {
+		await assert.rejects(connect(newStore()), (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "proxy_unusable");
+			assert.match(error.message, /https_proxy\/HTTPS_PROXY names a scheme other than http:\/\//);
+			return true;
+		});
+	} finally {
+		if (saved === undefined) delete process.env.https_proxy; else process.env.https_proxy = saved;
+	}
 });
 
 test("a missing executable is RuiUnavailableError", async () => {

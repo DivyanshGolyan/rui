@@ -22,6 +22,7 @@ pub const StartError = enum {
     store_fenced,
     runtime_dir_unusable,
     tool_name_collision,
+    proxy_unusable,
 };
 
 pub const Failure = struct {

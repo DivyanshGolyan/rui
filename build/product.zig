@@ -234,6 +234,12 @@ pub fn addTestPoll(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
 }
 
+/// The environment variables the transport reads (`src/tls_client/environment.zig`). A compile that
+/// links the transport shares tls_client's instance, since a file belongs to a single module.
+pub fn addTransportEnvironment(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/tls_client/environment.zig") });
+}
+
 pub fn addUrl(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/url.zig") });
 }
@@ -278,6 +284,7 @@ pub fn addTlsClient(
     });
     module.addImport("url", url);
     module.addImport("os", os);
+    module.addImport("transport_environment", addTransportEnvironment(b));
     const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
@@ -550,4 +557,7 @@ pub fn addSqliteShell(
 fn configureOpenApi(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addAnonymousImport("openapi.json", .{ .root_source_file = b.path("openapi.json") });
     compile.root_module.addAnonymousImport("rejections.ts", .{ .root_source_file = b.path("clients/ts/src/rejections.ts") });
+    compile.root_module.addAnonymousImport("host-environment.ts", .{ .root_source_file = b.path("clients/ts/src/host-environment.ts") });
+    const linked = if (compile.root_module.import_table.get("tls_client")) |tls_client| tls_client.import_table.get("transport_environment") else null;
+    compile.root_module.addImport("transport_environment", linked orelse addTransportEnvironment(b));
 }

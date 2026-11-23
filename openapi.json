@@ -14264,7 +14264,8 @@
                   "mysql_login",
                   "store_fenced",
                   "runtime_dir_unusable",
-                  "tool_name_collision"
+                  "tool_name_collision",
+                  "proxy_unusable"
                 ]
               },
               "message": {
