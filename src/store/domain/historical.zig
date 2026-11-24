@@ -116,13 +116,23 @@ pub const HistoricalEntry = struct {
     content: ?HistoricalContent = null,
     input: ?HistoricalInput = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
-    /// The Wire of an output item's producing revision (its connection and dialect).
+    /// The Wire of the producing revision (its connection and dialect): an output item's, or an
+    /// Operation's, which the effort boundary compares with the request's Binding.
     producer_wire: ?replay_binding.Wire = null,
     source_action: ?SourceAction = null,
     sender: ?Bounded(session_id.max_reference_bytes) = null,
     effort: ?model_capability.ReasoningEffort = null,
     tool_set_id: u64 = 0,
     declares: bool = false,
+
+    /// The Binding of the producing revision: its Wire and requested model. Null for an entry
+    /// that carries no producer.
+    pub fn producerBinding(entry: *const HistoricalEntry) ?replay_binding.Binding {
+        const wire = entry.producer_wire orelse return null;
+        // Borrow the model from the entry, not from a copy: the Binding's slice must outlive this call.
+        const model = if (entry.requested_model) |*value| value else return null;
+        return replay_wire.bindingOf(wire, model.slice());
+    }
 };
 
 pub const Declaration = struct {
@@ -450,7 +460,7 @@ pub const RequestPage = struct {
     pub fn replayOutput(self: *RequestPage, entry: *const HistoricalEntry, request: replay_binding.Binding) !?HistoricalOutput {
         var output = try self.openOutput(entry.position);
         const use: replay_binding.Use = if (self.anchor == entry.position) .selected_base else .history;
-        const producer = replay_wire.bindingOf(entry.producer_wire orelse return error.CorruptStore, entry.requested_model.?.slice());
+        const producer = entry.producerBinding() orelse return error.CorruptStore;
         const replay = replay_binding.decide(output.kind, producer, request, use);
         if (replay == .omit) {
             self.output_parts = null;
@@ -1384,7 +1394,7 @@ const historical_entries = rsql.Read(.{
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
         "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",NULL,earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,revision.provider,revision.codec,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",NULL,earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1981,6 +1991,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .position = row.session_position.get(),
         .kind = .operation,
         .requested_model = row.model orelse return error.CorruptStore,
+        .producer_wire = replay_wire.wireOf(row.provider orelse return error.CorruptStore, row.codec orelse return error.CorruptStore),
         .effort = row.effort,
         .tool_set_id = (row.tool_set_id orelse return error.CorruptStore).get(),
         .declares = row.declares orelse return error.CorruptStore,

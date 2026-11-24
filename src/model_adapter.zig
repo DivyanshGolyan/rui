@@ -1011,7 +1011,8 @@ pub const Preparation = struct {
                     .tool_results => self.state.stage = if (covered) .covered_tool_results else .tool_results,
                     .operation => if (!covered) {
                         if (entry.declares and codecs.declaresTools(self.settings.codec)) self.declare(.{ .tool_set_id = entry.tool_set_id, .position = entry.position }, .history);
-                        if (entry.requested_model.?.eql(self.settings.model.slice()))
+                        const producer = entry.producerBinding() orelse return error.CorruptStore;
+                        if (producer.eql(store.historicalRequestBinding(&self.settings)))
                             return self.loadItemHeader(.{ .operation = effortOf(entry.effort) }, 0);
                     },
                     .provider_output => {
@@ -3375,6 +3376,43 @@ test "model switch rebuilds effort only from the requested model binding" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("low", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second" });
+    try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
+}
+
+test "an Operation effort from another connection is no boundary for the same model" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("connection-effort-config");
+    var low: wire_request.ConfigureCommand = .{};
+    low.session = session;
+    try low.key.set("connection-effort-low");
+    low.configuration.reasoning_effort.state = .value;
+    try low.configuration.reasoning_effort.value.set("low");
+    try std.testing.expect(try setup.storage.configure(&low, .{}) == .accepted);
+    try setup.submit("connection-effort-one", "connection-effort-one", session.slice(), "visible original");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible answer\"}]}"}, "visible answer");
+    // The first Operation's revision names another connection with the same model and dialect.
+    try store.testing.setRevisionProviderForTesting(&setup.storage, session.slice(), 2, "openai");
+    var high: wire_request.ConfigureCommand = .{};
+    high.session = session;
+    try high.key.set("connection-effort-high");
+    high.configuration.reasoning_effort.state = .value;
+    try high.configuration.reasoning_effort.value.set("high");
+    try std.testing.expect(try setup.storage.configure(&high, .{}) == .accepted);
+    try setup.submit("connection-effort-two", "connection-effort-two", session.slice(), "visible second");
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [1]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const request = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("high", parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"effort\":\"low\"") == null);
     try expectInputTexts(request.bytes, &.{ "visible original", "additional_tools", "visible answer", "visible second" });
     try std.testing.expect(try expectMemoRebuildEqual(&setup, binding, &memos, .{}) > 0);
 }
