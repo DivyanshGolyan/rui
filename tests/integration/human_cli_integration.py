@@ -664,11 +664,13 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
-            os.write(master, b"\x1b[200~" + encoded[12:] + b"\x1b[201~\x1b\\" + frame(b"DONE" + prefix))
+            os.write(master, b"\x1b[200~" + encoded[12:] + b"\r\t\x7f\x1b[120;1;120u\x1b[201~\x1b\\" + frame(b"DONE" + prefix))
             os.write(master, b"safe")
             shown = raw_output(master, lambda screen: "safe" in screen)
             assert encoded[12:32] not in shown, "a delayed clipboard tail reached the composer"
             assert encoded[12:32].decode() not in current_screen(master), "a delayed clipboard tail reached the composer"
+            assert "xsafe" not in current_screen(master), "encoded paste text reached the composer"
+            assert len(endpoint.requests) == 1, "a control byte inside paste submitted a message"
 
             os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
             request = raw_output(master, b";" + base64.b64encode(b"image/png") + b"\x1b\\")
@@ -678,11 +680,12 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Clipboard read timed out" in screen)
             overview_frame(master, lambda screen: True, b"\x1b[27u")
             keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
-            os.write(master, b"unframedtext\x01\x05\x1b[200~blockedpaste\x1b[201~\x1b[120;1;120u")
+            os.write(master, b"unframedtext\x01\x05\x1b[200~blockedpaste\x1b[121;1;121u\x1b[201~\x1b[120;1;120u")
             raw_output(master, lambda screen: "safex" in screen)
             current = current_screen(master)
             assert "unframedtext" not in current, "an unfinished clipboard frame released unframed text"
             assert "blockedpaste" not in current, "an unfinished clipboard frame released bracketed paste"
+            assert "safey" not in current, "an unfinished clipboard frame released encoded paste text"
             os.write(master, b"\x03")
             reset = raw_output(master, b"Your chats keep working")
             assert b"\x1b[?5522l" in reset, reset
