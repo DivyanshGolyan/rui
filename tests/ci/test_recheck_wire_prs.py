@@ -36,9 +36,17 @@ def run(run_id=10, **changes):
             "status": "completed", "created_at": BEFORE, "run_started_at": BEFORE, **changes}
 
 
+UPDATED_STEPS = [{"name": "Checkout", "status": "completed"}, {"name": owner.WIRE_STEP, "status": "completed"}]
+LEGACY_STEPS = [{"name": "Checkout", "status": "completed"}]
+
+
 def job(job_id=100, **changes):
     return {"id": job_id, "run_id": 10, "run_attempt": 1, "name": "admission", "status": "completed", "conclusion": "success",
-            "started_at": BEFORE, **changes}
+            "started_at": BEFORE, "steps": UPDATED_STEPS, **changes}
+
+
+def legacy(job_id=100, name="policy", **changes):
+    return job(job_id, name=name, steps=LEGACY_STEPS, **changes)
 
 
 def files(*names):
@@ -164,26 +172,46 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 owner.timestamp(value)
 
-    def test_only_completed_non_skipped_admission_job_in_selected_run(self):
-        for jobs in ([], [job(name="policy")], [job(name="linux pr")], [job(run_id=9)], [job(run_attempt=2)],
+    def test_only_completed_non_skipped_wire_job_in_selected_run(self):
+        for jobs in ([], [job(run_id=9)], [job(run_attempt=2)],
                      [job(status="in_progress")], [job(status="queued")], [job(conclusion="skipped")]):
             with self.subTest(jobs=jobs):
                 self.assertIsNone(self.select(jobs=jobs).job_id)
         for conclusion in ("success", "failure", "cancelled", "timed_out", "action_required"):
             with self.subTest(conclusion=conclusion):
                 self.assertEqual(self.select(jobs=[job(conclusion=conclusion)]).job_id, 100)
-        for jobs, expected in (([job(101, name="policy"), job()], 100),
-                               ([job(101, name="linux suites (test-native)")], None)):
-            with self.subTest(jobs=[(item["name"], item["conclusion"]) for item in jobs]):
-                self.assertEqual(self.select(jobs=jobs).job_id, expected)
+        self.assertEqual(self.select(jobs=[job(101, name="linux suites (test-native)"), job()]).job_id, 100)
+        self.assertIsNone(self.select(jobs=[job(101, name="linux suites (test-native)")]).job_id)
 
     def test_ambiguous_admission_jobs_fail_loudly(self):
         with self.assertRaisesRegex(ValueError, "multiple latest admission"):
             self.select(jobs=[job(), job(101)])
 
-    def test_policy_job_alone_does_not_stand_in_for_admission(self):
-        selection = self.select(runs=[run(status="in_progress")], jobs=[job(name="policy", status="completed")])
+    def test_updated_run_is_judged_by_its_admission_step_not_its_policy_job(self):
+        selection = self.select(runs=[run(status="in_progress")], jobs=[job(status="completed"), legacy(101, status="completed", started_at=AFTER)])
         self.assertTrue(selection.waiting)
+        self.assertIsNone(self.select(jobs=[job(started_at=AFTER), legacy(101, started_at=BEFORE)]).job_id)
+        self.assertEqual(self.select(jobs=[job(), legacy(101, started_at=AFTER)]).job_id, 100)
+
+    def test_legacy_run_reruns_its_policy_job_once_completed(self):
+        selection = self.select(jobs=[legacy()])
+        self.assertEqual(selection.job_id, 100)
+        self.assertIn("policy in legacy run 10", selection.reason)
+        self.assertIsNone(self.select(jobs=[legacy(status="queued")]).job_id)
+        self.assertEqual(self.select(jobs=[legacy(101, conclusion="skipped"), legacy(102, name="linux pr")]).job_id, 102)
+
+    def test_legacy_run_in_progress_waits_for_its_policy_job(self):
+        selection = self.select(runs=[run(status="in_progress")], jobs=[legacy(status="completed")])
+        self.assertTrue(selection.waiting)
+        self.assertIsNone(selection.job_id)
+
+    def test_legacy_admission_started_after_publication_still_reruns_policy_started_before(self):
+        self.assertEqual(self.select(jobs=[legacy(), job(101, steps=LEGACY_STEPS, started_at=AFTER)]).job_id, 100)
+
+    def test_legacy_policy_started_after_publication_needs_no_rerun(self):
+        selection = self.select(jobs=[legacy(started_at=AFTER)])
+        self.assertIsNone(selection.job_id)
+        self.assertIn("checks after publication", selection.reason)
 
 
 class GitHub:
@@ -307,6 +335,26 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(clock.sleeps, [60])
         self.assertIn("Wait PR #1: latest run 10 is in_progress", output)
         self.assertIn("Rerun PR #1: job 100", output)
+        self.assertEqual(api.posts, ["actions/jobs/100/rerun"])
+
+    def test_legacy_completed_run_reruns_its_policy_job_not_admission(self):
+        api = GitHub()
+        api.jobs = [legacy(), job(101, steps=LEGACY_STEPS)]
+        output = self.recheck(api)
+        self.assertEqual(api.posts, ["actions/jobs/100/rerun"])
+        self.assertIn("Rerun PR #1: job 100, policy in legacy run 10", output)
+
+    def test_legacy_in_progress_run_waits_then_reruns_its_policy_job(self):
+        api = GitHub()
+        api.runs = [run(status="in_progress")]
+        api.jobs = [legacy(status="in_progress")]
+        def complete():
+            self.assertEqual(api.posts, [])
+            api.runs = [run()]
+            api.jobs = [legacy()]
+        clock = Clock(complete)
+        output = self.recheck(api, clock)
+        self.assertIn("Wait PR #1: latest run 10 is in_progress", output)
         self.assertEqual(api.posts, ["actions/jobs/100/rerun"])
 
     def test_timeout_is_shared_by_all_prs_and_names_every_unrechecked_pr(self):
@@ -437,7 +485,7 @@ class AdapterTest(unittest.TestCase):
     def test_no_admission_check_yet_logs_skip(self):
         api = GitHub()
         api.jobs = []
-        self.assertIn("no completed admission check yet", self.recheck(api))
+        self.assertIn("no completed wire check yet", self.recheck(api))
         self.assertEqual(api.posts, [])
 
     def test_every_collection_is_paginated(self):

@@ -60,14 +60,39 @@ def latest_run(pr, runs):
     return max(matches, key=lambda run: run["run_number"], default=None)
 
 
-# The job that reads the release last: its wire check fetches the v0 tags and origin/main
-# when the job starts, and it merges the PR when it goes green. Rerunning it alone is cheap.
+# A run replays the workflow revision it was created from, so the jobs decide what it checks.
+# An updated run's `admission` job has the wire step: it reads the newest release there, last,
+# and merges the PR when it goes green. Rerunning it alone is cheap. A legacy run has no such
+# step; its wire check happens in the policy job, and rerunning that job reruns its dependents.
 ADMISSION_JOB = "admission"
+WIRE_STEP = "Require the wire contract against the newest release"
+POLICY_JOBS = ("policy", "linux pr")
 
 
-def checked_since(run, admission):
-    if admission is not None and admission["status"] in ("in_progress", "completed"):
-        return timestamp(admission["started_at"])
+@dataclass(frozen=True)
+class WireGate:
+    job: dict | None
+    updated: bool
+
+
+def wire_gate(run, jobs):
+    """The job that reads the release for this run, and whether the run's own workflow has the wire step."""
+    latest = [job for job in jobs if job["run_id"] == run["id"] and job["run_attempt"] == run["run_attempt"]]
+    admission = [job for job in latest if job["name"] == ADMISSION_JOB]
+    if len(admission) > 1:
+        raise ValueError(f"run {run['id']} has multiple latest admission jobs")
+    if admission and any(step["name"] == WIRE_STEP for step in admission[0].get("steps") or []):
+        return WireGate(admission[0], updated=True)
+    policy = [job for job in latest if job["name"] in POLICY_JOBS]
+    policy = [job for job in policy if job["conclusion"] != "skipped"] or policy[:1]
+    if len(policy) > 1:
+        raise ValueError(f"run {run['id']} has multiple latest policy jobs")
+    return WireGate(policy[0] if policy else None, updated=False)
+
+
+def checked_since(run, gate):
+    if gate.job is not None and gate.job["status"] in ("in_progress", "completed"):
+        return timestamp(gate.job["started_at"])
     return timestamp(run["run_started_at"])
 
 
@@ -79,21 +104,20 @@ def select_rerun(pr, files, runs, jobs, published, now):
     run = latest_run(pr, runs)
     if run is None:
         return Selection(None, "no check.yml PR run for the current head yet")
-    latest = [job for job in jobs if job["run_id"] == run["id"]
-              and job["run_attempt"] == run["run_attempt"] and job["name"] == ADMISSION_JOB]
-    if len(latest) > 1:
-        raise ValueError(f"run {run['id']} has multiple latest admission jobs")
-    admission = latest[0] if latest else None
-    if checked_since(run, admission) >= published:
-        return Selection(None, f"run {run['id']} checks after publication; admission reads the new release itself")
+    gate = wire_gate(run, jobs)
+    if checked_since(run, gate) >= published:
+        return Selection(None, f"run {run['id']} checks after publication; it reads the new release itself")
     if now - timestamp(run["created_at"]) > RERUN_WINDOW:
         return Selection(None, f"run {run['id']} is older than GitHub's 30-day rerun limit; "
                                "push to the PR to start a fresh run", failed=True)
     if run["status"] != "completed":
         return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
-    if admission is None or admission["status"] != "completed" or admission["conclusion"] == "skipped":
-        return Selection(None, f"run {run['id']} has no completed admission check yet")
-    return Selection(admission["id"], f"{ADMISSION_JOB} in run {run['id']}")
+    job = gate.job
+    if job is None or job["status"] != "completed" or job["conclusion"] == "skipped":
+        return Selection(None, f"run {run['id']} has no completed wire check yet")
+    if gate.updated:
+        return Selection(job["id"], f"{ADMISSION_JOB} in run {run['id']}")
+    return Selection(job["id"], f"{job['name']} in legacy run {run['id']} and its dependents")
 
 
 def check_runs(api, repo, pr):
