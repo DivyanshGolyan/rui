@@ -16,6 +16,7 @@ const host_settings = @import("host_settings.zig");
 const output_retention = @import("output_retention.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
+const ModelLists = @import("ModelLists.zig");
 const server_host = @import("server_host.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_reply = @import("server_reply.zig");
@@ -60,11 +61,11 @@ pub const DropMode = enum { none, before_admission, during_admission, after_comm
 
 /// The Host's answers. `init` reads the Host once, for the facts a reply shows. The Store, Lifecycle and Probes are
 /// shared. `execution` answers the Execution facts of a report, the capacity of Host info and the MCP lists a request
-/// asks for; `host` is read only for the model lists and the rest of the Host's settings.
+/// asks for; `lists` holds the model lists the execution thread publishes.
 pub const Replies = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    host: *Host,
+    lists: *ModelLists,
     lease: *const platform.StoreLease,
     store: *store_module.Store,
     lifecycle: *Lifecycle,
@@ -91,7 +92,7 @@ pub const Replies = struct {
         return .{
             .io = host.io,
             .allocator = host.allocator,
-            .host = host,
+            .lists = &host.model_lists,
             .lease = host.lease,
             .store = host.store,
             .lifecycle = host.lifecycle,
@@ -545,7 +546,7 @@ pub const Replies = struct {
     }
 
     noinline fn replyModelList(self: *Replies, fd: *Reply) !void {
-        self.host.model_lists.ask();
+        self.lists.ask();
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const facts = self.store.readModelCatalog(arena.allocator()) catch |err| {
@@ -777,7 +778,7 @@ test "settings readiness discovers the canonical Store only through host info" {
 
 fn renderModelList(out: protocol.JsonOut, self: *Replies, facts: []const @import("model_catalog.zig").Entry) error{BufferTooLarge}!void {
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
-    self.host.model_lists.render(out.writer, facts) catch return error.BufferTooLarge;
+    self.lists.render(out.writer, facts) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
 }
 
