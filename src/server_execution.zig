@@ -336,7 +336,7 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
         }
         represented += 1;
         if (mcp) |calls| for (calls.entries) |entry| if (entry) |active| {
-            if (std.meta.eql(active.token, token)) return error.DuplicateExecutionToken;
+            if (std.meta.eql(active.attempt.token, token)) return error.DuplicateExecutionToken;
         };
         for (slots[i + 1 ..]) |*later| {
             const other = slotToken(later) orelse continue;
@@ -344,10 +344,10 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
         }
     }
     if (mcp) |calls| for (calls.entries, 0..) |entry, i| if (entry) |active| {
-        try custody.checkAttached(active.token, .{ .action = active.binding });
+        try custody.checkAttached(active.attempt.token, .{ .action = active.attempt.binding });
         represented += 1;
         for (calls.entries[i + 1 ..]) |later| if (later) |other| {
-            if (std.meta.eql(active.token, other.token)) return error.DuplicateExecutionToken;
+            if (std.meta.eql(active.attempt.token, other.attempt.token)) return error.DuplicateExecutionToken;
         };
     };
     if (represented != custody.occupied()) return error.OrphanedExecutionCustody;
@@ -1455,7 +1455,7 @@ noinline fn runNextCoreAction(host: *Host, attempts: action_attempt.Parts, mcp: 
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
-        .mcp => |call| mcp.admit(host, call),
+        .mcp => |call| mcp.admit(host, attempts, call),
         .read_image => |call| if (images) |calls| calls.admit(host, attempts, call) else .retry_later,
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
@@ -5884,7 +5884,7 @@ test "aggregate custody reconciles MCP and slots and rejects tokens shared acros
     const action_token = custody.reserve().?;
     var action_permit: store_module.ActionDispatchPermit = .{ .binding = .{ .turn_id = 3, .parent_operation_id = 4, .action_id = 5 } };
     const action_binding = try custody.attach(action_token, &action_permit);
-    var active: server_mcp.Active = .{ .token = action_token, .binding = action_binding, .arena = .init(std.testing.allocator) };
+    var active: server_mcp.Active = .{ .attempt = .{ .parts = undefined, .token = action_token, .labels = undefined, .binding = action_binding }, .arena = .init(std.testing.allocator) };
     defer active.arena.deinit();
     var mcp: server_mcp.Calls = .{};
     mcp.entries[0] = &active;
@@ -5893,15 +5893,15 @@ test "aggregate custody reconciles MCP and slots and rejects tokens shared acros
     try std.testing.expectError(error.DispatchPermitConsumed, custody.consumeLaunchAuthority(action_token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(std.testing.io, .awake)));
     try std.testing.expect(custody.claimTerminalDelivery(action_token));
     try std.testing.expect(!custody.claimTerminalDelivery(action_token));
-    active.token = model_token;
+    active.attempt.token = model_token;
     try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&slots, &custody, &mcp));
-    active.token = action_token;
+    active.attempt.token = action_token;
     mcp.entries[1] = &active;
     try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&slots, &custody, &mcp));
     mcp.entries[1] = null;
-    active.binding.action_id += 1;
+    active.attempt.binding.action_id += 1;
     try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody, &mcp));
-    active.binding = action_binding;
+    active.attempt.binding = action_binding;
     mcp.entries[0] = null;
     try std.testing.expectError(error.OrphanedExecutionCustody, checkSlotCustodyAgreement(&slots, &custody, &mcp));
     mcp.entries[0] = &active;
