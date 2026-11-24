@@ -114,7 +114,7 @@ jobs:
           path: ${{ runner.temp }}/actionlint
           key: ${{ steps.actionlint-cache.outputs.cache-primary-key }}
   compiled:
-    # Match Selected checks/Promote's split producers, not only ReleaseSafe.
+    # Match Selected checks/Promote's producers (Linux split, macOS whole), not only ReleaseSafe.
     # ci-build compiles their gates without executing or caching acceptance.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     strategy:
@@ -122,6 +122,10 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, macos-15]
         part: [compiled, compiled-unit]
+        # macOS builds every native gate in one producer part (check.yml macos_build).
+        exclude:
+          - runner: macos-15
+            part: compiled-unit
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
@@ -136,14 +140,16 @@ jobs:
         with:
           targets: ${{ matrix.part == 'compiled' && env.TARGETS || '[]' }}
           check-part: ${{ matrix.part }}
-      - name: Compile the same gates as the split producers
+      - name: Compile the same gates as the producers
         id: compile
-        # Cache timing: green 1117 s, run 43720387127; minimum margin 120 s.
+        # PROVISIONAL: 1877 s is the sum of the separate rest (1117 s) and unit (760 s)
+        # green runs, run 43720387127, until a combined run is recorded.
+        # Cache timing: green 1877 s, run 43720387127; minimum margin 120 s.
         # Equivalent consumer build; this new warm matrix has no main-run sample yet.
         # Limit = job budget - cold setup allowance - save reserve.
         timeout-minutes: 92
         env:
-          PART: ${{ matrix.part == 'compiled-unit' && 'unit' || 'rest' }}
+          PART: ${{ matrix.part == 'compiled-unit' && 'unit' || matrix.runner == 'macos-15' && 'all' || 'rest' }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
       - name: Save reusable caches even after failure
         if: ${{ always() }}

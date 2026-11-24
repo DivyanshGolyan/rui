@@ -106,12 +106,12 @@ class CauseTest(unittest.TestCase):
     def test_aggregates_and_unfinished_jobs_are_not_causes_while_the_run_goes_on(self):
         jobs = [job(name, step("Require every selected Linux part", "failure")) for name in AGGREGATES]
         jobs += [job("plan", conclusion="success"), job("macos_build", conclusion="skipped"),
-                 job("macos suites (check)", conclusion=None, status="queued"),
-                 job("macos_build_unit", step("Run ./.github/actions/setup", "in_progress"), conclusion=None,
+                 job("macos suites (native)", conclusion=None, status="queued"),
+                 job("linux_build_unit", step("Run ./.github/actions/setup", "in_progress"), conclusion=None,
                      status="in_progress")]
         self.assertEqual(causes(jobs, lambda job: [], lambda job: None, finished=False), [])
         self.assertEqual([name for name, *_ in causes(jobs, lambda job: [], lambda job: None)],
-                         ["macos suites (check)", "macos_build_unit"])
+                         ["macos suites (native)", "linux_build_unit"])
 
     def test_promotion_aggregates_under_their_caller_job_are_not_causes(self):
         # The shared tier nests under Promote's qualify job: "qualify / selected / linux".
