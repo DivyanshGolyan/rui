@@ -312,9 +312,16 @@ pub const Requests = struct {
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try resolveClientPaths(self.io, store_path);
+        return self.activityPageAt(&paths, session, cursor);
+    }
+
+    pub fn activityPageAt(self: Requests, paths: *const platform.Paths, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        try cursor.validate();
         var body: protocol.RequestBuffer = .{};
         try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
-        const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
+        const fd = try openRead(self, paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
             buffer: protocol.FixedJsonBuffer(activity_reply.max_page_bytes) = .{},
