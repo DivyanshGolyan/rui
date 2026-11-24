@@ -9,6 +9,7 @@ import pathlib
 import re
 import resource
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -63,7 +64,13 @@ def build_candidate_release(candidate, root):
     return prefix / "bin/rui-upgrade-release-fixture"
 
 
-def install_candidate_release(candidate, publisher, root):
+RESTART_ALL_BLOCK = """if ! "$prefix/bin/rui" host restart --all; then
+    printf '%s\\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
+fi
+"""
+
+
+def install_candidate_release(candidate, publisher, root, *, restart=True):
     sys.path.insert(0, str(candidate / "tests/ci"))
     import release
 
@@ -78,11 +85,17 @@ def install_candidate_release(candidate, publisher, root):
     with archive.open("rb") as packed:
         digest = hashlib.file_digest(packed, "sha256").hexdigest()
     script = root / "install.sh"
-    script.write_text(release.installer(
+    rendered = release.installer(
         (candidate / "release/install.sh").read_text(), version,
         {target: digest for target in release.PLATFORMS},
         (candidate / "release/publish.sh").read_text(),
-        release.download_policy((candidate / "src/download_policy.zig").read_text())))
+        release.download_policy((candidate / "src/download_policy.zig").read_text()))
+    if not restart:
+        # The installer's only restart is its final `host restart --all`; drop that block so the
+        # candidate is laid out exactly as the installer lays it out, with no Host restarted.
+        assert rendered.count(RESTART_ALL_BLOCK) == 1, "installer restart block changed"
+        rendered = rendered.replace(RESTART_ALL_BLOCK, "")
+    script.write_text(rendered)
     tools = root / "tools"
     tools.mkdir()
     curl = tools / "curl"
@@ -110,6 +123,30 @@ os.execv(os.environ["RUI_UPGRADE_REAL_CURL"], ["curl", *args])
     return pathlib.Path(os.environ["HOME"], ".local/bin/rui"), output
 
 
+def plain_start(binary, store, seed, root):
+    """Start the candidate as a user does, in a process group the old Host kills when it stops.
+
+    The old Host kills its Bash tool groups when it stops, which takes this `rui` with them. The
+    coordinator must keep running in its own session, so the Store still gets a ready Host.
+    """
+    log = root / "plain-start.log"
+    with log.open("w") as output:
+        candidate = subprocess.Popen([binary, "host", "start", "--store", str(store)],
+                                     start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=output, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.monotonic() + 20
+        while seed.poll() is None:
+            assert candidate.poll() is None, ("host start exited before the previous Host stopped", log.read_text())
+            assert time.monotonic() < deadline, "previous-release Host did not stop"
+            time.sleep(0.005)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(candidate.pid, signal.SIGKILL)
+        candidate.wait(timeout=5)
+    print(f"Killed the plain host start process group after the previous Host stopped; log {log}", flush=True)
+
+
 def assert_running_upgrade(dialect, binary, store, seed, ready, previous, version, output):
     state, shown = dialect.host_status(binary, store, 5)
     assert state == "ready", shown
@@ -130,7 +167,8 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     assert executable == binary.resolve(), (executable, binary.resolve())
     assert release_version(binary) == version, "installer did not select the candidate version"
     assert release_version(executable) == version, "serving Host is not the candidate version"
-    assert f"{store}: restarted on {version}" in output, output
+    if output is not None:
+        assert f"{store}: restarted on {version}" in output, output
     wait_for(lambda: seed.poll() is not None, "previous-release Host retirement", timeout=10)
     print(f"Running Host upgraded to {version}, instance {previous['instance']} → {current['instance']}", flush=True)
 
@@ -257,6 +295,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--running-host", action="store_true",
                         help="previous is an unpacked release; leave its Host running during release/install.sh")
+    parser.add_argument("--plain-start", action="store_true",
+                        help="with --running-host: install without the installer's restart, then start the candidate with rui host start in a process group that is killed when the previous Host stops")
     parser.add_argument("--candidate-release", type=pathlib.Path,
                         help="with --running-host: install this release executable instead of building the upgrade fixture")
     parser.add_argument("previous", type=pathlib.Path)
@@ -264,6 +304,8 @@ def main():
     args = parser.parse_args()
     if args.candidate_release and not args.running_host:
         parser.error("--candidate-release requires --running-host")
+    if args.plain_start and not args.running_host:
+        parser.error("--plain-start requires --running-host")
     previous, candidate = args.previous.resolve(), args.candidate.resolve()
     if not args.running_host:
         previous_format = supported_format(previous)
@@ -338,7 +380,8 @@ def main():
                 assert state == "ready" and seed.poll() is None, shown
                 previous_status = json.loads(shown)
                 print(f"Leaving previous release {release_version(previous_artifact)} running: {shown}", flush=True)
-                binary, installer_output = install_candidate_release(candidate, publisher, root)
+                binary, installer_output = install_candidate_release(
+                    candidate, publisher, root, restart=not args.plain_start)
             else:
                 subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
                 assert seed.wait(timeout=10) != 0
@@ -356,7 +399,21 @@ def main():
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
             dialect = candidate_cli = Dialect(binary)
-            if args.running_host:
+            if args.running_host and args.plain_start:
+                plain_start(binary, store, seed, root)
+                # The candidate's Host appears only after the coordinator's restart, so bound the wait.
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
+                                               release_version(publisher), None)
+                        break
+                    except (AssertionError, subprocess.SubprocessError, OSError):
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
+                commands = ()
+            elif args.running_host:
                 assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
                                        release_version(publisher), installer_output)
                 commands = ()
@@ -442,7 +499,9 @@ def main():
         raise
     else:
         shutil.rmtree(directory)
-        print(("Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
+        print(("Running-release plain start passed: candidate host start survived its old Host's process group; candidate Host version/new instance; "
+               if args.running_host and args.plain_start else
+               "Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
                if args.running_host else
                "Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; ") +
               "exact saved work/configuration and no replay", flush=True)

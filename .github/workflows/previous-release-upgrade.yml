@@ -161,6 +161,7 @@ jobs:
             'startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}' \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
             'running-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host ${RUI_UNDER_TEST:+--candidate-release "$RUI_UNDER_TEST"} "$RUNNER_TEMP/previous-running-release" .' \
+            'plain-start-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host --plain-start ${RUI_UNDER_TEST:+--candidate-release "$RUI_UNDER_TEST"} "$RUNNER_TEMP/previous-running-release" .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
