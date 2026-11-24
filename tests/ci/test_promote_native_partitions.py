@@ -1,9 +1,11 @@
 import json
+import os
+from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
-from unittest.mock import patch
 
-import run_selected
 from select_tests import execution_batches
 
 
@@ -13,22 +15,36 @@ class NativePartitionTest(unittest.TestCase):
         batches = [["check-full", "-Dcheck-part=execution"], ["admission-debug-integration"],
                    ["test-full"], ["check-full", "-Dcheck-part=callers"]]
         self.assertEqual(execution_batches(targets, "both"), batches)
-        for failed in (None, *range(len(batches))):
-            with self.subTest(failed=failed):
-                calls = []
-                def execute(batch, artifacts):
-                    calls.append(batch)
-                    return (1, "failed") if len(calls) - 1 == failed else (0, "")
-                args = ["run_selected.py", json.dumps(targets), "--check-part", "both"]
-                with patch.object(run_selected, "execute", execute), patch.object(run_selected, "summarize"), \
-                     patch.object(run_selected, "record_failure"), patch.object(sys, "argv", args):
-                    if failed is None:
-                        run_selected.main()
-                    else:
-                        with self.assertRaises(SystemExit) as exit_status:
-                            run_selected.main()
-                        self.assertEqual(exit_status.exception.code, 1)
-                self.assertEqual(calls, batches if failed is None else batches[:failed + 1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zig = root / "zig"
+            zig.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path(os.environ["BATCH_LOG"])
+rows = json.loads(log.read_text()) if log.exists() else []
+rows.append(sys.argv[1:])
+log.write_text(json.dumps(rows))
+sys.exit(1 if str(len(rows) - 1) == os.environ["FAIL_BATCH"] else 0)
+''')
+            zig.chmod(0o755)
+            for failed in (None, *range(len(batches))):
+                with self.subTest(failed=failed):
+                    log = root / "batches.json"
+                    log.unlink(missing_ok=True)
+                    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                               BATCH_LOG=str(log), FAIL_BATCH=str(failed))
+                    env.pop("GITHUB_STEP_SUMMARY", None)
+                    env.pop("RUI_STEP_FAILURES", None)
+                    result = subprocess.run([sys.executable, "-B", "tests/ci/run_selected.py",
+                                             json.dumps(targets), "--check-part", "both",
+                                             "--ci-artifacts", "compiled"],
+                                            env=env, capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0 if failed is None else 1, result.stdout + result.stderr)
+                    actual = json.loads(log.read_text())
+                    expected = batches if failed is None else batches[:failed + 1]
+                    self.assertEqual(actual, [["build", *batch, "-Dci-artifacts=compiled", "--summary", "all",
+                                               "--test-timeout", "5m"] for batch in expected])
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "both")
 
