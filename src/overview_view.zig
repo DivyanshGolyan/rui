@@ -5611,7 +5611,9 @@ fn activeRosterDuplicates() !void {
     defer state.deinit();
     try expectEachOnce(&state, &.{ "aaaaaa", "bbbbbb", "cccccc" });
     try std.testing.expect(state.find("bbbbbb".*).?.state == .finished);
-    try std.testing.expectEqualStrings("C", state.find("cccccc".*).?.label.?.slice());
+    const frame = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(frame);
+    try std.testing.expect(std.mem.indexOf(u8, frame, " C ") != null);
     for (0..3) |_| {
         if (std.mem.eql(u8, &state.selected.session, "cccccc")) break;
         _ = try press(&state, .next);

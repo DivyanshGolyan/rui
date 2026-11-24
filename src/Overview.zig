@@ -4591,7 +4591,7 @@ test "overview Archived window effect runs one job and its reply becomes the win
     try std.testing.expectEqual(@as(u64, 3), Seen.now.line.position);
 }
 
-test "overview archive effects preserve server filter, pending visibility, and restore intent" {
+test "SUI-25 overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, archive: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -4648,8 +4648,8 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    // Roster deltas ask for changed archived Sessions too (the window takes them); the window itself is a read.
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    // Active deltas carry archived changes; the separate window reads archived Sessions.
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .stopped, .input = .unarchive } });
     try std.testing.expect(try rig.settle() == null);
@@ -4664,7 +4664,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(protocol.SessionArchiveFilter.all, Seen.now.archive_filter);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
