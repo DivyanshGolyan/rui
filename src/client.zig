@@ -407,10 +407,7 @@ pub const Requests = struct {
             .report => {},
             .command => |reply| return self.failRead(try self.captureReadFailure(reply)),
         }
-        var page = try protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items);
-        errdefer page.deinit(gpa);
-        for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
-        return page;
+        return protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items, prefix);
     }
 
     /// The owner's whole certified part list, streamed into `sink` (a report scratch file);

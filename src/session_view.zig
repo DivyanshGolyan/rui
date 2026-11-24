@@ -60,11 +60,17 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
     return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}", .{ @as(u8, @intCast(local.hour)), @as(u8, @intCast(local.min)) }) catch unreachable;
 }
 
-pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
+pub fn userMarker(sink: anytype, colour: bool) !void {
+    try sink.feed(Text.decoration_on);
     try sink.feed(Style.quiet.code(colour));
     try sink.feed("›");
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
+    try sink.feed(Text.decoration_off);
+}
+
+pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
+    try userMarker(sink, colour);
     var buffer: [5]u8 = undefined;
     const time = clock(admitted_at, &buffer) orelse return;
     try sink.feed(Mark.sidenote);

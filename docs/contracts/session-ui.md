@@ -731,8 +731,9 @@ Pages and Message selection retain that same ID, without abbreviation metadata.
 No colour carries meaning: the glyphs do.
 Activity pages preserve both received and sent peer rows while scrolling in either direction.
 
-In a Session's feed, an ordinary left press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
-Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
+In a Session's feed, an ordinary left press followed by a move to another cell starts a drag. Selected cells draw reversed. The user Message marker `›` and margin times keep their original styling.
+On release, Rui clears the highlight and copies the shown text once through OSC 52. Selection resolves keyed rows and offsets, so wrapped rows join. The copy excludes display indents, the user Message marker and its following space, margin times, and link addresses.
+Above `TerminalText.clipboard_limit`, Rui skips the copy and shows `Too large for the clipboard · /copy file`. Otherwise, a successful copy shows `Copied N lines`.
 A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
 No fill is read in under a press or drag, at either loading edge; it waits for the release. Live scans continue.
 A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.

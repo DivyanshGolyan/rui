@@ -392,7 +392,8 @@ fn pendingDocument(self: *Self, ctx: vxfw.DrawContext) std.mem.Allocator.Error!*
     const document = try ctx.arena.create(PendingDocument);
     document.* = .{ .width_method = self.method, .sidenotes = true, .quotes = true };
     const sink: PendingSink = .{ .document = document };
-    document.append(PendingText.user_message_on ++ "\x1b[90m›\x1b[39m ") catch unreachable;
+    document.append(PendingText.user_message_on) catch unreachable;
+    View.userMarker(sink, true) catch unreachable;
     var body: View.UserBody(PendingSink) = undefined;
     body.init(sink, pending.text.len, false) catch unreachable;
     body.feed(pending.text) catch unreachable;
@@ -1110,6 +1111,65 @@ fn clipboardCommands(ctx: *const vxfw.EventContext) usize {
         count += 1;
     };
     return count;
+}
+
+test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard" {
+    const gpa = std.testing.allocator;
+    for ([_]u16{ 39, 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer gpa.destroy(window);
+        var document: PendingDocument = .{};
+        try document.append(PendingText.user_message_on);
+        try View.userPrefix(PendingSink{ .document = &document }, colour, 1);
+        try document.append("  › 雪e\u{301}\n" ++ PendingText.user_message_off);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        document.clear();
+        try document.append(View.Mark.body ++ "next\n" ++ View.Mark.reset);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&document) }});
+        var anchor: Feed = .{};
+        var fixture: RetryClicks = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler(), .colour = colour, .colours = .{ .user_band = .{ .index = 10 }, .no_depth = !colour } };
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const initial = try testFrame(&view, alloc, width, 10);
+        var message_row: ?u16 = null;
+        var next_row: ?u16 = null;
+        for (0..initial.size.height) |row| {
+            if (std.mem.eql(u8, testCell(initial, row, 2), "›")) message_row = @intCast(row);
+            if (std.mem.eql(u8, testCell(initial, row, 0), "n")) next_row = @intCast(row);
+        }
+        const row = message_row orelse return error.TestUnexpectedResult;
+        const next = next_row orelse return error.TestUnexpectedResult;
+        const note = width - 7;
+        if (width >= 40) try std.testing.expectEqualStrings(":", testCell(initial, row, note + 2));
+        for ([_]bool{ false, true }) |backwards| {
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = alloc, .cmds = .empty };
+            const marker: [2]u16 = .{ 3, row + 1 };
+            const answer: [2]u16 = .{ 5, next + 1 };
+            const start = if (backwards) answer else marker;
+            const end = if (backwards) marker else answer;
+            var report: [32]u8 = undefined;
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<0;{d};{d}M", .{ start[0], start[1] }));
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<32;{d};{d}M", .{ end[0], end[1] }));
+            const selected = try testFrame(&view, alloc, width, 10);
+            for ([_]u16{ 2, 3 }) |col| try std.testing.expectEqualDeep(initial.readCell(col, row), selected.readCell(col, row));
+            for ([_]u16{ 4, 6, 20 }) |col| try std.testing.expectEqual(!initial.readCell(col, row).style.reverse, selected.readCell(col, row).style.reverse);
+            if (width >= 40) for (0..5) |delta| {
+                const col = note + @as(u16, @intCast(delta));
+                try std.testing.expectEqualDeep(initial.readCell(col, row), selected.readCell(col, row));
+            };
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<0;{d};{d}m", .{ end[0], end[1] }));
+            try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
+            for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
+                try std.testing.expectEqualStrings("  › 雪e\u{301}\nnext", command.copy_to_clipboard);
+            };
+            const released = try testFrame(&view, alloc, width, 10);
+            try std.testing.expectEqualDeep(initial.buffer, released.buffer);
+        }
+    };
 }
 
 test "FeedView quote gesture latches decoded Alt and never copies or submits" {
