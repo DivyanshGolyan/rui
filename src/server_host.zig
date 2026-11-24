@@ -379,19 +379,14 @@ pub const Host = struct {
     settings_digest: ?settings_handoff.Digest = null,
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
-    allowance_lost: std.atomic.Value(bool) = .init(false),
+    allowance_diagnostic: AllowanceDiagnostic = .{},
     test_observation: ?*TestObservation = null,
     /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
     diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
 
     pub fn writeAllowance(self: *Host, observation: provider.AllowanceObservation) void {
-        var buffer: [1024]u8 = undefined;
-        const line = formatAllowance(observation, self.allowance_lost.load(.acquire), &buffer) catch {
-            self.allowance_lost.store(true, .release);
-            return;
-        };
-        if (!stderr.write(line)) self.allowance_lost.store(true, .release);
+        self.allowance_diagnostic.write(observation, StderrSink{});
     }
 
     pub fn launchAllowed(self: *const Host) bool {
@@ -687,6 +682,26 @@ pub fn nowNs(host: *Host) u64 {
     return @intCast(std.Io.Clock.Timestamp.now(host.io, .awake).raw.nanoseconds);
 }
 
+const StderrSink = struct {
+    fn write(_: StderrSink, bytes: []const u8) bool {
+        return stderr.write(bytes);
+    }
+};
+
+/// Owns loss across optional allowance diagnostic deliveries.
+pub const AllowanceDiagnostic = struct {
+    lost: std.atomic.Value(bool) = .init(false),
+
+    pub fn write(self: *AllowanceDiagnostic, observation: provider.AllowanceObservation, sink: anytype) void {
+        var buffer: [1024]u8 = undefined;
+        const line = formatAllowance(observation, self.lost.load(.acquire), &buffer) catch {
+            self.lost.store(true, .release);
+            return;
+        };
+        if (!sink.write(line)) self.lost.store(true, .release);
+    }
+};
+
 fn allowanceField(comptime T: type, field: provider.AllowanceField(T), buffer: []u8) []const u8 {
     return switch (field) {
         .missing => "missing",
@@ -703,37 +718,56 @@ fn formatAllowance(observation: provider.AllowanceObservation, lost: bool, buffe
     return std.fmt.bufPrint(buffer, "rui: allowance source_account=unconfirmed provider={s} turn={d} operation={d} attempt={d} status={d} observed_at={d} delivery=completion prior_loss={s} primary_used={s} primary_minutes={s} primary_reset_at={s} secondary_used={s} secondary_minutes={s} secondary_reset_at={s}\n", .{ @tagName(observation.provider), observation.binding.turn_id, observation.binding.operation_id, observation.binding.attempt_ordinal, observation.status, observation.observed_at, if (lost) "true" else "false", allowanceField(f64, observation.primary.used, &values[0]), allowanceField(u64, observation.primary.minutes, &values[1]), allowanceField(u64, observation.primary.reset_at, &values[2]), allowanceField(f64, observation.secondary.used, &values[3]), allowanceField(u64, observation.secondary.minutes, &values[4]), allowanceField(u64, observation.secondary.reset_at, &values[5]) });
 }
 
-test "CM-52 allowance diagnostic contains fixed typed fields only" {
-    var buffer: [1024]u8 = undefined;
-    const line = try formatAllowance(.{
+test "CM-52 allowance diagnostic delivers bounded typed records and reports loss" {
+    const Sink = struct {
+        fd: c_int,
+        fn write(self: @This(), bytes: []const u8) bool {
+            const count = std.c.write(self.fd, bytes.ptr, bytes.len);
+            return count >= 0 and @as(usize, @intCast(count)) == bytes.len;
+        }
+    };
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    const flags = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(flags >= 0);
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, flags | nonblock));
+    const output: Sink = .{ .fd = fds[1] };
+    var diagnostic: AllowanceDiagnostic = .{};
+    const sparse: provider.AllowanceObservation = .{
         .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
         .provider = .codex,
         .status = 200,
         .observed_at = 123,
-        .primary = .{ .used = .{ .value = 9.5 } },
-    }, false, &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, line, "source_account=unconfirmed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "primary_used=9.5e0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "secondary_used=missing") != null);
-    try std.testing.expect(line.len < buffer.len);
-    const extreme = try formatAllowance(.{
+        .primary = .{ .used = .{ .value = 9.5 }, .reset_at = .invalid },
+    };
+    var buffer: [1024]u8 = undefined;
+    diagnostic.write(sparse, output);
+    var count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=false primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
+    const extreme: provider.AllowanceObservation = .{
         .binding = .{ .turn_id = std.math.maxInt(u64), .operation_id = std.math.maxInt(u64), .attempt_ordinal = std.math.maxInt(u64) },
         .provider = .chatgpt,
         .status = 599,
         .observed_at = std.math.maxInt(i64),
         .primary = .{ .used = .{ .value = std.math.floatMax(f64) }, .minutes = .{ .value = std.math.maxInt(u64) } },
-    }, true, &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, extreme, "primary_used=1.7976931348623157e308") != null);
-    try std.testing.expect(std.mem.indexOf(u8, extreme, "primary_minutes=18446744073709551615") != null);
-    try std.testing.expect(std.mem.indexOf(u8, extreme, "prior_loss=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, extreme, "format_unavailable") == null);
-    var tiny: [8]u8 = undefined;
-    try std.testing.expectError(error.NoSpaceLeft, formatAllowance(.{
-        .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 3 },
-        .provider = .codex,
-        .status = 200,
-        .observed_at = 123,
-    }, false, &tiny));
+    };
+    diagnostic.write(extreme, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=chatgpt turn=18446744073709551615 operation=18446744073709551615 attempt=18446744073709551615 status=599 observed_at=9223372036854775807 delivery=completion prior_loss=false primary_used=1.7976931348623157e308 primary_minutes=18446744073709551615 primary_reset_at=missing secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
+
+    // A pipe's read end cannot be written: this is an actual failed write, with no output.
+    diagnostic.write(sparse, Sink{ .fd = fds[0] });
+    var pollfds = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pollfds, 0));
+    diagnostic.write(sparse, output);
+    count = std.c.read(fds[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 }
 
 pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8) ?TestObservation.Publication {
