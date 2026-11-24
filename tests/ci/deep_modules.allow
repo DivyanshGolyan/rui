@@ -382,7 +382,6 @@ field-leak provider.Reactor.wake
 field-leak read_transcript.StoreParts.next_index
 field-leak request_encoding.TestSink.output
 field-leak result_layout.Layout.run_open
-field-leak server.Intake.Exchange.host
 field-leak server.Intake.Exchange.ingress
 field-leak server.Intake.Exchange.request
 field-leak server.Intake.Exchange.retained_scratch

@@ -126,6 +126,7 @@ test {
     _ = @import("activity_reply.zig");
     _ = @import("server.zig");
     _ = @import("server_reply.zig");
+    _ = @import("server_replies.zig");
     _ = @import("line_intake.zig");
     _ = @import("line.zig");
     _ = @import("server_execution.zig");

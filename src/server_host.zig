@@ -1103,7 +1103,6 @@ pub const Host = struct {
     retention: *output_retention.Queue = undefined,
     failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
-    request_counter: std.atomic.Value(u64) = .init(0),
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),

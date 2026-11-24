@@ -28,16 +28,38 @@ pub const Answer = union(enum) {
     /// Renders one JSON body. `reserved` sizes the body up front and answers `.none` when that
     /// allocation fails; `growing` lets the body grow, so its allocation failures propagate.
     pub fn json(allocator: std.mem.Allocator, status: u16, max_bytes: usize, sizing: Sizing, comptime render: anytype, args: anytype) !Answer {
+        // A writer reports its allocation failure only as a failed write, so the probe records it and keeps
+        // it apart from a body that is too large.
+        var probe: AllocationProbe = .{ .child = allocator };
         var body: std.Io.Writer.Allocating = switch (sizing) {
-            .reserved => std.Io.Writer.Allocating.initCapacity(allocator, max_bytes) catch return .none,
-            .growing => .init(allocator),
+            .reserved => std.Io.Writer.Allocating.initCapacity(probe.allocator(), max_bytes) catch return .none,
+            .growing => .init(probe.allocator()),
         };
         defer body.deinit();
-        try @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args);
+        @call(.auto, render, .{protocol.JsonOut{ .writer = &body.writer }} ++ args) catch |err| return if (probe.failed) error.OutOfMemory else err;
         if (body.written().len > max_bytes) return error.BufferTooLarge;
         const bytes = body.toOwnedSlice() catch return .none;
         return .{ .rendered = .{ .status = status, .bytes = bytes } };
     }
+
+    const AllocationProbe = struct {
+        child: std.mem.Allocator,
+        failed: bool = false,
+
+        fn allocator(self: *AllocationProbe) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *AllocationProbe = @ptrCast(@alignCast(ptr));
+            const bytes = self.child.rawAlloc(len, alignment, ret);
+            if (bytes == null) self.failed = true;
+            return bytes;
+        }
+        fn free(ptr: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *AllocationProbe = @ptrCast(@alignCast(ptr));
+            self.child.rawFree(bytes, alignment, ret);
+        }
+    };
 };
 
 /// Hooks a started reply carries: a test gate that holds delivery, and the control timing to trace on completion.
@@ -233,6 +255,8 @@ pub const Reply = struct {
     }
 
     fn sendAvailable(self: *Reply, fd: std.posix.fd_t) !bool {
+        // A reply with no installed body has nothing to send, so it has no peer wait to time out.
+        if (self.body == .none) return true;
         if (std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds >= self.deadline())
             return if (self.absolute_deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
         if (self.header_sent < self.header_length) {
@@ -290,6 +314,63 @@ pub const Reply = struct {
 /// The allocator a reply's answer bodies are rendered with.
 pub fn allocatorOf(reply: *const Reply) std.mem.Allocator {
     return reply.allocator;
+}
+
+/// Test client: sends one reply on the socket, waiting within the reply's own budget.
+pub fn sendReply(io: std.Io, fd: std.posix.fd_t, reply: *Reply) !void {
+    try makeNonblocking(fd);
+    while (true) {
+        try wire_request.pollExchange(io, fd, std.posix.POLL.OUT, null);
+        if (try reply.advance(fd)) return;
+    }
+}
+
+/// Test client: sends raw bytes on the socket, waiting at most a minute for each window.
+pub fn sendBytes(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
+    try makeNonblocking(fd);
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        try wire_request.pollExchange(io, fd, std.posix.POLL.OUT, null);
+        const count = std.c.write(fd, bytes[sent..].ptr, bytes.len - sent);
+        if (count < 0) switch (std.posix.errno(count)) {
+            .AGAIN, .INTR => continue,
+            else => return error.WriteFailed,
+        };
+        if (count == 0) return error.ConnectionClosed;
+        sent += @intCast(count);
+    }
+}
+
+/// Test client: sends the reply and returns every byte it wrote, headers included. The caller frees it.
+pub fn sentWire(io: std.Io, allocator: std.mem.Allocator, reply: *Reply) ![]u8 {
+    var sockets: [2]c_int = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer _ = std.c.close(sockets[1]);
+    defer _ = std.c.close(sockets[0]);
+    try sendReply(io, sockets[0], reply);
+    _ = std.c.shutdown(sockets[0], std.posix.SHUT.WR);
+    var received: std.ArrayList(u8) = .empty;
+    errdefer received.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const count = std.c.read(sockets[1], &chunk, chunk.len);
+        if (count < 0) return error.ReadFailed;
+        if (count == 0) break;
+        try received.appendSlice(allocator, chunk[0..@intCast(count)]);
+    }
+    return received.toOwnedSlice(allocator);
+}
+
+/// The body that follows the headers of wire bytes from `sentWire`.
+pub fn bodyOf(wire: []const u8) []const u8 {
+    const headers_end = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse return wire[wire.len..];
+    return wire[headers_end + 4 ..];
+}
+
+fn makeNonblocking(fd: std.posix.fd_t) !void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.WriteFailed;
 }
 
 /// Answers a refusal with its static JSON body. A reply whose allocation fails sends nothing.
@@ -666,4 +747,38 @@ test "delayed control replies retain command identity after request storage reus
         try std.testing.expect(std.mem.indexOf(u8, frame, kind) != null);
         try std.testing.expectEqual(@as(u64, 2), observation.shared.state.load(.acquire));
     }
+}
+
+test "SH-122 answer shaping sends nothing when reserved bytes cannot be allocated and refusals carry their status kind and code" {
+    const Refusal = struct { status: u16, kind: protocol.ErrorType, code: []const u8 };
+    const refusals = [_]Refusal{
+        .{ .status = 409, .kind = .invocation_error, .code = "wrong_store_identity" },
+        .{ .status = 400, .kind = .invocation_error, .code = "host_instance_required" },
+        .{ .status = 500, .kind = .observation_error, .code = "OutOfMemory" },
+        .{ .status = 503, .kind = .host_unavailable, .code = "dispatch_fenced" },
+    };
+    for (refusals) |row| {
+        var reply = Reply.init(std.testing.io, std.testing.allocator, null);
+        defer reply.deinit();
+        refuse(&reply, row.status, row.kind, row.code);
+        const wire = try sentWire(std.testing.io, std.testing.allocator, &reply);
+        defer std.testing.allocator.free(wire);
+        var status_line: [32]u8 = undefined;
+        try std.testing.expect(std.mem.startsWith(u8, wire, try std.fmt.bufPrint(&status_line, "HTTP/1.1 {d} ", .{row.status})));
+        var code_field: [64]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, wire, try std.fmt.bufPrint(&code_field, "\"code\":\"{s}\"", .{row.code})) != null);
+    }
+
+    // A reserved answer whose bytes cannot be allocated sends nothing: the peer reads zero bytes.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var silent = Reply.init(std.testing.io, failing.allocator(), null);
+    defer silent.deinit();
+    refuse(&silent, 500, .observation_error, "OutOfMemory");
+    const silent_wire = try sentWire(std.testing.io, std.testing.allocator, &silent);
+    defer std.testing.allocator.free(silent_wire);
+    try std.testing.expectEqual(@as(usize, 0), silent_wire.len);
+
+    // A growing answer has no reserved size to fail on, so its allocation failure is reported to the caller.
+    var growing_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Answer.json(growing_failing.allocator(), 500, 4096, .growing, host_reply.renderStatic, .{ .observation_error, "OutOfMemory" }));
 }
