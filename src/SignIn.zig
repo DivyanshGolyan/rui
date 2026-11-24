@@ -729,7 +729,7 @@ fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
         const endpoint_edit = form.endpointEdit();
         const endpoint = switch (endpoint_edit) {
             .unchanged => |value| value,
-            .base => |base| @import("endpoint_value.zig").endpointUnder(self.initAllocator(), base) catch {
+            .base => |base| @import("endpoint_value.zig").endpointUnder(self.initAllocator(), base, "/responses") catch {
                 self.issue = "Use an HTTPS base URL without credentials, query or fragment.";
                 _ = self.state.step(.{ .invalid = .base });
                 return false;

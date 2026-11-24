@@ -9,6 +9,7 @@
 const std = @import("std");
 const url = @import("url");
 const provider_name = @import("provider_name.zig");
+const endpoint_value = @import("endpoint_value.zig");
 
 pub const max_document_bytes = 16 * 1024;
 pub const max_name_bytes = 16;
@@ -287,6 +288,8 @@ pub fn validate(c: *const Connection) ?Refusal {
         if (std.mem.endsWith(u8, base, "/v1") and (std.mem.eql(u8, path, "/v1") or std.mem.startsWith(u8, path, "/v1/"))) {
             return refusal(.doubled_path_segment, "path");
         }
+        var joined: [endpoint_value.max_endpoint_bytes]u8 = undefined;
+        _ = joinUnder(&joined, c.base_url, path) catch return refusal(.invalid_url, "base_url");
     }
     for (c.assign) |assignment| {
         if (c.endpointFor(assignment.family) == null) return refusal(.assignment_without_format, "assign");
@@ -339,12 +342,12 @@ pub const Resolved = struct {
 /// assignment that covers the model wins; else the model's native family
 /// when this connection speaks it; else the only family spoken; else the
 /// person must add a rule. `buffer` holds the returned URL.
-pub fn resolve(c: *const Connection, model: ModelFacts, buffer: []u8) error{ AmbiguousFormat, NoSpaceLeft }!Resolved {
+pub fn resolve(c: *const Connection, model: ModelFacts, buffer: []u8) error{ AmbiguousFormat, NoSpaceLeft, InvalidBaseUrl }!Resolved {
     const endpoint = choose(c, model) orelse return error.AmbiguousFormat;
     return .{
         .family = endpoint.family,
         .codec = endpoint.dialect,
-        .url = try requestUrl(c, endpoint, buffer),
+        .url = try joinUnder(buffer, c.base_url, endpoint.path orelse endpoint.family.defaultPath()),
     };
 }
 
@@ -369,13 +372,14 @@ fn covers(models: Match, model: ModelFacts, family: Family) bool {
     };
 }
 
-/// The request URL for one endpoint: the base URL without its trailing
-/// slash, then the endpoint's path.
-pub fn requestUrl(c: *const Connection, endpoint: Endpoint, buffer: []u8) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}{s}", .{
-        std.mem.trimEnd(u8, c.base_url, "/"),
-        endpoint.path orelse endpoint.family.defaultPath(),
-    }) catch error.NoSpaceLeft;
+/// The request URL at `path` under `base`, through the endpoint owner's join
+/// and its rules; the URL is written into `buffer`.
+fn joinUnder(buffer: []u8, base: []const u8, path: []const u8) error{ NoSpaceLeft, InvalidBaseUrl }![]const u8 {
+    var fixed: std.heap.FixedBufferAllocator = .init(buffer);
+    return endpoint_value.endpointUnder(fixed.allocator(), base, path) catch |err| switch (err) {
+        error.OutOfMemory => error.NoSpaceLeft,
+        error.InvalidBaseUrl => error.InvalidBaseUrl,
+    };
 }
 
 /// Whether the models list allows `id`; a connection without an allow list
@@ -976,12 +980,14 @@ test "validate refuses a sign-in token sent anywhere but its audience" {
     try std.testing.expect(validate(&connection) == null);
 }
 
-test "validate allows a key to any base URL that is https, or loopback HTTP" {
+test "validate allows a credential only over https, never plain HTTP to loopback" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var connection = try testOk(arena.allocator(), base_document);
-    connection.base_url = "http://127.0.0.1:9/v1";
+    connection.base_url = "https://gateway.example/v1";
     try std.testing.expect(validate(&connection) == null);
+    connection.base_url = "http://127.0.0.1:9/v1";
+    try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection).?.reason);
     connection.base_url = "http://gateway.example/v1";
     try std.testing.expectEqual(Refusal.Reason.invalid_url, validate(&connection).?.reason);
     connection.base_url = "https://gateway.example/v1?x=1";
