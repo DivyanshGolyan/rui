@@ -589,7 +589,7 @@ def quiet_output(master, seconds):
     return raw
 
 
-def clipboard_paste_case():
+def clipboard_paste_case(*, protocol_only=False):
     state = screen_fixture_root("rui-clipboard.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -605,7 +605,7 @@ def clipboard_paste_case():
         body = b";" + base64.b64encode(payload) if payload is not None else b""
         return b"\x1b]5522;type=read:status=" + metadata + body + b"\x1b\\"
 
-    def paste(master, mime, payload, malformed=None, at=0):
+    def paste(master, mime, payload, malformed=None, at=0, split_prefix=False):
         os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", mime) + frame(b"DONE"))
         request = raw_output(master, b";" + base64.b64encode(mime) + b"\x1b\\")
         handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
@@ -615,7 +615,13 @@ def clipboard_paste_case():
         if malformed:
             corrupt = frame(data, b"x" * (7000 if malformed == "oversized" else 1))
             frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
-        os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
+        os.write(master, frame(b"OK" + prefix))
+        if split_prefix and frames:
+            os.write(master, frames[0][:1])
+            time.sleep(0.001)
+            os.write(master, frames[0][1:])
+            frames = frames[1:]
+        os.write(master, b"".join(frames) + frame(b"DONE" + prefix))
 
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
@@ -627,15 +633,16 @@ def clipboard_paste_case():
             capture.reply = lambda data: None if b"[?5522;" in data or b"]5522;" in data else reply(data)
             raw_output(master, b"\x1b[?5522$p")
             read_terminal(master, "› ")
-            os.write(master, b"\x16")
-            raw_output(master, lambda screen: "No supported clipboard image" in screen)
+            if not protocol_only:
+                os.write(master, b"\x16")
+                raw_output(master, lambda screen: "No supported clipboard image" in screen)
             os.write(master, b"\x1b[?5522;2$y")
             raw_output(master, b"\x1b[?5522h")
             paste(master, b"text/plain", b"Clipboard caption")
             raw_output(master, lambda screen: "Clipboard caption" in screen)
             paste(master, b"text/plain", b"x" * 65_538)
             raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
-            paste(master, b"image/png", png)
+            paste(master, b"image/png", png, split_prefix=True)
             raw_output(master, lambda screen: "[Image 1]" in screen)
             assert endpoint.requests == []
             os.write(master, b"\r")
@@ -650,9 +657,45 @@ def clipboard_paste_case():
             assert [part["type"] for part in parts] == ["input_text", "input_image"], parts
             assert parts[0]["text"] == "Clipboard caption", parts
             assert parts[1]["image_url"] == "data:image/png;base64," + base64.b64encode(png).decode(), parts
+
+            os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
+            request = raw_output(master, b";" + base64.b64encode(b"image/png") + b"\x1b\\")
+            handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
+            prefix = b":id=" + handle
+            delayed_png = (pathlib.Path(__file__).parents[2] / "src/codecs/fixtures/image-input/pixel.png").read_bytes()
+            encoded = base64.b64encode(delayed_png)
+            os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
+            raw_output(master, lambda screen: "Clipboard read timed out" in screen)
+            overview_frame(master, lambda screen: True, b"\x1b[27u")
+            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            os.write(master, encoded[12:] + b"\x1b\\" + frame(b"DONE" + prefix))
+            os.write(master, b"safe")
+            shown = raw_output(master, lambda screen: "safe" in screen)
+            assert encoded[12:32] not in shown, "a delayed clipboard tail reached the composer"
+            assert encoded[12:32].decode() not in current_screen(master), "a delayed clipboard tail reached the composer"
+
+            os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", b"image/png") + frame(b"DONE"))
+            request = raw_output(master, b";" + base64.b64encode(b"image/png") + b"\x1b\\")
+            handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
+            prefix = b":id=" + handle
+            os.write(master, frame(b"OK" + prefix) + b"\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n" + prefix + b";" + encoded[:12])
+            raw_output(master, lambda screen: "Clipboard read timed out" in screen)
+            overview_frame(master, lambda screen: True, b"\x1b[27u")
+            keyed_frame(master, b"\x1b[13u", lambda screen, x, y: composer_ready(screen, x, y))
+            os.write(master, b"unframedtext\x01\x05\x1b[200~works\x1b[201~")
+            raw_output(master, lambda screen: "works" in screen)
+            assert "unframedtext" not in current_screen(master), "an unfinished clipboard frame released unframed text"
             os.write(master, b"\x03")
             reset = raw_output(master, b"Your chats keep working")
             assert b"\x1b[?5522l" in reset, reset
+            assert caller.wait(timeout=5) == 0
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home), "SSH_CONNECTION": "clipboard-fixture"}, cwd=state) as (caller, master):
+            read_terminal(master, "› ")
+            os.write(master, b"recovered")
+            read_terminal(master, "recovered", composer=True)
+            os.write(master, b"\x03")
+            raw_output(master, b"Your chats keep working")
             assert caller.wait(timeout=5) == 0
         completed = True
         print("clipboard paste: native caption and image reached the provider, and the terminal mode was restored")
@@ -1702,7 +1745,7 @@ def main(selected="all"):
     import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt", "clipboard-paste"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles", "start-receipt", "clipboard-paste", "clipboard-protocol"), selected
     if selected in ("all", "callers", "caller-core", "start-receipt"):
         start_receipt_cases.main()
     if selected == "start-receipt":
@@ -1719,9 +1762,9 @@ def main(selected="all"):
         session_chrome_cases.main()
     if selected == "session-chrome":
         return
-    if selected in ("all", "renderer", "clipboard-paste"):
-        clipboard_paste_case()
-    if selected == "clipboard-paste":
+    if selected in ("all", "renderer", "clipboard-paste", "clipboard-protocol"):
+        clipboard_paste_case(protocol_only=selected == "clipboard-protocol")
+    if selected in ("clipboard-paste", "clipboard-protocol"):
         return
     if selected in ("all", "callers", "caller-core", "provider-lines"):
         provider_line_cases()
