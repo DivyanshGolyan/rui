@@ -91,52 +91,52 @@ pub const records_per_transaction = 2;
 /// an app set saves its whole declaration inside one configure transaction.
 pub fn SavingRecordsOf(comptime capacity: usize) type {
     return struct {
-    const Self = @This();
+        const Self = @This();
 
-    records: []const tool_record.Record,
-    pairs: [capacity]content_domain.Pair = undefined,
-    descriptions: [capacity]content_domain.Import = undefined,
-    schemas: [capacity]content_domain.Import = undefined,
-    content_ids: [capacity][2]u64 = undefined,
-    existing: [capacity]lookup_record.Result = undefined,
+        records: []const tool_record.Record,
+        pairs: [capacity]content_domain.Pair = undefined,
+        descriptions: [capacity]content_domain.Import = undefined,
+        schemas: [capacity]content_domain.Import = undefined,
+        content_ids: [capacity][2]u64 = undefined,
+        existing: [capacity]lookup_record.Result = undefined,
 
-    pub fn lookup(saving: *Self, a: anytype) void {
-        std.debug.assert(saving.records.len <= capacity);
-        for (saving.records, 0..) |*each, index| {
-            saving.descriptions[index] = .ofBytes(each.description, false);
-            saving.schemas[index] = .ofBytes(each.input_schema, false);
-            content_domain.lookupPair(a, &saving.descriptions[index], &saving.schemas[index], &saving.pairs[index]);
-        }
-    }
-
-    pub fn importTexts(saving: *Self, a: anytype) !bool {
-        var known = false;
-        for (saving.records, 0..) |*each, index| {
-            content_domain.foundPair(&saving.pairs[index], &saving.descriptions[index], &saving.schemas[index]);
-            const both = saving.descriptions[index].found != null and saving.schemas[index].found != null;
-            const ids = &saving.content_ids[index];
-            ids.* = .{
-                try content_domain.importBytes(a, &saving.descriptions[index], each.description),
-                try content_domain.importBytes(a, &saving.schemas[index], each.input_schema),
-            };
-            saving.existing[index] = null;
-            if (both) {
-                known = true;
-                const policy = storedPolicy(each);
-                a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+        pub fn lookup(saving: *Self, a: anytype) void {
+            std.debug.assert(saving.records.len <= capacity);
+            for (saving.records, 0..) |*each, index| {
+                saving.descriptions[index] = .ofBytes(each.description, false);
+                saving.schemas[index] = .ofBytes(each.input_schema, false);
+                content_domain.lookupPair(a, &saving.descriptions[index], &saving.schemas[index], &saving.pairs[index]);
             }
         }
-        return known;
-    }
 
-    pub fn insert(saving: *Self, a: anytype) !void {
-        for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
-            const ids = saving.content_ids[index];
-            const id = try a.identity(.tool_record_id);
-            const policy = storedPolicy(each);
-            a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] });
-        };
-    }
+        pub fn importTexts(saving: *Self, a: anytype) !bool {
+            var known = false;
+            for (saving.records, 0..) |*each, index| {
+                content_domain.foundPair(&saving.pairs[index], &saving.descriptions[index], &saving.schemas[index]);
+                const both = saving.descriptions[index].found != null and saving.schemas[index].found != null;
+                const ids = &saving.content_ids[index];
+                ids.* = .{
+                    try content_domain.importBytes(a, &saving.descriptions[index], each.description),
+                    try content_domain.importBytes(a, &saving.schemas[index], each.input_schema),
+                };
+                saving.existing[index] = null;
+                if (both) {
+                    known = true;
+                    const policy = storedPolicy(each);
+                    a.read(lookup_record, .{ .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+                }
+            }
+            return known;
+        }
+
+        pub fn insert(saving: *Self, a: anytype) !void {
+            for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
+                const ids = saving.content_ids[index];
+                const id = try a.identity(.tool_record_id);
+                const policy = storedPolicy(each);
+                a.write(insert_record, .{ .id = id, .name = each.name, .remote = each.storedRemoteName(), .owner = each.owner, .server = each.server, .replay = policy.replay, .restart_limit = policy.restart_limit, .wait_ms = policy.wait_ms, .description = ids[0], .input_schema = ids[1] });
+            };
+        }
     };
 }
 
