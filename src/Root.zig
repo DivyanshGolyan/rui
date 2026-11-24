@@ -310,6 +310,15 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (routed == .mouse and (routed.mouse.type == .drag or routed.mouse.type == .release) and
+        (routed.mouse.button == .left or routed.mouse.button == .none) and self.session != null and
+        self.chooseLayout().pane == .session and !self.input.layer.signInOpen() and !self.input.layer.settingsOpen())
+    {
+        var captured = routed.mouse;
+        if (self.size.width >= split_at) captured.col -= @intCast(list_width + 1);
+        try self.session.?.captureEvent(ctx, .{ .mouse = captured });
+        if (ctx.consume_event) return;
+    }
     if (routed == .mouse and (routed.mouse.type == .press or routed.mouse.type == .motion)) if (self.pointer_free) |hook| try hook.free(hook.context, ctx);
     var input: app_input.Input = switch (routed) {
         .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key), .printable = @import("keypress.zig").classify(key) == .text } },

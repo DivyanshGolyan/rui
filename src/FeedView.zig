@@ -67,6 +67,7 @@ const Selection = struct {
     purpose: Purpose = .copy,
     link: LinkClick = .{},
     press: Cell,
+    size: vxfw.Size = .{},
     anchor: Spot,
     head: Spot,
     dragging: bool = false,
@@ -109,6 +110,10 @@ pub fn scroll(self: *Self, rows: i32) void {
 
 pub fn dragging(self: *const Self) bool {
     return self.selection != null;
+}
+
+pub fn capturesCopySelection(self: *const Self) bool {
+    return if (self.selection) |held| held.purpose == .copy else false;
 }
 
 pub fn cancelSelection(self: *Self) bool {
@@ -298,15 +303,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .focus_out => {
-            if (self.selection) |*held| _ = held.link.step(.cancel);
-            if (self.cancelQuote()) ctx.redraw = true;
+            if (self.cancelSelection()) ctx.redraw = true;
         },
         .mouse_leave => {
             self.retry_press = null;
-            if (self.selection != null) {
+            if (self.selection) |held| if (held.purpose == .quote) {
                 self.selection = null;
                 ctx.redraw = true;
-            }
+            };
         },
         .tick => {
             const held = if (self.selection) |*selection| selection else return;
@@ -375,7 +379,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
-            var selection: Selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
+            var selection: Selection = .{ .purpose = purpose, .press = at, .size = self.size, .anchor = spot, .head = spot };
             const plain = purpose == .copy and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
             _ = selection.link.step(.{ .press = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } });
             self.selection = selection;
@@ -400,6 +404,10 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
             var held = self.selection orelse return;
             self.selection = null;
             ctx.consumeAndRedraw();
+            if (held.purpose == .copy and (held.dragging or !std.meta.eql(at, held.press))) {
+                held.dragging = true;
+                held.head = try self.spotAt(ctx.alloc, at) orelse held.head;
+            }
             const anchor = self.resolved(held.anchor) orelse return;
             const head = self.resolved(held.head) orelse return;
             if (held.purpose == .quote) {
@@ -481,7 +489,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
     self.size = surface.size;
-    if (self.selection) |held| if (!self.current(held.purpose)) {
+    if (self.selection) |held| if ((held.purpose == .copy and held.size.width != 0 and !std.meta.eql(held.size, self.size)) or !self.current(held.purpose)) {
         _ = self.cancelSelection();
     };
     const pending = if (self.pending != null) try self.pendingDocument(ctx) else null;
@@ -673,6 +681,33 @@ fn activityScrollRoundTrip() !void {
     try std.testing.expectEqual(@as(i17, 3), short.children[0].origin.row);
 }
 
+test "FeedView copy selection survives leave and takes the release endpoint" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "alpha beta\n" } }});
+    var anchor: Feed = .{};
+    var actions: RetryClicks = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = actions.handler() };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    _ = try testFrame(&view, alloc, 20, 3);
+    const start = (try view.spotAt(alloc, .{ .row = 0, .col = 0 })).?;
+    view.selection = .{ .press = .{ .row = 0, .col = 0 }, .size = view.size, .anchor = start, .head = start };
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = alloc, .cmds = .empty };
+    defer {
+        for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) gpa.free(command.copy_to_clipboard);
+        ctx.cmds.deinit(gpa);
+    }
+    try view.widget().handleEvent(&ctx, .mouse_leave);
+    try std.testing.expect(view.capturesCopySelection());
+    try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 5, .button = .left, .mods = .{}, .type = .release } });
+    try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
+    for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) try std.testing.expectEqualStrings("alpha", command.copy_to_clipboard);
+    try std.testing.expect(!view.dragging());
+}
+
 test "FeedView selection endpoints survive prepends and edits but not eviction" {
     const window = try testWindow();
     defer std.testing.allocator.destroy(window);
@@ -684,7 +719,7 @@ test "FeedView selection endpoints survive prepends and edits but not eviction" 
     _ = try testFrame(&view, arena.allocator(), 16, 2);
     const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 6 })).?;
     const end = (try view.spotAt(arena.allocator(), .{ .row = 1, .col = 4 })).?;
-    view.selection = .{ .press = .{ .row = 0, .col = 6 }, .anchor = start, .head = end, .dragging = true };
+    view.selection = .{ .press = .{ .row = 0, .col = 6 }, .size = view.size, .anchor = start, .head = end, .dragging = true };
     view.scroll(-1);
     try window.prepend(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "older\n" } }});
     const first_copy = try selecting.copy(std.testing.allocator, &window.document, .of(view.resolved(start).?, view.resolved(end).?));
@@ -1131,7 +1166,7 @@ test "FeedView hover and drag highlight measure each visible line a bounded numb
         defer arena.deinit();
         _ = try testFrame(&view, arena.allocator(), 8, height);
         const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 0 })).?;
-        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .anchor = start, .head = start, .dragging = true };
+        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .size = view.size, .anchor = start, .head = start, .dragging = true };
         viewport.measured_lines = 0;
         const frame = try testFrame(&view, arena.allocator(), 8, height);
         try std.testing.expect(frame.buffer[0].style.reverse);

@@ -22,9 +22,19 @@ pub const Range = struct {
     }
 
     fn covers(self: Range, spot: Spot) bool {
-        return if (spot.start == spot.end) self.from <= spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
+        return if (spot.start == spot.end) self.from < spot.start and spot.start < self.to else spot.start < self.to and spot.end > self.from;
     }
 };
+
+test "selection ranges exclude point cells at endpoints and include interior blank boundaries" {
+    const range: Range = .{ .from = 4, .to = 9 };
+    try std.testing.expect(!range.covers(Spot.point(4)));
+    try std.testing.expect(range.covers(Spot.point(5)));
+    try std.testing.expect(range.covers(Spot.point(8)));
+    try std.testing.expect(!range.covers(Spot.point(9)));
+    try std.testing.expect(range.covers(.{ .start = 3, .end = 5 }));
+    try std.testing.expect(range.covers(.{ .start = 8, .end = 10 }));
+}
 
 pub const Row = RowFor(Document);
 

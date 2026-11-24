@@ -737,7 +737,7 @@ On release, Rui clears the highlight and copies the shown text once through OSC 
 Above `TerminalText.clipboard_limit`, Rui skips the copy and shows `Too large for the clipboard · /copy file`. Otherwise, a successful copy shows `Copied N lines`.
 A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
 No fill is read in under a press or drag, at either loading edge; it waits for the release. Live scans continue.
-A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.
+A press ends without copying when it leaves the feed. During an active plain copy selection, Root captures drag and release coordinates across pane hit targets; release supplies the final endpoint even without a final motion event. Replacing the feed content, changing layout, or losing the session cancels the selection. Alt-left quote keeps its existing rule: leaving the feed cancels it.
 
 Alt-left-drag in a terminal that forwards Alt mouse reports selects with the same highlight and inserts a Markdown blockquote at the existing draft caret on release.
 On macOS Ghostty the chord is Option-left-drag; Rui changes no terminal preferences or mouse-modifier modes.
