@@ -4011,7 +4011,7 @@ test "SUI-132 SessionFrontend cancels copy selection when its feed context is co
             .paste => held.root.input.pasting = true,
             .focus => try std.testing.expect(try held.root.focusList(&ctx)),
             .resize => {
-                held.size.width += 1;
+                held.size.width = (held.size.width orelse 0) + 1;
                 _ = try held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
             },
             .leaving => held.self.leaving = .returned,
