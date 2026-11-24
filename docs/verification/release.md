@@ -41,7 +41,7 @@ The documentation lane skips heavyweight policy, product builds and suites.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
 The allowlist reads committed Git paths and modes against the selector's resolved base and candidate; any selected runtime, native, cache or resource obligation restores normal verification.
 Reference and consistency checks remain reviewed evidence, not automated link validation.
-The always-run `admission` aggregate requires the exact results for the declared change kind; on a PR the Mac and cache-execution jobs must be skipped.
+The `admission` aggregate, which runs on every PR run that is not cancelled, requires the exact results for the declared change kind; on a PR the Mac and cache-execution jobs must be skipped.
 Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac job must be skipped.
 A draft PR runs only the plan (candidate, `git diff --check` and selection summary) and cheap aggregates; policy, builds and suites are skipped.
 The plan owns draft routing without changing the diff's documentation/normal classification; readiness computes a fresh full selection.

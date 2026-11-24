@@ -476,9 +476,9 @@ class AdmissionTest(unittest.TestCase):
                 with self.subTest(skips=skips):
                     self.assertNotEqual(run(skips).returncode, 0)
 
-    def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
+    def test_admission_runs_for_every_uncancelled_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
-        self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
+        self.assertIn("if: ${{ !cancelled() && github.event_name == 'pull_request' }}", text)
         # Admission checks every part the linux job checks off pull requests, so it needs their results too.
         required = ('plan', 'policy', 'macos', 'cache_execution', 'pr_linux', 'linux_build',
                     'linux_build_unit', 'linux_suites', 'macos_typecheck')
@@ -1157,7 +1157,7 @@ class JobGraphTest(unittest.TestCase):
         self.assertIn("if: ${{ github.event_name != 'pull_request' }}", job(text, 'mac_runner'))
         linux, admission = job(text, 'linux'), job(text, 'admission')
         self.assertIn("github.event_name != 'pull_request'", linux)
-        self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", admission)
+        self.assertIn("if: ${{ !cancelled() && github.event_name == 'pull_request' }}", admission)
         # Admission runs the same script over the same environment the linux job uses off pull requests.
         def linux_step(body):
             step = body.split('- name: Require every selected Linux part', 1)[1].split('\n      - ', 1)[0]
