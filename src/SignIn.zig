@@ -1405,6 +1405,31 @@ fn testingCompleted(page: *Self) bool {
     return page.task.completed();
 }
 
+test "SUI-134 Sign-in departure keeps a handover's unconfirmed certainty" {
+    const activation = @import("host_activation.zig");
+    const cause = try @import("protocol.zig").Bounded(64).from("OutOfMemory");
+    const Case = struct { selected: activation.Selected, expected: anyerror };
+    const cases = [_]Case{
+        .{ .selected = .{ .outcome = .{ .unconfirmed = .verifying } }, .expected = error.HostRestartUnconfirmed },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .stop, .cause = cause } } }, .expected = error.HostRestartUnconfirmed },
+        .{ .selected = .{ .outcome = .{ .faulted = .{ .effect = .resolve_target, .cause = cause } } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .outcome = .{ .failed = .stopping } }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .of(.observation, error.OutOfMemory) }, .expected = error.HostRestartFailed },
+        .{ .selected = .{ .failed = .of(.selection, error.NoVerifiedRelease) }, .expected = error.HostRestartFailed },
+    };
+    for (cases) |row| {
+        var launch: host_launch.Result = .failed(.setup, error.HostRestartFailed);
+        host_start.handoverFailed(&launch, row.selected);
+        var page: Self = .{
+            .state = .{ .page = .{ .saving = .existing } },
+            .outcome = .{ .published = .{ .defaults = {}, .activation = .{ .binding = .{}, .store = .{}, .launch = launch } } },
+        };
+        var report: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer report.deinit();
+        try std.testing.expectError(row.expected, page.stopTo(&report.writer));
+    }
+}
+
 test "Sign-in guided fields keep edits focus caret masking and paste authority" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -2209,7 +2234,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             if (launch.outcome == .failed) {
                 launch.outcome.failed.store = answer.store;
                 if (case == .os_launch) launch.outcome.failed.os_error = 13;
-                if (case == .refused) launch.outcome.failed.refusal = @import("start_report.zig").Failure.init(.settings_invalid, "retained refusal body");
+                if (case == .refused) launch.outcome.failed.detail = .{ .refusal = @import("start_report.zig").Failure.init(.settings_invalid, "retained refusal body") };
             }
             const marker = "retained child transcript\n";
             @memcpy(launch.startup_bytes[0..marker.len], marker);

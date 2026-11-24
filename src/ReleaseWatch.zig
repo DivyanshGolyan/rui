@@ -111,7 +111,7 @@ fn bytesOf(value: u64) [8]u8 {
     return bytes;
 }
 
-test "SH-131 the watch reads at its first poll, again only once its gap has passed, and a failed read keeps the last offer" {
+test "SH-143 the watch reads at its first poll, again only once its gap has passed, and a failed read keeps the last offer" {
     for (0..10_000) |step| {
         const gap = gapFrom(bytesOf(@as(u64, step) *% 0x9E3779B97F4A7C15));
         try std.testing.expect(gap >= 50 * minute_ms and gap <= 70 * minute_ms);
@@ -172,7 +172,7 @@ test "SH-131 the watch reads at its first poll, again only once its gap has pass
     try std.testing.expectEqual(@as(?u64, 3 * gap), watch.due_ms);
 }
 
-test "SH-132 only a release newer than this build is offered; equal, older or an unparsable build is not" {
+test "SH-144 only a release newer than this build is offered; equal, older or an unparsable build is not" {
     const candidate: release.Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { []const u8, release.Version, bool }{
         .{ "0.60.1", .{ .schema = 60, .patch = 0 }, false },
@@ -190,7 +190,7 @@ test "SH-132 only a release newer than this build is offered; equal, older or an
     try std.testing.expect(newerRelease("0.60.1", candidate) == null);
 }
 
-test "SH-133 settle stops a read in flight and the watch reads no more" {
+test "SH-145 settle stops a read in flight and the watch reads no more" {
     const Blocked = struct {
         var calls: std.atomic.Value(usize) = .init(0);
         fn started(count: *const std.atomic.Value(usize)) bool {

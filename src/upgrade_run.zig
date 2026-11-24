@@ -247,7 +247,7 @@ const world = struct {
                 .pin => trace.facts.pinned = .{ .ok = {} },
                 .hosts => {
                     var tally: activation.Tally = .{};
-                    for (0..script.restart_failures) |_| tally.add(.{ .place = .other, .state = .failed });
+                    for (0..script.restart_failures) |_| tally.add(.{ .place = .other, .state = .{ .failed = .of(.observation, error.OutOfMemory) } });
                     tally.add(.{ .place = .own, .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 7 } } } });
                     trace.facts.hosts = .{ .ok = tally.finish(null) };
                 },
@@ -435,7 +435,7 @@ test "SH-74 nothing reaches a Host before publication, and nothing after it undo
                     const hosts = hostsOf(trace.facts);
                     try std.testing.expectEqual(activation.Counts{ .failed = 1 }, hosts.counts);
                     try std.testing.expect(hosts.guidance);
-                    try std.testing.expectEqual(cause == .cancelled, activation.clientSafe(hosts.own));
+                    try std.testing.expectEqual(cause == .cancelled, activation.selectedClientSafe(hosts.own));
                     // The ending always names the kept publication receipt, even on restart failure.
                     const receipt = trace.facts.published.?.ok.selected;
                     const ended = ending(trace.facts, false);
@@ -486,7 +486,7 @@ pub fn ending(f: Facts, stopping: bool) status.Ended {
     if (f.published) |publication| if (publication == .ok) {
         const receipt = publication.ok;
         const hosts = hostsOf(f);
-        if (!activation.clientSafe(hosts.own)) return .{ .incompatible = receipt.selected };
+        if (!activation.selectedClientSafe(hosts.own)) return .{ .incompatible = receipt.selected };
         const restarted = hosts.counts.restarted != 0;
         if (!receipt.changed and !restarted) return if (receipt.selected.order(f.release.?.ok) == .gt)
             .{ .superseded = receipt.selected }
@@ -514,7 +514,7 @@ fn failureClass(cause: ?Cause) status.Failure {
 }
 
 pub fn outcome(f: Facts) status.Outcome {
-    if (f.published) |publication| if (publication == .ok) return if (activation.clientSafe(hostsOf(f).own)) .compatible else .incompatible;
+    if (f.published) |publication| if (publication == .ok) return if (activation.selectedClientSafe(hostsOf(f).own)) .compatible else .incompatible;
     return .unchanged;
 }
 
@@ -558,12 +558,12 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         guidance: bool,
         exit_class: Exit,
     };
-    const empty = activation.Summary{ .counts = .{}, .guidance = false, .own = .not_needed };
-    const restarted = activation.Summary{ .counts = .{ .restarted = 1 }, .guidance = false, .own = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } };
-    const current = activation.Summary{ .counts = .{ .current = 1 }, .guidance = false, .own = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } } };
-    const failed_other = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .not_needed };
-    const unsafe_host = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .{ .unconfirmed = .verifying } };
-    const cancelled = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .cancelled };
+    const empty = activation.Summary{ .counts = .{}, .guidance = false, .own = .{ .outcome = .not_needed } };
+    const restarted = activation.Summary{ .counts = .{ .restarted = 1 }, .guidance = false, .own = .{ .outcome = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } } };
+    const current = activation.Summary{ .counts = .{ .current = 1 }, .guidance = false, .own = .{ .outcome = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } } } };
+    const failed_other = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .{ .outcome = .not_needed } };
+    const unsafe_host = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .{ .outcome = .{ .unconfirmed = .verifying } } };
+    const cancelled = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .{ .outcome = .cancelled } };
     // Literal expectations from UpgradeJob before moving these decisions.
     const rows = [_]Row{
         .{ .changed = true, .hosts = empty, .ended = .{ .upgraded = .{ .version = receipt, .restarted = false } }, .result = .compatible, .relaunch = true, .guidance = false, .exit_class = .done },

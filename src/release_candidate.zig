@@ -255,7 +255,7 @@ fn expectRequestLog(io: std.Io, directory: std.Io.Dir, requests: []const []const
     try std.testing.expect(lines.next() == null);
 }
 
-test "SH-130 the release lookup follows redirects one hop at a time and never requests the tag page" {
+test "SH-142 the release lookup follows redirects one hop at a time and never requests the tag page" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const latest = "https://ruicode.com/releases/latest";
