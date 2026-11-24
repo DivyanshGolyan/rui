@@ -1163,7 +1163,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         break :note null;
     } else null;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
-    self.app_content.pending = null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -6836,7 +6835,6 @@ test "SessionFrontend submission presentation domain keeps Message notes separat
             } else try std.testing.expect(self.chrome.activity.queued != null);
         } else {
             for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "matrix original") == null);
-            try std.testing.expect(self.app_content.pending == null);
             if (expected) |prefix| {
                 var found = false;
                 for (shown) |line| if (std.mem.indexOf(u8, line, prefix) != null) {
