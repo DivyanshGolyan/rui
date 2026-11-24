@@ -1075,10 +1075,10 @@ pub const State = struct {
         }
     }
 
-    fn settleBrowse(self: *State, frame: @FieldType(Event, "list_settled"), effects: *Effects) error{OutOfMemory}!void {
+    fn settleBrowse(self: *State, wide: bool, focused: bool, effects: *Effects) error{OutOfMemory}!void {
         const target = self.browse_target;
         self.browse_target = null;
-        if (target) |reference| if (frame.wide and frame.focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) {
+        if (target) |reference| if (wide and focused and self.selected == .session and self.selectedRow() != null and std.mem.eql(u8, &self.selected.session, &reference)) {
             self.presentation_revision +%= 1;
             try activateList(self, .browse, effects);
         };
@@ -1547,7 +1547,7 @@ fn stepEvent(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.presentation_revision +%= 1;
                 try clickOpen(state, reference, &effects);
             }
-            try state.settleBrowse(frame, &effects);
+            try state.settleBrowse(frame.wide, frame.focused, &effects);
         },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| {
@@ -6326,7 +6326,10 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     var tail = session("eeeeee", .{ .finished = ago(5) }, .{ .label = "tail archived" });
     tail.archive_state = .archived;
     tail.archive_seq = 11;
-    const next_page = try step(&views, .{ .viewport = .{ .first = 0, .end = 1 } });
+    const bounds = archivedBounds(&views);
+    try std.testing.expectEqual(@as(?u64, 20), bounds.last);
+    var next_page: Effects = .{};
+    readArchived(&views, &next_page, .{ .below = bounds.last.? });
     try std.testing.expectEqual(@as(usize, 1), next_page.len);
     try std.testing.expect(next_page.items[0] == .read_archived);
     try std.testing.expect(next_page.items[0].read_archived.from == .below);
