@@ -1229,3 +1229,101 @@ test "SH-124 a lane root saves its app tools as one set; replacing, clearing and
         }
     }.run);
 }
+
+// SH-125: a lane root's configure or create saves a declared app tool set of any supported size in one transaction,
+// whether its texts are fresh or already stored, and the set reads back with every declared record.
+const declared_counts = [_]usize{ 1, 8, app_tools.max_records };
+
+/// One declaration of `count` tools whose texts carry `tag`; `wait_ms` changes each record's digest without changing its texts.
+fn writeAppDeclaration(buffer: []u8, count: usize, tag: []const u8, wait_ms: u32) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeByte('[');
+    for (0..count) |index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print(
+            "{{\"name\":\"tool-{d:0>2}\",\"description\":\"Tool {s} {d}.\",\"input_schema\":{{\"type\":\"object\"}},\"wait_ms\":{d}}}",
+            .{ index, tag, index, wait_ms },
+        );
+    }
+    try writer.writeByte(']');
+    return writer.buffered();
+}
+
+fn expectAppSetReadsBack(storage: *Store, root: []const u8, document: []const u8, count: usize) !void {
+    const set = try store_testing.queryU64(storage, "SELECT app_tool_set_id FROM session WHERE session_ref=?1", .{root});
+    try std.testing.expect(set > 0);
+    try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(storage, "SELECT member_count FROM tool_set WHERE tool_set_id=?1", .{set}));
+    const decl_arena = try std.testing.allocator.alloc(u8, app_tools.arena_bytes);
+    defer std.testing.allocator.free(decl_arena);
+    var decl_fixed: std.heap.FixedBufferAllocator = .init(decl_arena);
+    const declared = app_tools.parse(decl_fixed.allocator(), document).declared;
+    var expected_set: tool_record.SetDigest = .init();
+    var names: [app_tools.max_records][]const u8 = undefined;
+    for (declared.records, 0..) |*record, index| {
+        expected_set.add(&tool_record.recordDigest(record));
+        names[index] = record.name;
+    }
+    const set_names = try command_input.ToolsField.of(names[0..count]);
+    var offer: tool_offer_domain.Freeze = .{};
+    var selection: tool_set_domain.SavedSelection = .{ .names = &set_names };
+    try storage.readToolDigestsForTesting(set, &set_names, &offer, &selection);
+    try std.testing.expectEqualSlices(u8, &expected_set.final(), &(try selection.selection()).digest);
+}
+
+test "SH-125 a lane root saves a declared app tool set of every supported size on create and configure, fresh or with stored texts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var document: [app_tools.max_document_bytes]u8 = undefined;
+            var tag_buffer: [32]u8 = undefined;
+            var key_buffer: [64]u8 = undefined;
+            for (declared_counts) |count| {
+                // Fresh texts are tagged per count and operation, so no earlier declaration has stored them. The
+                // stored-texts declaration repeats the tag with another wait_ms: its records differ, its texts do not.
+                const fresh_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 1000);
+                var create = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-fresh-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, fresh_create);
+                const created = try storage.configure(&create, .{});
+                try std.testing.expect(created == .accepted);
+                try expectAppSetReadsBack(&storage, created.accepted.session.slice(), fresh_create, count);
+
+                const stored_create = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-create", .{count}), 2000);
+                var repeat = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-create-stored-{d}", .{count}), "", workspace, "model-a");
+                declareAppTools(&repeat.configuration, stored_create);
+                const repeated = try storage.configure(&repeat, .{});
+                try std.testing.expect(repeated == .accepted);
+                try expectAppSetReadsBack(&storage, repeated.accepted.session.slice(), stored_create, count);
+
+                const fresh_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 1000);
+                var plain = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-fresh-{d}", .{count}), "", workspace, "model-a");
+                const plain_root = try storage.configure(&plain, .{});
+                try std.testing.expect(plain_root == .accepted);
+                const fresh_root = plain_root.accepted.session.slice();
+                var configure: wire_request.ConfigureCommand = .{};
+                try configure.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-fresh-{d}", .{count}));
+                try configure.session.set(fresh_root);
+                declareAppTools(&configure.configuration, fresh_configure);
+                try std.testing.expect((try storage.configure(&configure, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, fresh_root, fresh_configure, count);
+
+                const stored_configure = try writeAppDeclaration(&document, count, try std.fmt.bufPrint(&tag_buffer, "c{d}-configure", .{count}), 2000);
+                var plain_again = try store_testing.completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh125-plain-stored-{d}", .{count}), "", workspace, "model-a");
+                const stored_plain_root = try storage.configure(&plain_again, .{});
+                try std.testing.expect(stored_plain_root == .accepted);
+                const stored_root = stored_plain_root.accepted.session.slice();
+                var stored: wire_request.ConfigureCommand = .{};
+                try stored.key.set(try std.fmt.bufPrint(&key_buffer, "sh125-configure-stored-{d}", .{count}));
+                try stored.session.set(stored_root);
+                declareAppTools(&stored.configuration, stored_configure);
+                try std.testing.expect((try storage.configure(&stored, .{})) == .accepted);
+                try expectAppSetReadsBack(&storage, stored_root, stored_configure, count);
+            }
+        }
+    }.run);
+}
