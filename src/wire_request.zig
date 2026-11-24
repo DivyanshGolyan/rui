@@ -37,6 +37,8 @@ pub const Ingress = struct {
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
     content_state: enum { metadata, awaiting_quote, awaiting_schema, awaiting_part, capturing, capturing_schema, capturing_part } = .metadata,
+    /// The JSON value the awaited document must be; set with `awaiting_schema`.
+    schema_root: @import("schema_json.zig").Root = .object,
     parts_capture: ?@import("InputCapture.zig") = null,
     parts_loan: ?@import("InputCapture.zig").Loan = null,
     part_sink: PartSink = undefined,
@@ -79,13 +81,14 @@ pub const Ingress = struct {
                 .awaiting_quote, .awaiting_schema => {
                     switch (byte) {
                         ' ', '\t', '\r', '\n' => continue,
-                        '"', '{' => {
+                        '"', '{', '[' => {
                             const schema = self.content_state == .awaiting_schema;
-                            if (byte != (if (schema) @as(u8, '{') else '"')) return error.InvalidJsonShape;
+                            const opener: u8 = if (!schema) '"' else if (self.schema_root == .array) '[' else '{';
+                            if (byte != opener) return error.InvalidJsonShape;
                             try self.capture.init(self.options, @intCast(self.content_count + 1));
                             if (schema) {
                                 self.content_state = .capturing_schema;
-                                self.schema_encoder = SchemaEncoder.init(self.allocator);
+                                self.schema_encoder = SchemaEncoder.initRoot(self.allocator, self.schema_root);
                                 _ = try self.schema_encoder.feed(byte, &self.capture.sink);
                             } else {
                                 self.content_state = .capturing;
@@ -201,9 +204,10 @@ pub const Ingress = struct {
         while (true) {
             self.parse() catch |err| switch (err) {
                 error.NeedInput => return,
-                error.NeedContent, error.NeedSchema => {
+                error.NeedContent, error.NeedSchema, error.NeedArray => {
                     std.debug.assert(self.content_count < self.contents.len);
-                    self.content_state = if (err == error.NeedSchema) .awaiting_schema else .awaiting_quote;
+                    self.content_state = if (err == error.NeedContent) .awaiting_quote else .awaiting_schema;
+                    self.schema_root = if (err == error.NeedArray) .array else .object;
                     return;
                 },
                 error.NeedPartStart => {
@@ -235,7 +239,7 @@ pub const Ingress = struct {
     pub fn finish(self: *Ingress) !*Request {
         if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
         self.parse() catch |err| switch (err) {
-            error.NeedInput, error.NeedContent, error.NeedSchema, error.NeedPartStart, error.NeedPartEnd => return error.UnexpectedEndOfBody,
+            error.NeedInput, error.NeedContent, error.NeedSchema, error.NeedArray, error.NeedPartStart, error.NeedPartEnd => return error.UnexpectedEndOfBody,
             else => return err,
         };
         if (self.parts_capture) |*capture| {
@@ -246,7 +250,7 @@ pub const Ingress = struct {
         var moved: usize = 0;
         switch (request.*) {
             .configure => |*command| {
-                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
+                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema, &command.configuration.app_tools }) |field| {
                     if (field.state != .value) continue;
                     self.take(field);
                     moved += 1;

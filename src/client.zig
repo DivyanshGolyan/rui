@@ -2790,7 +2790,7 @@ const Capture = struct {
         try self.write("{");
         var separator: []const u8 = "";
         inline for (@import("session_settings.zig").spec_entries) |entry| {
-            // The TypeScript client sends appTools in its own step; the Zig CLI has no option for it.
+            // ConfigureInput has no appTools field: the Zig CLI has no option for it, and only the TypeScript client sends it.
             if (comptime entry.kind == .app_tools) continue;
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {

@@ -849,7 +849,7 @@ export interface components {
                 session_changed: {
                     revision: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label" | "reasoning_effort_refused";
+                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label" | "reasoning_effort_refused" | "app_tools";
                     provider_text: string | null;
                 };
             };
@@ -1025,6 +1025,17 @@ export interface components {
             outputReservation?: number | null;
             effort?: string | null;
             label?: string | null;
+            appTools?: {
+                name: string;
+                description: string;
+                input_schema: {
+                    [key: string]: unknown;
+                };
+                /** @enum {string} */
+                replay?: "safe" | "unsafe";
+                restart_limit?: number;
+                wait_ms?: number;
+            }[] | null;
             parent?: string;
             preferences?: components["schemas"]["PreferencesShape"];
         };
@@ -1135,7 +1146,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "settings_on_reload" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "settings_on_reload" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child";
                 message: string | null;
                 missing: ("model" | "workspace" | "provider")[] | null;
             };
@@ -1863,7 +1874,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
                 missing: ("model" | "workspace" | "provider")[] | null;
             };
@@ -1888,7 +1899,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "mcp_server_unavailable" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "missing_settings" | "unknown_preset" | "preset_on_update" | "parent_on_update" | "parent_provider_forbidden" | "parent_workspace_forbidden" | "tools_not_in_parent" | "permission_mode_wider_than_parent" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "preferences_on_update" | "invalid_app_tools" | "app_tools_too_large" | "invalid_app_tool_name" | "duplicate_app_tool_name" | "app_tool_built_in_clash" | "invalid_app_tool_policy" | "app_tools_on_child" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
                 message: string | null;
                 missing: ("model" | "workspace" | "provider")[] | null;
             };
@@ -3615,6 +3626,8 @@ export interface components {
             tools: string[];
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             loaded_tools: string[];
+            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared. */
+            app_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             instructions: components["schemas"]["ContentValue"];

@@ -4020,6 +4020,58 @@
               }
             ]
           },
+          "appTools": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1,
+                      "x-rui-max-bytes": 200
+                    },
+                    "input_schema": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "replay": {
+                      "type": "string",
+                      "enum": [
+                        "safe",
+                        "unsafe"
+                      ]
+                    },
+                    "restart_limit": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16
+                    },
+                    "wait_ms": {
+                      "type": "integer",
+                      "minimum": 1000,
+                      "maximum": 3600000
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "description",
+                    "input_schema"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "parent": {
             "type": "string",
             "maxLength": 6,
@@ -15272,10 +15324,10 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_-]{1,64}$"
             },
-            "maxItems": 128,
+            "maxItems": 16,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The app tools this Session's lane declared."
           },
           "permission_mode": {
             "type": "string",

@@ -410,6 +410,9 @@ pub const CurrentJson = struct {
     const ToolNames = struct {
         pub const openapi_tools = true;
     };
+    const AppToolNames = struct {
+        pub const openapi_app_tool_names = true;
+    };
     pub const Settings = struct {
         pub const openapi_name = "domainreportCurrentJsonSettings";
         const head = .{
@@ -438,7 +441,7 @@ pub const CurrentJson = struct {
             "\"}",
         };
         const app_tools = ",\"app_tools\":";
-        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames, app_tools, ToolNames } ++ tail;
+        pub const json_shape = head ++ .{ ToolNames, loaded_tools, ToolNames, app_tools, AppToolNames } ++ tail;
     };
     pub const Outcome = struct {
         pub const openapi_name = "domainreportCurrentJsonOutcome";
