@@ -270,6 +270,26 @@ test "ASCII spells the ellipsis and dot" {
     try std.testing.expectEqualStrings("Preparing Upgrade - restarts every eligible Host (2 found) - esc cancels", line(.{ .installing = .{ .found = .{ .host = .{ .running = 2 } } } }, &buffer, .ascii).text);
 }
 
+/// The Settings Version row's tail: a run's own words while one shows,
+/// otherwise the release the update offer names.
+pub fn versionTail(run: ?Run, available: ?Version, buffer: *[max_line_bytes]u8) ?[]const u8 {
+    if (run) |shown| return fieldTail(shown, buffer);
+    const version = available orelse return null;
+    return std.fmt.bufPrint(buffer, " · update to {f}", .{version}) catch unreachable;
+}
+
+test "SH-152 the Version row shows a run's own words while one shows, otherwise the offered release" {
+    var buffer: [max_line_bytes]u8 = undefined;
+    const offer: Version = .{ .schema = 80, .patch = 2 };
+    const runs = [_]?Run{ null, .checking, .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 80, .patch = 1 } }, .outcome = .unchanged } }, .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } };
+    for (runs) |run| for ([_]?Version{ null, offer }) |available| {
+        var expected_buffer: [max_line_bytes]u8 = undefined;
+        const expected: ?[]const u8 = if (run) |shown| fieldTail(shown, &expected_buffer) else if (available != null) " · update to 0.80.2" else null;
+        const actual = versionTail(run, available, &buffer);
+        if (expected) |text| try std.testing.expectEqualStrings(text, actual.?) else try std.testing.expect(actual == null);
+    };
+}
+
 pub fn fieldTail(run: Run, buffer: *[max_line_bytes]u8) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     const text: []const u8 = switch (run) {

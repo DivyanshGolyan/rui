@@ -1318,7 +1318,7 @@ test "SH-145 a lane root saves a declared app tool set of every supported size o
     }.run);
 }
 
-// SH-148..SH-159: the tools a model request carries from its lane's declared app tools, read through the request page
+// SH-161..SH-172: the tools a model request carries from its lane's declared app tools, read through the request page
 // the provider reads (admission freezes the offer; the page walks its tool set).
 const two_app_tools = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}},{\"name\":\"other\",\"description\":\"Other.\",\"input_schema\":{\"type\":\"object\"}}]";
 const ask_app_tool = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
@@ -1399,7 +1399,7 @@ fn configureChild(storage: *Store, key: []const u8, parent: []const u8, tools: ?
     };
 }
 
-test "SH-148 a lane root's model request carries every app tool its lane declares, beside the Host tools" {
+test "SH-161 a lane root's model request carries every app tool its lane declares, beside the Host tools" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1418,7 +1418,7 @@ test "SH-148 a lane root's model request carries every app tool its lane declare
     }.run);
 }
 
-test "SH-149 a lane root that declares no app tools offers none, as a Host without app tools does" {
+test "SH-162 a lane root that declares no app tools offers none, as a Host without app tools does" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1437,7 +1437,7 @@ test "SH-149 a lane root that declares no app tools offers none, as a Host witho
     }.run);
 }
 
-test "SH-150 a re-declare changes the next request's tools, and the admitted request keeps the records it was made with" {
+test "SH-163 a re-declare changes the next request's tools, and the admitted request keeps the records it was made with" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1469,7 +1469,7 @@ test "SH-150 a re-declare changes the next request's tools, and the admitted req
     }.run);
 }
 
-test "SH-151 an attached child that names no tools offers every app tool its lane declares" {
+test "SH-164 an attached child that names no tools offers every app tool its lane declares" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1489,7 +1489,7 @@ test "SH-151 an attached child that names no tools offers every app tool its lan
     }.run);
 }
 
-test "SH-152 a child that names an app tool offers that tool alone; a child that names only Host tools offers every app tool" {
+test "SH-165 a child that names an app tool offers that tool alone; a child that names only Host tools offers every app tool" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1515,7 +1515,7 @@ test "SH-152 a child that names an app tool offers that tool alone; a child that
     }.run);
 }
 
-test "SH-153 a child that names an app tool its lane lacks is refused by name" {
+test "SH-166 a child that names an app tool its lane lacks is refused by name" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1532,7 +1532,7 @@ test "SH-153 a child that names an app tool its lane lacks is refused by name" {
     }.run);
 }
 
-test "SH-154 a child names only the app tools its parent offers; a parent that narrows to one refuses the other" {
+test "SH-167 a child names only the app tools its parent offers; a parent that narrows to one refuses the other" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1560,7 +1560,7 @@ test "SH-154 a child names only the app tools its parent offers; a parent that n
     }.run);
 }
 
-test "SH-155 a grandchild's request carries the app tools its root's lane declares" {
+test "SH-168 a grandchild's request carries the app tools its root's lane declares" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1582,7 +1582,7 @@ test "SH-155 a grandchild's request carries the app tools its root's lane declar
     }.run);
 }
 
-test "SH-156 a Session whose lane declares no app set is never stale for its app offer" {
+test "SH-169 a Session whose lane declares no app set is never stale for its app offer" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1598,7 +1598,7 @@ test "SH-156 a Session whose lane declares no app set is never stale for its app
     }.run);
 }
 
-test "SH-158 a detached child shares its lane's app tools, as an attached child does" {
+test "SH-171 a detached child shares its lane's app tools, as an attached child does" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1638,7 +1638,7 @@ test "SH-158 a detached child shares its lane's app tools, as an attached child 
     }.run);
 }
 
-test "SH-159 after an unserved app call settles, the next model request carries the text the model reads" {
+test "SH-172 after an unserved app call settles, the next model request carries the text the model reads" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1672,9 +1672,9 @@ test "SH-159 after an unserved app call settles, the next model request carries 
     }.run);
 }
 
-// SH-157: a model call to an app tool that no app serves yet resolves its Action once, as failed, with the text the
+// SH-170: a model call to an app tool that no app serves yet resolves its Action once, as failed, with the text the
 // model reads; the Action's answer is one content row, and no app call waits on a runner.
-test "SH-157 a model call to an app tool no app serves yet resolves once as failed with the text the model reads" {
+test "SH-170 a model call to an app tool no app serves yet resolves once as failed with the text the model reads" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1698,6 +1698,83 @@ test "SH-157 a model call to an app tool no app serves yet resolves once as fail
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code='failed'", .{binding.operation_id}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.parent_operation_id=?1 AND c.byte_length=?2", .{ binding.operation_id, answer.len }));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+        }
+    }.run);
+}
+
+// SH-160: configure and start_agent resolve a lane's names alike. A Host tool and a lane app tool are accepted and an
+// unknown name is refused by name. The app tool reaches a child through its parent's own tools, so the lane round,
+// not an earlier Host-only check, decides on both paths.
+const lane_declaration = "[{\"name\":\"ask\",\"description\":\"Ask.\",\"input_schema\":{\"type\":\"object\"}}]";
+const LaneCase = struct { name: []const u8, refused: bool };
+const lane_cases = [_]LaneCase{
+    .{ .name = "start_agent", .refused = false },
+    .{ .name = "ask", .refused = false },
+    .{ .name = "nope", .refused = true },
+};
+
+test "SH-160 configure and start_agent resolve a lane's names alike: a Host tool and a lane app tool are accepted, an unknown name is refused" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var key_buffer: [96]u8 = undefined;
+            var text_buffer: [256]u8 = undefined;
+            for (lane_cases, 0..) |lane_case, index| {
+                // The root declares the app tool, then names it once the lane holds it: configure reads the lane on update.
+                var create = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&create.configuration, lane_declaration);
+                create.configuration.tools = try .of(&.{ "find_tools", "start_agent" });
+                const root_reply = try storage.configure(&create, .{});
+                try std.testing.expect(root_reply == .accepted);
+                const root = root_reply.accepted.session.slice();
+                var names: wire_request.ConfigureCommand = .{};
+                try names.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-names-{d}", .{index}));
+                try names.session.set(root);
+                names.configuration.tools = try .of(&.{ "ask", "find_tools", "start_agent" });
+                try std.testing.expect((try storage.configure(&names, .{})) == .accepted);
+
+                // configure: a child of the root names the case's tool on create.
+                var child: wire_request.ConfigureCommand = .{};
+                try child.key.set(try std.fmt.bufPrint(&key_buffer, "sh160-child-{d}", .{index}));
+                child.configuration = try testingAgentSpec(&.{lane_case.name}, "ask");
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(root);
+                const configured = try storage.configure(&child, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, configured.rejected.code);
+                } else try std.testing.expect(configured == .accepted);
+
+                // start_agent refuses an unknown name by name. Its acceptance of a Host or lane name is covered elsewhere (the MCP
+                // missing-tool test starts a child). An app-only name reaches the model's offer, which this branch does not project
+                // yet (pr-b2b does), so this check runs only for the unknown name.
+                if (!lane_case.refused) continue;
+                var start_root_command = try completeConfiguration(try std.fmt.bufPrint(&key_buffer, "sh160-start-root-{d}", .{index}), "", workspace, "model-a");
+                declareAppTools(&start_root_command.configuration, lane_declaration);
+                start_root_command.configuration.tools = try .of(&.{"start_agent"});
+                const start_root_reply = try storage.configure(&start_root_command, .{});
+                try std.testing.expect(start_root_reply == .accepted);
+                const start_root = start_root_reply.accepted.session.slice();
+                var file_buffer: [48]u8 = undefined;
+                try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file_buffer, "sh160-file-{d}", .{index}), try std.fmt.bufPrint(&key_buffer, "sh160-message-{d}", .{index}), start_root, "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const call: TestingCall = .{ .item_id = "lane-call", .name = "start_agent", .encoded_call_id = "lane-call", .decoded_call_id = "lane-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTesting(&storage, &tmp, model, try std.fmt.bufPrint(&key_buffer, "sh160-calls-{d}", .{index}), &.{call});
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var spec = try testingAgentSpec(&.{lane_case.name}, "ask");
+                const started = try storage.startAgent(action.binding, start_root, "read", true, &spec, null, .{});
+                if (lane_case.refused) {
+                    try std.testing.expectEqual(command_domain.AgentStart.failed, started);
+                    const text = try std.fmt.bufPrint(&text_buffer, "spec.tools: {s} is not a known tool (unknown_tool). Nothing was started.", .{lane_case.name});
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                } else try std.testing.expectEqual(command_domain.AgentStart.started, started);
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }

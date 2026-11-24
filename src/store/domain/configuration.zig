@@ -173,11 +173,8 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
-    host_tool_set: *const tool_defs.HostToolSet,
-    served: *const provider_route.Served,
     current: ?*const CurrentConfiguration,
     requested: anytype,
-    creation_provider: ?connection.Name,
 ) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -197,7 +194,6 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, served, provider orelse (if (current) |existing| existing.provider else creation_provider.?), requestedNames(requested))) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
@@ -428,7 +424,10 @@ fn preferences(configuration: *const content_custody.Configuration) configuratio
     };
 }
 
-pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const provider_route.Served, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+/// The early parent boundary that start_agent checks before its lane round: the workspace and provider a child may
+/// not set. Tool and permission authority are not checked here: they need the lane's app records, so the lane round
+/// (validateModel's parent resolution) decides both for configure and start_agent alike.
+pub fn inheritParent(configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
@@ -440,23 +439,6 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, served: *const
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
-        // This early start_agent boundary needs only tool and permission
-        // authority. The selected catalog is read later for model defaults.
-        const resolved = configuration_defaults.resolve(&.{}, .{
-            .creating = true,
-            .parent = .{ .tools = reads.inherited.tools.slice(), .apps = reads.parent_apps.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) },
-            .provider = reads.inherited.provider,
-            .model = configuration.model.value.slice(),
-            .can_read_images = @import("../../os/read_image_file.zig").available,
-            .tools = &configuration.tools,
-            .loaded_tools = &configuration.loaded_tools,
-            .permission_mode = &configuration.permission_mode,
-            .reasoning_effort = &configuration.reasoning_effort,
-            .compaction_trigger = &configuration.compaction_trigger,
-            .preferences = preferences(configuration),
-        });
-        if (toolsRejection(host_tool_set, served, reads.inherited.provider, resolved.tools)) |code| return code;
-        if (resolved.parent_refusal) |failure| break :refusal ParentFailure.from(failure);
         break :refusal null;
     };
     reads.parent_checked = true;
@@ -978,7 +960,7 @@ fn validateLane(a: anytype, request: *const Request, reads: *ConfigurationReads)
     try reads.lane.check();
     reads.lane_tools = reads.lane.view(request.tools.host_tool_set);
     parentApps(reads);
-    if (creating) if (try inheritParent(&reads.lane_tools, request.served, request.configuration, reads)) |code| return .{ .rejected = code };
+    if (creating) if (try inheritParent(request.configuration, reads)) |code| return .{ .rejected = code };
     const creation_provider: ?connection.Name = if (creating) switch (creationCheck(configuration, reads, request.served)) {
         .missing => |missing| {
             reads.missing = missing;
@@ -1021,6 +1003,9 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         connection.Name.parse(configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
     else if (current_configuration) |existing| existing.provider else v.creation_provider.?;
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
+    // Named tools resolve through the lane before their parent authority is judged, so an unknown or unavailable name
+    // is refused by name, as the Host-only path did.
+    if (configuration.tools.state == .value) if (toolsRejection(&reads.lane_tools, request.served, provider, requestedNames(configuration))) |rejection| return .{ .rejected = rejection };
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
         .creating = creating,
         .parent = if (reads.inherits_parent) .{ .tools = reads.inherited.tools.slice(), .apps = reads.parent_apps.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) } else null,
@@ -1043,7 +1028,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     reads.configuration.permission_mode = &reads.defaults.permission_mode;
     reads.configuration.reasoning_effort = &reads.defaults.reasoning_effort;
     reads.configuration.compaction_trigger = &reads.defaults.compaction_trigger;
-    if (configurationBeforeWorkspace(v.model.facts(), &reads.lane_tools, request.served, current_configuration, configuration, v.creation_provider)) |rejection| {
+    if (configurationBeforeWorkspace(v.model.facts(), current_configuration, configuration)) |rejection| {
         return .{ .rejected = rejection };
     }
 
