@@ -1,7 +1,6 @@
 const std = @import("std");
 const execution = @import("execution.zig");
 const Host = @import("server_host.zig").Host;
-const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const store = @import("store.zig");
 const result_fault = @import("result_fault.zig");
 const tool_record = @import("tool_record.zig");
@@ -58,7 +57,7 @@ pub fn fence(host: *Host, phase: []const u8, fault: result_fault.Failure) Delive
     const err = switch (fault) {
         inline else => |value| value,
     };
-    fenceDispatch(host, phase, err);
+    host.lifecycle.fenceDispatch(phase, err);
     return .fenced;
 }
 

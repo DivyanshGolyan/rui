@@ -37,6 +37,8 @@ const image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{
 const bad_image_reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"image\",\"data\":\"not-base64-secret\",\"mimeType\":\"image/png\"}]}}");
 const Case = enum { success, image, image_bad, image_exhausted, image_stop_race, retention_saved, retention_refused, retention_tight, retention_no_bash, retention_settlement_failure, retention_settlement_unlink_failure, two_calls, timeout, down, stop, stop_unsent, shutdown, concurrent };
 
+const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
+
 test "Host MCP forwards schema-only arguments and metadata into a historical continuation" {
     try run(.success);
 }
@@ -170,10 +172,12 @@ fn run(case: Case) !void {
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
     host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(custody[0..(if (case == .concurrent) 2 else 1)]), .mcp_servers = .{ .entries = &servers }, .retention = &queue };
+    var host_parts: TestParts = undefined;
+    host_parts.attach(host, null);
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) host.hooks.failures.insert(.result_before_commit);
     var active: mcp.Calls = .{};
     defer {
-        _ = host.advance(.stopping);
+        _ = host.lifecycle.advance(.stopping);
         active.shutdown(host);
     }
     var action_binding: store.ActionAttemptBinding = undefined;
@@ -212,7 +216,7 @@ fn run(case: Case) !void {
             try expectHere(@src(), storage.stopSession(&stop, .{}) == .accepted);
             // Model a completed image arriving just after the stop committed.
             try std.testing.expectEqual(store.ActionSettlement.Outcome.session_stop, (try settleImageParts(storage, &tmp, stopped_binding)).outcome);
-            _ = host.advance(.stopping);
+            _ = host.lifecycle.advance(.stopping);
             active.shutdown(host);
             try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM content WHERE digest=?1 AND byte_length=?2", .{ store.testing.Blob{ .bytes = &protocol.contentDigest(image_png) }, image_png.len }));
@@ -252,13 +256,13 @@ fn run(case: Case) !void {
             try expectHere(@src(), std.mem.indexOf(u8, other_report, "page payload") != null);
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(other_binding.turn_id, next.turn_id);
-            _ = host.advance(.stopping);
+            _ = host.lifecycle.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
         }
         if (case == .shutdown) {
             try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), context, Context.sent);
-            _ = host.advance(.stopping);
+            _ = host.lifecycle.advance(.stopping);
             active.shutdown(host);
             try expectHere(@src(), try storage.recoverOneUncertainAction(.empty()));
             try expectHere(@src(), !try storage.recoverOneUncertainAction(.empty()));
@@ -302,7 +306,7 @@ fn run(case: Case) !void {
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     if (case == .retention_settlement_failure or case == .retention_settlement_unlink_failure) {
         try std.testing.expect(storage.isFenced());
-        try std.testing.expect(!host.launchAllowed());
+        try std.testing.expect(!host.lifecycle.launchAllowed());
         var filename_buffer: [128]u8 = undefined;
         const filename = try std.fmt.bufPrint(&filename_buffer, "mcp-output-{d}-1.tmp", .{try store.testing.sqlite_only.queryU64(storage, "SELECT action_id FROM action_operation", .{})});
         if (case == .retention_settlement_unlink_failure) {
@@ -324,7 +328,7 @@ fn run(case: Case) !void {
         return;
     }
     if (retention_case) {
-        try std.testing.expect(host.launchAllowed());
+        try std.testing.expect(host.lifecycle.launchAllowed());
         try std.testing.expect(!storage.isFenced());
         try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
         try std.testing.expectEqual(@as(usize, @intFromBool(case == .retention_saved)), queue.occupied());
@@ -348,7 +352,7 @@ fn run(case: Case) !void {
     }
     if (case == .image or case == .image_bad or case == .image_exhausted) {
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expect(host.launchAllowed());
+        try std.testing.expect(host.lifecycle.launchAllowed());
         try std.testing.expect(!storage.isFenced());
         const sql = store.testing.sqlite_only;
         const code = if (case == .image_exhausted) "storage_failed" else "succeeded";
