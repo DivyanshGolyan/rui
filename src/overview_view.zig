@@ -6305,16 +6305,27 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     _ = try step(&views, .{ .conversation = rows[0].reference });
     views.selected = .{ .session = archived.reference };
     try std.testing.expect(views.find(archived.reference).?.listed);
-    _ = try refresh(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
+    const roster_tick = try step(&views, .{ .tick = views.now_ms + list_interval_ms });
+    var roster_requested = false;
+    var head_read: ?ArchivedRead = null;
+    for (roster_tick.slice()) |effect| switch (effect) {
+        .list => {
+            try std.testing.expectEqual(testToken(2), effect.list.since.?);
+            roster_requested = true;
+        },
+        .read_archived => |archived_read| head_read = archived_read,
+        else => {},
+    };
+    try std.testing.expect(roster_requested);
+    _ = try respond(&views, .changed, testToken(3), &.{ rows[0], rows[2] });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
     var newer = rows[0];
     newer.archive_state = .archived;
     newer.archive_seq = 20;
-    var refresh_effects: Effects = .{};
-    readArchived(&views, &refresh_effects, .head);
-    var head_read = refresh_effects.slice()[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
+    const reanchor = head_read orelse return error.TestExpectedEqual;
+    try std.testing.expect(reanchor.from == .head);
+    _ = try step(&views, .{ .archived = .{ .read = reanchor, .page = .{ .rows = &.{newer}, .first = 20, .last = 20, .more_above = false, .more_below = true } } });
     try std.testing.expectEqualStrings(&archived.reference, &views.selected.session);
     try std.testing.expect(views.find(archived.reference) != null);
 
@@ -6334,8 +6345,8 @@ test "SUI-132 overview removal clears activation and arrows re-enter current row
     try std.testing.expect(next_page.items[0] == .read_archived);
     try std.testing.expect(next_page.items[0].read_archived.from == .below);
     try std.testing.expectEqual(@as(u64, 20), next_page.items[0].read_archived.from.below);
-    head_read = next_page.items[0].read_archived;
-    _ = try step(&views, .{ .archived = .{ .read = head_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
+    const below_read = next_page.items[0].read_archived;
+    _ = try step(&views, .{ .archived = .{ .read = below_read, .page = .{ .rows = &.{ middle, tail }, .first = 14, .last = 11, .more_above = false, .more_below = false } } });
     try std.testing.expect(views.selected == .none);
     try std.testing.expectEqualStrings("aaaaaa", &views.conversing.?);
     try expectEffects(&.{}, try submit(&views));
