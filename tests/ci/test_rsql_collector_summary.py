@@ -36,7 +36,7 @@ class CollectorSummaryTest(unittest.TestCase):
             zig.write_text('''#!/usr/bin/env python3
 import os, pathlib, shutil, sys
 args = sys.argv[1:]
-if args[-2:] == ["--summary", "all"]:
+if any(args[index:index + 2] == ["--summary", "all"] for index in range(len(args) - 1)):
     print("compile-step summary", file=sys.stderr)
 prefix = pathlib.Path(args[args.index("--prefix") + 1])
 (prefix / "bin").mkdir(parents=True)
