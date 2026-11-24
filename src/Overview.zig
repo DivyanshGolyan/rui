@@ -3604,7 +3604,7 @@ test "overview pins Settings below update states and feedback without an open ch
         .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } },
         .{ .ended = .{ .how = .{ .upgraded = .{ .version = version, .restarted = true } }, .outcome = .compatible } },
     };
-    for ([_]u16{ 46, 100, 140 }) |width| for ([_]u16{ 10, 30, 40 }) |height| for (runs) |active_run| for ([_]bool{ false, true }) |notice| {
+    for ([_]u16{ 46, 100, 140 }) |width| for ([_]u16{ 10, 24, 25, 30, 40 }) |height| for (runs) |active_run| for ([_]bool{ false, true }) |notice| {
         overview.state.upgrade.run = active_run;
         overview.state.upgrade.available = version;
         overview.state.notice = if (notice) .{ .colour = .quiet, .len = "Copied 3 lines".len } else null;
@@ -3612,11 +3612,13 @@ test "overview pins Settings below update states and feedback without an open ch
         var shown = try rig.shown(width, height);
         defer shown.deinit();
         try std.testing.expect(overview.root.session == null);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(height - 1), "     Settings"));
-        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, height - 2).?.char.grapheme);
+        const content_height = height - @as(u16, if (height <= 24) 0 else 1);
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(content_height - 1), "     Settings"));
+        try std.testing.expectEqualStrings("┄", shown.screen.readCell(0, content_height - 2).?.char.grapheme);
+        if (height > 24) try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(height - 1), " "));
         const at = view.layout(&overview.state);
-        try std.testing.expectEqual(height - 2, at.settings.start);
-        try std.testing.expectEqual(height, at.settings.end);
+        try std.testing.expectEqual(content_height - 2, at.settings.start);
+        try std.testing.expectEqual(content_height, at.settings.end);
         if (notice) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Copied 3 lines") != null);
         if (active_run) |running| if (running.takesEscape() and !notice) try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "esc cancels") != null);
     };
