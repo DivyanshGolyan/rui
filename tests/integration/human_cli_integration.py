@@ -24,7 +24,7 @@ import tty
 import unicodedata
 
 import host_process
-from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
+from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process, wait_for
 from product_defaults import CATALOG, DEFAULTS, compaction_trigger, start_effort
 
 
@@ -58,7 +58,7 @@ def time_limit(milliseconds):
     return f"{milliseconds} ms"
 
 
-from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_process
+from terminal_process import close_pty, answers_to, open_pty, pending_pty_input, spawn, terminal_process
 import model_fixture as fixture
 from session_list_fixture import session_values
 import codex_fixture
@@ -618,7 +618,7 @@ def clipboard_paste_case(*, protocol_only=False):
         os.write(master, frame(b"OK" + prefix))
         if split_prefix and frames:
             os.write(master, frames[0][:1])
-            time.sleep(0.001)
+            wait_for(lambda: pending_pty_input(master) == 0, "terminal consumed the OSC prefix", interval=0.001)
             os.write(master, frames[0][1:])
             frames = frames[1:]
         os.write(master, b"".join(frames) + frame(b"DONE" + prefix))
