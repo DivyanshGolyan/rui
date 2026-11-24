@@ -157,8 +157,9 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     assert current["capabilities"]["bash"] == previous["capabilities"]["bash"], (previous, current)
     # The previous release reports {name: route}; this candidate lists served connections with their route.
     served = {entry["name"]: entry["route"] for entry in current["capabilities"]["connections"]}
-    for name, route in previous["capabilities"]["providers"].items():
-        assert served.get(name, "unserved") == route, (previous, current)
+    before = previous["capabilities"]["providers"]
+    for name in set(before) | set(served):
+        assert served.get(name, "unserved") == before.get(name, "unserved"), (previous, current)
     with os_semantics.unix_stream() as connection:
         connection.settimeout(5)
         connection.connect(str(host_process.store_endpoint(store)))
