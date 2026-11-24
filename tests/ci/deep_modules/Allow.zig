@@ -177,7 +177,7 @@ test "parse reads entries sorted, once each, and skips comments and blank lines"
         \\
         \\tangle b,c
         \\field-leak T.x
-        \\  module-cycle a,b  
+        \\  module-cycle a,b
         \\tangle b,c
         \\
     );

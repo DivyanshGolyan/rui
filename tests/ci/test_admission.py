@@ -671,7 +671,7 @@ class CandidatePlanTest(unittest.TestCase):
         'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
         'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
                                     {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
-        'core owning many fixtures (Mac path)': (['src/client.zig'], {'deep-modules', 
+        'core owning many fixtures (Mac path)': (['src/client.zig'], {'deep-modules',
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',
             'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
