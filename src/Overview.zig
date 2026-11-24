@@ -622,6 +622,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
 
 fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery, focused: bool) view.Input {
     if (focused and delivery.list_origin and delivery.under == .main and !delivery.pasted and input == .key_press) {
+        // Ghostty can send Option-arrows as the same word-motion keys used by the composer.
         switch (keypress.classify(input.key_press)) {
             .edit => |edit| switch (edit) {
                 .word_left => return .{ .action = .collapse_tree },
@@ -656,10 +657,10 @@ test "SUI-140 overview tree key encodings respect list focus" {
         const main: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
         try std.testing.expectEqual(view.Input{ .action = case.action }, listKey(input_event, main, true));
         if (case.alias) {
-            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, main, false));
-            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .main, .pasted = false, .list_origin = false }, true));
-            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .settings, .pasted = false }, true));
-            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .main, .pasted = true }, true));
+            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, main, false));
+            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .main, .pasted = false, .list_origin = false }, true));
+            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .settings, .pasted = false }, true));
+            try std.testing.expectEqual(@as(view.Input, .ignored), listKey(input_event, .{ .under = .main, .pasted = true }, true));
         }
     }
 }
