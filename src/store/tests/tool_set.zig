@@ -996,7 +996,7 @@ test "stop_action effective offer preserves the historical settings limit" {
                                 }
                                 try std.testing.expect(!try page.nextTool(&tool));
                                 if (count == protocol.max_tools and !explicit and loaded_read) {
-                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_offered_list_name_bytes, name_bytes);
+                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_list_name_bytes + "stop_action".len, name_bytes);
                                 }
                             }
                         }
