@@ -477,8 +477,15 @@ pub const Probes = struct {
         return .{ .io = io, .hooks = hooks, .trace_run_ns = nowNs(io) };
     }
 
-    pub fn attachPauseOwner(self: *Probes, owner: *test_pause.PauseController) void {
+    pub fn attachPauseOwner(self: *Probes, owner: ?*test_pause.PauseController) void {
         if (comptime test_pause.enabled) self.pause_owner = owner;
+    }
+
+    /// Reaches the armed test pause `point` with `context`; an unarmed point proceeds at once.
+    pub fn reach(self: *Probes, point: test_pause.Point, context: test_pause.Context) void {
+        if (comptime test_pause.enabled) if (self.pause_owner) |owner| {
+            _ = owner.reach(point, context) catch {};
+        };
     }
 
     /// Opens the observation writer that the harness's fds name, if it names one.
@@ -624,7 +631,7 @@ pub const Probes = struct {
     }
 
     /// Holds retry recovery at its gate, returning the gate path when this call took the hold.
-    pub fn holdRetryRecovery(self: *Probes) ?[]const u8 {
+    fn holdRetryRecovery(self: *Probes) ?[]const u8 {
         if (self.hook_progress.retry_recovery != .initial) return null;
         const path = self.hooks.retry_recovery_gate_path orelse return null;
         if (!testGateActive(path)) return null;
@@ -641,14 +648,41 @@ pub const Probes = struct {
     }
 
     /// Whether the bash cleanup gate is present; null when no cleanup gate is configured.
-    pub fn bashReclaimGatePresent(self: *const Probes) ?bool {
+    fn bashReclaimGatePresent(self: *const Probes) ?bool {
         const path = self.hooks.bash_reclaim_gate_path orelse return null;
         return testGateActive(path);
     }
 
     /// The delay a test hold adds at `point`, 0 when none is configured.
-    pub fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
+    fn pauseDelayMs(self: *const Probes, point: Hooks.Pause) i64 {
         return self.hooks.pauses.get(point).delay_ms;
+    }
+
+    /// Holds `point` for its configured delay, tracing the point once before the wait; no delay returns at once.
+    pub fn holdAt(self: *Probes, point: Hooks.Pause) void {
+        const delay_ms = self.pauseDelayMs(point);
+        if (delay_ms == 0) return;
+        switch (point) {
+            .action_launch => |binding| self.traceAction("prepared_before_handoff", binding),
+            .model_launch => |binding| self.traceOperation("prepared_before_handoff", binding),
+            .action_result => |binding| self.traceAction("sealed_before_settlement", binding),
+            .model_result => |binding| self.traceOperation("sealed_before_settlement", binding),
+        }
+        self.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+    }
+
+    /// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
+    pub fn retryRecovered(self: *Probes) void {
+        const path = self.holdRetryRecovery() orelse return;
+        self.traceSubject("exhausted_retry_recovery_held", "path", path);
+    }
+
+    /// Whether a Bash reclaim waits at its test gate; once the gate is gone, a reclaim nothing attempted traces its release.
+    pub fn bashReclaimHeld(self: *Probes, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
+        const present = self.bashReclaimGatePresent() orelse return false;
+        if (present) return true;
+        if (!attempted) self.traceAction("cleanup_release_observed", binding);
+        return false;
     }
 
     pub inline fn traceSubject(self: *Probes, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
@@ -1190,31 +1224,6 @@ test "CM-54 allowance diagnostic delivers bounded typed records and reports loss
     try std.testing.expectEqualStrings("rui: allowance source_account=unconfirmed provider=codex turn=1 operation=2 attempt=3 status=200 observed_at=123 delivery=completion prior_loss=true primary_used=9.5e0 primary_minutes=missing primary_reset_at=invalid secondary_used=missing secondary_minutes=missing secondary_reset_at=missing\n", buffer[0..@intCast(count)]);
 }
 
-pub fn pause(host: *Host, point: Hooks.Pause) void {
-    const delay_ms = host.probes.pauseDelayMs(point);
-    if (delay_ms == 0) return;
-    switch (point) {
-        .action_launch => |binding| host.probes.traceAction("prepared_before_handoff", binding),
-        .model_launch => |binding| host.probes.traceOperation("prepared_before_handoff", binding),
-        .action_result => |binding| host.probes.traceAction("sealed_before_settlement", binding),
-        .model_result => |binding| host.probes.traceOperation("sealed_before_settlement", binding),
-    }
-    host.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
-}
-
-/// Retry recovery that the test gate holds back: the recovery waits, traced once, while its gate is present.
-pub fn retryRecovered(host: *Host) void {
-    const path = host.probes.holdRetryRecovery() orelse return;
-    host.probes.traceSubject("exhausted_retry_recovery_held", "path", path);
-}
-
-pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, attempted: bool) bool {
-    const present = host.probes.bashReclaimGatePresent() orelse return false;
-    if (present) return true;
-    if (!attempted) host.probes.traceAction("cleanup_release_observed", binding);
-    return false;
-}
-
 pub fn testGateActive(path: []const u8) bool {
     // Presence gates may be FIFOs; opening must not wait for a writer during
     // the release/unlink race. No descriptor survives this synchronous probe.
@@ -1248,21 +1257,21 @@ fn appendOptionalSigned(
 }
 
 pub const SettlementTrace = struct {
-    host: *Host,
+    probes: *Probes,
     binding: store_module.AttemptBinding,
 
-    pub fn init(host: *Host, binding: store_module.AttemptBinding) SettlementTrace {
-        return .{ .host = host, .binding = binding };
+    pub fn init(probes: *Probes, binding: store_module.AttemptBinding) SettlementTrace {
+        return .{ .probes = probes, .binding = binding };
     }
 
     pub fn storeTrace(self: *SettlementTrace) ?store_module.SettlementTrace {
-        if (!self.host.probes.hooks.phase_trace) return null;
+        if (!self.probes.hooks.phase_trace) return null;
         return .{ .context = self, .mark_fn = markStore };
     }
 
     fn markStore(context: *anyopaque, phase: store_module.SettlementTracePhase) void {
         const self: *SettlementTrace = @ptrCast(@alignCast(context));
-        self.host.probes.traceOperation(switch (phase) {
+        self.probes.traceOperation(switch (phase) {
             .lock_requested => "settlement_lock_requested",
             .lock_acquired => "settlement_lock_acquired",
             .transaction_active => "settlement_transaction_active",
@@ -1315,24 +1324,15 @@ test "required Bash observations publish while optional stderr custody is held" 
         try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
         var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
         defer observation.close();
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
         var probes: Probes = .{ .io = std.testing.io, .hooks = .{ .phase_trace = true }, .observation = observation };
-        host.probes = &probes;
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
         try std.testing.expect(stderr.tryAcquire());
         defer stderr.release();
         var count: u64 = 0;
         inline for (.{ "cleanup_started", "cleanup_release_observed", "cleanup_completed", "inspection_captured", "bash_leader_observed_with_open_pipes", "control_store_complete" }) |phase| {
             if (std.mem.eql(u8, phase, "inspection_captured") or std.mem.eql(u8, phase, "control_store_complete")) {
-                host.probes.traceSubject(phase, "command_key", "required");
+                probes.traceSubject(phase, "command_key", "required");
             } else {
-                host.probes.traceAction(phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
+                probes.traceAction(phase, .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 });
             }
             const selected = if (plan == .bash_cleanup)
                 std.mem.startsWith(u8, phase, "cleanup_") or std.mem.eql(u8, phase, "inspection_captured")
@@ -1357,154 +1357,310 @@ test "required Bash observations publish while optional stderr custody is held" 
     }
 }
 
-test "effect launch gate rechecks every Host phase" {
+fn tempStorePath(tmp: *std.testing.TmpDir, out: []u8) ![]const u8 {
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    return std.fmt.bufPrint(out, "{s}/store", .{root});
+}
+
+/// Runs `body` with Probes on `io` built from `hooks` and a test observation pipe for `plan`; `body` gets the pipe's read end.
+fn withTraceSink(io: std.Io, plan: TestObservation.Plan, hooks: Hooks, dir: std.Io.Dir, body: *const fn (*Probes, c_int, std.Io.Dir) anyerror!void) !void {
+    const native = @import("posix");
+    var descriptors: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+    defer _ = native.close(descriptors[0]);
+    for (descriptors) |fd| {
+        try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+    }
+    const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+    defer _ = native.fclose(backing);
+    try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+    var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), plan, 37);
+    defer observation.close();
+    // Holding the stderr lock keeps traces off stderr; the observation pipe still records each one.
+    try std.testing.expect(stderr.tryAcquire());
+    defer stderr.release();
+    var traced = hooks;
+    traced.phase_trace = true;
+    var probes: Probes = .{ .io = io, .hooks = traced, .observation = observation };
+    try body(&probes, descriptors[0], dir);
+}
+
+/// Counts the trace frames written since the last count, draining the pipe; every frame must name `phase`.
+/// Each frame carries its own length prefix, so frames that one read returns together are counted apart,
+/// and a frame naming any other phase fails the count instead of being drained unseen.
+fn countTraces(read_fd: c_int, phase: []const u8) error{TestUnexpectedResult}!usize {
+    const native = @import("posix");
+    var count: usize = 0;
+    var bytes: [4 * TestObservation.record_bytes]u8 = undefined;
+    var held: usize = 0;
+    while (true) {
+        const length = native.read(read_fd, bytes[held..].ptr, bytes.len - held);
+        if (length > 0) held += @intCast(length);
+        var start: usize = 0;
+        while (held - start >= 2) {
+            const frame = std.mem.readInt(u16, bytes[start..][0..2], .little);
+            if (frame < 2 or held - start < frame) break;
+            if (std.mem.indexOf(u8, bytes[start..][0..frame], phase) == null) return error.TestUnexpectedResult;
+            count += 1;
+            start += frame;
+        }
+        std.mem.copyForwards(u8, bytes[0 .. held - start], bytes[start..held]);
+        held -= start;
+        if (length <= 0) {
+            std.debug.assert(held == 0);
+            return count;
+        }
+    }
+}
+
+/// Controlled sleep for the hold rows: records the requested wait and the traces of the row's phase written before it, without waiting.
+const HoldSleep = struct {
+    var read_fd: c_int = -1;
+    var phase: []const u8 = "";
+    var requested: ?std.Io.Timeout = null;
+    var traced_before: usize = 0;
+
+    fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        requested = timeout;
+        traced_before = countTraces(read_fd, phase) catch std.math.maxInt(usize);
+    }
+};
+
+const HoldRow = struct { point: Hooks.Pause, delay_ms: i64, phase: []const u8 };
+var hold_row: HoldRow = undefined;
+
+fn holdCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    _ = dir;
+    HoldSleep.read_fd = read_fd;
+    HoldSleep.phase = hold_row.phase;
+    HoldSleep.requested = null;
+    HoldSleep.traced_before = 0;
+    probes.holdAt(hold_row.point);
+    if (hold_row.delay_ms == 0) {
+        // An unconfigured hold neither traces nor waits.
+        try std.testing.expect(HoldSleep.requested == null);
+    } else {
+        // A configured hold traces once, then asks for exactly its delay.
+        try std.testing.expectEqual(@as(usize, 1), HoldSleep.traced_before);
+        const requested = HoldSleep.requested orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(i96, hold_row.delay_ms) * std.time.ns_per_ms, requested.duration.raw.nanoseconds);
+        try std.testing.expectEqual(std.Io.Clock.awake, requested.duration.clock);
+    }
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, hold_row.phase));
+}
+
+fn retryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    probes.retryRecovered();
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try std.testing.expect(probes.releaseRetryRecovery());
+    try dir.deleteFile(std.testing.io, "retry-gate");
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    // A released recovery is not held again, even when the gate returns.
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+    try dir.deleteFile(std.testing.io, "retry-gate");
+}
+
+fn unconfiguredRetryCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "retry-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "retry-gate") catch {};
+    probes.retryRecovered();
+    try std.testing.expect(!probes.releaseRetryRecovery());
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "exhausted_retry_recovery_held"));
+}
+
+fn unconfiguredBashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    defer dir.deleteFile(std.testing.io, "bash-gate") catch {};
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+}
+
+fn bashCase(probes: *Probes, read_fd: c_int, dir: std.Io.Dir) anyerror!void {
+    const binding: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    try dir.writeFile(std.testing.io, .{ .sub_path = "bash-gate", .data = "" });
+    try std.testing.expect(probes.bashReclaimHeld(binding, false));
+    try std.testing.expect(probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+    try dir.deleteFile(std.testing.io, "bash-gate");
+    try std.testing.expect(!probes.bashReclaimHeld(binding, true));
+    try std.testing.expectEqual(@as(usize, 0), try countTraces(read_fd, "cleanup_release_observed"));
+    try std.testing.expect(!probes.bashReclaimHeld(binding, false));
+    try std.testing.expectEqual(@as(usize, 1), try countTraces(read_fd, "cleanup_release_observed"));
+}
+
+test "SH-128 each configured test hold traces once then asks for its delay, unconfigured holds and gates do nothing, and the retry and Bash reclaim gates hold while present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var retry_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var bash_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var hold_vtable = std.testing.io.vtable.*;
+    hold_vtable.sleep = HoldSleep.sleep;
+    var hold_io = std.testing.io;
+    hold_io.vtable = &hold_vtable;
+    const action: store_module.ActionAttemptBinding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 };
+    const model: store_module.AttemptBinding = .{ .turn_id = 4, .operation_id = 5, .attempt_ordinal = 6 };
+    for ([_]i64{ 0, 7 }) |delay_ms| {
+        for ([_]HoldRow{
+            .{ .point = .{ .action_launch = action }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .model_launch = model }, .delay_ms = delay_ms, .phase = "prepared_before_handoff" },
+            .{ .point = .{ .action_result = action }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+            .{ .point = .{ .model_result = model }, .delay_ms = delay_ms, .phase = "sealed_before_settlement" },
+        }) |row| {
+            hold_row = row;
+            var hooks: Hooks = .{};
+            hooks.pauses.getPtr(std.meta.activeTag(row.point)).delay_ms = row.delay_ms;
+            try withTraceSink(hold_io, .control, hooks, tmp.dir, holdCase);
+        }
+    }
+    try withTraceSink(std.testing.io, .dispatch, .{}, tmp.dir, unconfiguredRetryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{}, tmp.dir, unconfiguredBashCase);
+    try withTraceSink(std.testing.io, .dispatch, .{ .retry_recovery_gate_path = try std.fmt.bufPrint(&retry_buffer, "{s}/retry-gate", .{root}) }, tmp.dir, retryCase);
+    try withTraceSink(std.testing.io, .bash_cleanup, .{ .bash_reclaim_gate_path = try std.fmt.bufPrint(&bash_buffer, "{s}/bash-gate", .{root}) }, tmp.dir, bashCase);
+}
+
+test "SH-124 Host phases only move forward and the phase readers follow them" {
+    for (std.enums.values(Phase)) |start| {
+        for (std.enums.values(Phase)) |target| {
+            errdefer std.debug.print("phases: {t} then {t}\n", .{ start, target });
+            var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+            try std.testing.expectEqual(Phase.open, lifecycle.advance(start));
+            try std.testing.expectEqual(start, lifecycle.advance(target));
+            const later = if (@backingInt(target) > @backingInt(start)) target else start;
+            // Together the three readers name the phase: open alone launches, stopping alone stops,
+            // and ending or stopping ends execution.
+            try std.testing.expectEqual(later == .open, lifecycle.launchAllowed());
+            try std.testing.expectEqual(later == .stopping, lifecycle.stopping());
+            try std.testing.expectEqual(later == .ending or later == .stopping, lifecycle.executionEnding());
+        }
+    }
+}
+
+test "SH-125 an effect launch runs only while open, is refused in every other phase, and releases its lock after a failed launch" {
     const Launch = struct {
         fn run(calls: *usize) !void {
             calls.* += 1;
         }
-    };
-    for (std.enums.values(Phase)) |phase| {
-        var host = Host{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .lease = undefined,
-            .store = undefined,
-        };
-        var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(host.lifecycle.launchAllowed());
-        _ = host.lifecycle.advance(phase);
-        var calls: usize = 0;
-        if (phase == .open) {
-            try host.lifecycle.withEffectLaunch(&calls, Launch.run);
-            try std.testing.expectEqual(@as(usize, 1), calls);
-        } else {
-            try std.testing.expectError(error.HostDispatchSuppressed, host.lifecycle.withEffectLaunch(&calls, Launch.run));
-            try std.testing.expectEqual(@as(usize, 0), calls);
-        }
-    }
-}
 
-test "Host phases only move forward" {
-    for (std.enums.values(Phase)) |start| {
-        for (std.enums.values(Phase)) |target| {
-            var host = Host{
-                .io = std.testing.io,
-                .allocator = std.testing.allocator,
-                .lease = undefined,
-                .store = undefined,
-            };
-            var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-            host.lifecycle = &host_lifecycle;
-            try std.testing.expectEqual(Phase.open, host.lifecycle.advance(start));
-            try std.testing.expectEqual(start, host.lifecycle.advance(target));
-            const later = if (@backingInt(target) > @backingInt(start)) target else start;
-            try std.testing.expectEqual(later, host.lifecycle.phase.load(.acquire));
-            try std.testing.expectEqual(later == .open, host.lifecycle.launchAllowed());
-            try std.testing.expectEqual(later == .stopping, host.lifecycle.stopping());
-            try std.testing.expectEqual(later == .ending or later == .stopping, host.lifecycle.executionEnding());
-        }
-    }
-}
-
-test "effect launch gate releases its mutex after native failure" {
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-    };
-    var host_lifecycle = Lifecycle.init(host.io, undefined, false, null);
-    host.lifecycle = &host_lifecycle;
-    const Launch = struct {
         fn fail(calls: *usize) !void {
             calls.* += 1;
             return error.TestLaunchFailure;
         }
-
-        fn succeed(calls: *usize) !void {
-            calls.* += 1;
-        }
     };
+    const rows = [_]struct { phase: Phase, runs: bool }{
+        .{ .phase = .open, .runs = true },
+        .{ .phase = .fenced, .runs = false },
+        .{ .phase = .ending, .runs = false },
+        .{ .phase = .stopping, .runs = false },
+    };
+    for (rows) |row| {
+        errdefer std.debug.print("phase: {t}\n", .{row.phase});
+        var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
+        _ = lifecycle.advance(row.phase);
+        try std.testing.expectEqual(row.runs, lifecycle.launchAllowed());
+        var calls: usize = 0;
+        if (row.runs) {
+            try lifecycle.withEffectLaunch(&calls, Launch.run);
+        } else {
+            try std.testing.expectError(error.HostDispatchSuppressed, lifecycle.withEffectLaunch(&calls, Launch.run));
+        }
+        try std.testing.expectEqual(@as(usize, if (row.runs) 1 else 0), calls);
+    }
+    // A launch that fails still releases the launch lock for the next one.
+    var lifecycle = Lifecycle.init(std.testing.io, undefined, false, null);
     var calls: usize = 0;
-    try std.testing.expectError(error.TestLaunchFailure, host.lifecycle.withEffectLaunch(&calls, Launch.fail));
-    try host.lifecycle.withEffectLaunch(&calls, Launch.succeed);
+    try std.testing.expectError(error.TestLaunchFailure, lifecycle.withEffectLaunch(&calls, Launch.fail));
+    try lifecycle.withEffectLaunch(&calls, Launch.run);
     try std.testing.expectEqual(@as(usize, 2), calls);
 }
 
-test "an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
+test "SH-126 an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    const path = try tempStorePath(&tmp, &path_buffer);
     for (std.enums.values(Phase)) |before| {
         errdefer std.debug.print("phase before the ask: {t}\n", .{before});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        _ = host.lifecycle.advance(before);
+        var lifecycle = Lifecycle.init(io, &lease, false, null);
+        _ = lifecycle.advance(before);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        // A stop asked while already stopping changes nothing.
         const stopped = before != .stopping;
-        try std.testing.expectEqual(stopped, host.lifecycle.stopAsked());
-        try std.testing.expect(host.lifecycle.stopping());
+        try std.testing.expectEqual(stopped, lifecycle.stopAsked());
+        try std.testing.expect(lifecycle.stopping());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
-        try std.testing.expect(!host.lifecycle.stopAsked());
+        try std.testing.expect(!lifecycle.stopAsked());
         try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
     }
 }
 
-test "a draining stop holds new Turns, only tightens, and records how it ended" {
+test "SH-127 a draining stop holds new Turns, only tightens, outlives an operator release, and records how it ended" {
     const io = std.testing.io;
+    // The Lifecycle reads a fixed awake clock, so every deadline is exact.
+    const Clock = struct {
+        const at_ns: i96 = 5 * std.time.ns_per_s;
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
+            return .fromNanoseconds(at_ns);
+        }
+    };
+    var clock_vtable = std.testing.io.vtable.*;
+    clock_vtable.now = Clock.now;
+    var clock_io = std.testing.io;
+    clock_io.vtable = &clock_vtable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
-    const host_drain_test = @import("host_drain.zig");
+    const path = try tempStorePath(&tmp, &path_buffer);
     // How the drain ends: the execution owner's judgement, or a plain stop first.
-    for ([_]?host_drain_test.Outcome{ .finished, .deadline, null }) |ending| {
+    for ([_]?host_drain.Outcome{ .finished, .deadline, null }) |ending| {
         errdefer std.debug.print("ending: {?t}\n", .{ending});
         var lease = try platform.StoreLease.acquire(io, path);
         defer lease.release();
         try lease.prepareForServing(false);
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
-        var host_lifecycle = Lifecycle.init(host.io, &lease, false, null);
-        host.lifecycle = &host_lifecycle;
-        try std.testing.expect(!host.lifecycle.turnsHeld());
-        const first = host.lifecycle.askStop(try .seconds(60));
-        try std.testing.expect(first == .drain and first.drain.changed);
-        try std.testing.expect(host.lifecycle.turnsHeld() and !host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Record.draining, platform.StoreLease.stopRecord(io, path));
+        var lifecycle = Lifecycle.init(clock_io, &lease, false, null);
+        try std.testing.expect(!lifecycle.turnsHeld());
+        const first = lifecycle.askStop(try .seconds(60));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + 60 * std.time.ns_per_s, .changed = true } }, first);
+        try std.testing.expect(lifecycle.turnsHeld() and !lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Record.draining, platform.StoreLease.stopRecord(io, path));
         // A longer repeat leaves the deadline; a shorter one brings it in.
-        const longer = host.lifecycle.askStop(try .seconds(600));
-        try std.testing.expectEqual(host_drain_test.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
-        const shorter = host.lifecycle.askStop(try .seconds(1));
-        try std.testing.expect(shorter == .drain and shorter.drain.changed and shorter.drain.until_ns < first.drain.until_ns);
-        try std.testing.expectEqual(shorter.drain.until_ns, host.lifecycle.drainUntil().?);
+        const longer = lifecycle.askStop(try .seconds(600));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = first.drain.until_ns, .changed = false } }, longer);
+        const shorter = lifecycle.askStop(try .seconds(1));
+        try std.testing.expectEqual(host_drain.Ask{ .drain = .{ .until_ns = Clock.at_ns + std.time.ns_per_s, .changed = true } }, shorter);
+        try std.testing.expectEqual(shorter.drain.until_ns, lifecycle.drainUntil().?);
         // The operator's release does not end a drain's hold.
-        host.lifecycle.setTurnsPaused(false);
-        try std.testing.expect(host.lifecycle.turnsHeld());
+        lifecycle.setTurnsPaused(false);
+        try std.testing.expect(lifecycle.turnsHeld());
         if (ending) |outcome| {
-            try std.testing.expect(host.lifecycle.finishDrain(outcome));
-            try std.testing.expectEqual(host_drain_test.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.stopAsked());
+            try std.testing.expect(lifecycle.finishDrain(outcome));
+            try std.testing.expectEqual(host_drain.Record.of(outcome), platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.stopAsked());
         } else {
-            try std.testing.expect(host.lifecycle.stopAsked());
-            try std.testing.expectEqual(host_drain_test.Record.superseded, platform.StoreLease.stopRecord(io, path));
-            try std.testing.expect(!host.lifecycle.finishDrain(.finished));
+            try std.testing.expect(lifecycle.stopAsked());
+            try std.testing.expectEqual(host_drain.Record.superseded, platform.StoreLease.stopRecord(io, path));
+            try std.testing.expect(!lifecycle.finishDrain(.finished));
         }
-        try std.testing.expect(host.lifecycle.stopping());
-        try std.testing.expectEqual(host_drain_test.Ask.already_stopping, host.lifecycle.askStop(try .seconds(60)));
+        try std.testing.expect(lifecycle.stopping());
+        try std.testing.expectEqual(host_drain.Ask.already_stopping, lifecycle.askStop(try .seconds(60)));
         try std.testing.expectEqual(platform.StoreLease.LastStop.asked, platform.StoreLease.lastStop(io, path));
     }
 }

@@ -462,7 +462,8 @@ test "EXR-97 settle maps each Resolution to one Delivered outcome, and a fenced 
                 try std.testing.expect(!fx.stopping());
             },
             .result => {
-                const retained = try tool_result.Result.create(&fx.host, fx.selected.action_id, tool_record.Runner.read_image.resultProfile(false));
+                const results: tool_result.Results = .{ .allocator = fx.host.allocator, .io = fx.host.io, .retention = fx.host.retention };
+                const retained = try results.create(fx.selected.action_id, tool_record.Runner.read_image.resultProfile(false));
                 try std.testing.expectEqual(Delivered.delivered, attempt.settle(.{ .result = .{ .code = .succeeded, .value = .{ .text = "answer" }, .retained = retained } }));
                 retained.destroy();
                 try fx.expectResolved("succeeded", null);
