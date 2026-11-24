@@ -47,6 +47,7 @@ if __name__ == "__main__":
     os.execvp(sys.argv[2], sys.argv[2:])
 
 import atexit
+import contextlib
 from contextlib import contextmanager
 import http.client
 import http.server
@@ -57,6 +58,7 @@ import hashlib
 import io
 import json
 import mmap
+import os_semantics
 import pathlib
 import re
 import select
@@ -483,6 +485,67 @@ def store_endpoint(store):
     """
     digest = hashlib.sha256(str(pathlib.Path(store).resolve()).encode()).hexdigest()[:32]
     return pathlib.Path(f"/tmp/rui-{os.geteuid()}") / digest / "rui.sock"
+
+
+@contextmanager
+def claimed_endpoint(path, deadline):
+    """Hold the interface directory's flock while the caller serves the socket at path.
+
+    A Host serves from D/rui.sock while it holds an exclusive flock on D itself, and a
+    starting Host may remove a derived D whose lock is free. So a fake endpoint binds
+    inside this scope, never before it. On exit the socket is unlinked, D is removed if
+    this scope created it and it is empty, and the lock is released.
+    """
+    path = pathlib.Path(path)
+    directory = path.parent
+    made = False
+    acquired = None
+
+    def claim():
+        # One attempt: the held D descriptor, or None after closing every fd it opened.
+        nonlocal made, acquired
+        try:
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            try:
+                directory.mkdir(mode=0o700)
+                made = True
+            except FileExistsError:
+                pass
+            return None
+        if not os_semantics.try_lock(fd):
+            os.close(fd)
+            return None
+        try:
+            named = os.stat(directory, follow_symlinks=False).st_ino
+        except FileNotFoundError:
+            named = None
+        if named != os.fstat(fd).st_ino:
+            os.close(fd)
+            return None
+        acquired = fd
+        return fd
+
+    try:
+        lock_fd = wait_for(claim, "interface directory lock", deadline=deadline,
+                           drain=False, ready=lambda fd: fd is not None)
+    except WaitTimeout as error:
+        # wait_for can time out just after claim() succeeded; that fd is not returned, so close it here.
+        if acquired is not None:
+            os.close(acquired)
+        raise TimeoutError("interface directory is in use") from error
+    try:
+        path.unlink(missing_ok=True)
+        yield
+    finally:
+        dispose_all(lambda: path.unlink(missing_ok=True),
+                    lambda: _remove_empty_directory(directory) if made else None,
+                    lambda: os.close(lock_fd))
+
+
+def _remove_empty_directory(directory):
+    with contextlib.suppress(OSError):
+        directory.rmdir()
 
 
 @contextmanager

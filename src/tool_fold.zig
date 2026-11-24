@@ -4,10 +4,7 @@ const protocol = @import("protocol.zig");
 
 pub const heading_uri = "rui-tool";
 pub const row_uri = "rui-tool-row";
-pub const exit_uri = "rui-tool-exit";
 pub const row_marker = Text.link_open ++ row_uri ++ Text.link_end ++ Text.link_close;
-// A trusted heading field; the viewport retains its role instead of parsing visible text.
-pub const exit_open = Text.link_open ++ exit_uri ++ Text.link_end;
 pub const output_uri = "rui-tool-output";
 pub const more_uri = "rui-tool-more";
 pub const heading_marker = Text.link_open ++ heading_uri ++ Text.link_end ++ Text.link_close;

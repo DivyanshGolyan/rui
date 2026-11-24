@@ -25,6 +25,8 @@ pub const Key = enum {
     shift_tab,
     shift_up,
     shift_down,
+    alt_left,
+    alt_right,
     page_up,
     page_down,
     home,
@@ -121,6 +123,7 @@ pub const ReferenceInput = union(enum) {
     enter,
     newline,
     slash,
+    paste_image,
 };
 
 /// The app's one reference list, in pairs across a fitting panel. Every row
@@ -141,10 +144,12 @@ pub const list = [_]Reference{
     .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    .{ .key = "←→", .meaning = "fold tree · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "←→", .meaning = "open chat · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "alt+←→", .meaning = "fold / expand tree", .keys = &.{ .{ .key = .alt_left }, .{ .key = .alt_right } } },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
+    .{ .key = "ctrl+v", .meaning = "paste image", .keys = &.{.paste_image} },
     .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
     .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
@@ -179,7 +184,7 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
                 if (!bound.contains(key)) return .unbound_row;
                 shown.insert(key);
             },
-            .enter, .newline, .slash => {
+            .enter, .newline, .slash, .paste_image => {
                 const tag = std.meta.activeTag(input);
                 if (other_inputs.contains(tag)) return .duplicate_key;
                 other_inputs.insert(tag);
@@ -217,7 +222,6 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 16), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
@@ -257,11 +261,22 @@ test "every keys reference row names its input including non-table input" {
         empty[index].keys = &.{};
         try std.testing.expectEqual(@as(?ListError, .empty_row), referenceError(&empty, .{bindable}));
     }
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).enter, std.meta.activeTag(list[0].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).newline, std.meta.activeTag(list[2].keys[0]));
-    try std.testing.expectEqual(std.meta.Tag(ReferenceInput).slash, std.meta.activeTag(list[11].keys[0]));
-    for ([_]usize{ 0, 2, 11 }) |index| {
+    for ([_]struct { key: []const u8, input: ReferenceInput }{
+        .{ .key = "enter", .input = .enter },
+        .{ .key = "⇧enter", .input = .newline },
+        .{ .key = "ctrl+v", .input = .paste_image },
+        .{ .key = "/", .input = .slash },
+    }) |expected| {
+        const index = for (list, 0..) |row, at| {
+            if (std.mem.eql(u8, expected.key, row.key)) break at;
+        } else return error.MissingReferenceRow;
+        try std.testing.expectEqual(expected.input, list[index].keys[0]);
         const duplicate = list ++ .{list[index]};
         try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
     }
+    const option = for (list) |row| {
+        if (std.mem.eql(u8, "alt+←→", row.key)) break row;
+    } else return error.MissingReferenceRow;
+    try std.testing.expectEqualStrings("fold / expand tree", option.meaning);
+    try std.testing.expectEqualSlices(ReferenceInput, &.{ .{ .key = .alt_left }, .{ .key = .alt_right } }, option.keys);
 }

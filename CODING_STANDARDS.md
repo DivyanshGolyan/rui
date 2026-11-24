@@ -41,7 +41,7 @@ Each listed contract has one owning enforcement; change the owner and its check 
 | [Stable installation and activation](docs/contracts/store.md#store-format-and-upgrades) | `Installation` alone publishes complete managed builds; the local upgrade coordinator composes separate publication and exact-instance Host lifecycle outcomes. Shell installers share the native publication and PATH owners, then invoke the sequential restart-all coordinator, which reuses HostLifecycle rather than owning launch or exact-stop policy. | `upgrade-integration` exercises real CLI, both PTY/tmux screens, cancellation and exact pinned activation; focused native owner tests and both installer suites check final eligibility, ordering and reporting; restart-all cases cover two Stores, already-current Hosts, stale/unreadable sockets and explained application-owned skips. |
 | [Shared Session rules](CODING_STANDARDS.md#ownership-and-transitions) | `tests/ci/client_locality.py` scans client production sources for named Host rules; its existing exceptions carry their removal issues and only shrink against trusted `origin/main`. | `test_client_locality.py` tests the scan and ratchet; prepush and CI policy run the gate. |
 | [Caller diagnostics](docs/contracts/cli.md#help-and-prerequisites) | `caller_error.of`, its catalog and invocation-owned witnesses classify CLI failures; `tests/ci/caller_errors.py` inventories CLI-owned production errors and ratchets pending causes against the same scoped trusted-main inventory. | `test_caller_errors.py` rejects pending growth, raw caller error names and unmapped errors in CLI-owned sources, without catalog coupling to Host-internal owners; prepush and CI policy run the gate. |
-| [Host stack budget](CODING_STANDARDS.md#host-stacks) | `tests/ci/stack_frames.py` and [stack_frames.json](tests/ci/stack_frames.json) own the ReleaseSafe frame budget, each Host thread's chain ceiling and the shrink-only exceptions. | `stack-frames` runs in `check`. `test_stack_frames.py` self-tests the gate and fails when an exception or ceiling grows past the trusted `origin/main` copy; the policy job runs it with the other `tests/ci` unittests. |
+| Per-agent Host memory | `tests/ci/host_memory.py` owns `PER_AGENT_BUDGET` and its verdict over one Host's 100 -> 1,000 waiting-agent Private_Dirty slope, measured on the release archive | `host-memory` runs in Promote's qualification tier only (the `memory` job), never on a PR; `test_host_memory.py` tests the verdict and the table in the policy job. |
 | [Primary failure and mandatory disposal](CODING_STANDARDS.md#evidence) | Shared process, held-endpoint, Control and Bash disposal owners attempt every cleanup and keep the original failure primary. | `host_process_test.py` injects disposal and retention failures; `transport_h2_integration_test.py` drives body/cleanup fault pairs and successful-body cleanup failure. Existing build targets run both. |
 
 ## Engineering
@@ -166,7 +166,7 @@ On Host threads:
   Name a big field's small parts instead, as in `.{ .workspace = .{ .len = 0 } }`.
 - Rare work with scratch of its own (a trace, a diagnostic line, an error envelope, startup) is a `noinline` function, so the scratch stays off its caller's frame.
 
-`stack-frames` enforces the frame budget ([canonical gates](docs/verification/gates.md#canonical-gates)).
+Review enforces these rules; the Host's fixed stack cost shows in the Empty Host row of each release's memory table.
 
 ## Review
 
@@ -233,9 +233,9 @@ Record the evidence's revision or tree and explain relevant changes since it ran
 Rerun evidence invalidated by semantic changes or the final integration of changed paths, not by a commit, push or review round alone.
 A new TUI interaction still needs the independent plain-PTY journey in [landing](docs/agents/landing.md#publish-and-merge); compilation and CI do not demonstrate it.
 
-Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
+Ready CI owns selected broad unit and integration tests, Mac checks, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
 `python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
-It adds the CI policy suite with the same unchanged-input self-check skips, development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
+It adds the CI policy suite with the same unchanged-input self-check skips, development targets, Mac typechecking, unfiltered unit compilation and selected reachable local MySQL checks.
 UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
 Use a full composed suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) only to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` requires `RUI_CI_RED=<run or issue>` for those commands.

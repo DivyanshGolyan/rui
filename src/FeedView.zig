@@ -38,6 +38,7 @@ drawn: Drawn = .{},
 pub const Handler = struct {
     userdata: *anyopaque,
     on_open: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
+    on_external: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, resident.Point) anyerror!void = null,
@@ -60,8 +61,11 @@ const Purpose = union(enum) {
     copy,
     quote: struct { target: SessionInput.Insertion, frame: QuoteFrame },
 };
+const LinkFrame = struct { quote: QuoteFrame, visible: Feed.Visible };
+const LinkClick = @import("answer_link_click.zig").Click(resident.Point, Cell, LinkFrame);
 const Selection = struct {
     purpose: Purpose = .copy,
+    link: LinkClick = .{},
     press: Cell,
     anchor: Spot,
     head: Spot,
@@ -78,7 +82,10 @@ const Drawn = struct {
     pad: u32 = 0,
     width: u16 = 0,
     height: u16 = 0,
+    visible: Feed.Visible = .{ .first = 0 },
+    links: []const LinkRegion = &.{},
 };
+const LinkRegion = struct { rect: Hover.Rect, point: resident.Point };
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw, .eventHandler = event };
@@ -234,6 +241,49 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), line) }).spot(col));
 }
 
+fn linkHit(self: *const Self, at: Cell) ?LinkClick.Hit {
+    if (at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
+    for (self.drawn.links) |link| {
+        if (!link.rect.contains(@intCast(at.col), @intCast(at.row))) continue;
+        const visible = self.anchor.visible(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height);
+        if (!std.meta.eql(self.drawn.quote, self.quoteFrame()) or !std.meta.eql(self.drawn.visible, visible)) return null;
+        return .{ .target = link.point, .freshness = .{ .quote = self.drawn.quote, .visible = self.drawn.visible } };
+    }
+    return null;
+}
+
+fn drawnLinks(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
+    const handler = self.handler orelse return;
+    if (handler.on_external == null or surface.size.width == 0) return;
+    var links: std.ArrayList(LinkRegion) = .empty;
+    const width = surface.size.width;
+    for (0..surface.size.height) |row| {
+        const cells = surface.buffer[row * width ..][0..width];
+        var col: usize = 0;
+        var previous_uri: []const u8 = "";
+        while (col < width) {
+            const cell = cells[col];
+            const end = @min(@as(usize, width), col + @max(1, cell.char.width));
+            defer col = end;
+            if (cell.link.uri.len == 0) continue;
+            const offset = self.window.document.cellOffset(cell) orelse continue;
+            if (previous_uri.ptr == cell.link.uri.ptr and previous_uri.len == cell.link.uri.len) {
+                const last = &links.items[links.items.len - 1];
+                if (@as(usize, @intCast(last.rect.col)) + last.rect.width == col) {
+                    last.rect.width += @intCast(end - col);
+                    continue;
+                }
+            }
+            const uri = self.window.document.assistantWebLinkAt(offset) orelse continue;
+            if (!std.mem.eql(u8, uri, cell.link.uri)) continue;
+            const point = self.window.pointAt(offset) orelse continue;
+            try links.append(arena, .{ .rect = .{ .row = @intCast(row), .col = @intCast(col), .width = @intCast(end - col) }, .point = point });
+            previous_uri = cell.link.uri;
+        }
+    }
+    self.drawn.links = links.items;
+}
+
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
     if (!self.retry_actionable or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
     const position = self.rowPosition(@intCast(at.row)) orelse return null;
@@ -248,6 +298,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .focus_out => {
+            if (self.selection) |*held| _ = held.link.step(.cancel);
             if (self.cancelQuote()) ctx.redraw = true;
         },
         .mouse_leave => {
@@ -324,11 +375,15 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 return;
             };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
-            self.selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
+            var selection: Selection = .{ .purpose = purpose, .press = at, .anchor = spot, .head = spot };
+            const plain = purpose == .copy and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
+            _ = selection.link.step(.{ .press = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } });
+            self.selection = selection;
             ctx.consumeEvent();
         },
         .drag => {
             const held = if (self.selection) |*selection| selection else return;
+            _ = held.link.step(.drag);
             if (!held.dragging and std.meta.eql(at, held.press)) return;
             held.dragging = true;
             held.head = try self.spotAt(ctx.alloc, at) orelse return;
@@ -342,7 +397,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
             ctx.consumeAndRedraw();
         },
         .release => {
-            const held = self.selection orelse return;
+            var held = self.selection orelse return;
             self.selection = null;
             ctx.consumeAndRedraw();
             const anchor = self.resolved(held.anchor) orelse return;
@@ -366,6 +421,14 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 if (result == .text) try ctx.addCmd(.{ .copy_to_clipboard = result.text.bytes });
                 var buffer: [64]u8 = undefined;
                 if (selecting.notice(result, &buffer)) |text| try handler.on_notice(handler.userdata, ctx, text);
+                return;
+            }
+            if (held.link.pending()) {
+                const plain = (value.button == .left or value.button == .none) and !value.mods.alt and !value.mods.ctrl and !value.mods.shift;
+                const point = held.link.step(.{ .release = .{ .plain = plain, .cell = at, .hit = if (plain) self.linkHit(at) else null } }) orelse return;
+                const offset = self.window.offsetOf(point) orelse return;
+                const uri = self.window.document.assistantWebLinkAt(offset) orelse return;
+                if (handler.on_external) |open| try open(handler.userdata, ctx, uri);
                 return;
             }
             if (!std.meta.eql(at, held.press)) return;
@@ -392,7 +455,8 @@ fn pendingDocument(self: *Self, ctx: vxfw.DrawContext) std.mem.Allocator.Error!*
     const document = try ctx.arena.create(PendingDocument);
     document.* = .{ .width_method = self.method, .sidenotes = true, .quotes = true };
     const sink: PendingSink = .{ .document = document };
-    document.append(PendingText.user_message_on ++ "\x1b[90m›\x1b[39m ") catch unreachable;
+    document.append(PendingText.user_message_on) catch unreachable;
+    View.userMarker(sink, true) catch unreachable;
     var body: View.UserBody(PendingSink) = undefined;
     body.init(sink, pending.text.len, false) catch unreachable;
     body.feed(pending.text) catch unreachable;
@@ -461,7 +525,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         for (0..visible.line) |_| offset = self.window.document.lineEnd(offset) + 1;
         first = .{ .key = entry.key, .offset = offset - entry.offset };
     } else if (visible.first < entries.len) first = .{ .key = resident.tail_key, .offset = 0 };
-    self.drawn = .{ .quote = self.quoteFrame(), .first = first, .row = visible.row, .pad = visible.pad, .width = self.size.width, .height = self.size.height };
+    self.drawn = .{ .quote = self.quoteFrame(), .first = first, .row = visible.row, .pad = visible.pad, .width = self.size.width, .height = self.size.height, .visible = visible };
     if (self.window.tail_rows != 0) {
         var row: i64 = visible.pad;
         for (entries[@min(visible.first, entries.len)..], @min(visible.first, entries.len)..) |entry, i| {
@@ -483,6 +547,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             }
         }
     }
+    try self.drawnLinks(ctx.arena, surface);
     try self.drawHover(ctx, surface);
     if (self.selection) |*held| {
         const anchor = self.resolved(held.anchor) orelse {
@@ -1112,6 +1177,65 @@ fn clipboardCommands(ctx: *const vxfw.EventContext) usize {
     return count;
 }
 
+test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard" {
+    const gpa = std.testing.allocator;
+    for ([_]u16{ 39, 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer gpa.destroy(window);
+        var document: PendingDocument = .{};
+        try document.append(PendingText.user_message_on);
+        try View.userPrefix(PendingSink{ .document = &document }, colour, 1);
+        try document.append("  › 雪e\u{301}\n" ++ PendingText.user_message_off);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        document.clear();
+        try document.append(View.Mark.body ++ "next\n" ++ View.Mark.reset);
+        try document.prepare();
+        try window.append(&.{.{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&document) }});
+        var anchor: Feed = .{};
+        var fixture: RetryClicks = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .handler = fixture.handler(), .colour = colour, .colours = .{ .user_band = .{ .index = 10 }, .no_depth = !colour } };
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const initial = try testFrame(&view, alloc, width, 10);
+        var message_row: ?u16 = null;
+        var next_row: ?u16 = null;
+        for (0..initial.size.height) |row| {
+            if (std.mem.eql(u8, testCell(initial, row, 2), "›")) message_row = @intCast(row);
+            if (std.mem.eql(u8, testCell(initial, row, 0), "n")) next_row = @intCast(row);
+        }
+        const row = message_row orelse return error.TestUnexpectedResult;
+        const next = next_row orelse return error.TestUnexpectedResult;
+        const note = width - 7;
+        if (width >= 40) try std.testing.expectEqualStrings(":", testCell(initial, row, note + 2));
+        for ([_]bool{ false, true }) |backwards| {
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = alloc, .cmds = .empty };
+            const marker: [2]u16 = .{ 3, row + 1 };
+            const answer: [2]u16 = .{ 5, next + 1 };
+            const start = if (backwards) answer else marker;
+            const end = if (backwards) marker else answer;
+            var report: [32]u8 = undefined;
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<0;{d};{d}M", .{ start[0], start[1] }));
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<32;{d};{d}M", .{ end[0], end[1] }));
+            const selected = try testFrame(&view, alloc, width, 10);
+            for ([_]u16{ 2, 3 }) |col| try std.testing.expectEqualDeep(initial.readCell(col, row), selected.readCell(col, row));
+            for ([_]u16{ 4, 6, 20 }) |col| try std.testing.expectEqual(!initial.readCell(col, row).style.reverse, selected.readCell(col, row).style.reverse);
+            if (width >= 40) for (0..5) |delta| {
+                const col = note + @as(u16, @intCast(delta));
+                try std.testing.expectEqualDeep(initial.readCell(col, row), selected.readCell(col, row));
+            };
+            try quoteReport(&view, &ctx, try std.fmt.bufPrint(&report, "\x1b[<0;{d};{d}m", .{ end[0], end[1] }));
+            try std.testing.expectEqual(@as(usize, 1), clipboardCommands(&ctx));
+            for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
+                try std.testing.expectEqualStrings("  › 雪e\u{301}\nnext", command.copy_to_clipboard);
+            };
+            const released = try testFrame(&view, alloc, width, 10);
+            try std.testing.expectEqualDeep(initial.buffer, released.buffer);
+        }
+    };
+}
+
 test "FeedView quote gesture latches decoded Alt and never copies or submits" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
@@ -1426,4 +1550,202 @@ pub fn testMessageLayout() !void {
     try optimisticBand();
     try boundedPreview();
     try viewport.testMessageLayout();
+}
+
+test "SUI-112 painted assistant links open on plain clicks while drags select" {
+    const T = @import("TerminalText.zig");
+    const Actions = struct {
+        count: usize = 0,
+        uri: [128]u8 = undefined,
+        len: usize = 0,
+        clicks: usize = 0,
+        fn external(raw: *anyopaque, _: *vxfw.EventContext, uri: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.count += 1;
+            @memcpy(self.uri[0..uri.len], uri);
+            self.len = uri.len;
+        }
+        fn click(raw: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.clicks += 1;
+        }
+        fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn scroll(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    const url = "https://example.com/path";
+    const link = T.link_open ++ url ++ T.link_end ++ "web" ++ T.link_close;
+    const local = T.link_open ++ "file:///tmp/file" ++ T.link_end ++ "local" ++ T.link_close;
+    const peer = T.link_open ++ "rui-session:abcdef" ++ T.link_end ++ "peer" ++ T.link_close;
+    var document: viewport.Sized(1024, true) = .{};
+    try document.append(T.body_on ++ "x " ++ link ++ " " ++ local ++ " " ++ peer ++ T.body_off ++ "\n" ++ T.user_message_on ++ T.body_on ++ link ++ T.body_off ++ T.user_message_off ++ "\n");
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &actions, .on_external = Actions.external, .on_click = Actions.click, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer {
+        for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
+            gpa.free(command.copy_to_clipboard);
+        };
+        ctx.cmds.deinit(gpa);
+    }
+    const frame = try testFrame(&view, arena.allocator(), 60, 5);
+    var web: ?Cell = null;
+    var adjacent: ?Cell = null;
+    var other: ?Cell = null;
+    var user: ?Cell = null;
+    for (frame.buffer, 0..) |cell, i| {
+        const at: Cell = .{ .row = @intCast(i / 60), .col = @intCast(i % 60) };
+        if (std.mem.eql(u8, cell.char.grapheme, "x")) adjacent = at;
+        if (std.mem.eql(u8, cell.link.uri, url)) {
+            if (web == null) web = at else if (at.row != web.?.row) user = at;
+        }
+        if (std.mem.eql(u8, cell.link.uri, "file:///tmp/file")) other = at;
+    }
+    const at = web orelse return error.MissingWebLink;
+    try retryMouse(&view, &ctx, at, .press);
+    try retryMouse(&view, &ctx, at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    try std.testing.expectEqualStrings(url, actions.uri[0..actions.len]);
+    for ([_]Cell{ adjacent orelse return error.MissingAdjacent, other orelse return error.MissingLocal, user orelse return error.MissingUser }) |inert| {
+        try retryMouse(&view, &ctx, inert, .press);
+        try retryMouse(&view, &ctx, inert, .release);
+        try std.testing.expectEqual(@as(usize, 1), actions.count);
+    }
+    try std.testing.expect(actions.clicks > 0);
+    try retryMouse(&view, &ctx, at, .press);
+    try retryMouse(&view, &ctx, .{ .row = at.row, .col = at.col + 1 }, .drag);
+    try retryMouse(&view, &ctx, at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    var copied: ?[]const u8 = null;
+    for (ctx.cmds.items) |command| if (command == .copy_to_clipboard) {
+        copied = command.copy_to_clipboard;
+    };
+    try std.testing.expectEqualStrings("we", copied orelse return error.MissingClipboardCopy);
+    try retryMouse(&view, &ctx, at, .press);
+    try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(at.row), .col = @intCast(at.col), .button = .left, .mods = .{ .ctrl = true }, .type = .release } });
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    try retryMouse(&view, &ctx, at, .press);
+    window.revision += 1;
+    try retryMouse(&view, &ctx, at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    _ = try testFrame(&view, arena.allocator(), 60, 5);
+    try retryMouse(&view, &ctx, at, .press);
+    try retryMouse(&view, &ctx, .{ .row = at.row, .col = at.col + 1 }, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    try retryMouse(&view, &ctx, at, .press);
+    _ = try testFrame(&view, arena.allocator(), 59, 5);
+    try retryMouse(&view, &ctx, at, .release);
+    try std.testing.expectEqual(@as(usize, 1), actions.count);
+    try wideWrappedLinks();
+    try decoratedRows();
+}
+
+fn wideWrappedLinks() !void {
+    const T = @import("TerminalText.zig");
+    const Actions = struct {
+        count: usize = 0,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext, uri: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("https://example.com/wide", uri);
+            self.count += 1;
+        }
+        fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn scroll(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    var document: viewport.Sized(512, true) = .{};
+    try document.append(T.body_on ++ T.link_open ++ "https://example.com/wide" ++ T.link_end ++ "界界界界界" ++ T.link_close ++ T.body_off ++ "\n");
+    try document.prepare();
+    try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer ctx.cmds.deinit(gpa);
+    const frame = try testFrame(&view, arena.allocator(), 6, 6);
+    var first_row: ?usize = null;
+    var wrapped = false;
+    for (frame.buffer, 0..) |cell, i| {
+        if (!std.mem.eql(u8, cell.link.uri, "https://example.com/wide")) continue;
+        const row = i / 6;
+        if (first_row == null) first_row = row else if (row != first_row.?) wrapped = true;
+        const col = i % 6;
+        for (0..cell.char.width) |column| {
+            const at: Cell = .{ .row = @intCast(row), .col = @intCast(col + column) };
+            const before = actions.count;
+            try retryMouse(&view, &ctx, at, .press);
+            try retryMouse(&view, &ctx, at, .release);
+            try std.testing.expectEqual(before + 1, actions.count);
+        }
+    }
+    try std.testing.expect(wrapped);
+    try std.testing.expect(actions.count >= 5);
+}
+
+fn decoratedRows() !void {
+    const T = @import("TerminalText.zig");
+    const Actions = struct {
+        count: usize = 0,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.count += 1;
+        }
+        fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+        fn scroll(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    var user: viewport.Sized(256, true) = .{};
+    try user.append(T.user_message_on ++ "› original\n" ++ T.user_message_off);
+    try user.prepare();
+    var assistant: viewport.Sized(256, true) = .{};
+    try assistant.append(T.body_on ++ T.link_open ++ "https://example.com" ++ T.link_end ++ "linked words" ++ T.link_close ++ T.body_off ++ "\n");
+    try assistant.prepare();
+    try window.append(&.{
+        .{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&user), .message_key = @splat('A') },
+        .{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&assistant) },
+    });
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed" }, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer ctx.cmds.deinit(gpa);
+    const frame = try testFrame(&view, arena.allocator(), 30, 10);
+    var note_row: ?usize = null;
+    var link_row: ?usize = null;
+    for (frame.buffer, 0..) |cell, i| {
+        if (std.mem.eql(u8, cell.char.grapheme, "N")) note_row = i / 30;
+        if (std.mem.eql(u8, cell.link.uri, "https://example.com")) link_row = i / 30;
+    }
+    const note = note_row orelse return error.MissingNote;
+    const link = link_row orelse return error.MissingWebLink;
+    try std.testing.expect(note + 1 < link);
+    try std.testing.expectEqualStrings(" ", frame.readCell(29, link).char.grapheme);
+    for (0..30) |col| {
+        for ([_]usize{ note, note + 1 }) |row| {
+            if (row >= link) continue;
+            const at: Cell = .{ .row = @intCast(row), .col = @intCast(col) };
+            try retryMouse(&view, &ctx, at, .press);
+            try retryMouse(&view, &ctx, at, .release);
+            try std.testing.expectEqual(@as(usize, 0), actions.count);
+        }
+    }
+    const padding: Cell = .{ .row = @intCast(link), .col = 29 };
+    try retryMouse(&view, &ctx, padding, .press);
+    try retryMouse(&view, &ctx, padding, .release);
+    try std.testing.expectEqual(@as(usize, 0), actions.count);
 }

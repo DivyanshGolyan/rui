@@ -407,10 +407,7 @@ pub const Requests = struct {
             .report => {},
             .command => |reply| return self.failRead(try self.captureReadFailure(reply)),
         }
-        var page = try protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items);
-        errdefer page.deinit(gpa);
-        for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
-        return page;
+        return protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items, prefix);
     }
 
     /// The owner's whole certified part list, streamed into `sink` (a report scratch file);
@@ -534,7 +531,14 @@ fn completeContentEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, ex
     if (try readRequest(requests, fd, &tail, ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true)) != 0) return error.InvalidResponse;
 }
 
-pub const MessageOperand = union(enum) { text: []const u8, text_file: []const u8, image: []const u8 };
+pub const MessageOperand = union(enum) {
+    text: []const u8,
+    text_file: []const u8,
+    image: []const u8,
+    image_bytes: []const u8,
+};
+
+pub const OperandStdin = union(enum) { process, file: std.Io.File, none };
 
 pub const MessageInput = struct {
     store: []const u8,
@@ -542,8 +546,7 @@ pub const MessageInput = struct {
     text_path: []const u8,
     text: ?[]const u8 = null,
     operands: []const MessageOperand = &.{},
-    /// Borrowed stdin source for ordered operands; null selects process stdin.
-    operand_stdin: ?std.Io.File = null,
+    operand_stdin: OperandStdin = .process,
     configuration: ?ConfigureInput = null,
     /// Refuse the Message unless the Session's provider is served (the Host checks it at admission).
     require_model: bool = false,
@@ -2942,7 +2945,7 @@ const Capture = struct {
         try snapshot.end();
     }
 
-    fn writeMessageOperands(self: *Capture, operands: []const MessageOperand, input_stdin: ?std.Io.File) !void {
+    fn writeMessageOperands(self: *Capture, operands: []const MessageOperand, input_stdin: OperandStdin) !void {
         const InputCapture = @import("InputCapture.zig");
         if (operands.len > @import("input_parts.zig").max_parts) return error.TooManyInputParts;
         var explicit_text = false;
@@ -2957,7 +2960,7 @@ const Capture = struct {
                     selected_stdin = true;
                 }
             },
-            .image => has_image = true,
+            .image, .image_bytes => has_image = true,
         };
         const spool = try self.scratchFile("spool");
         const index = self.scratchFile("index") catch |err| {
@@ -2968,19 +2971,22 @@ const Capture = struct {
         var snapshot: InputCapture = undefined;
         snapshot.init(self.io, spool, index, .{ .used = &used, .limit = @import("content_string.zig").max_bytes + (384 * 1024 * 1024) + 1024 * 1024 });
         defer snapshot.close();
-        const stdin = input_stdin orelse std.Io.File.stdin();
-        const is_terminal = stdin.isTty(self.io) catch false;
-        if (!selected_stdin and !is_terminal) {
+        const stdin: ?std.Io.File = switch (input_stdin) {
+            .process => std.Io.File.stdin(),
+            .file => |file| file,
+            .none => null,
+        };
+        if (!selected_stdin) if (stdin) |file| if (!(file.isTty(self.io) catch false)) {
             var first: [1]u8 = undefined;
-            const count = stdin.readStreaming(self.io, &.{&first}) catch |err| switch (err) {
+            const count = file.readStreaming(self.io, &.{&first}) catch |err| switch (err) {
                 error.EndOfStream => 0,
                 else => return err,
             };
             if (count != 0) {
                 if (explicit_text) return error.UnselectedStdin;
-                try self.appendTextStream(&snapshot, stdin, first[0..count], true);
+                try self.appendTextStream(&snapshot, file, first[0..count], true);
             }
-        }
+        };
         for (operands) |operand| switch (operand) {
             .text => |text| {
                 try snapshot.begin(.text, text.len);
@@ -2993,11 +2999,15 @@ const Capture = struct {
             },
             .text_file => |path| {
                 const standard = std.mem.eql(u8, path, "-");
-                const file = if (standard) stdin else try std.Io.Dir.cwd().openFile(self.io, path, .{});
+                const file = if (standard) stdin orelse return error.UnselectedStdin else try std.Io.Dir.cwd().openFile(self.io, path, .{});
                 defer if (!standard) file.close(self.io);
                 try self.appendTextStream(&snapshot, file, "", false);
             },
             .image => |path| try self.captureImage(&snapshot, path),
+            .image_bytes => |bytes| {
+                var source: ImageBytes = .{ .remaining = bytes };
+                try captureImageSource(&snapshot, .{ .length = bytes.len, .context = &source, .next = ImageBytes.next });
+            },
         };
         if (!has_image and snapshot.length == 0) return error.EmptyMessageInput;
         if (!has_image and snapshot.length > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
@@ -3039,8 +3049,24 @@ const Capture = struct {
         const file = try @import("os/read_image_file.zig").open(self.io, cwd, path);
         defer file.close(self.io);
         var source: @import("image_file_source.zig").FileSource = .{ .io = self.io, .file = file, .length = (try file.stat(self.io)).size };
+        try captureImageSource(snapshot, source.source());
+    }
+
+    const ImageBytes = struct {
+        remaining: []const u8,
+
+        fn next(raw: *anyopaque, window: []u8) !usize {
+            const self: *ImageBytes = @ptrCast(@alignCast(raw));
+            const count = @min(window.len, self.remaining.len);
+            @memcpy(window[0..count], self.remaining[0..count]);
+            self.remaining = self.remaining[count..];
+            return count;
+        }
+    };
+
+    noinline fn captureImageSource(snapshot: *@import("InputCapture.zig"), source: @import("image_intake.zig").Source) !void {
         var intake: @import("image_intake.zig").Intake = .{};
-        switch (intake.begin(source.source(), .{})) {
+        switch (intake.begin(source, .{})) {
             .ready => {},
             .failed => |failure| return switch (failure) {
                 inline else => |err| err,
@@ -6612,7 +6638,6 @@ test "socket upgrade discovery shares one refusal window and settles an unanswer
     _ = try std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false });
     // Once its holder is gone, the next look proves it dead and removes it.
     candidates.items[0].result = .{ .unanswered = error.ConnectionRefused };
-    endpoint.held.?.lock.close(io);
     endpoint.held.?.dir.close(io);
     endpoint.held = null;
     settleUnansweredSockets(allocator, io, &candidates);
@@ -7393,7 +7418,7 @@ test "ADM-25 image capture survives source replacement and reopen" {
     var image_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const image_path = try std.fmt.bufPrint(&image_buffer, "{s}/image.png", .{root});
     const operands = [_]MessageOperand{ .{ .text = "before" }, .{ .image = image_path }, .{ .text = "after" } };
-    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .operands = &operands, .operand_stdin = empty_stdin }, .{ .generated = root }).get();
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .operands = &operands, .operand_stdin = .{ .file = empty_stdin } }, .{ .generated = root }).get();
     const saved = captured.identity().*;
     const target = captured.target;
     var before: [8192]u8 = undefined;
@@ -7440,7 +7465,7 @@ test "ADM-26 image capture write failures do not publish a request" {
         var vtable = io.vtable.*;
         if (publication) vtable.fileSync = Fault.sync else vtable.fileWritePositional = Fault.write;
         const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-        try std.testing.expectError(error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .operands = &operands, .operand_stdin = empty_stdin }, .{ .explicit = .{ .record = path, .key = "key" } }).get());
+        try std.testing.expectError(error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .operands = &operands, .operand_stdin = .{ .file = empty_stdin } }, .{ .explicit = .{ .record = path, .key = "key" } }).get());
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".record.capture.tmp", .{}));
     }

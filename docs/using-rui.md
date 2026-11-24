@@ -45,8 +45,8 @@ Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
 
-Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
-Click a tool heading to open or close its saved output in place.
+Tool outcomes start folded, showing their description and outcome.
+Click a tool heading to open or close its saved output in place, including any exit code.
 Ctrl-O toggles the lowest tool heading or opens the lowest collapsed Message or Session name in view, whichever is lower.
 Several tools can stay open; new live output does not close them and the view keeps following it.
 Output is safely escaped and indented, with at most 20 rows followed by `… N more lines` when needed.
@@ -146,7 +146,8 @@ The overview list uses the full width at every terminal size, with no empty chat
 | --- | --- |
 | Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. On a Session row, Left collapses the agents it created and Right expands them; Enter or a click opens it. |
+| Right, Left | On **+ New Session**, Right selects **Archived**, and Left goes back to **New Session**. Right on a Session row opens its input. |
+| Alt+Left, Alt+Right | Collapse or expand the selected Session’s descendants. Double-click a parent row to toggle them. A single click on a parent opens its chat after a short delay. |
 | Alt-? | Opens the next Session that needs you, including one hidden in a collapsed tree or scrolled out of view. |
 | Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. On **Archived** it opens the archived Sessions, or from there returns to the usual list; a click on **Archived** does the same, and a click elsewhere on the row is still **New Session**. In Settings, open **Model** to pick the default for future Sessions. |
 | Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
@@ -241,6 +242,12 @@ rui session unarchive --session SESSION_REF
 ```
 
 `--all` still means every Workspace, not archived Sessions.
+
+## Paste an image into chat
+
+Copy an image and use your terminal's usual paste shortcut, such as Cmd+V on macOS. Rui detects support for terminal clipboard paste events automatically. If no image appears, press Ctrl+V in the composer. The fallback uses the macOS clipboard or `wl-paste` or `xclip` on a local Linux desktop.
+
+`[Image 1]` shows that the draft has an image. Press Enter to send it with any text you typed. To remove the image, move the caret to the start of the draft and press Backspace. Pasting another image replaces it. Rui accepts PNG and JPEG images up to 16 MiB.
 
 ## Models
 

@@ -1283,7 +1283,7 @@ def term_record(run, name):
 
 EXIT_KEY = "C-c"
 
-KEYS = {"M-?": b"\x1b?", "M-i": b"\x1bi", "M-d": b"\x1bd", "Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
+KEYS = {"M-?": b"\x1b?", "M-Left": b"\x1b[1;3D", "M-Right": b"\x1b[1;3C", "M-i": b"\x1bi", "M-d": b"\x1bd", "Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-Down": b"\x1b[1;2B", "S-PgUp": b"\x1b[5;2~",
         # Exact SGR wheel reports for L2 injection; terminal tracking determines
@@ -3370,7 +3370,7 @@ def frame_capture(run, target, out, state, size, reason):
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
-        reason = (frame_row_failure(state, plain) or frame_dim_failure(state, frame)
+        reason = (frame_row_failure(state, frame.text) or frame_dim_failure(state, frame)
                   or frame_background_failure(state, frame) or frame_style_failure(state, frame))
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
