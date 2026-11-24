@@ -1490,10 +1490,12 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             const shadow_root = keepRef(&refs[1], shadowed_reply.accepted.session.slice());
 
             // A child of that root names `ask`: the shadowed `lookup` narrows nothing, so `ask` is offered to it.
-            var child_ask = try completeConfiguration("sh175-child-ask", "", workspace, "model-a");
+            // A child inherits its parent's workspace, so its spec names none.
+            var child_ask: wire_request.ConfigureCommand = .{};
+            try child_ask.key.set("sh175-child-ask");
+            child_ask.configuration = try testingAgentSpec(&.{"ask"}, "ask");
             child_ask.configuration.parent.state = .value;
             try child_ask.configuration.parent.value.set(shadow_root);
-            child_ask.configuration.tools = try .of(&.{"ask"});
             try expectAccepted("child_ask", try storage.configure(&child_ask, .{}));
 
             // A real subset: the root names `ask` alone of its two app tools, so its child may not name `other`.
@@ -1503,10 +1505,11 @@ test "SH-175 configure resolves names through the lane's effective declaration, 
             const subset_reply = try storage.configure(&subset_root_command, .{});
             try expectAccepted("subset", subset_reply);
             const subset_root = keepRef(&refs[2], subset_reply.accepted.session.slice());
-            var child_other = try completeConfiguration("sh175-child-other", "", workspace, "model-a");
+            var child_other: wire_request.ConfigureCommand = .{};
+            try child_other.key.set("sh175-child-other");
+            child_other.configuration = try testingAgentSpec(&.{"other"}, "ask");
             child_other.configuration.parent.state = .value;
             try child_other.configuration.parent.value.set(subset_root);
-            child_other.configuration.tools = try .of(&.{"other"});
             try std.testing.expectEqual(protocol.ConfigurationRejection.tools_not_in_parent, (try storage.configure(&child_other, .{})).rejected.code);
         }
     }.run);
