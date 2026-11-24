@@ -97,6 +97,150 @@ test "the terminal's own background is the RGB the ground cells show at every de
     };
 }
 
+const DimCache = struct {
+    const Entry = struct { key: u64 = 0, value: vaxis.Color = .default, valid: bool = false };
+    entries: [256]Entry = @splat(.{}),
+};
+
+/// Restyle the pane's frame-local buffers in place to preserve its live hit tree.
+pub fn dimSurface(surface: vaxis.vxfw.Surface, monochrome: bool) void {
+    var result = surface;
+    var cache: DimCache = .{};
+    dimTree(&result, monochrome, &cache);
+}
+
+fn dimTree(surface: *vaxis.vxfw.Surface, monochrome: bool, cache: *DimCache) void {
+    for (surface.buffer) |*cell| {
+        if (cell.default) continue;
+        const style = &cell.style;
+        if (monochrome) {
+            if (!style.bold and !style.reverse and !style.dim and style.ul_style == .off) style.dim = true;
+        } else if (!style.dim and style.bg != .default and style.fg != .default) {
+            dimColored(style, cache);
+        }
+    }
+    for (surface.children) |*child| dimTree(&child.surface, monochrome, cache);
+}
+
+fn dimColored(style: *vaxis.Style, cache: *DimCache) void {
+    const foreground = if (style.reverse) style.bg else style.fg;
+    const background = if (style.reverse) style.fg else style.bg;
+    const fg = colorRgb(foreground) orelse return;
+    const bg = colorRgb(background) orelse return;
+    const key: u64 = (@as(u64, colorKey(foreground)) << 32) | colorKey(background);
+    const slot = @as(usize, @intCast((key ^ (key >> 17) ^ (key >> 31)) & 255));
+    const entry = &cache.entries[slot];
+    var selected = foreground;
+    if (entry.valid and entry.key == key) {
+        selected = entry.value;
+    } else {
+        const original_contrast = contrastRatio(fg, bg);
+        if (original_contrast >= 4.5) {
+            const target = blend(fg, bg, 0.18);
+            const adjusted = if (contrastRatio(target, bg) >= 4.5) target else floorBlend(fg, bg);
+            switch (foreground) {
+                .rgb => selected = .{ .rgb = adjusted },
+                .index => {
+                    const quantized = theme.nearestIndex(adjusted);
+                    const quantized_rgb = theme.xtermRgb(quantized);
+                    const quantized_contrast = contrastRatio(quantized_rgb, bg);
+                    if (quantized_contrast >= 4.5 and quantized_contrast < original_contrast) selected = .{ .index = quantized };
+                },
+                .default => {},
+            }
+        }
+        entry.* = .{ .key = key, .value = selected, .valid = true };
+    }
+    if (style.reverse) style.bg = selected else style.fg = selected;
+}
+
+fn floorBlend(fg: [3]u8, bg: [3]u8) [3]u8 {
+    var low: f64 = 0;
+    var high: f64 = 0.18;
+    for (0..8) |_| {
+        const middle = (low + high) / 2;
+        if (contrastRatio(blend(fg, bg, middle), bg) >= 4.5) low = middle else high = middle;
+    }
+    return blend(fg, bg, low);
+}
+
+fn colorKey(color: vaxis.Color) u32 {
+    return switch (color) {
+        .default => 0,
+        .index => |index| (@as(u32, 1) << 24) | index,
+        .rgb => |rgb| (@as(u32, 2) << 24) | pack(rgb),
+    };
+}
+
+fn blend(fg: [3]u8, bg: [3]u8, amount: f64) [3]u8 {
+    var result: [3]u8 = undefined;
+    for (fg, bg, &result) |front, back, *out| out.* = @intFromFloat(@round(@as(f64, @floatFromInt(front)) * (1 - amount) + @as(f64, @floatFromInt(back)) * amount));
+    return result;
+}
+
+fn contrastRatio(fg: [3]u8, bg: [3]u8) f64 {
+    const a = theme.relativeLuminance(fg);
+    const b = theme.relativeLuminance(bg);
+    return (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+}
+
+fn pack(rgb: [3]u8) u24 {
+    return (@as(u24, rgb[0]) << 16) | (@as(u24, rgb[1]) << 8) | rgb[2];
+}
+
+fn colorRgb(color: vaxis.Color) ?[3]u8 {
+    return switch (color) {
+        .rgb => |rgb| rgb,
+        .index => |index| if (index < 16) null else theme.xtermRgb(index),
+        .default => null,
+    };
+}
+
+test "SUI-4 inactive pane dimming preserves cell data, contrast floor, reverse and monochrome cues" {
+    const vx = @import("vaxis");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const widget = vx.vxfw.Widget{ .userdata = undefined, .drawFn = undefined };
+    var parent = try vx.vxfw.Surface.init(arena.allocator(), widget, .{ .width = 1, .height = 1 });
+    const child_widget = vx.vxfw.Widget{ .userdata = @ptrFromInt(1), .drawFn = undefined };
+    var child = try vx.vxfw.Surface.init(arena.allocator(), child_widget, .{ .width = 4, .height = 1 });
+    child.buffer[0] = .{ .char = .{ .grapheme = "x", .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } }, .ul = .{ .rgb = .{ 1, 2, 3 } }, .ul_style = .single }, .link = .{ .uri = "https://example.test" }, .wrapped = true };
+    child.buffer[1] = .{ .char = .{ .grapheme = "r", .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 100, 100, 100 } }, .bg = .{ .rgb = .{ 110, 110, 110 } } } };
+    child.buffer[2] = .{ .char = .{ .grapheme = "v", .width = 1 }, .style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 0, 0, 0 } }, .reverse = true } };
+    parent.children = try arena.allocator().alloc(vx.vxfw.SubSurface, 1);
+    parent.children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
+    dimSurface(parent, false);
+    const drawn = parent.children[0].surface;
+    try std.testing.expectEqualStrings("x", drawn.buffer[0].char.grapheme);
+    try std.testing.expectEqualStrings("https://example.test", drawn.buffer[0].link.uri);
+    try std.testing.expect(drawn.buffer[0].wrapped and drawn.buffer[0].style.ul_style == .single);
+    try std.testing.expectEqual(vx.Color{ .rgb = .{ 1, 2, 3 } }, drawn.buffer[0].style.ul);
+    try std.testing.expectEqual(@as(u8, 209), drawn.buffer[0].style.fg.rgb[0]);
+    try std.testing.expectEqual(@as(u8, 100), drawn.buffer[1].style.fg.rgb[0]);
+    try std.testing.expect(drawn.buffer[2].style.reverse);
+    try std.testing.expectEqual(@as(u8, 46), drawn.buffer[2].style.bg.rgb[0]);
+
+    drawn.buffer[0].style = .{ .fg = .{ .index = 231 }, .bg = .{ .index = 16 } };
+    dimSurface(parent, false);
+    try std.testing.expect(drawn.buffer[0].style.fg == .index);
+    try std.testing.expect(drawn.buffer[0].style.fg.index != 231);
+    const indexed_fg = theme.xtermRgb(drawn.buffer[0].style.fg.index);
+    try std.testing.expect(contrastRatio(indexed_fg, theme.xtermRgb(16)) >= 4.5);
+    drawn.buffer[0].style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 16 } };
+    dimSurface(parent, false);
+    try std.testing.expectEqual(vx.Color{ .index = 7 }, drawn.buffer[0].style.fg);
+
+    drawn.buffer[0] = .{ .char = .{ .grapheme = "m" }, .style = .{} };
+    drawn.buffer[1].style = .{ .bold = true };
+    drawn.buffer[2].style = .{ .reverse = true };
+    drawn.buffer[3] = .{ .default = true };
+    dimSurface(parent, true);
+    try std.testing.expect(drawn.buffer[0].style.dim);
+    try std.testing.expect(drawn.buffer[1].style.bold and !drawn.buffer[1].style.dim);
+    try std.testing.expect(drawn.buffer[2].style.reverse and !drawn.buffer[2].style.dim);
+    try std.testing.expect(!drawn.buffer[3].style.dim);
+}
+
 // The returned segments and their text borrow the frame arena and the input, respectively.
 pub fn segments(arena: std.mem.Allocator, caps: view.Caps, input: []const view.Segment, background: ?view.Background) std.mem.Allocator.Error![]vaxis.Segment {
     const result = try arena.alloc(vaxis.Segment, input.len);

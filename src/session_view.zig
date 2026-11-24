@@ -546,10 +546,10 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool) !void {
-    return toolHeadingWith(presentation, sink, colour, "", false);
+    return toolHeadingWith(presentation, sink, colour, false);
 }
 
-fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, exit: []const u8, foldable: bool) !void {
+fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, foldable: bool) !void {
     const state = toolState(presentation.code);
     if (foldable) try sink.feed(tool_fold.heading_marker);
     try sink.feed(state.style.code(colour));
@@ -562,12 +562,6 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.finish();
     try indented.feed(state.suffix);
     try indented.finish();
-    if (presentation.code == .failed and exit.len != 0) {
-        try sink.feed(tool_fold.exit_open);
-        try sink.feed("exit ");
-        try sink.feed(exit);
-        try sink.feed(Text.link_close);
-    }
     try sink.feed("\n");
 }
 
@@ -1240,55 +1234,11 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, sc
     try stream(requests, &display, target);
 }
 
-pub const ToolHeaderFacts = struct {
-    exit: ?u16 = null,
-};
-
-pub const ToolHeaderScan = struct {
-    line: [64]u8 = undefined,
-    length: usize = 0,
-    ended: bool = false,
-    overflow: bool = false,
-
-    pub fn feed(self: *@This(), bytes: []const u8) !void {
-        for (bytes) |byte| {
-            if (self.ended) return;
-            if (byte == '\n') {
-                self.ended = true;
-            } else if (self.length < self.line.len) {
-                self.line[self.length] = byte;
-                self.length += 1;
-            } else {
-                self.overflow = true;
-                self.ended = true;
-            }
-        }
-    }
-
-    pub fn facts(self: *const @This(), code: protocol.ToolPresentation.Code) ToolHeaderFacts {
-        if (self.overflow or toolState(code).style != .failure) return .{};
-        var buffer: [64]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&buffer, "Bash {s}. Exit code: ", .{@tagName(code)}) catch unreachable;
-        const line = self.line[0..self.length];
-        if (!std.mem.startsWith(u8, line, prefix) or !std.mem.endsWith(u8, line, ".")) return .{};
-        const digits = line[prefix.len .. line.len - 1];
-        if (digits.len == 0 or digits.len > 3) return .{};
-        for (digits) |byte| if (!std.ascii.isDigit(byte)) return .{};
-        return .{ .exit = std.fmt.parseInt(u16, digits, 10) catch return .{} };
-    }
-};
-
-pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool) !void {
-    return toolResultRow(presentation, facts, false, sink, colour);
+pub fn toolResult(presentation: protocol.ToolPresentation, sink: anytype, colour: bool) !void {
+    return toolHeadingWith(presentation, sink, colour, false);
 }
 
-fn toolResultRow(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, foldable: bool, sink: anytype, colour: bool) !void {
-    var buffer: [3]u8 = undefined;
-    const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
-    try toolHeadingWith(presentation, sink, colour, exit, foldable);
-}
-
-test "tool header hides all body lines for every outcome and first-line split" {
+test "SUI-125 tool headings show each outcome without exit fields" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -1297,18 +1247,12 @@ test "tool header hides all body lines for every outcome and first-line split" {
             self.length += bytes.len;
         }
     };
-    const bodies = .{
-        "Bash failed. Exit code: 7.\nProcess-group signaling reported a failure.\n" ++
-            "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
-            "[earlier output omitted]\nFull stdout: /secret\nOpen the tool row for saved output.\n",
-        "Bash failed. Exit code: 7.\nCapture may be incomplete.\nstdout:\nhead\n[123 bytes left out]\ntail\nstderr:\n\x1b[2Jhidden\nFull stdout: /secret\nFull stderr: /secret-err\n",
-    };
     const cases = .{
         .{ protocol.ToolPresentation.Code.unresolved, "◝ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "● Tool call" },
         .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "× Tool call" ++ tool_fold.exit_open ++ "exit 7" ++ Text.link_close },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call" },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
@@ -1320,86 +1264,28 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
     try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
-    inline for (bodies) |body| {
-        inline for (cases) |case| {
-            for (0..body.len + 1) |split| {
-                for ([_]bool{ false, true }) |colour| {
-                    var scan: ToolHeaderScan = .{};
-                    try scan.feed(body[0..split]);
-                    try scan.feed(body[split..]);
-                    var sink: Sink = .{};
-                    const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
-                    try toolResult(presentation, scan.facts(case[0]), &sink, colour);
-                    var expected: Sink = .{};
-                    const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
-                    if (colour) try expected.feed(switch (case[0]) {
-                        .unresolved => "\x1b[94m",
-                        .pending_permission => "\x1b[33m",
-                        .succeeded, .background => "\x1b[90m",
-                        .denied, .cancelled => "\x1b[39m",
-                        else => "\x1b[91m",
-                    });
-                    try expected.feed(case[1][0..glyph_end]);
-                    if (colour) try expected.feed("\x1b[39m");
-                    try expected.feed(case[1][glyph_end..]);
-                    try expected.feed("\n");
-                    try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
-                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
-                }
-            }
+    inline for (cases) |case| {
+        for ([_]bool{ false, true }) |colour| {
+            var sink: Sink = .{};
+            const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
+            try toolResult(presentation, &sink, colour);
+            var expected: Sink = .{};
+            const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
+            if (colour) try expected.feed(switch (case[0]) {
+                .unresolved => "\x1b[94m",
+                .pending_permission => "\x1b[33m",
+                .succeeded, .background => "\x1b[90m",
+                .denied, .cancelled => "\x1b[39m",
+                else => "\x1b[91m",
+            });
+            try expected.feed(case[1][0..glyph_end]);
+            if (colour) try expected.feed("\x1b[39m");
+            try expected.feed(case[1][glyph_end..]);
+            try expected.feed("\n");
+            try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
+            try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
+            try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
         }
-    }
-}
-
-test "failed tool heading carries an explicit exit field" {
-    const Sink = struct {
-        out: *std.Io.Writer,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            try self.out.writeAll(bytes);
-        }
-    };
-    for ([_]?[]const u8{ null, "Fail with exit 127" }) |title| {
-        var presentation: protocol.ToolPresentation = .{ .description = null, .code = .failed, .publication_position = null };
-        if (title) |words| {
-            presentation.description = .{};
-            try presentation.description.?.set(words);
-        }
-        for ([_][]const u8{ "1", "7", "127" }) |exit| {
-            var buffer: [128]u8 = undefined;
-            var out = std.Io.Writer.fixed(&buffer);
-            var sink: Sink = .{ .out = &out };
-            try toolHeadingWith(presentation, &sink, false, exit, false);
-            var expected: [128]u8 = undefined;
-            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× {s}" ++ tool_fold.exit_open ++ "exit {s}" ++ Text.link_close ++ "\n", .{ title orelse "Tool call", exit }), out.buffered());
-        }
-    }
-}
-
-test "tool header numeric exit accepts only a complete canonical first line" {
-    for (std.enums.values(protocol.ToolPresentation.Code)) |code| {
-        if (toolState(code).style != .failure) continue;
-        for ([_]u16{ 0, 1, 7, 127, 255, 999 }) |exit| {
-            var buffer: [128]u8 = undefined;
-            const body = try std.fmt.bufPrint(&buffer, "Bash {s}. Exit code: {d}.\nignored", .{ @tagName(code), exit });
-            for (0..body.len + 1) |split| {
-                var scan: ToolHeaderScan = .{};
-                try scan.feed(body[0..split]);
-                try scan.feed(body[split..]);
-                try std.testing.expectEqual(exit, scan.facts(code).exit.?);
-            }
-        }
-    }
-    for ([_][]const u8{
-        "Bash failed. Exit code: 1000.",                                "Bash failed. Exit code: -1.",
-        "Bash failed. Exit code: 7. warning",                           "Bash failed. Exit code: .",
-        "Bash failed. Exit code: 0007.",                                "Bash failed. Exit code: +7.",
-        "ignored\nBash failed. Exit code: 7.",                          "Bash succeeded. Exit code: 7.",
-        "Bash failed. Exit code: " ++ @as([128]u8, @splat('0')) ++ ".",
-    }) |body| {
-        var scan: ToolHeaderScan = .{};
-        try scan.feed(body);
-        try std.testing.expectEqual(null, scan.facts(.failed).exit);
     }
 }
 
@@ -1588,29 +1474,22 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
-            var scan: ToolHeaderScan = .{};
-            switch (fold) {
-                .none, .closed => try content(requests, store, session, scratch, item, result.content, &scan),
-                .open => |output| {
-                    const Both = struct {
-                        scan: *ToolHeaderScan,
-                        output: *tool_fold.Output,
-                        pub fn feed(self: *@This(), bytes: []const u8) !void {
-                            try self.scan.feed(bytes);
-                            try self.output.feed(bytes);
-                        }
-                    };
-                    output.* = .{};
-                    var both: Both = .{ .scan = &scan, .output = output };
-                    try content(requests, store, session, scratch, item, result.content, &both);
-                },
+            if (fold == .open) {
+                fold.open.* = .{};
+                try content(requests, store, session, scratch, item, result.content, fold.open);
+            } else {
+                const Discard = struct {
+                    pub fn feed(_: *@This(), _: []const u8) !void {}
+                };
+                var discard: Discard = .{};
+                try content(requests, store, session, scratch, item, result.content, &discard);
             }
-            try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour);
+            try toolHeadingWith(result.presentation, sink, colour, fold != .none);
             if (fold == .open) try fold.open.finish(sink);
         },
         .hosted_call => |presentation| {
             try sink.feed(tool_fold.row_marker);
-            try toolResult(presentation, .{}, sink, colour);
+            try toolResult(presentation, sink, colour);
         },
         .call => {},
         .turn_ended => |ended| {
@@ -1692,7 +1571,7 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
         try description.set(call[0]);
         const presentation: protocol.ToolPresentation = .{ .description = description, .code = call[1], .publication_position = 1 };
         var row: Sink = .{};
-        try toolResult(presentation, .{}, &row, false);
+        try toolResult(presentation, &row, false);
         try std.testing.expectEqualStrings(call[2], row.bytes[0..row.length]);
         const below = tight(.{ .hosted_call = presentation });
         if (above) |value| if (gap(value, below, true)) try joined.feed("\n");

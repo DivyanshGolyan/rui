@@ -65,7 +65,7 @@ def documentation_env():
 def plan_sources():
     names = ['tests/ci/' + name for name in (
         'select_tests.py', 'ci_plan.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
-        'import_architecture.py', 'build_files.py', 'release_numbers.py', 'stack_frames.json')]
+        'import_architecture.py', 'build_files.py', 'release_numbers.py')]
     names += [path.relative_to(ROOT).as_posix() for path in build_files.files()]
     names += ['src/store/schema.zig']
     return {name: (ROOT / name).read_text() for name in names} | {
@@ -621,9 +621,8 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], 'false', key)
 
     # CI-1: written as literals, independent of select_tests' tier constants. measurement-check and
-    # mysql-wire-integration reach the PR tier only through their own files; stack-frames runs whenever a Host
-    # source, build input or frame gate file selects it, and deep-modules runs for every src/ or build manifest
-    # path that is not documentation (the rows below name each case).
+    # mysql-wire-integration reach the PR tier only through their own files, and deep-modules runs for every
+    # src/ or build manifest path that is not documentation (the rows below name each case).
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full'}
     # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
@@ -631,18 +630,18 @@ class CandidatePlanTest(unittest.TestCase):
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         # A source file no owner reaches is unclassified, so it selects the full PR set.
         'unreached source': (['src/future_owner.zig'], {'deep-modules', 'test-logic', 'test-native', 'test-store', 'test-h2', 'test-pg'}),
-        'build hub': (['build.zig'], {'deep-modules', 'stack-frames', 'test-logic'}),
+        'build hub': (['build.zig'], {'deep-modules', 'test-logic'}),
         'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
         'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
         # The replayed SQLite pin: the PR roots that link sqlite, and the logic root the bootstrap always runs.
-        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
-        'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'stack-frames', 'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'deep-modules', 'test-logic', 'test-native', 'test-store'}),
+        'dependency fetch': (['src/fetch_dependencies.sh'], {'deep-modules', 'test-logic'}),
         'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
                                       'tests/ci/ci_plan.py'], set()),
         'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
         'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
-                                     {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
-        'Store': (['src/store.zig'], {'deep-modules', 'stack-frames', 'test-native', 'test-store'}),
+                                     {'deep-modules', 'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'deep-modules', 'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         # A shared helper runs the fixtures that import it, directly (bash_fixture.py) or through another
         # helper (tool_profile_fixture.py is imported by fresh_tool_profile_cases.py, which human-cli imports).
@@ -662,16 +661,14 @@ class CandidatePlanTest(unittest.TestCase):
             'host-launch-integration', 'host-status-integration', 'human-cli-integration', 'settings-integration',
             'upgrade-integration', 'test-logic', 'test-native'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'deep-modules', 'upgrade-integration'}),
-        'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
-        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'stack-frames', 'test-logic', 'test-native'}),
-        # The frame gate's budget and any Host source run stack-frames on the PR.
-        'frame gate budget': (['tests/ci/stack_frames.json'], {'stack-frames'}),
-        'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'stack-frames', 'test-logic', 'test-native'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'deep-modules', 'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'deep-modules', 'skills-integration', 'test-logic', 'test-native'}),
+        'Host source under check': (['src/wire_version.zig'], {'deep-modules', 'test-logic', 'test-native'}),
         'measurement own file': (['tests/qualification/call-classification/main.go'], {'measurement-check'}),
         'measurement non-own file': (['build/measurement.zig'], set()),
         'mysql wire own file': (['tests/integration/mysql_wire_test.zig'], {'mysql-wire-integration', 'test-logic'}),
         'mysql wire non-own file': (['src/store/wire/mysql_connection.zig'],
-                                    {'deep-modules', 'stack-frames', 'test-logic', 'test-native', 'test-store'}),
+                                    {'deep-modules', 'test-logic', 'test-native', 'test-store'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {'deep-modules',
             'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
             'conversation-page-integration',
@@ -703,7 +700,7 @@ class CandidatePlanTest(unittest.TestCase):
                 self.assertEqual(run('pull_request', draft=True)['targets'], [])
                 self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
                 promoted = set(run('workflow_dispatch', promotion=True)['targets'])
-                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
+                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration'}, promoted)
                 from select_tests import covers
                 self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
 
@@ -1252,13 +1249,33 @@ class ReleaseFlowTest(unittest.TestCase):
                     self.assertEqual(ran.returncode, 0, ran.stderr)
                     self.assertEqual(output.read(), f'scheduled={expected}\n')
 
+    def test_memory_gates_the_release_archive_and_never_skips(self):
+        text = TIER.read_text()
+        memory = job(text, 'memory')
+        # No job-level condition: a skipped tier is unfinished to verdict(), so the gate always runs.
+        self.assertNotIn('\n    if:', memory)
+        self.assertIn('needs: release_build', memory)
+        self.assertIn('ref: ${{ inputs.head }}', memory)
+        self.assertIn('targets: \'["host-memory"]\'', memory)
+        self.assertIn('python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA"', memory)
+        self.assertIn('VERSION: ${{ needs.release_build.outputs.version }}', memory)
+        self.assertIn('RUI_HOST_MEMORY_NOTES: ${{ runner.temp }}/host-memory.md', memory)
+        self.assertIn('python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/memory"', memory)
+        self.assertIn('\'host-memory=zig build host-memory --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}\'', memory)
+        upload = memory.split('Retain the Host memory table', 1)[1]
+        self.assertIn('if: ${{ always() }}', upload)
+        self.assertIn('name: rui-host-memory', upload)
+        self.assertIn('path: ${{ runner.temp }}/host-memory.md', upload)
+        self.assertEqual(permissions_of(memory), {'contents': 'read', 'actions': 'read'})
+        self.assertIn('needs: [selected, upgrade, renderer, memory]', job(text, 'report'))
+
     def test_one_tier_owns_qualification_and_its_verdict(self):
         text = TIER.read_text()
         on = text.split('\npermissions:', 1)[0]
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_call'])
         self.assertEqual(re.findall(r'(?m)^      ([a-z-]+):\n        description', on), ['base', 'head', 'red-label', 'version'])
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]),
-                         ['release_build', 'selected', 'upgrade', 'renderer', 'qualified', 'report'])
+                         ['release_build', 'selected', 'upgrade', 'renderer', 'memory', 'qualified', 'report'])
         self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
         build = job(text, 'release_build')
         self.assertIn('uses: ./.github/workflows/release-build.yml', build)
@@ -1276,14 +1293,14 @@ class ReleaseFlowTest(unittest.TestCase):
             self.assertIn('needs: release_build', body)
             self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
         qualified = job(text, 'qualified')
-        self.assertIn('needs: [release_build, selected, upgrade, renderer]', qualified)
+        self.assertIn('needs: [release_build, selected, upgrade, renderer, memory]', qualified)
         self.assertIn('if: ${{ always() }}', qualified)
         self.assertEqual(permissions_of(qualified), {'contents': 'read', 'statuses': 'write'})
         script = step_script(qualified, 'Record the verdict on HEAD')
         self.assertIn('main_qualified.py verdict $RESULTS', script)
         self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
                       script)
-        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer', 'memory'):
             self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
         # The requirement is report_issue.py's aggregate step: it files nothing of its own.
         self.assertIn('      - name: Require every selected qualification tier\n', qualified)
@@ -1332,7 +1349,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('value: ${{ jobs.release_build.outputs.version }}', TIER.read_text())
         # A green qualification publishes that run's archives without qualifying again.
         self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
-        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
+        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 2)
         self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
         # Publication never rebuilds: it checks the archives against the digests recorded at build time.
         publication = RELEASE.read_text()
@@ -1354,7 +1371,8 @@ class ReleaseFlowTest(unittest.TestCase):
         jobs = [('linux_suites', job(check, 'linux_suites'), 'run_selected.py'),
                 ('macos_suites', job(check, 'macos_suites'), 'run_selected.py'),
                 ('upgrade', job(UPGRADE.read_text(), 'upgrade'), 'steps.py'),
-                ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py')]
+                ('contracts', job(RENDERER.read_text(), 'contracts'), 'steps.py'),
+                ('memory', job(TIER.read_text(), 'memory'), 'steps.py')]
         for name, body, recorder in jobs:
             with self.subTest(job=name):
                 self.assertNotIn('Bisect the promotion batch', body)
