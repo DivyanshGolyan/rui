@@ -542,7 +542,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.redraw = true;
             }
             if (self.signInIsFirstRun()) return;
-            try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
+            try self.appNext(ctx, try self.event(.{ .list_settled = .{
+                .wide = self.root.size.width >= Root.split_at,
+                .focused = self.root.input.listFocused() and self.root.input.layer == .main,
+                .click_clock_ms = if (self.root.input.pasting) null else self.animationMs(),
+            } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -646,7 +650,7 @@ fn appScrolled(raw: *anyopaque, ctx: *vxfw.EventContext, top: u32, height: u32) 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const upgrade_admitted = if (self.app_session) |shown| (if (shown.frontend) |frontend| frontend.admitsUpgrade() else true) else true;
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .upgrade_admitted = upgrade_admitted, .at_ms = self.animationMs() } }));
     ctx.redraw = true;
 }
 
@@ -7267,6 +7271,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .shift_tab = &.{ "\x1b[Z", "\x1b[9;2u" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
+    .alt_left = &.{ "\x1b[1;3D", "\x1b[1;3:1D" },
+    .alt_right = &.{ "\x1b[1;3C", "\x1b[1;3:1C" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
     .page_down = &.{ "\x1b[6~", "\x1b[6;1~", "\x1b[6;2~" },
     .home = &.{ "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~", "\x1b[1;1H" },

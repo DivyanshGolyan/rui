@@ -1,5 +1,5 @@
 {
-  "inputs": "0a04ebb51f40e4069d95772c39d6fa5b",
+  "inputs": "de9f9a139bb7109cae5e29d42226fc17",
   "targets": {
     "activity-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "admission-debug-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
@@ -63,7 +63,6 @@
     "session-list-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "settings-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "skills-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
-    "stack-frames": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "terminal-restoration-integration": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],
     "test-full": ["nghttp2", "openssl", "sqlite", "translate_c", "vaxis", "yaml"],

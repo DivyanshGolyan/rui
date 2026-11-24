@@ -30,6 +30,8 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .right = &.{.{ .code = vaxis.Key.right }},
     .shift_up = &.{.{ .code = vaxis.Key.up, .mods = .{ .shift = true } }},
     .shift_down = &.{.{ .code = vaxis.Key.down, .mods = .{ .shift = true } }},
+    .alt_left = &.{.{ .code = vaxis.Key.left, .mods = .{ .alt = true } }},
+    .alt_right = &.{.{ .code = vaxis.Key.right, .mods = .{ .alt = true } }},
     .page_up = &.{ .{ .code = vaxis.Key.page_up }, .{ .code = vaxis.Key.page_up, .mods = .{ .shift = true } } },
     .page_down = &.{ .{ .code = vaxis.Key.page_down }, .{ .code = vaxis.Key.page_down, .mods = .{ .shift = true } } },
     .home = &.{.{ .code = vaxis.Key.home }},
@@ -73,8 +75,8 @@ pub fn classify(value: vaxis.Key) Press {
     if (value.matchExact('k', .{ .ctrl = true })) return .{ .edit = .delete_to_line_end };
     if (value.matchExact('w', .{ .ctrl = true })) return .{ .edit = .delete_word };
     if (value.matchExact(vaxis.Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return .{ .edit = .delete_word_part };
-    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(vaxis.Key.left, .{ .alt = true })) return .{ .edit = .word_left };
-    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(vaxis.Key.right, .{ .alt = true })) return .{ .edit = .word_right };
+    if (value.matchExact('b', .{ .alt = true })) return .{ .edit = .word_left };
+    if (value.matchExact('f', .{ .alt = true })) return .{ .edit = .word_right };
     if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .chord;
     // An unbound Ctrl key is dropped and reported the same way, the draft
     // kept: vaxis represents C0 controls as Ctrl keys or textless Kitty
@@ -100,6 +102,7 @@ pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(k
         .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else switch (key_name) {
             .left => .left,
             .right => .right,
+            .alt_left, .alt_right => .refused,
             else => .none,
         },
         .enter => .enter,
@@ -139,7 +142,8 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         .{ .bytes = "\x1c", .expected = .refused },
         .{ .bytes = "\x1b[113;5u", .expected = .refused },
         .{ .bytes = "\x01", .expected = .refused },
-        .{ .bytes = "\x1b[1;3D", .expected = .refused },
+        .{ .bytes = "\x1b[1;3D", .expected = .{ .action = .alt_left } },
+        .{ .bytes = "\x1b[1;3C", .expected = .{ .action = .alt_right } },
         .{ .bytes = "\x02", .expected = .refused },
         .{ .bytes = "\x06", .expected = .refused },
         .{ .bytes = "\x1b[98;5u", .expected = .refused },

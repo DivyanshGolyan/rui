@@ -25,6 +25,8 @@ pub const Key = enum {
     shift_tab,
     shift_up,
     shift_down,
+    alt_left,
+    alt_right,
     page_up,
     page_down,
     home,
@@ -142,7 +144,8 @@ pub const list = [_]Reference{
     .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.{ .key = .shift_tab }} },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.{ .key = .ctrl_x }} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .{ .key = .up }, .{ .key = .down } }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    .{ .key = "←→", .meaning = "fold tree · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "←→", .meaning = "open chat · info actions", .keys = &.{.{ .key = .right }} },
+    .{ .key = "alt+←→", .meaning = "fold / expand tree", .keys = &.{ .{ .key = .alt_left }, .{ .key = .alt_right } } },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.{ .key = .ctrl_o }} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.{ .key = .ctrl_p }}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.{ .key = .ctrl_r }} },
@@ -258,18 +261,22 @@ test "every keys reference row names its input including non-table input" {
         empty[index].keys = &.{};
         try std.testing.expectEqual(@as(?ListError, .empty_row), referenceError(&empty, .{bindable}));
     }
-    const standalone = [_]struct { label: []const u8, input: std.meta.Tag(ReferenceInput) }{
-        .{ .label = "enter", .input = .enter },
-        .{ .label = "⇧enter", .input = .newline },
-        .{ .label = "ctrl+v", .input = .paste_image },
-        .{ .label = "/", .input = .slash },
-    };
-    for (standalone) |expected| {
-        const row = for (list) |candidate| {
-            if (std.mem.eql(u8, candidate.key, expected.label)) break candidate;
-        } else return error.TestExpectedEqual;
-        try std.testing.expectEqual(expected.input, std.meta.activeTag(row.keys[0]));
-        const duplicate = list ++ .{row};
+    for ([_]struct { key: []const u8, input: ReferenceInput }{
+        .{ .key = "enter", .input = .enter },
+        .{ .key = "⇧enter", .input = .newline },
+        .{ .key = "ctrl+v", .input = .paste_image },
+        .{ .key = "/", .input = .slash },
+    }) |expected| {
+        const index = for (list, 0..) |row, at| {
+            if (std.mem.eql(u8, expected.key, row.key)) break at;
+        } else return error.MissingReferenceRow;
+        try std.testing.expectEqual(expected.input, list[index].keys[0]);
+        const duplicate = list ++ .{list[index]};
         try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
     }
+    const option = for (list) |row| {
+        if (std.mem.eql(u8, "alt+←→", row.key)) break row;
+    } else return error.MissingReferenceRow;
+    try std.testing.expectEqualStrings("fold / expand tree", option.meaning);
+    try std.testing.expectEqualSlices(ReferenceInput, &.{ .{ .key = .alt_left }, .{ .key = .alt_right } }, option.keys);
 }
