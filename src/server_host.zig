@@ -513,10 +513,20 @@ pub const Lifecycle = struct {
         store.commitWake().store(&self.dispatch_wake, .release);
     }
 
-    pub fn underLaunchLock(self: *Lifecycle, context: anytype, comptime body: anytype) @TypeOf(body(context)) {
+    /// Runs `open`, which creates a descriptor that is not yet close-on-exec, with
+    /// effect launches held off, so no child launched meanwhile inherits it.
+    pub fn openUninherited(self: *Lifecycle, context: anytype, comptime open: anytype) @TypeOf(open(context)) {
         self.launch_mutex.lockUncancelable(self.io);
         defer self.launch_mutex.unlock(self.io);
-        return body(context);
+        return open(context);
+    }
+
+    /// Runs `hand_off` with whether the Host is stopping, ordered against askStop:
+    /// a stop asked before the lock is seen, and one asked after waits for the hand-off.
+    pub fn handOff(self: *Lifecycle, context: anytype, comptime hand_off: anytype) @TypeOf(hand_off(context, false)) {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        return hand_off(context, self.stopping());
     }
 };
 

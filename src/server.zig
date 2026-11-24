@@ -655,7 +655,7 @@ const Intake = struct {
             }
             if (next) |exchange| {
                 const handoff = .{ .host = self.host, .exchange = exchange, .worker = worker };
-                if (!self.host.lifecycle.underLaunchLock(handoff, handOffWorker)) continue;
+                if (!self.host.lifecycle.handOff(handoff, handOffWorker)) continue;
             }
         }
     }
@@ -865,7 +865,7 @@ const Intake = struct {
     }
 
     fn acceptSocket(self: *Intake, listener: std.posix.fd_t) !std.posix.fd_t {
-        return self.host.lifecycle.underLaunchLock(listener, acceptLocked);
+        return self.host.lifecycle.openUninherited(listener, acceptLocked);
     }
 
     fn accept(self: *Intake, fd: std.posix.fd_t) !void {
@@ -881,12 +881,12 @@ const Intake = struct {
     }
 };
 
-fn handOffWorker(handoff: anytype) bool {
+fn handOffWorker(handoff: anytype, stopping: bool) bool {
     const exchange = handoff.exchange;
     if (exchange.state == .retired) {
         exchange.job = .cleanup;
     } else {
-        if (handoff.host.lifecycle.stopping()) exchange.retireUnhanded();
+        if (stopping) exchange.retireUnhanded();
         if (exchange.state == .retired) return false;
     }
     exchange.state = .working;
@@ -4157,8 +4157,12 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, null);
+    const wake = try Intake.openIntakeWake();
     var intake: Intake = undefined;
-    try intake.init(&host, try Intake.openIntakeWake());
+    intake.init(&host, wake) catch |err| {
+        for (wake) |fd| _ = std.c.close(fd);
+        return err;
+    };
     var intake_owned = true;
     defer if (intake_owned) intake.deinit();
     var sockets: [100][2]std.posix.fd_t = undefined;
@@ -4397,14 +4401,17 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);
         defer std.testing.allocator.free(message);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .instance = @splat(0) };
+        const wake = try Intake.openIntakeWake();
         var host_parts: TestParts = undefined;
-        host_parts.attach(&host, &lease);
+        host_parts.attachWithWake(&host, &lease, wake[1]);
         var retention = output_retention.Queue.initialize(io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
         host.retention = &retention;
         var intake: Intake = undefined;
-        try intake.init(&host, try Intake.openIntakeWake());
+        intake.init(&host, wake) catch |err| {
+            for (wake) |fd| _ = std.c.close(fd);
+            return err;
+        };
         defer intake.deinit();
-        host.lifecycle.intake_wake = intake.wake[1];
         var listener = try endpoint.listen(.{ .kernel_backlog = 8 });
         const partial_header = try address.connect(std.testing.io);
         defer partial_header.socket.close(std.testing.io);
