@@ -370,27 +370,93 @@ test "creation accepts omitted Host settings and preserves its supplied Workspac
     }.run);
 }
 
-test "an omitted provider selects the Host's sole served provider" {
+test "ADM-33 a creation takes a served connection, the default or its parent's, and checks tools against that binding" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var routes: protocol.Served = .{};
-            try routes.put(protocol.servedEntry(.openai, .endpoint));
-            var storage: Store = undefined;
-            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var command = try completeConfiguration("host-provider", "", workspace, "model-a");
-            command.configuration.provider.state = .omitted;
-            command.configuration.tools = try .of(&.{});
-            command.require_model = true;
-            const reply = try storage.configure(&command, .{});
-            try std.testing.expect(reply == .accepted);
-            const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-            try std.testing.expectEqualStrings("openai", observed.provider.?.slice());
-            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
+            const records = comptime shared_fixtures.testingHostToolRecords(&.{.{ .name = "code_interpreter", .owner = .provider }});
+            const digests = comptime blk: {
+                @setEvalBranchQuota(10_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                break :blk out;
+            };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            try std.testing.expect(host_tool_set.valid());
+            const Host = enum { serves_codex, serves_nothing };
+            const Binding = enum { codex, chatgpt, omitted };
+            const Tools = enum { omitted, web_search, code_interpreter };
+            for (std.enums.values(Host)) |host| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var routes: protocol.Served = .{};
+                if (host == .serves_codex) try routes.put(protocol.servedEntry(.codex, .endpoint));
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes, .host_tool_set = &host_tool_set });
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                // The parent names no connection, so it takes the default binding on either Host.
+                var parent_key_buffer: [48]u8 = undefined;
+                const parent_key = try std.fmt.bufPrint(&parent_key_buffer, "adm33-{s}-parent", .{@tagName(host)});
+                var parent = try completeConfiguration(parent_key, "", workspace, "model-a");
+                parent.configuration.provider.state = .omitted;
+                // A child that omits tools takes the defaults, which must lie within its parent's, so the parent offers them all.
+                parent.configuration.tools.state = .value;
+                parent.configuration.tools.count = 0;
+                parent.configuration.tools.names.len = 0;
+                for (tool_defs.built_in_tool_set.records) |record| try parent.configuration.tools.insert(record.name);
+                const parent_reply = try storage.configure(&parent, .{});
+                try std.testing.expect(parent_reply == .accepted);
+                const parent_session = parent_reply.accepted.session;
+                for (std.enums.values(Binding)) |binding| for ([_]bool{ false, true }) |inherited| for (std.enums.values(Tools)) |tools| {
+                    // An inherited creation may not name a provider: a child's explicit provider is refused by ADM-6.
+                    if (inherited and binding != .omitted) continue;
+                    var key_buffer: [96]u8 = undefined;
+                    const key = try std.fmt.bufPrint(&key_buffer, "adm33-{s}-{s}-{s}-{s}", .{ @tagName(host), @tagName(binding), @tagName(tools), if (inherited) "child" else "standalone" });
+                    var command: wire_request.ConfigureCommand = .{};
+                    if (inherited) {
+                        try command.key.set(key);
+                        command.configuration.parent.state = .value;
+                        try command.configuration.parent.value.set(parent_session.slice());
+                        command.configuration.model.state = .value;
+                        try command.configuration.model.value.set("model-a");
+                    } else {
+                        command = try completeConfiguration(key, "", workspace, "model-a");
+                        switch (binding) {
+                            .codex => try command.configuration.provider.value.set("codex"),
+                            .chatgpt => try command.configuration.provider.value.set("chatgpt"),
+                            .omitted => command.configuration.provider.state = .omitted,
+                        }
+                    }
+                    switch (tools) {
+                        .omitted => command.configuration.tools.state = .omitted,
+                        .web_search => command.configuration.tools = try .of(&.{"web_search"}),
+                        .code_interpreter => command.configuration.tools = try .of(&.{"code_interpreter"}),
+                    }
+                    // An explicit unserved connection is refused whatever tools it asks for; the default and
+                    // inherited bindings check the tools against the built-in codex binding, served or not.
+                    // Explicit codex is unserved on a Host serving nothing; chatgpt is unserved on both Hosts.
+                    const unserved = binding == .chatgpt or (binding == .codex and host == .serves_nothing);
+                    const expected: ?protocol.ConfigurationRejection = if (!inherited and unserved)
+                        .connection_unserved
+                    else if (tools == .code_interpreter)
+                        .provider_tool_missing
+                    else
+                        null;
+                    const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{});
+                    const reply = try storage.configure(&command, .{});
+                    if (expected) |code| {
+                        try std.testing.expect(reply == .rejected);
+                        try std.testing.expectEqual(code, reply.rejected.code);
+                        try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                    } else {
+                        try std.testing.expect(reply == .accepted);
+                        const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+                        try std.testing.expectEqualStrings("codex", observed.provider.?.slice());
+                        try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                    }
+                };
+            }
         }
     }.run);
 }

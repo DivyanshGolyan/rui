@@ -66,10 +66,13 @@ pub const Served = struct {
         return if (self.of(name)) |entry| entry.route else .unserved;
     }
 
-    /// Whether the served name runs the tool. An absent name runs none.
+    /// Whether the binding named `name` runs the tool. This is the one owner of tool capability: a served
+    /// name answers from its entry, an absent built-in name from the built-in provider's facts, and any
+    /// other absent name runs nothing. Serving decides reachability, not what the binding can run.
     pub fn runsTool(self: *const Served, name: []const u8, tool: []const u8) bool {
-        const entry = self.of(name) orelse return false;
-        return entry.web_search and std.mem.eql(u8, tool, "web_search");
+        if (self.of(name)) |entry| return entry.web_search and std.mem.eql(u8, tool, "web_search");
+        const built_in = builtInOf(connection.Name.parse(name) orelse return false) orelse return false;
+        return built_in.runsTool(tool);
     }
 };
 
@@ -98,7 +101,7 @@ pub fn builtIns(route: Route) Served {
     return served;
 }
 
-test "served lookup finds exactly the listed names" {
+test "CM-49 served lookup finds exactly the listed names" {
     var served: Served = .{};
     try std.testing.expect(!served.servesModel());
     try std.testing.expectEqual(@as(?*const Entry, null), served.of("codex"));
