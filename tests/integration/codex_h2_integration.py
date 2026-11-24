@@ -14,7 +14,7 @@ import h2_fixture
 import host_process
 from host_process import dispose_all, READY_TRANSPORT, retain_failure_state, start_ready_process
 import os_semantics
-from codex_h2_cases import openai_base_url_run, saved_catalog_run, run
+from codex_h2_cases import named_key_connections_run, openai_base_url_run, saved_catalog_run, run
 
 
 REQUIRED_PROXY_MESSAGE = "https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy"
@@ -148,6 +148,7 @@ if __name__ == "__main__":
         openai_base_url_run()
         openai_base_url_run(catalog_available=True)
         saved_catalog_run()
+        named_key_connections_run()
     else:
         print("openai base URL TLS case not run: Darwin system trust takes no fixture CA; unit tests cover the URL rules")
     run()
