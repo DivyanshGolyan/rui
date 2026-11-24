@@ -25,6 +25,12 @@ pub fn Reply(comptime Capture: type) type {
         first: bool = true,
         tools_json: [tool_name.max_offered_names_json_bytes]u8 = undefined,
 
+        /// A reply that writes its report into `capture` and carries the Execution facts it cannot read itself.
+        /// Fills `reply` in place: its tools buffer is larger than 1 KiB, so it is never returned by value.
+        pub fn init(reply: *@This(), capture: *Capture, execution: session_report.Execution) void {
+            reply.* = .{ .capture = capture, .execution = execution };
+        }
+
         pub fn missing(reply: *@This(), profile: cli_value.ReportProfile) !void {
             try reply.envelope(profile);
             try reply.capture.append(missing_text);
