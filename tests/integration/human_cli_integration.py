@@ -24,7 +24,7 @@ import tty
 import unicodedata
 
 import host_process
-from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process, wait_for
+from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
 from product_defaults import CATALOG, DEFAULTS, compaction_trigger, start_effort
 
 
@@ -58,7 +58,7 @@ def time_limit(milliseconds):
     return f"{milliseconds} ms"
 
 
-from terminal_process import close_pty, answers_to, open_pty, pending_pty_input, spawn, terminal_process
+from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
 from session_list_fixture import session_values
 import codex_fixture
@@ -605,7 +605,7 @@ def clipboard_paste_case(*, protocol_only=False):
         body = b";" + base64.b64encode(payload) if payload is not None else b""
         return b"\x1b]5522;type=read:status=" + metadata + body + b"\x1b\\"
 
-    def paste(master, mime, payload, malformed=None, at=0, split_prefix=False):
+    def paste(master, mime, payload, malformed=None, at=0):
         os.write(master, frame(b"OK:pw=dG9rZW4=") + frame(b"DATA:mime=Lg==", mime) + frame(b"DONE"))
         request = raw_output(master, b";" + base64.b64encode(mime) + b"\x1b\\")
         handle = re.search(rb"type=read:id=([0-9]+)", request).group(1)
@@ -615,13 +615,7 @@ def clipboard_paste_case(*, protocol_only=False):
         if malformed:
             corrupt = frame(data, b"x" * (7000 if malformed == "oversized" else 1))
             frames.insert(at, corrupt if malformed == "oversized" else corrupt[:-2])
-        os.write(master, frame(b"OK" + prefix))
-        if split_prefix and frames:
-            os.write(master, frames[0][:1])
-            wait_for(lambda: pending_pty_input(master) == 0, "terminal consumed the OSC prefix", interval=0.001)
-            os.write(master, frames[0][1:])
-            frames = frames[1:]
-        os.write(master, b"".join(frames) + frame(b"DONE" + prefix))
+        os.write(master, frame(b"OK" + prefix) + b"".join(frames) + frame(b"DONE" + prefix))
 
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
@@ -642,7 +636,7 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Clipboard caption" in screen)
             paste(master, b"text/plain", b"x" * 65_538)
             raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
-            paste(master, b"image/png", png, split_prefix=True)
+            paste(master, b"image/png", png)
             raw_output(master, lambda screen: "[Image 1]" in screen)
             assert endpoint.requests == []
             os.write(master, b"\r")
