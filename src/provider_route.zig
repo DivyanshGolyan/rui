@@ -82,7 +82,7 @@ pub fn builtIns(route: Route) Served {
     return served;
 }
 
-test "served lookup finds exactly the listed names" {
+test "CM-49 served lookup finds exactly the listed names" {
     var served: Served = .{};
     try std.testing.expect(!served.servesModel());
     try std.testing.expectEqual(@as(?*const Entry, null), served.of("codex"));
