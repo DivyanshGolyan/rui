@@ -85,7 +85,7 @@ requests: Requests = undefined,
 status: Status = undefined,
 screen: *Screen = undefined,
 app_content: FeedView = .{ .window = undefined, .anchor = undefined },
-feed_origin: struct { row: i32 = 0, col: i32 = 0 } = .{},
+feed_origin: SurfaceOrigin = .{},
 app_document: DocumentView = .{ .document = undefined },
 app_body: AppScreen.Content = undefined,
 app_input: InputArea = undefined,
@@ -1101,7 +1101,9 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     }
 }
 
-fn surfaceOrigin(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32) ?struct { row: i32, col: i32 } {
+const SurfaceOrigin = struct { row: i32 = 0, col: i32 = 0 };
+
+fn surfaceOrigin(surface: vxfw.Surface, target: vxfw.Widget, row: i32, col: i32) ?SurfaceOrigin {
     if (surface.widget.eql(target)) return .{ .row = row, .col = col };
     for (surface.children) |child| if (surfaceOrigin(child.surface, target, row + child.origin.row, col + child.origin.col)) |found| return found;
     return null;
