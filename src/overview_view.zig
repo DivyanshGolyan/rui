@@ -3720,7 +3720,7 @@ fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, cap
     const attention_badge = if (compact and node.attention != 0) try std.fmt.allocPrint(arena, "{s}{d}?", .{ if (caps.unicode) "·" else ".", node.attention }) else normal_attention;
     const hidden_cells = built.measure(hidden);
     const attention_cells = built.measure(attention_badge);
-    const tight = folded and row_width < inset + mark_and_gap + title_floor + archived_cells + hidden_cells + attention_cells + 5;
+    const tight = folded and row_width < 2 * inset + mark_and_gap + title_floor + archived_cells + hidden_cells + attention_cells + 5;
     const end = row_width -| (if (tight) @as(usize, 0) else inset);
     const origin = if (tight and end < inset + mark_and_gap + title_floor + normal_suffix_cells) 0 else inset;
     if (depth != 0) {
@@ -9656,8 +9656,7 @@ fn creatorActivityWidthCase() !void {
 
 fn creatorSidebarCase() !void {
     const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const width: u16 = 36;
-    for ([_]bool{ false, true }) |use_unicode| {
+    for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 36, 37, 38 }) |width| {
         var state = try opened(&.{session("a1b2c3", .{ .finished = ago(999 * 86400) }, .{ .label = name, .descendant_count = 2, .descendant_needs_you_count = 1 })});
         defer state.deinit();
         state.selected = .{ .session = "a1b2c3".* };
@@ -9670,7 +9669,7 @@ fn creatorSidebarCase() !void {
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "W…" else "W.") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸2·1?" else ">2.1?") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "999d") != null);
-    }
+    };
 }
 
 fn creatorPresentationCase() !void {
