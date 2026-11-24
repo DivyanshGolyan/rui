@@ -249,7 +249,10 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     if (!(arguments.parse(&source, &active.path) catch |err| return active.recordFailure(.{ .store = err }))) return active.recordFailure(.{ .source = error.InvalidImageArguments });
     const now = std.Io.Clock.Timestamp.now(host.io, .awake);
     active.deadline = now.addDuration(.{ .raw = .fromMilliseconds(@intCast(active.input.timeout_ms)), .clock = .awake });
-    active.attempt.launch(.effect, now, .{ .host = host, .active = active }, openSource) catch |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err });
+    switch (active.attempt.launch(.effect, now, .{ .host = host, .active = active }, openSource)) {
+        .started => {},
+        .authority, .handoff => |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err }),
+    }
     active.length = (active.source.?.stat(host.io) catch |err| return active.recordFailure(.{ .source = err })).size;
     // Keep declared-size rejection ahead of Result allocation and scratch.
     _ = image_intake.preflight(active.length, null, .{}) catch |err| return active.recordFailure(.{ .source = err });
@@ -362,7 +365,10 @@ fn testReadImage(cases: []const TestCase) !void {
             const active = calls.entries[0].?;
             try std.testing.expectEqual(@as(usize, 1), parts.custody.occupied());
             try std.testing.expect(calls.contains(selected.action_id));
-            try std.testing.expectError(error.DispatchPermitConsumed, active.attempt.launch(.effect, .now(std.testing.io, .awake), {}, unreachableOpen));
+            switch (active.attempt.launch(.effect, .now(std.testing.io, .awake), {}, unreachableOpen)) {
+                .authority => |err| try std.testing.expectEqual(error.DispatchPermitConsumed, err),
+                else => return error.TestUnexpectedResult,
+            }
             if (case == .payload_capacity or case == .stop_between_ticks) {
                 // A real multi-window file must yield before a second read.
                 try std.testing.expect(calls.service(&host));

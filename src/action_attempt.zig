@@ -55,6 +55,14 @@ pub const Resolution = union(enum) {
 
 pub const Delivered = enum { delivered, session_stop, lost, fenced };
 
+/// Launch failures keep their origin: `authority` is the custody check that
+/// spends launch authority, `handoff` is the Store handoff or the start itself.
+pub const Launch = union(enum) {
+    started,
+    authority: anyerror,
+    handoff: anyerror,
+};
+
 /// Reserves custody, admits the Action's attempt row in the Store, and attaches
 /// custody to it. Failures release the reservation and fence here.
 pub fn admit(parts: Parts, call: store.ReadyAction, timeout_ms: u64, labels: Labels) Admission {
@@ -96,9 +104,9 @@ pub const Attempt = struct {
 
     /// Consumes launch authority, then runs `begin` under the Store handoff
     /// and, for `.effect`, the launch lock. Message watching starts after the effect.
-    pub fn launch(self: *Attempt, comptime start: Start, now: std.Io.Clock.Timestamp, context: anytype, comptime begin: anytype) !void {
-        try self.parts.custody.consumeLaunchAuthority(self.token, .{ .action = self.binding }, now);
-        try self.parts.store.withActionLaunchHandoff(self.binding, .{ .attempt = self, .context = context }, struct {
+    pub fn launch(self: *Attempt, comptime start: Start, now: std.Io.Clock.Timestamp, context: anytype, comptime begin: anytype) Launch {
+        self.parts.custody.consumeLaunchAuthority(self.token, .{ .action = self.binding }, now) catch |err| return .{ .authority = err };
+        self.parts.store.withActionLaunchHandoff(self.binding, .{ .attempt = self, .context = context }, struct {
             fn handoff(handoff_context: anytype, cutoff: u64) !void {
                 const attempt = handoff_context.attempt;
                 switch (start) {
@@ -107,11 +115,12 @@ pub const Attempt = struct {
                 }
                 try attempt.parts.custody.watchMessages(attempt.token, cutoff);
             }
-        }.handoff);
+        }.handoff) catch |err| return .{ .handoff = err };
         self.stage = switch (start) {
             .effect => .launched,
             .channel => .opened,
         };
+        return .started;
     }
 
     /// Sends under the Store dispatch handoff and the launch lock, after a `.channel` launch.

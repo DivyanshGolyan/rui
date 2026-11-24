@@ -321,7 +321,10 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
     };
-    try active.attempt.launch(.channel, std.Io.Clock.Timestamp.now(host.io, .awake), .{ .host = host, .active = active, .input = start }, begin);
+    switch (active.attempt.launch(.channel, std.Io.Clock.Timestamp.now(host.io, .awake), .{ .host = host, .active = active, .input = start }, begin)) {
+        .started => {},
+        .authority, .handoff => |err| return err,
+    }
 }
 
 fn begin(context: anytype) !void {

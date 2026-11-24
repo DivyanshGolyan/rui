@@ -1,6 +1,5 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
-const tool_settle = @import("tool_settle.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const server_mcp_settings = @import("server_mcp_settings.zig");
 const tool_record = @import("tool_record.zig");
@@ -115,13 +114,13 @@ const NamedScratchSlot = struct {
 };
 
 const BashSlot = struct {
-    token: execution.CustodyToken,
-    binding: store_module.ActionAttemptBinding,
+    attempt: action_attempt.Attempt,
     execution: *bash.Execution,
     stop_accepted: bool = false,
     delivery: union(enum) {
         open,
         closed: struct {
+            closing: action_attempt.Closing,
             reclaim_at: std.Io.Clock.Timestamp,
             reclaim_failed: bool = false,
         },
@@ -129,13 +128,20 @@ const BashSlot = struct {
 };
 
 const BashPreparedCleanupSlot = struct {
-    token: execution.CustodyToken,
+    closing: action_attempt.Closing,
     cleanup: *bash.PreparedCleanup,
 };
 
 const BashPreparingSlot = struct {
-    token: execution.CustodyToken,
-    binding: store_module.ActionAttemptBinding,
+    attempt: action_attempt.Attempt,
+};
+
+const bash_labels: action_attempt.Labels = .{
+    .admission = "Bash Attempt admission",
+    .custody = "Bash custody attachment",
+    .stop = "Bash stop reconciliation",
+    .result = "Bash result settlement",
+    .failure = "Bash failure settlement",
 };
 
 const ModelPreparingSlot = struct {
@@ -242,9 +248,9 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
         .model_refreshing => |*active| active.owner.token,
         .model_failure_preparing => |*active| active.owner.token,
         .provider => |*active| active.owner.token,
-        .bash_preparing => |*active| active.token,
-        .bash => |*active| active.token,
-        .bash_prepared_cleanup => |*retained| retained.token,
+        .bash_preparing => |*active| active.attempt.token,
+        .bash => |*active| active.attempt.token,
+        .bash_prepared_cleanup => |*retained| retained.closing.token,
         .named_scratch => |*retained| retained.token,
     };
 }
@@ -257,8 +263,8 @@ fn slotBinding(slot: *const ExecutionSlot) ?execution.CustodyBinding {
         .model_refreshing => |*active| .{ .model = active.owner.binding },
         .model_failure_preparing => |*active| .{ .model = active.owner.binding },
         .provider => |*active| .{ .model = active.owner.binding },
-        .bash_preparing => |*active| .{ .action = active.binding },
-        .bash => |*active| .{ .action = active.binding },
+        .bash_preparing => |*active| .{ .action = active.attempt.binding },
+        .bash => |*active| .{ .action = active.attempt.binding },
     };
 }
 
@@ -272,37 +278,65 @@ fn attachSlot(
     const binding = try host.custody.attach(token, permit);
     slot.* = switch (@TypeOf(binding)) {
         store_module.AttemptBinding => .{ .model_preparing = .{ .token = token, .binding = binding } },
-        store_module.ActionAttemptBinding => .{ .bash_preparing = .{ .token = token, .binding = binding } },
-        else => @compileError("not an Attempt binding: " ++ @typeName(@TypeOf(binding))),
+        else => @compileError("not a model Attempt binding: " ++ @typeName(@TypeOf(binding))),
     };
     host.slot_changes +%= 1;
     return binding;
 }
 
+fn isActionSlot(slot: *const ExecutionSlot) bool {
+    return switch (slot.*) {
+        .bash_preparing, .bash, .bash_prepared_cleanup => true,
+        else => false,
+    };
+}
+
+/// Moves a slot between arms. Action custody is not moved here: an action
+/// slot's Attempt closes it and its Closing finishes it, so moves into or out
+/// of an action arm change only the slot.
 fn moveSlot(
     host: *Host,
     slot: *ExecutionSlot,
     comptime arm: std.meta.Tag(ExecutionSlot),
     payload: @FieldType(ExecutionSlot, @tagName(arm)),
 ) void {
-    const token = slotToken(slot).?;
+    const token = slotToken(slot);
     const from = slotCustody(slot);
+    const action = isActionSlot(slot) or comptime switch (arm) {
+        .bash_preparing, .bash, .bash_prepared_cleanup => true,
+        else => false,
+    };
     slot.* = @unionInit(ExecutionSlot, @tagName(arm), payload);
     host.slot_changes +%= 1;
-    if (slotToken(slot)) |kept| std.debug.assert(std.meta.eql(kept, token));
+    if (slotToken(slot)) |kept| std.debug.assert(token == null or std.meta.eql(kept, token.?));
+    if (action) return;
     const to = slotCustody(slot);
     if (from == .attached and to != .attached) {
-        std.debug.assert(!host.custody.holdsUndeliveredAction(token) or !host.lifecycle.launchAllowed());
-        host.custody.detach(token) catch unreachable;
+        std.debug.assert(!host.custody.holdsUndeliveredAction(token.?) or !host.lifecycle.launchAllowed());
+        host.custody.detach(token.?) catch unreachable;
     }
     switch (to) {
         .attached => std.debug.assert(from == .attached),
         .detached => {},
-        .free => host.custody.cleanupComplete(token) catch unreachable,
+        .free => host.custody.cleanupComplete(token.?) catch unreachable,
     }
 }
 
 const TestParts = if (@import("builtin").is_test) @import("server_host_testing.zig").TestParts else void;
+
+/// Test-only Attempt over a custody record the test attaches itself.
+fn testAttempt(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding) action_attempt.Attempt {
+    return .{
+        .parts = .{ .store = host.store, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody },
+        .token = token,
+        .labels = bash_labels,
+        .binding = binding,
+    };
+}
+
+fn testBashAttempt(host: *Host, token: execution.CustodyToken, permit: anytype) !action_attempt.Attempt {
+    return testAttempt(host, token, try host.custody.attach(token, permit));
+}
 
 test "execution slots change only through attachSlot and moveSlot" {
     const source = @embedFile("server_execution.zig");
@@ -367,7 +401,7 @@ fn checkSharedPreparation(
         },
         .bash_preparing => |*active| {
             if (bash_slot != null) return error.PreparationOwnershipMismatch;
-            bash_slot = active.binding;
+            bash_slot = active.attempt.binding;
         },
         else => {},
     };
@@ -907,7 +941,7 @@ const NativeTurn = struct {
 
     pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
         const slot = self.firstFreeSlot() orelse return .no_work;
-        return switch (admitBashAttempt(self.host, slot, self.workspace)) {
+        return switch (admitBashAttempt(self.host, self.attempts, slot, self.workspace)) {
             .admitted => .admitted,
             .no_work => .no_work,
             .retry_later => .retry_later,
@@ -1394,8 +1428,8 @@ fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
     if (active.images) |images| if (images.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
-        .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
-        .bash => |value| if (value.binding.action_id == action_id) return true,
+        .bash_preparing => |value| if (value.attempt.binding.action_id == action_id) return true,
+        .bash => |value| if (value.attempt.binding.action_id == action_id) return true,
         else => {},
     };
     return false;
@@ -1416,17 +1450,17 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             const was_running = active.execution.lifecycle.process == .running;
             const service = active.execution.service(bashScratch(host), &workspace.bash_window);
             if (was_running and active.execution.lifecycle.process != .running) {
-                host.store.revokeActionSender(active.binding) catch |err| {
+                host.store.revokeActionSender(active.attempt.binding) catch |err| {
                     _ = failBash(host, slot, "Bash sender retirement", err);
                 };
             }
             made_progress = made_progress or service.made_progress;
             if (service.timeout_action) |action| {
-                traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.binding);
+                traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.attempt.binding);
             }
             if (service.leader_observed_with_open_pipes) {
-                traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
+                traceAction(host, "bash_leader_observed_with_open_pipes", active.attempt.binding);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.attempt.binding);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -1732,6 +1766,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
 
 fn admitBashAttempt(
     host: *Host,
+    parts: action_attempt.Parts,
     slot: *ExecutionSlot,
     workspace: *Workspace,
 ) AdmissionProgress {
@@ -1739,31 +1774,26 @@ fn admitBashAttempt(
         host.lifecycle.fenceDispatch("Bash Action selection", err);
         return .retry_later;
     }) orelse return .no_work;
-    const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.probes.storeFaults(.attempt_admission)) catch |err| {
-        host.custody.releaseUnused(token) catch unreachable;
-        host.lifecycle.fenceDispatch("Bash Attempt admission", err);
-        return .retry_later;
-    } orelse {
-        host.custody.releaseUnused(token) catch unreachable;
-        return .no_work;
+    const attempt = switch (action_attempt.admit(parts, selected, host.bash_timeout_ms, bash_labels)) {
+        .attempt => |attempt| attempt,
+        .busy, .none => return .no_work,
+        .refused => return .retry_later,
+        .unattached => return .admitted,
     };
-    const action_binding = attachSlot(host, slot, token, &admission.permit) catch |err| {
-        host.custody.releaseUnused(token) catch unreachable;
-        host.lifecycle.fenceDispatch("Bash custody attachment", err);
-        return .admitted;
-    };
+    std.debug.assert(slot.* == .free);
+    moveSlot(host, slot, .bash_preparing, .{ .attempt = attempt });
+    const action_binding = attempt.binding;
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(host, .action_attempt_committed, action_binding);
     const input = &workspace.bash_input;
     host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
-        settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
+        settleActionFailure(slot, .storage_failed, "Bash input could not be read.");
         finishCustodyNow(host, slot);
         if (host.store.isFenced()) host.lifecycle.fenceDispatch("Bash canonical input", err);
         return .admitted;
     };
     const arguments = host.store.openContent(input.arguments) catch |err| {
-        settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be opened.");
+        settleActionFailure(slot, .storage_failed, "Bash input could not be opened.");
         finishCustodyNow(host, slot);
         host.lifecycle.fenceDispatch("Bash canonical input", err);
         return .admitted;
@@ -1808,22 +1838,20 @@ fn advanceBashPreparation(
 }
 
 fn finishBashPreparationFailure(host: *Host, slot: *ExecutionSlot, failure: *bash.PreparationFailure) void {
-    const token = slot.bash_preparing.token;
-    const binding = slot.bash_preparing.binding;
     const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
         failure.cause == error.ShortCanonicalRead;
     if (failure.cause == error.BashCommandTooLong) {
-        settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
+        settleActionFailure(slot, .spawn_failed, std.fmt.comptimePrint(
             "Bash was not started: the decoded command exceeds {d} bytes. Split long content across several smaller commands.",
             .{tools.bash_max_command_bytes},
         ));
     } else if (failure.cause == error.BashStdinTooLong) {
-        settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
+        settleActionFailure(slot, .spawn_failed, std.fmt.comptimePrint(
             "Bash was not started: decoded stdin exceeds {d} bytes. Split the input across smaller calls or read an existing file.",
             .{tools.bash_max_stdin_bytes},
         ));
     } else if (!canonical_failure) {
-        settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
+        settleActionFailure(slot, .storage_failed, "Bash preparation failed.");
     }
     failure.cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
         retainBashPreparedCleanup(host, slot, failure.cleanup, cleanup_err);
@@ -1849,8 +1877,8 @@ fn discardBashResources(
 }
 
 fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepared) void {
-    const token = slot.bash_preparing.token;
-    const action_binding = slot.bash_preparing.binding;
+    const token = slot.bash_preparing.attempt.token;
+    const action_binding = slot.bash_preparing.attempt.binding;
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(host, .action_before_handoff, action_binding);
     pause(host, .{ .action_launch = action_binding });
@@ -1859,55 +1887,52 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         return;
     }
     const base = launchBase(host.environments, prepared.session.slice(), prepared.allocator) catch {
-        settleActionFailure(host, token, action_binding, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
+        settleActionFailure(slot, .spawn_failed, "Bash was not started: the Host could not copy the Session's environment.");
         discardBashResources(host, slot, prepared.takeCleanup());
         return;
     };
     defer if (base) |bytes| prepared.allocator.free(bytes);
-    host.custody.consumeLaunchAuthority(token, .{ .action = action_binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
-        host.lifecycle.fenceDispatch("Bash launch authority", err);
-        discardBashResources(host, slot, prepared.takeCleanup());
-        return;
-    };
     const work = &host.bash_work[token.index];
     var refused: bash.ArgumentSizes = .{};
-    host.store.withActionLaunchHandoff(action_binding, .{
+    switch (slot.bash_preparing.attempt.launch(.effect, std.Io.Clock.Timestamp.now(host.io, .awake), .{
         .host = host,
         .prepared = prepared,
         .base = base,
         .work = work,
         .refused = &refused,
-        .token = token,
-    }, struct {
-        fn handoff(context: anytype, cutoff: u64) !void {
-            try context.host.lifecycle.withEffectLaunch(context, launch);
-            try context.host.custody.watchMessages(context.token, cutoff);
-        }
-
-        fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.host.lease.paths.runtimeHint(), context.refused) };
-        }
-    }.handoff) catch |err| {
-        if (err == error.SupersededByControl) {
-            settleActionFailure(host, token, action_binding, .cancelled, "Bash was stopped before launch.");
-        } else if (err == error.BashSpawnFailed) {
-            settleActionFailure(host, token, action_binding, .spawn_failed, "Bash process creation failed.");
-        } else if (err == error.BashArgumentsTooLarge) {
-            settleArgumentsTooLarge(host, token, action_binding, refused);
-        } else if (err != error.HostDispatchSuppressed) {
-            host.lifecycle.fenceDispatch("Bash dispatch handoff", err);
-        }
-        discardBashResources(host, slot, prepared.takeCleanup());
-        return;
-    };
+    }, startBash)) {
+        .started => {},
+        .authority => |err| {
+            host.lifecycle.fenceDispatch("Bash launch authority", err);
+            discardBashResources(host, slot, prepared.takeCleanup());
+            return;
+        },
+        .handoff => |err| {
+            if (err == error.SupersededByControl) {
+                settleActionFailure(slot, .cancelled, "Bash was stopped before launch.");
+            } else if (err == error.BashSpawnFailed) {
+                settleActionFailure(slot, .spawn_failed, "Bash process creation failed.");
+            } else if (err == error.BashArgumentsTooLarge) {
+                settleArgumentsTooLarge(slot, refused);
+            } else if (err != error.HostDispatchSuppressed) {
+                host.lifecycle.fenceDispatch("Bash dispatch handoff", err);
+            }
+            discardBashResources(host, slot, prepared.takeCleanup());
+            return;
+        },
+    }
+    const attempt = slot.bash_preparing.attempt;
     moveSlot(host, slot, .bash, .{
-        .token = token,
-        .binding = action_binding,
+        .attempt = attempt,
         .execution = &work.execution,
     });
     traceAction(host, "bash_handoff_committed", action_binding);
     const deadline_ns = slot.bash.execution.deadlineNs();
     traceActionDeadline(host, "bash_deadline_established", deadline_ns, false, action_binding);
+}
+
+fn startBash(context: anytype) !void {
+    context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.host.lease.paths.runtimeHint(), context.refused) };
 }
 
 fn stopSupersededBash(
@@ -1916,15 +1941,15 @@ fn stopSupersededBash(
     preparation: *bash.Preparation,
 ) void {
     for (slots) |*slot| switch (slot.*) {
-        .bash_preparing => |active| {
-            const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
-                host.lifecycle.fenceDispatch("Bash stop reconciliation", err);
-                return;
+        .bash_preparing => {
+            const control = switch (slot.bash_preparing.attempt.stopped()) {
+                .fenced => return,
+                .running => continue,
+                .stopped => |control| control,
             };
-            const control = stopped orelse continue;
-            traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
+            traceActionControl(host, "effect_stop_requested", control.command_key.slice(), slot.bash_preparing.attempt.binding);
             var cleanup = preparation.cancel();
-            settleActionFailure(host, active.token, active.binding, .cancelled, "Bash was stopped before launch.");
+            settleActionFailure(slot, .cancelled, "Bash was stopped before launch.");
             cleanup.cleanup(bashScratch(host)) catch |cleanup_err| {
                 retainBashPreparedCleanup(host, slot, cleanup, cleanup_err);
                 continue;
@@ -1932,27 +1957,26 @@ fn stopSupersededBash(
             finishCustodyNow(host, slot);
         },
         .bash => |*active| {
-            const stopped = host.store.actionSupersededByStop(active.binding) catch |err| {
-                host.lifecycle.fenceDispatch("Bash stop reconciliation", err);
-                return;
+            const control = switch (active.attempt.stopped()) {
+                .fenced => return,
+                .running => continue,
+                .stopped => |control| control,
             };
-            if (stopped) |control| {
-                if (!active.stop_accepted) {
-                    active.stop_accepted = true;
-                    traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
-                    const action = active.execution.requestStop(.now(host.io, .awake));
-                    host.store.revokeActionSender(active.binding) catch |err| {
-                        _ = failBash(host, slot, "Bash sender retirement", err);
-                    };
-                    traceActionControlOutcome(
-                        host,
-                        "lifecycle_action_attempted",
-                        control.command_key.slice(),
-                        action.attempted,
-                        action.signal_failed,
-                        active.binding,
-                    );
-                }
+            if (!active.stop_accepted) {
+                active.stop_accepted = true;
+                traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.attempt.binding);
+                const action = active.execution.requestStop(.now(host.io, .awake));
+                host.store.revokeActionSender(active.attempt.binding) catch |err| {
+                    _ = failBash(host, slot, "Bash sender retirement", err);
+                };
+                traceActionControlOutcome(
+                    host,
+                    "lifecycle_action_attempted",
+                    control.command_key.slice(),
+                    action.attempted,
+                    action.signal_failed,
+                    active.attempt.binding,
+                );
             }
         },
         else => {},
@@ -1961,7 +1985,7 @@ fn stopSupersededBash(
 
 noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
-    const binding = active.binding;
+    const binding = active.attempt.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
     const result = @import("tool_result.zig").Result.create(host, binding.action_id, profile) catch |err| {
         _ = failBash(host, slot, "Bash result allocation", err);
@@ -1974,7 +1998,7 @@ noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     pause(host, .{ .action_result = binding });
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(host, .action_result_ready, binding);
-    const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value, result);
+    const delivered = active.attempt.settle(.{ .result = .{ .code = code, .value = value, .retained = result } });
     switch (delivered) {
         // This blocking pause holds the shared execution loop until release.
         .delivered, .session_stop => if (comptime test_pause.enabled) reachAction(host, .action_result_committed, binding),
@@ -1997,7 +2021,7 @@ noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@i
     return switch (result.finish()) {
         .value => |value| .{ .code = code, .value = value },
         .failed => |failure| {
-            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            _ = slot.bash.attempt.settle(.{ .fence = .{ .phase = "Bash result finalization", .fault = failure.failure } });
             closeBashDelivery(host, slot);
             return null;
         },
@@ -2005,7 +2029,7 @@ noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@i
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
-    _ = tool_settle.fence(host, phase, .{ .capture = err });
+    _ = slot.bash.attempt.settle(.{ .fence = .{ .phase = phase, .fault = .{ .capture = err } } });
     if (slot.bash.delivery != .open) return false;
     closeBashDelivery(host, slot);
     return true;
@@ -2014,16 +2038,16 @@ fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror)
 fn closeBashDelivery(host: *Host, slot: *ExecutionSlot) void {
     var closed = slot.bash;
     std.debug.assert(closed.delivery == .open);
-    closed.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
+    closed.delivery = .{ .closed = .{ .closing = closed.attempt.close(), .reclaim_at = .now(host.io, .awake) } };
     moveSlot(host, slot, .bash, closed);
-    traceAction(host, "cleanup_started", closed.binding);
+    traceAction(host, "cleanup_started", closed.attempt.binding);
 }
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
     const active = &slot.bash;
     const closed = &active.delivery.closed;
     const retry_at = now.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
-    if (bashReclaimHeld(host, active.binding, closed.reclaim_failed)) {
+    if (bashReclaimHeld(host, active.attempt.binding, closed.reclaim_failed)) {
         closed.reclaim_at = retry_at;
         return false;
     }
@@ -2034,8 +2058,10 @@ fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) b
         if (first_failure) host.lifecycle.retainDispatchFence("Bash resource reclamation", err);
         return first_failure;
     };
-    const binding = active.binding;
+    const binding = active.attempt.binding;
+    const closing = closed.closing;
     moveSlot(host, slot, .free, {});
+    closing.finish();
     traceAction(host, "cleanup_completed", binding);
     return true;
 }
@@ -2047,28 +2073,27 @@ fn retainBashPreparedCleanup(
     err: anyerror,
 ) void {
     host.lifecycle.retainDispatchFence("Bash preparation cleanup", err);
-    const token = slotToken(slot).?;
-    const work = &host.bash_work[token.index];
+    const closing = slot.bash_preparing.attempt.close();
+    const work = &host.bash_work[closing.token.index];
     work.* = .{ .prepared_cleanup = cleanup };
     moveSlot(host, slot, .bash_prepared_cleanup, .{
-        .token = token,
+        .closing = closing,
         .cleanup = &work.prepared_cleanup,
     });
 }
 
-noinline fn settleArgumentsTooLarge(host: *Host, token: execution.CustodyToken, binding: store_module.ActionAttemptBinding, sizes: bash.ArgumentSizes) void {
+noinline fn settleArgumentsTooLarge(slot: *ExecutionSlot, sizes: bash.ArgumentSizes) void {
     var message: [bash.arguments_message_bytes]u8 = undefined;
-    settleActionFailure(host, token, binding, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
+    settleActionFailure(slot, .spawn_failed, bash.argumentsTooLargeMessage(&message, sizes));
 }
 
+/// Settles the preparing slot's Attempt with a fixed result.
 fn settleActionFailure(
-    host: *Host,
-    token: execution.CustodyToken,
-    binding: store_module.ActionAttemptBinding,
+    slot: *ExecutionSlot,
     code: store_module.ActionResolutionCode,
     result: []const u8,
 ) void {
-    _ = tool_settle.fixed(host, .{ .token = token, .binding = binding, .publication_phase = "Bash failure settlement" }, code, result);
+    _ = slot.bash_preparing.attempt.settle(.{ .text = .{ .code = code, .text = result } });
 }
 
 fn admitNewAttempt(
@@ -2777,7 +2802,9 @@ fn advanceRetainedCleanup(
     for (slots) |*slot| switch (slot.*) {
         .bash_prepared_cleanup => |*retained| {
             retained.cleanup.cleanup(bashScratch(host)) catch continue;
+            const closing = retained.closing;
             moveSlot(host, slot, .free, {});
+            closing.finish();
             made_progress = true;
         },
         .named_scratch => |*retained| {
@@ -3015,7 +3042,14 @@ fn advancePendingFailure(host: *Host, slots: []ExecutionSlot, workspace: *Worksp
 
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot) void {
     const traced = if (host.probes.hooks.phase_trace) host.custody.binding(slotToken(slot).?) catch unreachable else null;
-    moveSlot(host, slot, .free, {});
+    switch (slot.*) {
+        .bash_preparing => |*active| {
+            const closing = active.attempt.close();
+            moveSlot(host, slot, .free, {});
+            closing.finish();
+        },
+        else => moveSlot(host, slot, .free, {}),
+    }
     if (traced) |binding| switch (binding) {
         .model => |model| traceOperation(host, "cleanup_completed", model),
         .action => |action| traceAction(host, "cleanup_completed", action),
@@ -3676,7 +3710,7 @@ test "cleanup publication follows complete execution retirement" {
                 .parent_operation_id = 7,
                 .action_id = 11,
             } };
-            _ = try attachSlot(&host, &slot, token, &permit);
+            slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(&host, token, &permit) } };
             try std.testing.expect(slot == .bash_preparing);
             try std.testing.expect(host.custody.claimTerminalDelivery(token));
             finishCustodyNow(&host, &slot);
@@ -3767,7 +3801,7 @@ test "cleanup publication follows complete execution retirement" {
     });
     var refused: bash.ArgumentSizes = .{};
     var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
-    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &bash_execution, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    slot = .{ .bash = .{ .attempt = testAttempt(&host, token, binding), .execution = &bash_execution, .delivery = .{ .closed = .{ .closing = .{ .custody = &host.custody, .token = token }, .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
     defer if (slot == .bash) {
@@ -3853,7 +3887,8 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         host.retention = &retention;
         const token = host.custody.reserve().?;
         var slot: ExecutionSlot = .free;
-        const binding = try attachSlot(&host, &slot, token, &admission.permit);
+        slot = .{ .bash_preparing = .{ .attempt = try testBashAttempt(&host, token, &admission.permit) } };
+        const binding = slot.bash_preparing.attempt.binding;
         var input: store_module.ActionExecutionInput = undefined;
         try storage.readActionExecutionInput(.bash, binding, &input);
         const arguments_location = try storage.openContent(input.arguments);
@@ -3890,7 +3925,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         defer prepared.cleanup() catch unreachable;
         var refused: bash.ArgumentSizes = .{};
         var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
-        moveSlot(&host, &slot, .bash, .{ .token = token, .binding = binding, .execution = &bash_execution });
+        moveSlot(&host, &slot, .bash, .{ .attempt = slot.bash_preparing.attempt, .execution = &bash_execution });
         var window: [bash.copy_window_bytes]u8 = undefined;
         const service = .{ .execution = &bash_execution, .scratch = scratch, .window = &window };
         defer if (slot == .bash) {
@@ -3913,7 +3948,7 @@ test "Bash releases both spills after lost custody or fenced settlement" {
         }
         try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
         if (outcome == .lost) {
-            try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
+            try std.testing.expectEqual(action_attempt.Delivered.delivered, slot.bash.attempt.settle(.{ .text = .{ .code = .succeeded, .text = "prior result" } }));
         } else host.probes.arm(.result_before_commit);
 
         var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
@@ -4073,8 +4108,7 @@ test "execution slots agree with custody across the complete population" {
     var slots = [_]ExecutionSlot{
         .{ .provider = .{ .owner = .{ .token = model_token, .binding = model_binding } } },
         .{ .bash = .{
-            .token = action_token,
-            .binding = action_binding,
+            .attempt = .{ .parts = undefined, .token = action_token, .labels = undefined, .binding = action_binding },
             .execution = undefined,
         } },
     };
@@ -4313,7 +4347,7 @@ test "no-work admission restores only its temporary custody reservation" {
             var retry_scanned = false;
             var retry_due_ms: ?u64 = null;
             const progress = switch (kind) {
-                .bash => admitBashAttempt(&host, &slots[0], workspace.value),
+                .bash => admitBashAttempt(&host, .{ .store = host.store, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody }, &slots[0], workspace.value),
                 .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
                 .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation, &admission_preparation),
                 .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation, &admission_preparation),
@@ -4427,7 +4461,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             var retry_scanned = false;
             var retry_due_ms: ?u64 = null;
             const progress = switch (kind) {
-                .bash => admitBashAttempt(&host, &slots[0], engine_workspace.value),
+                .bash => admitBashAttempt(&host, .{ .store = host.store, .lifecycle = host.lifecycle, .probes = host.probes, .custody = &host.custody }, &slots[0], engine_workspace.value),
                 .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation, &retry_scanned, &retry_due_ms),
                 .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation, &admission_preparation),
                 .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation, &admission_preparation),
@@ -4475,8 +4509,7 @@ test "closed Bash delivery retains its payload with detached custody" {
     const binding = try host.custody.attach(token, &permit);
     var slots = [_]ExecutionSlot{
         .{ .bash = .{
-            .token = token,
-            .binding = binding,
+            .attempt = testAttempt(&host, token, binding),
             .execution = undefined,
         } },
     };
@@ -4499,10 +4532,10 @@ test "closed Bash delivery retains its payload with detached custody" {
     const second_binding = try host.custody.attach(second, &second_permit);
     const bad = [_]ExecutionSlot{
         .{ .bash = .{
-            .token = second,
-            .binding = second_binding,
+            .attempt = .{ .parts = undefined, .token = second, .labels = undefined, .binding = second_binding },
             .execution = undefined,
             .delivery = .{ .closed = .{
+                .closing = .{ .custody = &host.custody, .token = second },
                 .reclaim_at = std.Io.Clock.Timestamp.now(std.testing.io, .awake),
             } },
         } },
@@ -4541,25 +4574,23 @@ test "closed Bash payloads keep their typed binding identity" {
 
     var slots = [_]ExecutionSlot{
         .{ .bash = .{
-            .token = first_token,
-            .binding = first_binding,
+            .attempt = .{ .parts = undefined, .token = first_token, .labels = undefined, .binding = first_binding },
             .execution = undefined,
-            .delivery = .{ .closed = .{ .reclaim_at = now } },
+            .delivery = .{ .closed = .{ .closing = .{ .custody = &custody, .token = first_token }, .reclaim_at = now } },
         } },
         .{ .bash = .{
-            .token = second_token,
-            .binding = second_binding,
+            .attempt = .{ .parts = undefined, .token = second_token, .labels = undefined, .binding = second_binding },
             .execution = undefined,
-            .delivery = .{ .closed = .{ .reclaim_at = now } },
+            .delivery = .{ .closed = .{ .closing = .{ .custody = &custody, .token = second_token }, .reclaim_at = now } },
         } },
     };
     try checkSlotCustodyAgreement(&slots, &custody, null);
 
-    slots[0].bash.token = second_token;
-    slots[1].bash.token = first_token;
+    slots[0].bash.attempt.token = second_token;
+    slots[1].bash.attempt.token = first_token;
     try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody, null));
-    slots[0].bash.token = first_token;
-    slots[1].bash.token = second_token;
+    slots[0].bash.attempt.token = first_token;
+    slots[1].bash.attempt.token = second_token;
     try checkSlotCustodyAgreement(&slots, &custody, null);
     try custody.cleanupComplete(first_token);
     try custody.cleanupComplete(second_token);
@@ -4665,14 +4696,14 @@ test "preparing slots belong to their live preparations" {
         .source = undefined,
     };
     var bash_matched = [_]ExecutionSlot{
-        .{ .bash_preparing = .{ .token = retoken, .binding = .{
+        .{ .bash_preparing = .{ .attempt = .{ .parts = undefined, .token = retoken, .labels = undefined, .binding = .{
             .turn_id = 1,
             .parent_operation_id = 1,
             .action_id = 7,
-        } } },
+        } } } },
     };
     try checkSharedPreparation(&bash_matched, null, &bash_preparation);
-    bash_matched[0].bash_preparing.binding.action_id = 8;
+    bash_matched[0].bash_preparing.attempt.binding.action_id = 8;
     try std.testing.expectError(error.PreparationOwnershipMismatch, checkSharedPreparation(&bash_matched, null, &bash_preparation));
 
     try custody.detach(retoken);
@@ -5256,8 +5287,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .stderr_capture = null,
             };
             var slots = [_]ExecutionSlot{.{ .bash_preparing = .{
-                .token = token,
-                .binding = binding,
+                .attempt = testAttempt(&host, token, binding),
             } }};
             var work: [1]server_host.BashWork = undefined;
             host.bash_work = &work;
