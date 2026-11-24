@@ -68,7 +68,7 @@ pub fn next(f: Facts) Effect {
     const selection = f.selection orelse return .inspect_selection;
     if (selection == .failed) return .end;
     const release = f.release orelse return .{ .release = if (f.discovered) |candidate| switch (selection.ok) {
-        .released => |installed| if (installed.order(candidate) == .lt) .adopt else .discover,
+        .released => |selected| if (selected.order(candidate) == .lt) .adopt else .discover,
         else => .adopt,
     } else .discover };
     if (release == .failed) return .end;
