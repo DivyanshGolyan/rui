@@ -39,13 +39,13 @@ pub fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
         const shown = piece.buffered();
         if (value.len + shown.len > limit) {
             value.len = room;
-            @memcpy(value.bytes[room..][0..session_line.ellipsis.len], session_line.ellipsis);
-            value.len += session_line.ellipsis.len;
+            @memcpy(value.bytes[room..][0..ellipsis.len], ellipsis);
+            value.len += ellipsis.len;
             return value;
         }
         for (shown, value.bytes[value.len..][0..shown.len]) |from, *to| to.* = if (from == '\n' or from == '\t') ' ' else from;
         value.len += shown.len;
-        if (value.len + session_line.ellipsis.len <= limit) room = value.len;
+        if (value.len + ellipsis.len <= limit) room = value.len;
     }
     return value;
 }
