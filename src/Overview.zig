@@ -651,15 +651,15 @@ test "SUI-140 overview tree key encodings respect list focus" {
         .{ .bytes = "\x1b[C", .action = .open_session, .alias = false },
     }) |case| {
         var events: Events = .init(case.bytes);
-        const event = events.next().?;
+        const input_event = events.next().?;
         try std.testing.expect(events.next() == null);
         const main: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
-        try std.testing.expectEqual(view.Input{ .action = case.action }, listKey(event, main, true));
+        try std.testing.expectEqual(view.Input{ .action = case.action }, listKey(input_event, main, true));
         if (case.alias) {
-            try std.testing.expectEqual(view.Input.ignored, listKey(event, main, false));
-            try std.testing.expectEqual(view.Input.ignored, listKey(event, .{ .under = .main, .pasted = false, .list_origin = false }, true));
-            try std.testing.expectEqual(view.Input.ignored, listKey(event, .{ .under = .settings, .pasted = false }, true));
-            try std.testing.expectEqual(view.Input.ignored, listKey(event, .{ .under = .main, .pasted = true }, true));
+            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, main, false));
+            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .main, .pasted = false, .list_origin = false }, true));
+            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .settings, .pasted = false }, true));
+            try std.testing.expectEqual(view.Input.ignored, listKey(input_event, .{ .under = .main, .pasted = true }, true));
         }
     }
 }
