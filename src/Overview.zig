@@ -9260,8 +9260,15 @@ fn archivedLaterWindowCase() !void {
             try r.workspace.set("/work");
             try r.model.set("gpt-5.5");
             r.end = 1;
-            r.first_message = .{ .position = 1, .admission = 4, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
+            const admission: u64 = if (target_row) 4 else @as(u64, reference[0]) + 100;
+            r.first_message = .{ .position = 1, .admission = admission, .admitted_at = test_now_s, .sender = null, .content = .{ .text = .{ .length = 7, .digest = @splat(0) } } };
             r.peers.from_person_at = test_now_s;
+        }
+
+        fn bootstrap(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, filter, page);
+            if (page.count != 0) if (page.rows[0].first_message) |*first| first.admission = 1000;
+            return failure;
         }
 
         fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, filter: protocol.SessionArchiveFilter, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
@@ -9294,7 +9301,9 @@ fn archivedLaterWindowCase() !void {
     };
 
     var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    var ops = fake_operations;
+    ops.list = Script.bootstrap;
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer rig.close();
     const overview = rig.overview;
 
