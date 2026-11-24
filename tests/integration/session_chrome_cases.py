@@ -12,7 +12,7 @@ import model_fixture as fixture
 import canonical_fixture
 from host_process import dispose_all, screen_fixture_root, stop_process
 from human_cli_fixture import (
-    admit,
+    CAPTURE_NOTICE,
     assert_chat_info_layout,
     chat_content_row,
     chat_info_open,
@@ -26,7 +26,6 @@ from human_cli_fixture import (
     keyed_frame,
     model_choice_frame,
     model_choice_shown,
-    run,
     settle_screen,
     terminal_capture,
     terminal_exit,
@@ -90,7 +89,7 @@ class Chrome:
 
     def __enter__(self):
         self.host = fixture.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
-        run(self.home, "defaults", "configure", "--store", self.store)
+        private_chrome_command(self, "defaults", "configure", "--store", self.store)
         return self
 
     def __exit__(self, kind, value, traceback):
@@ -104,21 +103,19 @@ class Chrome:
             shutil.rmtree(self.state)
 
     def session(self, permission="bypass"):
-        reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
+        reply = json.loads(private_chrome_command(self, "session", "configure", "--store", self.store,
+            "--workspace", self.workspace, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):
         for text in inputs:
-            message = admit(self.home, "session", "send", "--session", session, input=text)
+            message = private_chrome_admit(self, "session", "send", "--store", self.store, "--session", session, input=text)
             fixture.wait_for(lambda key=message["request"]: fixture.completed_observation(self.store, key), "saved answer")
 
     def open(self, session, ready, *, columns=80, height=ROWS):
         master, slave = open_pty(columns, height)
         self.descriptors += [master, slave]
-        environment = {key: value for key, value in os.environ.items()
-                       if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
-        environment["HOME"] = str(self.home)
+        environment = private_chrome_environment(self)
         caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(self.store), "--", session],
             env=environment, cwd=str(self.workspace),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -298,7 +295,7 @@ def send_recovery_case():
             assert attempts == [original, original], attempts
             assert proxy.mutations == [("/v1/message", original), ("/v1/message", original)], proxy.mutations
             assert record.read_bytes() == saved, "recovery changed the original saved Message"
-            assert json.loads(run(chrome.home, "request", "inspect", key))["observation"]["status"] == "accepted"
+            assert json.loads(private_chrome_command(chrome, "request", "inspect", "--store", chrome.store, "--key", key))["observation"]["status"] == "accepted"
             for frame in frames:
                 assert "Sending" not in frame, frame
                 assert "\n".join(transcript_rows(frame)).count("› RECOVER-ME") <= 1, frame
@@ -361,18 +358,18 @@ def pages_case():
             chrome.frame(master, b"\x1b", lambda screen: not model_choice_shown(screen) and "Copy last answer" in screen)
             chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
             chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
-            before_name = json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+            before_name = json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store,
                                          "--session", session))["session"]["label"]
             chrome.frame(master, b"\rkept-name", lambda screen: "kept-name" in screen)
             refused = chrome.frame(master, b"\x1b[200~\xff\x1b[201~\r",
                                    lambda screen: "text couldn't be entered" in screen)
             assert "kept-name" in refused and "kept draft" in refused, refused
-            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+            assert json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store,
                                   "--session", session))["session"]["label"] == before_name
             chrome.frame(master, b"\x01\x0bRecovered rename\r", lambda screen:
                          "Recovered rename" in screen and "saving" not in screen
                          and "text couldn't be entered" not in screen)
-            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+            assert json.loads(private_chrome_command(chrome, "session", "inspect", "--store", chrome.store,
                                   "--session", session))["session"]["label"] == "Recovered rename"
             returned = chrome.frame(master, b"\x1b", lambda screen:
                                     latest(screen, "SEED-ANSWER") and composing(screen, "kept draft")
@@ -405,14 +402,14 @@ def info_natural_height_case():
     answer = "\n".join(f"FEED-{index:02d}" for index in range(1, 25))
     with Chrome("rui-chrome-info-height.", [fixture.sse_answer("feed", "r", "m", answer)[0]]) as chrome:
         session = chrome.session()
-        run(chrome.home, "session", "configure", "--store", chrome.store, "--session", session,
+        private_chrome_command(chrome, "session", "configure", "--store", chrome.store, "--session", session,
             "--label", "Natural height")
         chrome.answered(session, "Show the saved feed")
         for width, height in ((140, 40), (46, 30), (46, 18)):
             master, slave = open_pty(width, height)
             chrome.descriptors += [master, slave]
-            caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-                env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(chrome.store), "--", session],
+                env=private_chrome_environment(chrome), cwd=str(chrome.workspace),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             chrome.callers.append(caller)
             chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
@@ -483,14 +480,14 @@ def approval_glyph_domain():
         chrome.endpoint.responses.append(fixture.sse_tool_calls("glyph", [
             ("bash", "glyph-call", json.dumps({
                 "cmd": "printf done", "description": "Review approval glyph", "timeout_ms": None}))]))
-        request = admit(chrome.home, "session", "send", "--session", session, input="Review this")["request"]
+        request = private_chrome_admit(chrome, "session", "send", "--store", chrome.store, "--session", session, input="Review this")["request"]
         fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
         for locale, glyph in (("C", "?"), ("C.UTF-8", "●")):
             for width, height in ((140, 40), (46, 30)):
                 master, slave = open_pty(width, height)
                 chrome.descriptors += [master, slave]
-                caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-                    env={**os.environ, "HOME": str(chrome.home), "LC_ALL": locale}, cwd=str(chrome.workspace),
+                caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(chrome.store), "--", session],
+                    env=private_chrome_environment(chrome, LC_ALL=locale), cwd=str(chrome.workspace),
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 chrome.callers.append(caller)
                 title = f"{glyph} Review approval glyph"
@@ -512,10 +509,10 @@ def opening_case():
         ]
         chrome.answered(session, long_text)
         try:
-            admit(chrome.home, "session", "send", "--session", session, input="HOLD-QUESTION")
+            private_chrome_admit(chrome, "session", "send", "--store", chrome.store, "--session", session, input="HOLD-QUESTION")
             fixture.wait_for(lambda: len(chrome.endpoint.requests) >= 2, "held request", timeout=20)
             for index in range(2):
-                admit(chrome.home, "session", "send", "--session", session, input=f"WAITING-{index}")
+                private_chrome_admit(chrome, "session", "send", "--store", chrome.store, "--session", session, input=f"WAITING-{index}")
             release.set()
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "◝ Held call · " in screen)
             tail = tail_rows(opened)
@@ -547,15 +544,32 @@ def opening_case():
 
 
 
-def private_chrome_command(chrome, *arguments, input=None):
-    assert "--store" in arguments, ("private Store must be explicit", arguments)
+def private_chrome_environment(chrome, **overrides):
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE")}
-    environment["HOME"] = str(chrome.home)
-    result = subprocess.run([str(fixture.RUI), *map(str, arguments)], env=environment,
+    environment.update(HOME=str(chrome.home), **overrides)
+    return environment
+
+
+def private_chrome_result(chrome, *arguments, input=None):
+    assert "--store" in arguments, ("private Store must be explicit", arguments)
+    result = subprocess.run([str(fixture.RUI), *map(str, arguments)], env=private_chrome_environment(chrome),
                             cwd=chrome.workspace, capture_output=True, text=True, input=input, timeout=20)
     assert result.returncode == 0, (arguments, result.stdout, result.stderr)
-    return result.stdout
+    return result
+
+
+def private_chrome_command(chrome, *arguments, input=None):
+    return private_chrome_result(chrome, *arguments, input=input).stdout
+
+
+def private_chrome_admit(chrome, *arguments, input=None):
+    result = private_chrome_result(chrome, *arguments, input=input)
+    notice = CAPTURE_NOTICE.match(result.stderr)
+    assert notice, (arguments, result.stderr)
+    admission = json.loads(result.stdout)
+    assert admission["context"]["key"] == notice.group(1), (admission, result.stderr)
+    return {"request": notice.group(1), "admission": admission, "stderr": result.stderr}
 
 
 def verify_private_chrome(chrome):
